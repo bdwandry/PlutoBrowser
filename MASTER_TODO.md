@@ -1,10 +1,10 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P05 DONE (verified in simulator). NEXT: P06.**
+**Status: PLANNING COMPLETE — PHASES P01–P06 DONE (verified in simulator). NEXT: P07.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
-**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ | P06–P36 ⬜
+**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ | P07–P36 ⬜
 
 ---
 
@@ -364,19 +364,43 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       budget-gate test must run first (shared counter parity) or first-yield lands at 44
       not 64.
 
-### PHASE P06 — core/encoding.c + html/entities.c
-- [ ] Encoding.toUtf8: BOM detect UTF-8/UTF-16LE/BE; transport charset param;
+### PHASE P06 — core/encoding.c + html/entities.c  ✅ DONE (verified in simulator)
+- [x] Encoding.toUtf8: BOM detect UTF-8/UTF-16LE/BE; transport charset param;
       scanMetaCharset first 1024 bytes; charsetFromHeader; normalizeCharset aliases;
       windows-1252 table (exact CP1252 0x80–0x9F mappings); utf16→utf8 converter;
       single-byte→utf8; utf8Encode codepoint encoder.
-- [ ] Entities: full NAMED_ENTITIES table (all ~200 entries verbatim incl. multi-char
-      approximations like nbsp→space, amp, lt, gt, quot, apos, copy→"(c)", deg→" deg",
-      mdash→"--", hellip→"...", etc.), numeric &#NN;/&#xHH; decoding incl. bounds,
-      decode() scanning loop semantics (order: numeric then named, longest-match rules as
-      implemented), encode() inverse used where source uses it, UTF-8 sanitizer dropping
-      invalid sequences/control chars per source.
-- [ ] Self-test fixtures logged.
-- [ ] Verify; STOP.
+- [x] Entities: full NAMED_ENTITIES table verbatim (Lua duplicate keys resolved
+      last-wins), numeric &#NN;/&#xHH; decoding incl. bounds/overflow→" ", decode()
+      pipeline order (fast path → decimal → hex → named → fixed UTF-8 seqs →
+      transliteration loop w/ Tasks.yieldCheck per byte), encode() inverse (& < > "
+      escaped, amp first, apostrophe NOT).
+- [x] Ground truth via host-Lua oracle on the REAL encoding.lua + entities.lua
+      (p06_truth.txt). Quirks preserved: quoted header charset value FAILS the Lua
+      pattern (meta scan then applies); bare "utf16" never dispatched; lone high
+      surrogate consumes the next unit before emitting "?"; hex branch lacks the
+      decimal branch's 0x201A/0x201E specials; &frac12; never matches (%a+ can't
+      cross digits); meta-scan greedy [^>]* resolves duplicate charset= attrs to
+      the LAST occurrence; header beats meta unless header is utf-8; emoji widens
+      one space PER byte; truncated tails widen.
+      Self-tests: 75 assertions, all encoded from oracle output.
+- [x] Verify; STOP.
+      Verified: make clean && make = 0 errors / 0 warnings; simulator run:
+      "[P06] encoding selftests done: 75 passed, 0 failed" (logs/phase-P06.log);
+      fixes en route: entities hex branch missed the '#' before [xX] (hex entities
+      never decoded); test fixtures initially passed NULL content-type to CP1252
+      probes (verbatim is correct without a dispatching charset) and used raw
+      Latin-1 bytes instead of UTF-8 in the transliteration fixture.
+
+### PHASE P26B — render/layout.c (block layout engine)  ⬜ (INSERTED)
+> Gap found during P06: render/layout.lua (~1472 LOC) had no dedicated phase;
+> P32/P33 assume it exists. This phase closes that gap before P27 consumes it.
+- [ ] Port block layout: node tree walk, inline text wrapping vs Playdate font
+      metrics (getImageTextWidth equivalent), margins/padding collapse rules as
+      implemented in source, list/table/figure/image geometry, absolute offsets,
+      page height computation feeding the scroll renderer.
+- [ ] Oracle-driven like P05/P06; self-tests assert computed rects for fixture
+      documents against host-Lua output of the REAL layout.lua.
+- [ ] Depends on P08–P25 DOM/render primitives being present; schedule before P27.
 
 ### PHASE P07 — core/http_client.c (raw TCP HTTP/HTTPS) + BENCHMARK
 - [ ] Port doGet/get/update/cancel/isLoading over playdate->network->tcp with identical

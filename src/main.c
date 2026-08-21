@@ -12,12 +12,15 @@
 
 #include "core/constants.h"
 #include "core/cookie_jar.h"
+#include "core/encoding.h"
 #include "core/logger.h"
+#include "core/selftest_encoding.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
 #include "core/selftest_url.h"
 #include "core/storage.h"
 #include "core/tasks.h"
+#include "html/entities.h"
 #include "util/mem.h"
 #include "util/selftest_util.h"
 
@@ -32,6 +35,8 @@ static int s_stPass = -1;
 static int s_stFail = -1;
 static int s_tkPass = -1;
 static int s_tkFail = -1;
+static int s_enPass = -1;
+static int s_enFail = -1;
 
 static void draw_placeholder(void)
 {
@@ -91,8 +96,19 @@ static void draw_placeholder(void)
         }
     }
 
-    const char* hint = "Phase P05 task scheduler";
-    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 195);
+    if (s_tkPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P05 tasks: %d passed, %d failed",
+                     s_tkPass, s_tkFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 185);
+        }
+    }
+
+    const char* hint = "Phase P06 charset + entities";
+    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 210);
 }
 
 static int update(void* userdata)
@@ -154,6 +170,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_tasks_run(&s_tkPass, &s_tkFail);
             if (s_tkFail > 0) {
                 PLUTO_ERROR("P05 SELFTEST FAILURES: %d", s_tkFail);
+            }
+
+            // P06 charset conversion + HTML entities self-tests.
+            encoding_init(pd);
+            entities_init(pd);
+            selftest_encoding_run(&s_enPass, &s_enFail);
+            if (s_enFail > 0) {
+                PLUTO_ERROR("P06 SELFTEST FAILURES: %d", s_enFail);
             }
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.

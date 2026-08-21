@@ -1,4 +1,4 @@
-build/src/main.o: src/main.c \
+build/src/core/selftest_encoding.o: src/core/selftest_encoding.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -32,32 +32,9 @@ build/src/main.o: src/main.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/constants.h src/core/cookie_jar.h src/core/../util/strbuf.h \
- src/core/storage_data.h src/core/encoding.h src/core/logger.h \
- src/core/selftest_encoding.h src/core/selftest_storage.h \
- src/core/selftest_tasks.h src/core/selftest_url.h src/core/storage.h \
- src/core/../util/dynarray.h src/core/tasks.h src/html/entities.h \
- src/util/mem.h src/util/selftest_util.h
+ src/core/../core/logger.h src/core/../core/tasks.h \
+ src/core/../html/entities.h src/core/encoding.h src/core/../util/mem.h \
+ src/core/../util/strbuf.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -125,74 +102,14 @@ build/src/main.o: src/main.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
+src/core/../core/logger.h:
 
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
+src/core/../core/tasks.h:
 
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
-
-src/core/constants.h:
-
-src/core/cookie_jar.h:
-
-src/core/../util/strbuf.h:
-
-src/core/storage_data.h:
+src/core/../html/entities.h:
 
 src/core/encoding.h:
 
-src/core/logger.h:
+src/core/../util/mem.h:
 
-src/core/selftest_encoding.h:
-
-src/core/selftest_storage.h:
-
-src/core/selftest_tasks.h:
-
-src/core/selftest_url.h:
-
-src/core/storage.h:
-
-src/core/../util/dynarray.h:
-
-src/core/tasks.h:
-
-src/html/entities.h:
-
-src/util/mem.h:
-
-src/util/selftest_util.h:
+src/core/../util/strbuf.h:

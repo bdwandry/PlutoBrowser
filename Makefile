@@ -36,6 +36,9 @@ SRC = \
 	src/core/selftest_storage.c \
 	src/core/tasks.c \
 	src/core/selftest_tasks.c \
+	src/core/encoding.c \
+	src/core/selftest_encoding.c \
+	src/html/entities.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
