@@ -38,6 +38,9 @@ SRC = \
 	src/core/selftest_tasks.c \
 	src/core/encoding.c \
 	src/core/selftest_encoding.c \
+	src/core/internal_pages.c \
+	src/core/http_client.c \
+	src/core/selftest_http.c \
 	src/html/entities.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
