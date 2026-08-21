@@ -1,10 +1,10 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P07 DONE (verified in simulator). NEXT: P08.**
+**Status: PLANNING COMPLETE — PHASES P01–P08 DONE (verified in simulator). NEXT: P09.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
-**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ P07 ✅ | P08–P36 ⬜
+**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ P07 ✅ P08 ✅ | P09–P36 ⬜
 
 ---
 
@@ -432,13 +432,35 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       still green (128/70/119/33/75); clean make 0 errors / 0 warnings; logs exported
       to logs/phase-P07.log; STOP.
 
-### PHASE P08 — html/tokenizer.c
-- [ ] tokenize(): MAX_HTML_SIZE=256KB truncate; doctype/comment/CDATA skip; raw-text
-      script/style/title capture; findTagEnd quote-aware; parseAttributes byte-wise
-      (quoted/unquoted/valueless, entity-decode attr values? mirror source), tag-name
-      lowercase, self-closing flag; token stream types TEXT/OPEN/CLOSE/COMMENT/DOCTYPE.
-- [ ] Fixture HTML logged token dump; compare against Lua tokenizer output shapes.
-- [ ] Verify; STOP.
+### PHASE P08 — html/tokenizer.c  ✅ DONE (verified in simulator)
+- [x] tokenize() ported to src/html/tokenizer.{h,c} (~330 LOC) with exact source
+      semantics: MAX_HTML_SIZE=262144 truncation cutting at first '>' found in the
+      [MAX-128, ∞) window (single trailing text token when no '<' survives — oracle
+      probed: 262202-byte cut, 262144 when window empty / exactly-MAX untouched);
+      doctype/junk tags vanish silently; comments produce NO token (-->" searched
+      from tagStart); script/style skipped via case-insensitive literal closers
+      searched from tagEnd; <title> open tag never emitted (title text ws-collapsed,
+      trimmed, entity-decoded into pageTitle, pos += 8); unterminated tag drops the
+      broken remainder; "3 < 4 > 2" yields TAG "4" quirk preserved.
+- [x] findTagEnd quote-aware segment scan ('>' vs quoted skips); parseAttributes
+      byte-wise port with all quirks verified by oracle: key charset [w-_:]
+      (dot starts bogus-key single-byte skip), space-before-'=' loses the value
+      ("href =\"v\"" -> href="" + boolean v), unquoted value charset [w-_./?#],
+      first-wins per lowered key, Lua-true booleans as HT_ATTR_TRUE sentinel,
+      missing closing quote aborts whole attr parse, trailing "key=" -> "".
+- [x] NOTE: plan wording said tokens TEXT/OPEN/CLOSE/COMMENT/DOCTYPE, but the
+      SOURCE emits only {text, tag(isClosing,isSelfClosing)} — parity kept to
+      source (closing tags always carry isSelfClosing=1).
+- [x] Oracle p08_oracle.lua drove the real tokenizer.lua over 29 fixtures ->
+      p08_truth.txt; C selftest (src/html/selftest_tokenizer.{h,c}, 68 checks)
+      replays every fixture incl. dup-first-wins, title-prefix hijack
+      ("<titles>" consumes following <title> region), truncation lengths.
+- [x] Tasks integration per iteration: tasks_yield_check() cancel +
+      tasks_report_progress(0.5*(pos+1)/workLen) (global monotonic max shared
+      across phases — asserted >= own contribution).
+- [x] Verify: **[P08] tokenizer selftests done: 68 passed, 0 failed**; P02–P07
+      still green (128/70/119/33/75/89); clean make 0 errors / 0 warnings;
+      logs exported to logs/phase-P08.log; STOP.
 
 ### PHASE P09 — html/dom.c
 - [ ] DOM.build: stack builder; VOID set; implied end tags (p/li/dt/dd/tr/td/th/option);
