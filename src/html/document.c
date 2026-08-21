@@ -428,6 +428,23 @@ typedef struct {
     int depth;
 } DListCtx;
 
+/* progressive <td>/<th> build target (single slot; nested tables inside
+ * cells are dropped by parity with the Lua walker) */
+typedef struct {
+    DocInline* inlines;
+    size_t nInlines;
+    size_t capInlines;
+    int isHeader;
+    const char* align;
+} DCellBuild;
+
+/* progressive <table> build target */
+typedef struct {
+    DocTableRow* rows;
+    size_t nRows;
+    size_t capRows;
+} DTableBuild;
+
 struct DocState {
     DocDocument* doc;
     const char* baseUrl;
@@ -443,13 +460,15 @@ struct DocState {
     StrBuf preBuffer;
 
     int inTextarea;
+    char* textareaName;        /* owned */
     StrBuf textareaBuffer;
 
     int inMath;
     StrBuf mathParts;
 
-    DomNode* currentTableCell; /* P11: tables */
+    DCellBuild* cell;          /* non-NULL while walking a td/th subtree */
     int cellFirstText;
+    DTableBuild* tbl;          /* non-NULL between <table> open and close */
 
     int figureCaptionDone;
     StrBuf figCaption;
@@ -465,6 +484,12 @@ struct DocState {
 
     DocBlock* currentBlock;
 
+    char* formAction;          /* owned resolved URL or NULL */
+    char* formMethod;          /* owned lowercased or NULL */
+
+    int detailsIndex;
+    const DocParseOpts* opts;
+
     int hasMetaRefresh;
     double metaDelay;
     char* metaUrl;             /* owned */
@@ -475,24 +500,80 @@ static void di_free(DocInline* in) {
     pluto_free(in->href);
 }
 
-static void db_free_contents(DocBlock* b) {
+/* frees a standalone table row (cells + their inlines) */
+static void dtr_free(DocTableRow* r) {
+    for (size_t i = 0; i < r->nCells; i++) {
+        DocTableCell* c = &r->cells[i];
+        for (size_t j = 0; j < c->nInlines; j++) di_free(&c->inlines[j]);
+        pluto_free(c->inlines);
+        pluto_free(c->abbr);
+    }
+    pluto_free(r->cells);
+    r->cells = NULL;
+    r->nCells = r->capCells = 0;
+}
+
+/* frees every owned field of a block EXCEPT the struct itself
+ * (blocks live inline inside DocDocument.blocks) */
+static void db_free_fields(DocBlock* b) {
     for (size_t i = 0; i < b->nInlines; i++) di_free(&b->inlines[i]);
     pluto_free(b->inlines);
     b->inlines = NULL;
     b->nInlines = b->capInlines = 0;
-}
 
-static void db_free(DocBlock* b) {
-    if (b == NULL) return;
-    db_free_contents(b);
+    /* frees a standalone table row (cells + their inlines) */
+    for (size_t i = 0; i < b->nRows; i++) {
+        DocTableRow* r = &b->rows[i];
+        for (size_t j = 0; j < r->nCells; j++) {
+            DocTableCell* c2 = &r->cells[j];
+            for (size_t k = 0; k < c2->nInlines; k++)
+                di_free(&c2->inlines[k]);
+            pluto_free(c2->inlines);
+            pluto_free(c2->abbr);
+        }
+        pluto_free(r->cells);
+    }
+    pluto_free(b->rows);
+    b->rows = NULL;
+    b->nRows = b->capRows = 0;
+
     pluto_free(b->codeText);
     for (size_t i = 0; i < b->nLines; i++) pluto_free(b->lines[i]);
     pluto_free(b->lines);
+    b->lines = NULL;
+    b->nLines = 0;
     pluto_free(b->src);
     pluto_free(b->alt);
     pluto_free(b->caption);
     pluto_free(b->imgHref);
     pluto_free(b->usemap);
+    pluto_free(b->svgXml);
+    pluto_free(b->tableCaption);
+    pluto_free(b->tableWidth);
+    pluto_free(b->inputType);
+    pluto_free(b->inName);
+    pluto_free(b->inValue);
+    pluto_free(b->placeholder);
+    pluto_free(b->checkboxLabel);
+    pluto_free(b->submitLabel);
+    pluto_free(b->formAction);
+    pluto_free(b->formMethod);
+    for (size_t i = 0; i < b->nOptions; i++) {
+        pluto_free(b->options[i].text);
+        pluto_free(b->options[i].value);
+    }
+    pluto_free(b->options);
+    b->options = NULL;
+    b->nOptions = b->capOptions = 0;
+    pluto_free(b->boxLabel);
+    pluto_free(b->toggleKey);
+    pluto_free(b->phTag);
+    pluto_free(b->phHref);
+}
+
+static void db_free(DocBlock* b) {
+    if (b == NULL) return;
+    db_free_fields(b);
     pluto_free(b);
 }
 
@@ -647,6 +728,25 @@ static void doc_push_link(DocDocument* doc, const char* href,
     doc->links[doc->nLinks++] = nl;
 }
 
+static void d_cell_push_inline(DocState* st, DocInline* in) {
+    DCellBuild* c = st->cell;
+    if (c->nInlines >= DOC_MAX_INLINES) {
+        di_free(in);
+        return;
+    }
+    if (c->nInlines == c->capInlines) {
+        size_t nc = c->capInlines ? c->capInlines * 2 : 8;
+        DocInline* ni = pluto_realloc(c->inlines, nc * sizeof(DocInline));
+        if (ni == NULL) {
+            di_free(in);
+            return;
+        }
+        c->inlines = ni;
+        c->capInlines = nc;
+    }
+    c->inlines[c->nInlines++] = *in;
+}
+
 /* ── text node routing ────────────────────────────────────────────────── */
 
 static void d_handle_text_node(DocState* st, DomNode* n) {
@@ -654,7 +754,50 @@ static void d_handle_text_node(DocState* st, DomNode* n) {
     if (text[0] == '\0') return;
     if (st->inPre) { sb_append_str(&st->preBuffer, text); return; }
     if (st->inTextarea) { sb_append_str(&st->textareaBuffer, text); return; }
-    if (st->currentTableCell != NULL) return;              /* P11: tables */
+    if (st->cell != NULL) {
+        /* first text of the cell loses its leading whitespace; other runs
+         * only collapse \r\n\t to spaces (no full whitespace squeeze) */
+        const char* txt = text;
+        char buf[512];
+        if (st->cellFirstText) {
+            while (*txt != '\0' && isspace((unsigned char)*txt)) txt++;
+            st->cellFirstText = 0;
+        }
+        char* o = buf;
+        for (const char* p = txt; *p != '\0' && o + 1 < buf + sizeof(buf); p++) {
+            if (*p == '\r' || *p == '\n' || *p == '\t') {
+                *o++ = ' ';
+                while (p[1] == '\r' || p[1] == '\n' || p[1] == '\t') p++;
+            } else {
+                *o++ = *p;
+            }
+        }
+        *o = '\0';
+        if (buf[0] == '\0') return;
+        DocInline in;
+        memset(&in, 0, sizeof(in));
+        in.type = DIT_TEXT;
+        in.text = pluto_strdup(buf);
+        in.textLen = strlen(buf);
+        if (in.text == NULL) return;
+        in.bold = st->f.bold;
+        in.italic = st->f.italic;
+        in.underline = st->f.underline || (st->currentHref != NULL);
+        in.code = st->f.code;
+        in.small = st->f.small;
+        in.big = st->f.big;
+        in.sub = st->f.sub;
+        in.sup = st->f.sup;
+        in.mark = st->f.mark;
+        in.strike = st->f.strike;
+        in.invert = st->f.invert;
+        in.inert = st->inert > 0;
+        in.anchorIndex = st->currentAnchorIndex;
+        if (st->currentHref != NULL)
+            in.href = pluto_strdup(st->currentHref);
+        d_cell_push_inline(st, &in);
+        return;
+    }
     if (st->figureActive && !st->figureCaptionDone) {
         sb_append_str(&st->figCaption, text);
         return;
@@ -783,6 +926,437 @@ static void d_split_code_lines(DocBlock* b) {
     }
 }
 
+/* ── P11 helpers ──────────────────────────────────────────────────────── */
+
+static char* d_lower_dup(const char* s) {
+    if (s == NULL) return NULL;
+    char* out = pluto_strdup(s);
+    if (out == NULL) return NULL;
+    for (char* c = out; *c; c++) *c = (char)tolower((unsigned char)*c);
+    return out;
+}
+
+/* in-place Lua "%s+" -> " " collapse plus end trim */
+static void d_collapse_trim(char* s) {
+    if (s == NULL) return;
+    size_t r = 0, w = 0;
+    int inWs = 0;
+    while (s[r] != '\0') {
+        if (isspace((unsigned char)s[r])) {
+            inWs = 1;
+            r++;
+        } else {
+            if (inWs && w > 0) s[w++] = ' ';
+            inWs = 0;
+            s[w++] = s[r++];
+        }
+    }
+    s[w] = '\0';
+}
+
+static int d_details_override(const DocState* st, const char* key,
+                              int defaultOpen) {
+    if (st->opts != NULL && st->opts->detailsOverrides != NULL) {
+        for (size_t i = 0; i < st->opts->nOverrides; i++)
+            if (strcmp(st->opts->detailsOverrides[i].key, key) == 0)
+                return st->opts->detailsOverrides[i].open ? 1 : 0;
+    }
+    return defaultOpen;
+}
+
+/* shared "common" attribute bundle for input-family blocks */
+typedef struct {
+    char* name;          /* owned */
+    char* value;         /* owned */
+    unsigned char disabled, readonlyFlag, requiredFlag, inertFlag;
+    int maxlength;       /* -1 unset */
+} DInputCommon;
+
+static void d_input_common(DocState* st, StrMap* attrs, DInputCommon* c) {
+    memset(c, 0, sizeof(*c));
+    const char* nm = da_get(attrs, "name");
+    c->name = pluto_strdup((nm != NULL) ? nm : "q");
+    const char* val = da_get(attrs, "value");
+    c->value = pluto_strdup((val != NULL) ? val : "");
+    int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
+    c->disabled = (unsigned char)dis;
+    c->readonlyFlag =
+        (unsigned char)(da_has(attrs, "readonly") || dis);
+    c->requiredFlag = (unsigned char)da_has(attrs, "required");
+    int ok = 0;
+    double mv = d_tonum(da_get(attrs, "maxlength"), &ok);
+    c->maxlength = ok ? (int)mv : -1;
+    c->inertFlag = (unsigned char)((st->inert > 0) || dis);
+}
+
+/* copies the common bundle into a block; takes ownership of name/value */
+static void d_block_set_common(DocBlock* b, DInputCommon* c,
+                               DocState* st) {
+    b->inName = c->name;
+    b->inValue = c->value;
+    b->disabledFlag = c->disabled;
+    b->readonlyFlag = c->readonlyFlag;
+    b->requiredFlag = c->requiredFlag;
+    b->maxlength = c->maxlength;
+    b->blockInert = c->inertFlag;
+    if (st->formAction != NULL && st->formAction[0] != '\0')
+        b->formAction = pluto_strdup(st->formAction);
+    if (st->formMethod != NULL && st->formMethod[0] != '\0')
+        b->formMethod = pluto_strdup(st->formMethod);
+}
+
+/* per-element formaction / formmethod attribute overrides */
+static void d_form_overrides(DocState* st, StrMap* attrs, DocBlock* b) {
+    const char* fa = da_get(attrs, "formaction");
+    if (fa != NULL && fa[0] != '\0') {
+        StrBuf fb;
+        sb_init(&fb);
+        url_resolve(st->baseUrl, fa, &fb);
+        pluto_free(b->formAction);
+        b->formAction = sb_detach(&fb);
+    }
+    const char* fm = da_get(attrs, "formmethod");
+    if (fm != NULL && fm[0] != '\0') {
+        pluto_free(b->formMethod);
+        b->formMethod = d_lower_dup(fm);
+    }
+}
+
+static int d_str_eq_ci(const char* a, const char* b) {
+    return a != NULL && b != NULL && strcasecmp(a, b) == 0;
+}
+
+/* viewBox fallback sizing. The Lua source binds captures #1/#2 (minx/miny)
+ * and uses them as w/h fallbacks — replicate exactly, quirks included:
+ *   vbW, vbH = match("^%s*([num]+)%s+([num]+)%s+[num]+%s+[num]+$")   */
+static void d_parse_viewbox(const char* vb, double* wOut, double* hOut) {
+    *wOut = 0;
+    *hOut = 0;
+    if (vb == NULL) return;
+    int n = 0;
+    double first = 0, second = 0;
+    const char* p = vb;
+    while (*p != '\0' && n < 2) {
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+        char* end = NULL;
+        double v = strtod(p, &end);
+        if (end == p) { p++; continue; }
+        if (n == 0) first = v;
+        else second = v;
+        n++;
+        p = end;
+    }
+    /* full pattern requires FOUR number groups before it matches */
+    if (n < 2) return;
+    int groups = 2;
+    while (*p != '\0') {
+        while (*p != '\0' && isspace((unsigned char)*p)) p++;
+        if (*p == '\0') break;
+        char* end = NULL;
+        (void)strtod(p, &end);
+        if (end == p) break;
+        groups++;
+        p = end;
+    }
+    if (groups < 4) return;
+    *wOut = first;
+    *hOut = second;
+}
+
+/* mfenced attribute: entity-decoded with default; returns owned string */
+static char* d_mfenced_attr(StrMap* attrs, const char* key,
+                            const char* dflt) {
+    const char* raw = da_get(attrs, key);
+    if (raw == NULL || raw[0] == '\0') raw = dflt;
+    size_t outLen = 0;
+    char* dec = entities_decode(raw, strlen(raw), &outLen);
+    if (dec != NULL) {
+        dec[outLen] = '\0';
+        return dec;
+    }
+    return pluto_strdup(dflt);
+}
+
+/* ── table row processing ─────────────────────────────────────────────── */
+
+static void d_handle_row(DocState* st, DomNode* trNode, DTableBuild* tbl);
+
+static void d_handle_row(DocState* st, DomNode* trNode, DTableBuild* tbl) {
+    DocTableRow row;
+    memset(&row, 0, sizeof(row));
+    for (size_t i = 0; i < trNode->nChildren; i++) {
+        DomNode* cellNode = trNode->children[i];
+        if (cellNode->kind != DOM_ELEMENT)
+            continue;
+        int isTh = !strcmp(cellNode->tag, "th");
+        if (!isTh && strcmp(cellNode->tag, "td") != 0)
+            continue;
+
+        char* savedHref = st->currentHref;
+        long savedAnchor = st->currentAnchorIndex;
+
+        DCellBuild cellBuild;
+        memset(&cellBuild, 0, sizeof(cellBuild));
+        cellBuild.isHeader = isTh;
+        cellBuild.align = d_parse_align(cellNode->attrs);
+        st->cell = &cellBuild;
+        st->cellFirstText = 1;
+        st->currentHref = NULL;
+        st->currentAnchorIndex = -1;
+        d_walk_children(st, cellNode);
+        if (cellBuild.nInlines == 0) {
+            DocInline sp;
+            memset(&sp, 0, sizeof(sp));
+            sp.type = DIT_TEXT;
+            sp.text = pluto_strdup(" ");
+            sp.textLen = 1;
+            if (sp.text != NULL) d_cell_push_inline(st, &sp);
+        }
+        st->cell = NULL;
+
+        DocTableCell* arr = pluto_realloc(
+            row.cells, (row.nCells + 1) * sizeof(DocTableCell));
+        if (arr == NULL) {
+            for (size_t j = 0; j < cellBuild.nInlines; j++)
+                di_free(&cellBuild.inlines[j]);
+            pluto_free(cellBuild.inlines);
+        } else {
+            DocTableCell* c = &arr[row.nCells++];
+            row.cells = arr;
+            row.capCells = row.nCells;
+            c->inlines = cellBuild.inlines;
+            c->nInlines = cellBuild.nInlines;
+            c->capInlines = cellBuild.capInlines;
+            c->isHeader = isTh;
+            int ok = 0;
+            double cs = d_tonum(da_get(cellNode->attrs, "colspan"), &ok);
+            c->colspan = (ok && cs >= 1) ? (int)cs : 1;
+            double rs = d_tonum(da_get(cellNode->attrs, "rowspan"), &ok);
+            c->rowspan = (ok && rs >= 1) ? (int)rs : 1;
+            const char* ab = da_get(cellNode->attrs, "abbr");
+            if (ab == NULL || ab[0] == '\0') ab = da_get(cellNode->attrs, "title");
+            c->abbr = pluto_strdup((ab != NULL) ? ab : "");
+            c->align = cellBuild.align;
+        }
+
+        st->currentHref = savedHref;
+        st->currentAnchorIndex = savedAnchor;
+    }
+    DocTableRow* rarr =
+        pluto_realloc(tbl->rows, (tbl->nRows + 1) * sizeof(DocTableRow));
+    if (rarr == NULL) {
+        dtr_free(&row);
+        return;
+    }
+    tbl->rows = rarr;
+    tbl->capRows = tbl->nRows + 1;
+    tbl->rows[tbl->nRows++] = row;
+}
+
+/* ── select options ───────────────────────────────────────────────────── */
+
+static void d_collect_select_options(DocState* st, DomNode* node,
+                                     DocBlock* b) {
+    for (size_t i = 0; i < node->nChildren; i++) {
+        DomNode* c = node->children[i];
+        if (c->kind != DOM_ELEMENT) continue;
+        if (!strcmp(c->tag, "option")) {
+            char* text = d_concat_node_text(c);
+            d_collapse_trim(text);
+            const char* labelAttr = da_get(c->attrs, "label");
+            char* finalText = text;
+            if (labelAttr != NULL && labelAttr[0] != '\0') {
+                pluto_free(text);
+                finalText = pluto_strdup(labelAttr);
+            }
+            const char* val = da_get(c->attrs, "value");
+            DocSelectOpt* arr = pluto_realloc(
+                b->options, (b->nOptions + 1) * sizeof(DocSelectOpt));
+            if (arr == NULL || finalText == NULL) {
+                pluto_free(finalText);
+                continue;
+            }
+            b->options = arr;
+            b->capOptions = b->nOptions + 1;
+            DocSelectOpt* o = &b->options[b->nOptions++];
+            o->text = finalText;
+            o->value = pluto_strdup((val != NULL) ? val : finalText);
+            o->selected = (unsigned char)da_has(c->attrs, "selected");
+            o->disabled = (unsigned char)da_has(c->attrs, "disabled");
+            o->group = 0;
+        } else if (!strcmp(c->tag, "optgroup")) {
+            const char* gl = da_get(c->attrs, "label");
+            size_t childrenBefore = b->nOptions;
+            d_collect_select_options(st, c, b);
+            if (gl != NULL && gl[0] != '\0' &&
+                childrenBefore <= b->nOptions) {
+                DocSelectOpt* arr = pluto_realloc(
+                    b->options, (b->nOptions + 1) * sizeof(DocSelectOpt));
+                if (arr == NULL) continue;
+                b->options = arr;
+                b->capOptions = b->nOptions + 1;
+                memmove(&b->options[childrenBefore + 1],
+                        &b->options[childrenBefore],
+                        (b->nOptions - childrenBefore) *
+                            sizeof(DocSelectOpt));
+                DocSelectOpt* g = &b->options[childrenBefore];
+                g->text = pluto_strdup(gl);
+                g->value = pluto_strdup("");
+                g->group = 1;
+                g->disabled = 1;
+                g->selected = 0;
+                b->nOptions++;
+            }
+        }
+    }
+}
+
+/* ── media placeholders ───────────────────────────────────────────────── */
+
+static void d_handle_media_placeholder(DocState* st, const char* tag,
+                                       DomNode* n, StrMap* attrs) {
+    doc_flush_block(st);
+    const char* src = da_get(attrs, "src");
+    if (src == NULL || src[0] == '\0') src = da_get(attrs, "data");
+    if (src == NULL || src[0] == '\0') {
+        for (size_t i = 0; i < n->nChildren; i++) {
+            DomNode* c = n->children[i];
+            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "source")) {
+                const char* s = da_get(c->attrs, "src");
+                if (s != NULL && s[0] != '\0') {
+                    src = s;
+                    break;
+                }
+            }
+        }
+    }
+
+    const char* label = da_get(attrs, "title");
+    if (label == NULL || label[0] == '\0') label = da_get(attrs, "alt");
+    char labelBuf[512];
+    int labelIsBuf = 0;
+    if ((label == NULL || label[0] == '\0')) {
+        if (src != NULL && src[0] != '\0') {
+            /* base = last path segment, tolerating one trailing slash */
+            const char* end = src + strlen(src);
+            if (end > src && end[-1] == '/') end--;
+            const char* seg = end;
+            while (seg > src && seg[-1] != '/') seg--;
+            snprintf(labelBuf, sizeof(labelBuf), "[%s: %.*s]", tag,
+                     (int)(end - seg), seg);
+        } else {
+            snprintf(labelBuf, sizeof(labelBuf), "[%s]", tag);
+        }
+        label = labelBuf;
+        labelIsBuf = 1;
+    }
+    (void)labelIsBuf;
+
+    int okw = 0, okh = 0;
+    double wv = d_tonum(da_get(attrs, "width"), &okw);
+    double hv = d_tonum(da_get(attrs, "height"), &okh);
+    int w = okw ? (int)wv : 160;
+    int h = okh ? (int)hv : 60;
+    if (w > 360) w = 360;
+    if (h > 120) h = 120;
+
+    DocBlock* b = d_new_block(DB_PLACEHOLDER);
+    if (b == NULL) return;
+    b->phTag = pluto_strdup(tag);
+    b->boxLabel = pluto_strdup(label);
+    b->width = w;
+    b->height = h;
+    if ((!strcmp(tag, "iframe") || !strcmp(tag, "portal")) &&
+        src != NULL && src[0] != '\0' && d_valid_href(src)) {
+        StrBuf rb;
+        sb_init(&rb);
+        url_resolve(st->baseUrl, src, &rb);
+        b->phHref = sb_detach(&rb);
+    }
+    doc_add_block(st, b);
+}
+
+/* ── image maps ───────────────────────────────────────────────────────── */
+
+static void d_map_free(DocMap* m) {
+    pluto_free(m->name);
+    for (size_t i = 0; i < m->nRegions; i++) {
+        DocAreaRegion* r = &m->regions[i];
+        pluto_free(r->shape);
+        pluto_free(r->coords);
+        pluto_free(r->href);
+        pluto_free(r->alt);
+    }
+    pluto_free(m->regions);
+}
+
+static void d_collect_areas(DocState* st, DomNode* n, DocMap* m) {
+    for (size_t i = 0; i < n->nChildren; i++) {
+        DomNode* c = n->children[i];
+        if (c->kind != DOM_ELEMENT) continue;
+        if (!strcmp(c->tag, "area")) {
+            StrMap* a = c->attrs;
+            const char* shape = da_get(a, "shape");
+            const char* coordsRaw = da_get(a, "coords");
+            const char* alt = da_get(a, "alt");
+
+            DocAreaRegion r;
+            memset(&r, 0, sizeof(r));
+            r.shape = pluto_strdup((shape != NULL && shape[0] != '\0')
+                                       ? shape : "rect");
+
+            int* carr = NULL;
+            size_t cn = 0;
+            const char* p = (coordsRaw != NULL) ? coordsRaw : "";
+            while (*p != '\0') {
+                while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
+                if (*p == '\0') break;
+                long v = strtol(p, (char**)&p, 10);
+                int* narr = pluto_realloc(carr, (cn + 1) * sizeof(int));
+                if (narr == NULL) break;
+                carr = narr;
+                carr[cn++] = (int)v;
+            }
+            r.coords = carr;
+            r.nCoords = cn;
+
+            if (d_valid_href(da_get(a, "href"))) {
+                StrBuf rb;
+                sb_init(&rb);
+                url_resolve(st->baseUrl, da_get(a, "href"), &rb);
+                r.href = sb_detach(&rb);
+            }
+            r.alt = pluto_strdup((alt != NULL) ? alt : "");
+
+            DocAreaRegion* arr = pluto_realloc(
+                m->regions, (m->nRegions + 1) * sizeof(DocAreaRegion));
+            if (arr == NULL) {
+                pluto_free(r.shape);
+                pluto_free(r.coords);
+                pluto_free(r.href);
+                pluto_free(r.alt);
+                return;
+            }
+            m->regions = arr;
+            m->capRegions = m->nRegions + 1;
+            m->regions[m->nRegions++] = r;
+        }
+        /* direct children only — matches the source collector */
+    }
+}
+
+/* ── datalists ────────────────────────────────────────────────────────── */
+
+static void d_datalist_free(DocDatalist* dl) {
+    pluto_free(dl->id);
+    for (size_t i = 0; i < dl->nOpts; i++) {
+        pluto_free(dl->opts[i].text);
+        pluto_free(dl->opts[i].value);
+    }
+    pluto_free(dl->opts);
+}
+
 static void d_handle_element(DocState* st, DomNode* n) {
     const char* tag = n->tag;
     StrMap* attrs = n->attrs;
@@ -796,12 +1370,19 @@ static void d_handle_element(DocState* st, DomNode* n) {
 
     if (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6' && tag[2] == '\0') {
         doc_flush_block(st);
+        if (st->cell != NULL) {
+            d_walk_children(st, n);
+            return;
+        }
+        DBox sp;
+        d_parse_box_spacing(attrs, &sp);
         DocBlock* b = d_new_block(DB_HEADING);
         if (b == NULL) return;
         b->level = tag[1] - '0';
-        b->spacingTop = 18;
-        b->spacingBottom = 8;
+        b->spacingTop = sp.top;
+        b->spacingBottom = sp.bottom;
         b->align = d_parse_align(attrs);
+        b->indent = sp.left;
         if (d_is_inverted_style(attrs)) b->invert = 1;
         st->currentBlock = b;
         d_walk_children(st, n);
@@ -837,7 +1418,12 @@ static void d_handle_element(DocState* st, DomNode* n) {
         !strcmp(tag, "article") || !strcmp(tag, "header") ||
         !strcmp(tag, "footer") || !strcmp(tag, "main") ||
         !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
+        !strcmp(tag, "address") || !strcmp(tag, "hgroup") ||
         !strcmp(tag, "noindex") || !strcmp(tag, "search")) {
+        if (st->cell != NULL) {
+            d_walk_children(st, n);
+            return;
+        }
         doc_flush_block(st);
         DBox sp;
         d_parse_box_spacing(attrs, &sp);
@@ -1134,6 +1720,23 @@ static void d_handle_element(DocState* st, DomNode* n) {
             else
                 sb_clear(&st->figCaption);
             doc_add_block(st, img);
+        } else if (st->figCaption.len > 0) {
+            /* caption without an image becomes a centered italic paragraph */
+            char* capText = sb_detach(&st->figCaption);
+            DocBlock* b = d_new_block(DB_PARAGRAPH);
+            if (b != NULL) {
+                b->align = "center";
+                DocInline in;
+                memset(&in, 0, sizeof(in));
+                in.type = DIT_TEXT;
+                in.text = capText;
+                in.textLen = strlen(capText);
+                in.italic = 1;
+                db_push_inline(b, in);
+                doc_add_block(st, b);
+            } else {
+                pluto_free(capText);
+            }
         } else {
             sb_clear(&st->figCaption);
         }
@@ -1150,11 +1753,692 @@ static void d_handle_element(DocState* st, DomNode* n) {
         return;
     }
 
+    /* ── Tables ─────────────────────────────────────────────────────────── */
+
+    if (!strcmp(tag, "table")) {
+        if (st->cell != NULL) return;   /* nested table inside a cell: dropped */
+        doc_flush_block(st);
+        DTableBuild tbl;
+        memset(&tbl, 0, sizeof(tbl));
+        st->tbl = &tbl;
+        StrBuf caption;
+        sb_init(&caption);
+        for (size_t i = 0; i < n->nChildren; i++) {
+            DomNode* c = n->children[i];
+            if (c->kind != DOM_ELEMENT) continue;
+            if (!strcmp(c->tag, "caption")) {
+                char* t = d_concat_node_text(c);
+                d_collapse_trim(t);
+                if (t[0] != '\0') sb_append_str(&caption, t);
+                pluto_free(t);
+            } else if (!strcmp(c->tag, "tr")) {
+                d_handle_row(st, c, &tbl);
+            } else if (!strcmp(c->tag, "thead") || !strcmp(c->tag, "tbody") ||
+                       !strcmp(c->tag, "tfoot")) {
+                for (size_t j = 0; j < c->nChildren; j++) {
+                    DomNode* r = c->children[j];
+                    if (r->kind == DOM_ELEMENT && !strcmp(r->tag, "tr"))
+                        d_handle_row(st, r, &tbl);
+                }
+            }
+        }
+        st->tbl = NULL;
+        int border = da_has(attrs, "border");
+        const char* bw = da_get(attrs, "border");
+        if (bw != NULL && strcmp(bw, "0") == 0) border = 0;
+        if (tbl.nRows > 0) {
+            DocBlock* b = d_new_block(DB_TABLE);
+            if (b != NULL) {
+                b->rows = tbl.rows;
+                b->nRows = tbl.nRows;
+                b->capRows = tbl.capRows;
+                b->tableCaption = (caption.len > 0) ? sb_detach(&caption)
+                                                    : NULL;
+                if (caption.len == 0) sb_clear(&caption);
+                b->tableBorder = border;
+                const char* tw = da_get(attrs, "width");
+                if (tw != NULL && tw[0] != '\0')
+                    b->tableWidth = pluto_strdup(tw);
+                b->align = d_parse_align(attrs);
+                doc_add_block(st, b);
+            } else {
+                for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
+                pluto_free(tbl.rows);
+                sb_clear(&caption);
+            }
+        } else {
+            for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
+            pluto_free(tbl.rows);
+            sb_clear(&caption);
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "tr")) {
+        if (st->tbl != NULL && st->cell == NULL)
+            d_handle_row(st, n, st->tbl);   /* stray <tr> directly in flow */
+        return;
+    }
+
+    if (!strcmp(tag, "td") || !strcmp(tag, "th"))
+        return;   /* cells are handled by row processing; strays ignored */
+
+    /* ── Forms ──────────────────────────────────────────────────────────── */
+
+    if (!strcmp(tag, "form")) {
+        char* savedAction = st->formAction;
+        char* savedMethod = st->formMethod;
+        StrBuf rb;
+        sb_init(&rb);
+        url_resolve(st->baseUrl, da_get(attrs, "action"), &rb);
+        st->formAction = sb_detach(&rb);
+        const char* m = da_get(attrs, "method");
+        st->formMethod = (m != NULL && m[0] != '\0') ? d_lower_dup(m)
+                                                     : pluto_strdup("get");
+        d_walk_children(st, n);
+        pluto_free(st->formAction);
+        pluto_free(st->formMethod);
+        st->formAction = savedAction;
+        st->formMethod = savedMethod;
+        return;
+    }
+
+    if (!strcmp(tag, "input")) {
+        char* ty = d_lower_dup(da_get(attrs, "type"));
+        const char* inputType = (ty != NULL) ? ty : "text";
+        const char* ph = da_get(attrs, "placeholder");
+        if (ph == NULL || ph[0] == '\0') ph = da_get(attrs, "aria-label");
+
+        if (!strcmp(inputType, "hidden")) {
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_INPUT_FIELD);
+            if (b != NULL) {
+                b->inputType = pluto_strdup("hidden");
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                d_form_overrides(st, attrs, b);
+                doc_add_block(st, b);
+            }
+        } else if (!strcmp(inputType, "checkbox") ||
+                   !strcmp(inputType, "radio")) {
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_CHECKBOX_FIELD);
+            if (b != NULL) {
+                b->inputType = pluto_strdup(inputType);
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                d_form_overrides(st, attrs, b);
+                b->radioFlag = !strcmp(inputType, "radio");
+                b->checkedFlag = (unsigned char)da_has(attrs, "checked");
+                const char* lb = da_get(attrs, "label");
+                if (lb == NULL || lb[0] == '\0') lb = da_get(attrs, "title");
+                if (lb == NULL || lb[0] == '\0') lb = ph;
+                if (lb == NULL || lb[0] == '\0') {
+                    const char* nm = da_get(attrs, "name");
+                    lb = (nm != NULL) ? nm : "";
+                }
+                b->checkboxLabel = pluto_strdup(lb);
+                doc_add_block(st, b);
+            }
+        } else if (!strcmp(inputType, "text") ||
+                   !strcmp(inputType, "search") ||
+                   !strcmp(inputType, "email") ||
+                   !strcmp(inputType, "url") ||
+                   !strcmp(inputType, "number") ||
+                   !strcmp(inputType, "password") ||
+                   !strcmp(inputType, "tel") ||
+                   !strcmp(inputType, "date") ||
+                   !strcmp(inputType, "time") ||
+                   !strcmp(inputType, "month") ||
+                   !strcmp(inputType, "week") ||
+                   !strcmp(inputType, "datetime-local") ||
+                   !strcmp(inputType, "color")) {
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_INPUT_FIELD);
+            if (b != NULL) {
+                b->inputType = pluto_strdup(inputType);
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                d_form_overrides(st, attrs, b);
+                b->placeholder = pluto_strdup((ph != NULL) ? ph : "");
+                int ok = 0;
+                double sv = d_tonum(da_get(attrs, "size"), &ok);
+                b->fieldWidth = ok ? (int)sv : -1;
+                doc_add_block(st, b);
+            }
+        } else if (!strcmp(inputType, "submit") ||
+                   !strcmp(inputType, "button")) {
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+            if (b != NULL) {
+                b->inputType = pluto_strdup(inputType);
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                d_form_overrides(st, attrs, b);
+                const char* val = da_get(attrs, "value");
+                if (val != NULL && val[0] != '\0')
+                    b->submitLabel = pluto_strdup(val);
+                else
+                    b->submitLabel = pluto_strdup(
+                        !strcmp(inputType, "button") ? "Button" : "Submit");
+                doc_add_block(st, b);
+            }
+        } else if (!strcmp(inputType, "file") ||
+                   !strcmp(inputType, "reset") ||
+                   !strcmp(inputType, "image")) {
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+            if (b != NULL) {
+                b->inputType = pluto_strdup(inputType);
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                d_form_overrides(st, attrs, b);
+                const char* val = da_get(attrs, "value");
+                if (val != NULL && val[0] != '\0')
+                    b->submitLabel = pluto_strdup(val);
+                else
+                    b->submitLabel = pluto_strdup(
+                        !strcmp(inputType, "file")     ? "Choose File"
+                        : !strcmp(inputType, "reset")  ? "Reset"
+                                                       : "Submit");
+                doc_add_block(st, b);
+            }
+        }
+        pluto_free(ty);
+        return;
+    }
+
+    if (!strcmp(tag, "textarea")) {
+        doc_flush_block(st);
+        int savedIn = st->inTextarea;
+        char* savedName = st->textareaName;
+        StrBuf savedBuf = st->textareaBuffer;
+        sb_init(&st->textareaBuffer);
+        const char* nm = da_get(attrs, "name");
+        st->textareaName =
+            pluto_strdup((nm != NULL && nm[0] != '\0') ? nm : "q");
+        st->inTextarea = 1;
+        d_walk_children(st, n);
+        st->inTextarea = 0;
+        int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
+        DocBlock* b = d_new_block(DB_INPUT_FIELD);
+        if (b != NULL) {
+            b->inputType = pluto_strdup("textarea");
+            DInputCommon c;
+            d_input_common(st, attrs, &c);
+            d_block_set_common(b, &c, st);
+            b->inName = st->textareaName;
+            st->textareaName = NULL;
+            b->inValue = sb_detach(&st->textareaBuffer);
+            const char* ph2 = da_get(attrs, "placeholder");
+            b->placeholder = pluto_strdup((ph2 != NULL) ? ph2 : "");
+            int ok = 0;
+            double cv = d_tonum(da_get(attrs, "cols"), &ok);
+            b->fieldWidth = ok ? (int)cv : -1;
+            double rv = d_tonum(da_get(attrs, "rows"), &ok);
+            b->fieldRows = ok ? (int)rv : -1;
+            b->readonlyFlag =
+                (unsigned char)(da_has(attrs, "readonly") || dis);
+            b->blockInert = (unsigned char)((st->inert > 0) || dis);
+            doc_add_block(st, b);
+        }
+        sb_clear(&st->textareaBuffer);
+        st->textareaBuffer = savedBuf;
+        pluto_free(st->textareaName);
+        st->textareaName = savedName;
+        st->inTextarea = savedIn;
+        return;
+    }
+
+    if (!strcmp(tag, "button")) {
+        char* bt = d_lower_dup(da_get(attrs, "type"));
+        const char* btype = (bt != NULL) ? bt : "submit";
+        if (!strcmp(btype, "submit") || !strcmp(btype, "button")) {
+            char* raw = d_concat_node_text(n);
+            d_collapse_trim(raw);
+            int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
+            doc_flush_block(st);
+            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+            if (b != NULL) {
+                b->inputType = pluto_strdup(btype);
+                DInputCommon c;
+                d_input_common(st, attrs, &c);
+                d_block_set_common(b, &c, st);
+                if (raw[0] != '\0')
+                    b->submitLabel = pluto_strdup(raw);
+                else
+                    b->submitLabel = pluto_strdup(
+                        !strcmp(btype, "button") ? "Button" : "Submit");
+                const char* fa = da_get(attrs, "formaction");
+                if (fa != NULL && fa[0] != '\0') {
+                    StrBuf fb;
+                    sb_init(&fb);
+                    url_resolve(st->baseUrl, fa, &fb);
+                    pluto_free(b->formAction);
+                    b->formAction = sb_detach(&fb);
+                }
+                const char* fm = da_get(attrs, "formmethod");
+                if (fm != NULL && fm[0] != '\0') {
+                    pluto_free(b->formMethod);
+                    b->formMethod = d_lower_dup(fm);
+                }
+                b->disabledFlag = (unsigned char)dis;
+                b->blockInert = (unsigned char)((st->inert > 0) || dis);
+                doc_add_block(st, b);
+            }
+            pluto_free(raw);
+        }
+        pluto_free(bt);
+        return;
+    }
+
+    if (!strcmp(tag, "select")) {
+        doc_flush_block(st);
+        DocBlock* b = d_new_block(DB_SELECT_FIELD);
+        if (b != NULL) {
+            DInputCommon c;
+            d_input_common(st, attrs, &c);
+            d_collect_select_options(st, n, b);
+            long sel = 1;
+            for (size_t i = 0; i < b->nOptions; i++)
+                if (b->options[i].selected && !b->options[i].disabled)
+                    sel = (long)i + 1;
+            b->selectedIndex = (int)sel;
+            b->multipleFlag = (unsigned char)da_has(attrs, "multiple");
+            d_block_set_common(b, &c, st);
+            if (b->nOptions > 0)
+                doc_add_block(st, b);
+            else
+                db_free(b);
+        }
+        return;
+    }
+
+    /* ── Bordered boxes ─────────────────────────────────────────────────── */
+
+    if (!strcmp(tag, "fieldset")) {
+        if (st->cell != NULL) {
+            d_walk_children(st, n);
+            return;
+        }
+        doc_flush_block(st);
+        char* label = NULL;
+        for (size_t i = 0; i < n->nChildren; i++) {
+            DomNode* c = n->children[i];
+            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")) {
+                label = d_concat_node_text(c);
+                d_collapse_trim(label);
+                break;
+            }
+        }
+        DocBlock* b = d_new_block(DB_BOX_OPEN);
+        if (b != NULL) {
+            b->boxLabel = (label != NULL && label[0] != '\0')
+                              ? pluto_strdup(label) : NULL;
+            doc_add_block(st, b);
+        }
+        pluto_free(label);
+        int wasDisabled = st->disabledDepth;
+        if (da_has(attrs, "disabled")) st->disabledDepth++;
+        for (size_t i = 0; i < n->nChildren; i++) {
+            DomNode* c = n->children[i];
+            if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")))
+                d_walk(st, c);
+        }
+        st->disabledDepth = wasDisabled;
+        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+        if (cb != NULL) doc_add_block(st, cb);
+        return;
+    }
+
+    if (!strcmp(tag, "details")) {
+        if (st->cell != NULL) {
+            d_walk_children(st, n);
+            return;
+        }
+        doc_flush_block(st);
+        st->detailsIndex++;
+        char dkey[24];
+        snprintf(dkey, sizeof(dkey), "d%d", st->detailsIndex);
+        char* label = NULL;
+        for (size_t i = 0; i < n->nChildren; i++) {
+            DomNode* c = n->children[i];
+            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")) {
+                label = d_concat_node_text(c);
+                d_collapse_trim(label);
+                break;
+            }
+        }
+        int isOpen = da_has(attrs, "open");
+        isOpen = d_details_override(st, dkey, isOpen);
+        DocBlock* b = d_new_block(DB_BOX_OPEN);
+        if (b != NULL) {
+            if (label != NULL && label[0] != '\0') {
+                StrBuf bl;
+                sb_init(&bl);
+                sb_append_str(&bl, "> ");
+                sb_append_str(&bl, label);
+                b->boxLabel = sb_detach(&bl);
+            }
+            b->toggleKey = pluto_strdup(dkey);
+            b->toggleOpen = isOpen;
+            doc_add_block(st, b);
+        }
+        pluto_free(label);
+        if (isOpen) {
+            for (size_t i = 0; i < n->nChildren; i++) {
+                DomNode* c = n->children[i];
+                if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")))
+                    d_walk(st, c);
+            }
+        }
+        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+        if (cb != NULL) {
+            cb->toggleKey = pluto_strdup(dkey);
+            cb->toggleOpen = isOpen;
+            doc_add_block(st, cb);
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "dialog")) {
+        if (st->cell != NULL) {
+            d_walk_children(st, n);
+            return;
+        }
+        if (!da_has(attrs, "open")) return;  /* closed dialog: not rendered */
+        doc_flush_block(st);
+        DocBlock* b = d_new_block(DB_BOX_OPEN);
+        if (b != NULL) doc_add_block(st, b);
+        d_walk_children(st, n);
+        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+        if (cb != NULL) doc_add_block(st, cb);
+        return;
+    }
+
+    /* ── Media placeholders ─────────────────────────────────────────────── */
+
+    if (!strcmp(tag, "video") || !strcmp(tag, "audio") ||
+        !strcmp(tag, "iframe") || !strcmp(tag, "canvas") ||
+        !strcmp(tag, "object") || !strcmp(tag, "embed") ||
+        !strcmp(tag, "portal")) {
+        d_handle_media_placeholder(st, tag, n, attrs);
+        return;
+    }
+
+    if (!strcmp(tag, "progress") || !strcmp(tag, "meter")) {
+        doc_flush_block(st);
+        DocBlock* b = d_new_block(DB_METER);
+        if (b != NULL) {
+            int ok = 0;
+            double v;
+            v = d_tonum(da_get(attrs, "value"), &ok);
+            b->mValue = ok ? v : 0;
+            v = d_tonum(da_get(attrs, "max"), &ok);
+            b->mMax = ok ? v : 1;
+            if (b->mMax <= 0) b->mMax = 1;
+            v = d_tonum(da_get(attrs, "min"), &ok);
+            b->mMin = ok ? v : 0;
+            v = d_tonum(da_get(attrs, "low"), &ok);
+            b->mLow = ok ? v : 0;
+            v = d_tonum(da_get(attrs, "high"), &ok);
+            b->mHigh = ok ? v : b->mMax;
+            v = d_tonum(da_get(attrs, "optimum"), &ok);
+            b->mOptimum = ok ? v : 0;
+            const char* lb = da_get(attrs, "title");
+            b->boxLabel = pluto_strdup((lb != NULL) ? lb : "");
+            doc_add_block(st, b);
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "map")) {
+        const char* nameAttr = da_get(attrs, "name");
+        const char* name = nameAttr;
+        if (name != NULL && name[0] == '#') name++;
+        if (name != NULL && name[0] != '\0') {
+            DocMap m;
+            memset(&m, 0, sizeof(m));
+            m.name = pluto_strdup(name);
+            d_collect_areas(st, n, &m);
+            if (m.name != NULL) {
+                DocDocument* doc = st->doc;
+                DocMap* arr = pluto_realloc(
+                    doc->maps, (doc->nMaps + 1) * sizeof(DocMap));
+                if (arr != NULL) {
+                    doc->maps = arr;
+                    doc->capMaps = doc->nMaps + 1;
+                    doc->maps[doc->nMaps++] = m;
+                } else {
+                    d_map_free(&m);
+                }
+            } else {
+                d_map_free(&m);
+            }
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "datalist")) {
+        const char* id = da_get(attrs, "id");
+        if (id != NULL && id[0] != '\0') {
+            DocDatalist dl;
+            memset(&dl, 0, sizeof(dl));
+            dl.id = pluto_strdup(id);
+            for (size_t i = 0; i < n->nChildren; i++) {
+                DomNode* c = n->children[i];
+                if (c->kind != DOM_ELEMENT || strcmp(c->tag, "option") != 0)
+                    continue;
+                char* text = d_concat_node_text(c);
+                d_collapse_trim(text);
+                const char* val = da_get(c->attrs, "value");
+                DocDatalistOpt* arr = pluto_realloc(
+                    dl.opts, (dl.nOpts + 1) * sizeof(DocDatalistOpt));
+                if (arr == NULL) {
+                    pluto_free(text);
+                    break;
+                }
+                dl.opts = arr;
+                dl.capOpts = dl.nOpts + 1;
+                dl.opts[dl.nOpts].text = text;
+                dl.opts[dl.nOpts].value = pluto_strdup(
+                    (val != NULL) ? val : text);
+                dl.nOpts++;
+            }
+            if (dl.id != NULL) {
+                DocDocument* doc = st->doc;
+                DocDatalist* arr = pluto_realloc(
+                    doc->datalists,
+                    (doc->nDatalists + 1) * sizeof(DocDatalist));
+                if (arr != NULL) {
+                    doc->datalists = arr;
+                    doc->capDatalists = doc->nDatalists + 1;
+                    doc->datalists[doc->nDatalists++] = dl;
+                } else {
+                    d_datalist_free(&dl);
+                }
+            } else {
+                d_datalist_free(&dl);
+            }
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "template") || !strcmp(tag, "menuitem") ||
+        !strcmp(tag, "content") || !strcmp(tag, "shadow") ||
+        !strcmp(tag, "geolocation"))
+        return;   /* inert / obsolete: children never rendered */
+
+    if (!strcmp(tag, "fencedframe")) {
+        doc_flush_block(st);
+        int okw = 0, okh = 0;
+        double wv = d_tonum(da_get(attrs, "width"), &okw);
+        double hv = d_tonum(da_get(attrs, "height"), &okh);
+        int w = okw ? (int)wv : 160;
+        int h = okh ? (int)hv : 60;
+        if (w > 360) w = 360;
+        if (h > 120) h = 120;
+        DocBlock* b = d_new_block(DB_PLACEHOLDER);
+        if (b != NULL) {
+            b->phTag = pluto_strdup("fencedframe");
+            b->boxLabel = pluto_strdup("[fencedframe]");
+            b->width = w;
+            b->height = h;
+            doc_add_block(st, b);
+        }
+        return;
+    }
+
+    if (!strcmp(tag, "svg")) {
+        doc_flush_block(st);
+        char* xml = d_serialize_svg_node(n);
+        int okw = 0, okh = 0;
+        double wv = d_tonum(da_get(attrs, "width"), &okw);
+        double hv = d_tonum(da_get(attrs, "height"), &okh);
+        int w = (okw && wv > 0) ? (int)wv : 0;
+        int h = (okh && hv > 0) ? (int)hv : 0;
+        if (w <= 0 || h <= 0) {
+            double vbW = 0, vbH = 0;
+            d_parse_viewbox(da_get(attrs, "viewBox"), &vbW, &vbH);
+            if (w <= 0 && vbW > 0) w = (int)vbW;
+            if (h <= 0 && vbH > 0) h = (int)vbH;
+        }
+        if (w <= 0) w = 120;
+        if (h <= 0) h = 40;
+        if (w > 360) w = 360;
+        if (h > 180) h = 180;
+        const char* alt = "";
+        if (d_str_eq_ci(da_get(attrs, "role"), "img")) {
+            const char* al = da_get(attrs, "aria-label");
+            if (al == NULL || al[0] == '\0') al = da_get(attrs, "title");
+            alt = (al != NULL) ? al : "";
+        }
+        DocBlock* b = d_new_block(DB_IMAGE);
+        if (b != NULL) {
+            b->imgIsSvg = 1;
+            b->svgXml = xml;
+            b->width = w;
+            b->height = h;
+            b->alt = pluto_strdup(alt);
+            b->imgHref = (st->currentHref != NULL)
+                             ? pluto_strdup(st->currentHref) : NULL;
+            b->align = d_parse_align(attrs);
+            b->imgInert = st->inert > 0;
+            doc_add_block(st, b);
+        } else {
+            pluto_free(xml);
+        }
+        return;
+    }
+
+    /* MathML linearization */
+
+    if (!strcmp(tag, "math")) {
+        doc_flush_block(st);
+        int wasMath = st->inMath;
+        StrBuf savedMath = st->mathParts;
+        sb_init(&st->mathParts);
+        st->inMath = 1;
+        d_walk_children(st, n);
+        st->inMath = wasMath;
+        if (st->mathParts.len > 0 && st->mathParts.data != NULL) {
+            /* StrBuf contents are not NUL-terminated until detach */
+            if (sb_reserve(&st->mathParts, 1))
+                st->mathParts.data[st->mathParts.len] = '\0';
+            d_collapse_trim(st->mathParts.data);
+        }
+        if (st->mathParts.len > 0 && st->mathParts.data != NULL &&
+            st->mathParts.data[0] != '\0') {
+            DocBlock* b = d_new_block(DB_MATH);
+            if (b != NULL) {
+                b->codeText = sb_detach(&st->mathParts);
+                doc_add_block(st, b);
+            } else {
+                sb_clear(&st->mathParts);
+            }
+        } else {
+            sb_clear(&st->mathParts);
+        }
+        st->mathParts = savedMath;
+        return;
+    }
+
+    if (st->inMath && !strcmp(tag, "mfrac")) {
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (i > 0) sb_append_str(&st->mathParts, " / ");
+            d_walk(st, n->children[i]);
+        }
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "msup")) {
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (i > 0) sb_append_char(&st->mathParts, '^');
+            d_walk(st, n->children[i]);
+        }
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "msub")) {
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (i > 0) sb_append_char(&st->mathParts, '_');
+            d_walk(st, n->children[i]);
+        }
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "msubsup")) {
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (i == 1) sb_append_char(&st->mathParts, '_');
+            if (i == 2) sb_append_char(&st->mathParts, '^');
+            d_walk(st, n->children[i]);
+        }
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "msqrt")) {
+        sb_append_str(&st->mathParts, "sqrt(");
+        d_walk_children(st, n);
+        sb_append_char(&st->mathParts, ')');
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "mroot")) {
+        sb_append_str(&st->mathParts, "sqrt(");
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (i > 0) sb_append_str(&st->mathParts, "^(1/");
+            if (i + 1 == n->nChildren) sb_append_char(&st->mathParts, ')');
+            d_walk(st, n->children[i]);
+        }
+        sb_append_char(&st->mathParts, ')');
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "mfenced")) {
+        char* openCh = d_mfenced_attr(attrs, "open", "(");
+        char* closeCh = d_mfenced_attr(attrs, "close", ")");
+        char* sep = d_mfenced_attr(attrs, "separators", ",");
+        sb_append_str(&st->mathParts, openCh);
+        size_t count = 0;
+        for (size_t i = 0; i < n->nChildren; i++) {
+            if (count > 0) sb_append_str(&st->mathParts, sep);
+            d_walk(st, n->children[i]);
+            count++;
+        }
+        sb_append_str(&st->mathParts, closeCh);
+        pluto_free(openCh);
+        pluto_free(closeCh);
+        pluto_free(sep);
+        return;
+    }
+    if (st->inMath && !strcmp(tag, "mspace")) {
+        sb_append_char(&st->mathParts, ' ');
+        return;
+    }
+
     if (!strcmp(tag, "meta")) {
         const char* he = da_get(attrs, "http-equiv");
         const char* ct = da_get(attrs, "content");
-        if (he != NULL && ct != NULL && strcasecmp(he, "refresh") == 0 &&
-            !st->hasMetaRefresh) {
+        if (he != NULL && ct != NULL && strcasecmp(he, "refresh") == 0) {
             double delay = 0;
             char* u = NULL;
             if (d_parse_meta_content(ct, &delay, &u)) {
@@ -1168,10 +2452,10 @@ static void d_handle_element(DocState* st, DomNode* n) {
     }
 
     if (!strcmp(tag, "base") || !strcmp(tag, "link") ||
-        !strcmp(tag, "input") || !strcmp(tag, "area") ||
-        !strcmp(tag, "col") || !strcmp(tag, "embed") ||
+        !strcmp(tag, "col") || !strcmp(tag, "colgroup") ||
         !strcmp(tag, "source") || !strcmp(tag, "track") ||
-        !strcmp(tag, "param"))
+        !strcmp(tag, "param") || !strcmp(tag, "frameset") ||
+        !strcmp(tag, "frame"))
         return;
 
     d_walk_children(st, n);
@@ -1192,7 +2476,7 @@ static void d_walk(DocState* st, DomNode* n) {
     }
     if (n->kind != DOM_ELEMENT) return;
     if (d_is_display_none(n->attrs)) return;
-    int inertHere = da_has(n->attrs, "aria-hidden");
+    int inertHere = da_has(n->attrs, "inert");
     if (inertHere) st->inert++;
     d_handle_element(st, n);
     if (inertHere) st->inert--;
@@ -1240,7 +2524,7 @@ static void d_finalize(DocState* st, int scannedHas, double scannedDelay,
     doc_flush_block(st);
 
     if (st->truncated)
-        d_push_notice(st, "(Page truncated: too many blocks)", 0);
+        d_push_notice(st, "(Page too large - rest not rendered)", 0);
 
     if (doc->nBlocks == 0)
         d_push_notice(st, "(Empty Web Page)", 1);
@@ -1279,7 +2563,8 @@ static int d_valid_absolute_url(const char* s) {
 
 /* ── entry point ──────────────────────────────────────────────────────── */
 
-DocDocument* doc_parse(const char* html, const char* baseUrl, int mode) {
+DocDocument* doc_parse_opts(const char* html, const char* baseUrl, int mode,
+                            const DocParseOpts* opts) {
     tasks_yield_check();
 
     if (html == NULL || html[0] == '\0') {
@@ -1372,10 +2657,12 @@ DocDocument* doc_parse(const char* html, const char* baseUrl, int mode) {
     st.doc = doc;
     st.baseUrl = doc->baseUrl;
     st.currentAnchorIndex = -1;
+    st.opts = opts;
     sb_init(&st.linkText);
     sb_init(&st.preBuffer);
     sb_init(&st.figCaption);
     sb_init(&st.mathParts);
+    sb_init(&st.textareaBuffer);
 
     if (root != NULL) d_walk_children(&st, root);
 
@@ -1385,6 +2672,8 @@ DocDocument* doc_parse(const char* html, const char* baseUrl, int mode) {
     sb_clear(&st.preBuffer);
     sb_clear(&st.figCaption);
     sb_clear(&st.mathParts);
+    sb_clear(&st.textareaBuffer);
+    pluto_free(st.textareaName);
     pluto_free(baseOverride);
     if (root != NULL) dom_free(root);
     htt_free(tokens);
@@ -1401,7 +2690,7 @@ void doc_free(DocDocument* doc) {
     pluto_free(doc->baseUrl);
     pluto_free(doc->rawHtml);
     pluto_free(doc->metaUrl);
-    for (size_t i = 0; i < doc->nBlocks; i++) db_free_contents(&doc->blocks[i]);
+    for (size_t i = 0; i < doc->nBlocks; i++) db_free_fields(&doc->blocks[i]);
     pluto_free(doc->blocks);
     for (size_t i = 0; i < doc->nLinks; i++) {
         pluto_free(doc->links[i].href);
@@ -1409,6 +2698,11 @@ void doc_free(DocDocument* doc) {
         pluto_free(doc->links[i].target);
     }
     pluto_free(doc->links);
+    for (size_t i = 0; i < doc->nMaps; i++) d_map_free(&doc->maps[i]);
+    pluto_free(doc->maps);
+    for (size_t i = 0; i < doc->nDatalists; i++)
+        d_datalist_free(&doc->datalists[i]);
+    pluto_free(doc->datalists);
     pluto_free(doc);
 }
 

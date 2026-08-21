@@ -10,8 +10,8 @@
 static int s_pass, s_fail;
 
 static void ck(const char* name, int cond) {
-    if (cond) { s_pass++; PLUTO_LOG("[P10] PASS %s", name); }
-    else      { s_fail++; PLUTO_ERROR("[P10] FAIL %s", name); }
+    if (cond) { s_pass++; PLUTO_LOG("[P11] PASS %s", name); }
+    else      { s_fail++; PLUTO_ERROR("[P11] FAIL %s", name); }
 }
 
 #define BASE "http://ex.com/dir/page.html"
@@ -66,8 +66,8 @@ static void case_headings(void) {
     DocDocument* d = parse("<h2>T</h2>");
     DocBlock* h = find_type(d, DB_HEADING);
     ck("C.h2_meta", h != NULL && h->level == 2 &&
-       h->spacingTop == 18 && h->spacingBottom == 8 &&
-       h->nInlines == 1 && txt_is(inl(h, 0), "T"));
+        h->spacingTop == 0 && h->spacingBottom == 0 &&
+        h->nInlines == 1 && txt_is(inl(h, 0), "T"));
     doc_free(d);
 
     d = parse("<h6 align=center>X</h6>");
@@ -447,9 +447,9 @@ static void case_visibility(void) {
        txt_is(inl(&d->blocks[0], 0), "y"));
     doc_free(d);
 
-    d = parse("a<span aria-hidden=\"true\">sec</span>b");
+    d = parse("a<span inert>sec</span>b");
     DocBlock* p = find_type(d, DB_PARAGRAPH);
-    ck("P.aria_inert", p != NULL && p->nInlines == 3 &&
+    ck("P.inert_attr", p != NULL && p->nInlines == 3 &&
        !inl(p, 0)->inert && inl(p, 1)->inert && !inl(p, 2)->inert);
     doc_free(d);
 }
@@ -523,7 +523,7 @@ static void case_caps(void) {
        strcmp(d->blocks[1200].align, "center") == 0 &&
        d->blocks[1200].nInlines == 1 && inl(&d->blocks[1200], 0)->bold &&
        txt_is(inl(&d->blocks[1200], 0),
-              "(Page truncated: too many blocks)"));
+              "(Page too large - rest not rendered)"));
     doc_free(d);
 
     off = 0;
@@ -533,6 +533,695 @@ static void case_caps(void) {
     d = parse(s_bigHtml);
     DocBlock* p = find_type(d, DB_PARAGRAPH);
     ck("S.inline_cap", p != NULL && p->nInlines == 900);
+    doc_free(d);
+}
+
+/* ── T. tables ────────────────────────────────────────────────────────── */
+
+static void case_tables(void) {
+    DocDocument* d =
+        parse("<table><tr><td>a</td><td>b</td></tr>"
+              "<tr><td>c</td></tr></table>");
+    ck("T.basic_rows", d != NULL && d->nBlocks == 1 &&
+       d->blocks[0].type == DB_TABLE && d->blocks[0].nRows == 2 &&
+       d->blocks[0].rows[0].nCells == 2 &&
+       d->blocks[0].rows[1].nCells == 1 &&
+       d->blocks[0].rows[0].cells[0].inlines != NULL &&
+       strcmp(d->blocks[0].rows[0].cells[0].inlines[0].text, "a") == 0 &&
+       strcmp(d->blocks[0].rows[0].cells[1].inlines[0].text, "b") == 0);
+    doc_free(d);
+
+    /* parity quirk: a new <tr> only closes an open <td>, so an implicitly
+     * reopened row nests inside the previous one and its cells are lost */
+    d = parse("<table><tr><td>a<td>b<tr><td>c</table>");
+    {
+        DocBlock* t = find_type(d, DB_TABLE);
+        ck("T.implicit_tr_quirk", t != NULL && t->nRows == 1 &&
+           t->rows[0].nCells == 2);
+    }
+    doc_free(d);
+
+    d = parse("<table><tr>"
+              "<th colspan=3 abbr=\"AB\">H</th><td rowspan=2>x</td>"
+              "</tr></table>");
+    ck("T.th_spans", d != NULL && find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->rows[0].cells[0].isHeader == 1 &&
+       find_type(d, DB_TABLE)->rows[0].cells[0].colspan == 3 &&
+       find_type(d, DB_TABLE)->rows[0].cells[0].rowspan == 1 &&
+       find_type(d, DB_TABLE)->rows[0].cells[0].abbr != NULL &&
+       strcmp(find_type(d, DB_TABLE)->rows[0].cells[0].abbr, "AB") == 0 &&
+       find_type(d, DB_TABLE)->rows[0].cells[1].isHeader == 0 &&
+       find_type(d, DB_TABLE)->rows[0].cells[1].rowspan == 2);
+    doc_free(d);
+
+    d = parse("<table><caption>  Cap   x </caption><tr><td>y</table>");
+    ck("T.caption_trim", d != NULL && find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->tableCaption != NULL &&
+       strcmp(find_type(d, DB_TABLE)->tableCaption, "Cap x") == 0);
+    doc_free(d);
+
+    d = parse("<table border=1 width=\"80%\" align=center>"
+              "<tr><td>i</table>");
+    ck("T.border_width_align", d != NULL &&
+       find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->tableBorder == 1 &&
+       find_type(d, DB_TABLE)->tableWidth != NULL &&
+       strcmp(find_type(d, DB_TABLE)->tableWidth, "80%") == 0 &&
+       find_type(d, DB_TABLE)->align != NULL &&
+       strcmp(find_type(d, DB_TABLE)->align, "center") == 0);
+    doc_free(d);
+
+    d = parse("<table border=0><tr><td>i</table>");
+    ck("T.border_zero_off", d != NULL &&
+       find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->tableBorder == 0);
+    doc_free(d);
+
+    d = parse("<table><tbody><tr><td>t1</tr><tr><td>t2</tr></tbody>"
+              "</table>");
+    ck("T.tbody_wrapper", d != NULL && find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->nRows == 2);
+    doc_free(d);
+
+    d = parse("<table><tr><td><table><tr><td>deep</td></tr></table>"
+              "</td></tr></table>");
+    {
+        DocBlock* t = find_type(d, DB_TABLE);
+        /* outer table keeps exactly one row; nested table dropped whole */
+        int outerOnly = (d != NULL && t != NULL && d->nBlocks == 1 &&
+                         t->nRows == 1 && t->rows[0].nCells == 1);
+        int spaceFilled = outerOnly &&
+            t->rows[0].cells[0].nInlines == 1 &&
+            strcmp(t->rows[0].cells[0].inlines[0].text, " ") == 0;
+        ck("T.nested_dropped", outerOnly);
+        ck("T.empty_cell_space", spaceFilled);
+    }
+    doc_free(d);
+
+    d = parse("<table><tr><td><b>b</b><a href=\"/l\">L</a></td></tr>"
+              "</table>");
+    {
+        DocBlock* t = find_type(d, DB_TABLE);
+        const DocTableCell* c =
+            (t != NULL) ? &t->rows[0].cells[0] : NULL;
+        ck("T.cell_flags_link",
+           c != NULL && c->nInlines == 2 &&
+           c->inlines[0].bold && !c->inlines[0].underline &&
+           c->inlines[1].underline && c->inlines[1].href != NULL &&
+           strcmp(c->inlines[1].href, "http://ex.com/l") == 0 &&
+           d->nLinks == 1);   /* <a> still registers the link */
+    }
+    doc_free(d);
+
+    d = parse("<table><tr><td> lead</td><td>\tmid\n</td></tr></table>");
+    {
+        DocBlock* t = find_type(d, DB_TABLE);
+        /* first cell text loses leading ws; later cells keep trailing ws */
+        ck("T.cell_first_ws_strip",
+           t != NULL &&
+           strcmp(t->rows[0].cells[0].inlines[0].text, "lead") == 0 &&
+           strcmp(t->rows[0].cells[1].inlines[0].text, "mid ") == 0);
+    }
+    doc_free(d);
+
+    /* parity quirk: stray row/cell markup outside a table — the DOM
+     * builder drops the elements but their text leaks to the root */
+    d = parse("<tr><td>stray</td></tr>");
+    ck("T.stray_tr_text_leak", d != NULL && d->nBlocks == 1 &&
+       d->blocks[0].type == DB_PARAGRAPH &&
+       find_type(d, DB_TABLE) == NULL &&
+       txt_is(inl(&d->blocks[0], 0), "stray"));
+    doc_free(d);
+
+    d = parse("<td>stray cell</td>");
+    ck("T.stray_td_text_leak", d != NULL && d->nBlocks == 1 &&
+       txt_is(inl(&d->blocks[0], 0), "stray cell"));
+    doc_free(d);
+
+    d = parse("<table><tr><td><h3>h</h3><div>dv</div></td></tr></table>");
+    ck("T.block_tags_plain_in_cell",
+       d != NULL && find_type(d, DB_HEADING) == NULL &&
+       find_type(d, DB_TABLE) != NULL &&
+       find_type(d, DB_TABLE)->rows[0].cells[0].nInlines >= 2);
+    doc_free(d);
+}
+
+/* ── U. forms ─────────────────────────────────────────────────────────── */
+
+static void case_forms(void) {
+    DocDocument* d = parse("<input type=hidden value=v>");
+    {
+        DocBlock* f = find_type(d, DB_INPUT_FIELD);
+        ck("U.hidden_block", f != NULL &&
+           f->inputType != NULL && strcmp(f->inputType, "hidden") == 0 &&
+           f->inName != NULL && strcmp(f->inName, "q") == 0 &&
+           f->inValue != NULL && strcmp(f->inValue, "v") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<input>");
+    {
+        DocBlock* f = find_type(d, DB_INPUT_FIELD);
+        ck("U.text_defaults", f != NULL &&
+           f->inputType != NULL && strcmp(f->inputType, "text") == 0 &&
+           f->fieldWidth == -1 && f->maxlength == -1 &&
+           (f->placeholder == NULL || f->placeholder[0] == '\0') &&
+           !f->disabledFlag && !f->readonlyFlag && !f->requiredFlag);
+    }
+    doc_free(d);
+
+    d = parse("<input type=email name=u value=v1 "
+              "placeholder=\"P\" size=30 maxlength=10 "
+              "disabled readonly required>");
+    {
+        DocBlock* f = find_type(d, DB_INPUT_FIELD);
+        ck("U.text_attrs", f != NULL &&
+           strcmp(f->inputType, "email") == 0 &&
+           strcmp(f->inName, "u") == 0 &&
+           strcmp(f->inValue, "v1") == 0 &&
+           strcmp(f->placeholder, "P") == 0 &&
+           f->fieldWidth == 30 && f->maxlength == 10 &&
+           f->disabledFlag && f->readonlyFlag && f->requiredFlag &&
+           f->blockInert);
+    }
+    doc_free(d);
+
+    d = parse("<input type=checkbox aria-label=\"AL\">"
+              "<input type=checkbox title=T2 name=n2>"
+              "<input type=checkbox label=L3 name=n3>");
+    {
+        DocBlock* f1 = &d->blocks[0];
+        DocBlock* f2 = &d->blocks[1];
+        DocBlock* f3 = &d->blocks[2];
+        ck("U.checkbox_aria_fallback",
+           f1->checkboxLabel != NULL &&
+           strcmp(f1->checkboxLabel, "AL") == 0);
+        ck("U.checkbox_title_fallback",
+           f2->checkboxLabel != NULL &&
+           strcmp(f2->checkboxLabel, "T2") == 0);
+        ck("U.checkbox_label_attr",
+           f3->checkboxLabel != NULL &&
+           strcmp(f3->checkboxLabel, "L3") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<input type=checkbox checked><input type=radio name=r>");
+    {
+        DocBlock* cb = &d->blocks[0];
+        DocBlock* rb = &d->blocks[1];
+        ck("U.checkbox_radio_flags", cb->type == DB_CHECKBOX_FIELD &&
+           !cb->radioFlag && cb->checkedFlag &&
+           rb->type == DB_CHECKBOX_FIELD && rb->radioFlag &&
+           !rb->checkedFlag &&
+           strcmp(rb->checkboxLabel, "r") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<input type=submit><input type=button value=B>"
+              "<input type=file><input type=reset><input type=image>");
+    {
+        ck("U.submit_labels",
+           d->nBlocks == 5 &&
+           d->blocks[0].type == DB_INPUT_SUBMIT &&
+           strcmp(d->blocks[0].submitLabel, "Submit") == 0 &&
+           strcmp(d->blocks[1].submitLabel, "B") == 0 &&
+           strcmp(d->blocks[2].submitLabel, "Choose File") == 0 &&
+           strcmp(d->blocks[3].submitLabel, "Reset") == 0 &&
+           strcmp(d->blocks[4].submitLabel, "Submit") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<button> Hi </button><button type=reset>X</button>"
+              "<button type=button></button>");
+    {
+        ck("U.button_blocks",
+           d->nBlocks == 2 &&
+           d->blocks[0].type == DB_INPUT_SUBMIT &&
+           strcmp(d->blocks[0].submitLabel, "Hi") == 0 &&
+           strcmp(d->blocks[1].submitLabel, "Button") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<form action=\"/s\" method=POST>"
+              "<input name=in1>"
+              "<input name=in2 formaction=\"/b2\" formmethod=get>"
+              "</form><input name=out>");
+    {
+        DocBlock* i1 = &d->blocks[0];
+        DocBlock* i2 = &d->blocks[1];
+        DocBlock* out = &d->blocks[2];
+        ck("U.form_context", i1->formAction != NULL &&
+           strcmp(i1->formAction, "http://ex.com/s") == 0 &&
+           i1->formMethod != NULL && strcmp(i1->formMethod, "post") == 0 &&
+           i2->formAction != NULL &&
+           strcmp(i2->formAction, "http://ex.com/b2") == 0 &&
+           i2->formMethod != NULL && strcmp(i2->formMethod, "get") == 0 &&
+           out->formAction == NULL && out->formMethod == NULL);
+    }
+    doc_free(d);
+
+    d = parse("<textarea rows=4 cols=30 readonly required maxlength=99>"
+              "ab\ncd</textarea>");
+    {
+        DocBlock* f = find_type(d, DB_INPUT_FIELD);
+        ck("U.textarea_capture", f != NULL &&
+           strcmp(f->inputType, "textarea") == 0 &&
+           f->inName != NULL && strcmp(f->inName, "q") == 0 &&
+           f->inValue != NULL && strcmp(f->inValue, "ab\ncd") == 0 &&
+           f->fieldWidth == 30 && f->fieldRows == 4 &&
+           f->readonlyFlag && f->requiredFlag && f->maxlength == 99);
+    }
+    doc_free(d);
+
+    d = parse("<textarea name=ta disabled>x</textarea>");
+    {
+        DocBlock* f = find_type(d, DB_INPUT_FIELD);
+        ck("U.textarea_disabled", f != NULL &&
+           strcmp(f->inName, "ta") == 0 && f->disabledFlag &&
+           f->readonlyFlag && f->blockInert);
+    }
+    doc_free(d);
+
+    d = parse("<select name=s multiple><option>a"
+              "<option value=v2 selected><option disabled selected=c>d"
+              "</select>");
+    {
+        DocBlock* sel = find_type(d, DB_SELECT_FIELD);
+        ck("U.select_basic", sel != NULL && sel->nOptions == 3 &&
+           sel->multipleFlag && sel->selectedIndex == 2 &&
+           strcmp(sel->options[0].value, "a") == 0 &&
+           strcmp(sel->options[1].value, "v2") == 0 &&
+           sel->options[2].disabled);
+    }
+    doc_free(d);
+
+    d = parse("<select><optgroup label=\"G\"><option>a"
+              "<option>b</optgroup><option>c</select>");
+    {
+        DocBlock* sel = find_type(d, DB_SELECT_FIELD);
+        ck("U.select_optgroup", sel != NULL && sel->nOptions == 4 &&
+           sel->options[0].group && sel->options[0].disabled &&
+           strcmp(sel->options[0].text, "G") == 0 &&
+           strcmp(sel->options[1].text, "a") == 0 &&
+           strcmp(sel->options[2].text, "b") == 0 &&
+           strcmp(sel->options[3].text, "c") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<select><p>not an option</p></select>");
+    ck("U.select_empty_skip",
+       d != NULL && find_type(d, DB_SELECT_FIELD) == NULL);
+    doc_free(d);
+
+    d = parse("<select><option label=\"Lab\" value=vv>Text</option>"
+              "</select>");
+    {
+        DocBlock* sel = find_type(d, DB_SELECT_FIELD);
+        ck("U.select_label_wins", sel != NULL && sel->nOptions == 1 &&
+           strcmp(sel->options[0].text, "Lab") == 0 &&
+           strcmp(sel->options[0].value, "vv") == 0);
+    }
+    doc_free(d);
+}
+
+/* ── V. bordered boxes ────────────────────────────────────────────────── */
+
+static void case_boxes(void) {
+    DocDocument* d = parse("<fieldset disabled><legend>LG</legend>"
+                           "<input name=i></fieldset>");
+    {
+        int opens = 0, closes = 0;
+        DocBlock* openBlk = NULL;
+        for (size_t i = 0; i < d->nBlocks; i++) {
+            if (d->blocks[i].type == DB_BOX_OPEN) {
+                opens++;
+                if (openBlk == NULL) openBlk = &d->blocks[i];
+            }
+            if (d->blocks[i].type == DB_BOX_CLOSE) closes++;
+        }
+        DocBlock* inp = find_type(d, DB_INPUT_FIELD);
+        ck("V.fieldset_legend", opens == 1 && closes == 1 &&
+           openBlk != NULL && openBlk->boxLabel != NULL &&
+           strcmp(openBlk->boxLabel, "LG") == 0 &&
+           openBlk->toggleKey == NULL);
+        ck("V.fieldset_disables_inner", inp != NULL && inp->disabledFlag);
+    }
+    doc_free(d);
+
+    d = parse("<details open><summary>  S   u </summary>BODY</details>");
+    {
+        DocBlock* openBlk = find_type(d, DB_BOX_OPEN);
+        DocBlock* closeBlk = find_type(d, DB_BOX_CLOSE);
+        ck("V.details_open", openBlk != NULL && closeBlk != NULL &&
+           openBlk->toggleKey != NULL &&
+           strcmp(openBlk->toggleKey, "d1") == 0 &&
+           openBlk->toggleOpen == 1 && closeBlk->toggleOpen == 1 &&
+           openBlk->boxLabel != NULL &&
+           strcmp(openBlk->boxLabel, "> S u") == 0 &&
+           closeBlk->toggleKey != NULL &&
+           strcmp(closeBlk->toggleKey, "d1") == 0);
+        /* summary label excluded from body */
+        int sawBody = 0;
+        for (size_t i = 0; i < d->nBlocks; i++)
+            for (size_t j = 0; j < d->blocks[i].nInlines; j++)
+                if (txt_is(&d->blocks[i].inlines[j], "BODY")) sawBody = 1;
+        ck("V.details_body_rendered", sawBody);
+    }
+    doc_free(d);
+
+    d = parse("<details><summary>S2</summary>HIDDEN</details>"
+              "<details><summary>S3</summary>H3</details>");
+    {
+        DocBlock* b1 = find_type(d, DB_BOX_OPEN);
+        int sawHidden = 0;
+        for (size_t i = 0; i < d->nBlocks; i++)
+            for (size_t j = 0; j < d->blocks[i].nInlines; j++)
+                if (txt_is(&d->blocks[i].inlines[j], "HIDDEN")) sawHidden = 1;
+        ck("V.details_closed_default", b1 != NULL && b1->toggleOpen == 0 &&
+           !sawHidden);
+        ck("V.details_counter_seq",
+           d->nBlocks >= 4 && d->blocks[2].type == DB_BOX_OPEN &&
+           d->blocks[2].toggleKey != NULL &&
+           strcmp(d->blocks[2].toggleKey, "d2") == 0);
+    }
+    doc_free(d);
+
+    {
+        const char* html =
+            "<details><summary>A</summary>BODY1</details>"
+            "<details open><summary>B</summary>BODY2</details>";
+        DocDetailsOverride ovr[2] = {
+            {"d1", 1},
+            {"d2", 0},
+        };
+        DocParseOpts po;
+        po.detailsOverrides = ovr;
+        po.nOverrides = 2;
+        DocDocument* dd =
+            doc_parse_opts(html, BASE, PLUTO_MODE_RAW_HTML, &po);
+        int sawBody1 = 0, sawBody2 = 0;
+        for (size_t i = 0; i < dd->nBlocks; i++) {
+            for (size_t j = 0; j < dd->blocks[i].nInlines; j++) {
+                if (txt_is(&dd->blocks[i].inlines[j], "BODY1")) sawBody1 = 1;
+                if (txt_is(&dd->blocks[i].inlines[j], "BODY2")) sawBody2 = 1;
+            }
+        }
+        ck("V.details_override_open_close",
+           sawBody1 && !sawBody2 &&
+           dd->blocks[0].toggleOpen == 1 &&
+           dd->blocks[2].toggleOpen == 0);
+        doc_free(dd);
+    }
+
+    d = parse("<dialog><p>never</p></dialog>");
+    /* nothing rendered -> the empty-page notice is the only block */
+    ck("V.dialog_closed_hidden", d != NULL && d->nBlocks == 1 &&
+       find_type(d, DB_BOX_OPEN) == NULL &&
+       txt_is(inl(&d->blocks[0], 0), "(Empty Web Page)") &&
+       inl(&d->blocks[0], 0)->italic);
+    doc_free(d);
+
+    d = parse("<dialog open>DTEXT</dialog>");
+    {
+        /* parity quirk: the pending paragraph flushes AFTER box_close */
+        ck("V.dialog_open_pair", d != NULL && d->nBlocks == 3 &&
+           d->blocks[0].type == DB_BOX_OPEN &&
+           (d->blocks[0].boxLabel == NULL ||
+            d->blocks[0].boxLabel[0] == '\0') &&
+           d->blocks[1].type == DB_BOX_CLOSE &&
+           txt_is(inl(&d->blocks[2], 0), "DTEXT"));
+    }
+    doc_free(d);
+
+    d = parse("<fieldset><div><fieldset>inner</fieldset></div></fieldset>");
+    {
+        int opens = 0;
+        for (size_t i = 0; i < d->nBlocks; i++)
+            if (d->blocks[i].type == DB_BOX_OPEN) opens++;
+        ck("V.fieldset_nests", opens == 2);
+    }
+    doc_free(d);
+}
+
+/* ── W. media / metadata branches ─────────────────────────────────────── */
+
+static void case_media_misc(void) {
+    DocDocument* d =
+        parse("<video src=\"v.mp4\" width=999 height=999 title=\"T\">"
+              "</video>");
+    {
+        DocBlock* ph = find_type(d, DB_PLACEHOLDER);
+        ck("W.video_placeholder", ph != NULL &&
+           strcmp(ph->phTag, "video") == 0 &&
+           strcmp(ph->boxLabel, "T") == 0 &&
+           ph->width == 360 && ph->height == 120);
+    }
+    doc_free(d);
+
+    d = parse("<video><source src=\"s.mp4\"></video>");
+    {
+        DocBlock* ph = find_type(d, DB_PLACEHOLDER);
+        ck("W.source_fallback", ph != NULL &&
+           strcmp(ph->boxLabel, "[video: s.mp4]") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<canvas></canvas>");
+    {
+        DocBlock* ph = find_type(d, DB_PLACEHOLDER);
+        ck("W.canvas_no_src", ph != NULL &&
+           strcmp(ph->boxLabel, "[canvas]") == 0 &&
+           ph->width == 160 && ph->height == 60);
+    }
+    doc_free(d);
+
+    d = parse("<iframe src=\"/f\"></iframe><embed>");
+    {
+        DocBlock* ph = find_type(d, DB_PLACEHOLDER);
+        DocBlock* ph2 = (d != NULL && d->nBlocks > 1) ? &d->blocks[1] : NULL;
+        ck("W.iframe_href_embed", ph != NULL &&
+           ph->phHref != NULL &&
+           strcmp(ph->phHref, "http://ex.com/f") == 0 &&
+           ph2 != NULL && ph2->type == DB_PLACEHOLDER &&
+           strcmp(ph2->phTag, "embed") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<progress value=7 max=0 title=P></progress>"
+              "<meter min=1 low=2 high=9 optimum=4 max=10 value=3></meter>");
+    {
+        ck("W.progress_clamp", d != NULL && d->nBlocks == 2 &&
+           d->blocks[0].type == DB_METER &&
+           d->blocks[0].mValue == 7 &&
+           d->blocks[0].mMax == 1 && d->blocks[0].mHigh == 1 &&
+           d->blocks[0].boxLabel != NULL &&
+           strcmp(d->blocks[0].boxLabel, "P") == 0);
+        DocBlock* m = &d->blocks[1];
+        ck("W.meter_fields", m->type == DB_METER && m->mValue == 3 &&
+           m->mMax == 10 && m->mMin == 1 && m->mLow == 2 &&
+           m->mHigh == 9 && m->mOptimum == 4);
+    }
+    doc_free(d);
+
+    d = parse("<datalist id=langs><option value=cpp>C++"
+              "<option>Lua</datalist>");
+    {
+        /* parity quirk: the DOM builder drops <option> without a
+         * <select> ancestor, so the list keeps its id but no entries */
+        ck("W.datalist_meta", d != NULL && d->nDatalists == 1 &&
+           d->datalists[0].id != NULL &&
+           strcmp(d->datalists[0].id, "langs") == 0 &&
+           d->datalists[0].nOpts == 0 &&
+           find_type(d, DB_SELECT_FIELD) == NULL);
+    }
+    doc_free(d);
+
+    d = parse("<map name=\"#m\"><area coords=\"1,2 3\" href=\"/a\" alt=A>"
+              "<area shape=circle href=\"javascript:x\"></map>");
+    {
+        ck("W.map_areas", d != NULL && d->nMaps == 1 &&
+           d->maps[0].name != NULL && strcmp(d->maps[0].name, "m") == 0 &&
+           d->maps[0].nRegions == 2 &&
+           strcmp(d->maps[0].regions[0].shape, "rect") == 0 &&
+           d->maps[0].regions[0].nCoords == 3 &&
+           d->maps[0].regions[0].coords[0] == 1 &&
+           d->maps[0].regions[0].coords[2] == 3 &&
+           d->maps[0].regions[0].href != NULL &&
+           strcmp(d->maps[0].regions[0].href,
+                  "http://ex.com/a") == 0 &&
+           strcmp(d->maps[0].regions[1].shape, "circle") == 0 &&
+           d->maps[0].regions[1].href == NULL);
+    }
+    doc_free(d);
+
+    d = parse("<fencedframe width=999 height=-3></fencedframe>");
+    {
+        DocBlock* ph = find_type(d, DB_PLACEHOLDER);
+        ck("W.fencedframe", ph != NULL &&
+           strcmp(ph->phTag, "fencedframe") == 0 &&
+           strcmp(ph->boxLabel, "[fencedframe]") == 0 &&
+           ph->width == 360 && ph->height == -3);
+    }
+    doc_free(d);
+
+    d = parse("<template><p>TPL</p></template>");
+    ck("W.template_inert", d != NULL && d->nBlocks == 1 &&
+       txt_is(inl(&d->blocks[0], 0), "(Empty Web Page)") &&
+       inl(&d->blocks[0], 0)->italic);
+    doc_free(d);
+
+    d = parse("<col><colgroup span=2></colgroup><track>"
+              "<param name=a value=b><frameset><frame></frameset>"
+              "<menuitem>M</menuitem>");
+    ck("W.voids_silent", d != NULL && d->nBlocks == 1 &&
+       find_type(d, DB_TABLE) == NULL &&
+       txt_is(inl(&d->blocks[0], 0), "(Empty Web Page)"));
+    doc_free(d);
+}
+
+/* ── X. svg / MathML ──────────────────────────────────────────────────── */
+
+static void case_svg_math(void) {
+    DocDocument* d =
+        parse("<svg width=50 height=20><circle cx=\"5\"/></svg>");
+    {
+        DocBlock* img = find_type(d, DB_IMAGE);
+        ck("X.svg_serialize", img != NULL && img->imgIsSvg == 1 &&
+           img->svgXml != NULL &&
+           strstr(img->svgXml, "<circle cx=\"5\"/>") != NULL &&
+           img->width == 50 && img->height == 20);
+    }
+    doc_free(d);
+
+    d = parse("<svg viewBox=\"10 20 300 150\"></svg>");
+    {
+        DocBlock* img = find_type(d, DB_IMAGE);
+        /* parity quirk: attribute keys are lowercased by the tokenizer in
+         * BOTH implementations, so the "viewBox" lookup never matches and
+         * the fallback sizes stay at the defaults */
+        ck("X.svg_viewbox_quirk", img != NULL &&
+           img->width == 120 && img->height == 40);
+    }
+    doc_free(d);
+
+    d = parse("<svg width=999 height=999></svg><svg></svg>");
+    {
+        DocBlock* i1 = find_type(d, DB_IMAGE);
+        DocBlock* i2 = (d != NULL && d->nBlocks > 1) ? &d->blocks[1] : NULL;
+        ck("X.svg_defaults_clamp", i1 != NULL &&
+           i1->width == 360 && i1->height == 180 &&
+           i2 != NULL && i2->imgIsSvg == 1 &&
+           i2->width == 120 && i2->height == 40);
+    }
+    doc_free(d);
+
+    d = parse("<svg role=img aria-label=\"Icon\"></svg>"
+              "<svg role=img title=\"Ti\"></svg><svg><desc>d</desc></svg>");
+    {
+        DocBlock* i1 = find_type(d, DB_IMAGE);
+        DocBlock* i2 = (d != NULL && d->nBlocks > 1) ? &d->blocks[1] : NULL;
+        DocBlock* i3 = (d != NULL && d->nBlocks > 2) ? &d->blocks[2] : NULL;
+        ck("X.svg_alt_rules", i1 != NULL &&
+           i1->alt != NULL && strcmp(i1->alt, "Icon") == 0 &&
+           i2 != NULL && i2->alt != NULL && strcmp(i2->alt, "Ti") == 0 &&
+           i3 != NULL && i3->alt != NULL && i3->alt[0] == '\0');
+    }
+    doc_free(d);
+
+    d = parse("<math><mfrac><mi>a</mi><mn>b</mn></mfrac></math>"
+              "<math><msup><mi>x</mi><mn>2</mn></msup></math>"
+              "<math><msub><mi>y</mi><mn>1</mn></msub></math>"
+              "<math><msubsup><mi>z</mi><mn>1</mn><mn>2</mn></msubsup></math>"
+              "<math><msqrt><mi>w</mi></msqrt></math>"
+              "<math><mroot><mi>8</mi><mn>3</mn></mroot></math>");
+    {
+        int ok = d != NULL && d->nBlocks == 6;
+        if (ok) {
+            /* parity quirk: mroot emits "^(1/" and the closing paren
+             * BEFORE walking the last child, exactly like the source */
+            const char* e[] = {"a / b", "x^2", "y_1",
+                               "z_1^2", "sqrt(w)", "sqrt(8^(1/)3)"};
+            for (int i = 0; i < 6 && ok; i++) {
+                DocBlock* b = &d->blocks[i];
+                ok = b->type == DB_MATH && b->codeText != NULL &&
+                     strcmp(b->codeText, e[i]) == 0;
+            }
+        }
+        ck("X.math_linearized", ok);
+    }
+    doc_free(d);
+
+    d = parse("<math><mfenced open=\"[\" close=\"]\" separators=\";\">"
+              "<mi>a</mi><mi>b</mi></mfenced></math>");
+    {
+        DocBlock* b = find_type(d, DB_MATH);
+        ck("X.mfenced_seps", b != NULL && b->codeText != NULL &&
+           strcmp(b->codeText, "[a;b]") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<math><mi> a </mi> <mo>+</mo>\n<mi>b</mi></math>");
+    {
+        DocBlock* b = find_type(d, DB_MATH);
+        ck("X.math_ws_collapse", b != NULL && b->codeText != NULL &&
+           strcmp(b->codeText, "a + b") == 0);
+    }
+    doc_free(d);
+
+    d = parse("<math><mtext></mtext></math>");
+    ck("X.math_empty_skipped",
+       d != NULL && find_type(d, DB_MATH) == NULL);
+    doc_free(d);
+}
+
+/* ── Y. misc parity ───────────────────────────────────────────────────── */
+
+static void case_misc_parity(void) {
+    DocDocument* d = parse("<address>ad</address><hgroup>hg</hgroup>");
+    ck("Y.address_hgroup_paragraphs", d != NULL && d->nBlocks == 2 &&
+       d->blocks[0].type == DB_PARAGRAPH &&
+       txt_is(inl(&d->blocks[0], 0), "ad") &&
+       d->blocks[1].type == DB_PARAGRAPH &&
+       txt_is(inl(&d->blocks[1], 0), "hg"));
+    doc_free(d);
+
+    d = parse("<figure><figcaption>OnlyCap</figcaption></figure>");
+    {
+        DocBlock* p = find_type(d, DB_PARAGRAPH);
+        ck("Y.figure_caption_only_para", p != NULL &&
+           p->align != NULL && strcmp(p->align, "center") == 0 &&
+           p->nInlines == 1 && inl(p, 0)->italic &&
+           txt_is(inl(p, 0), "OnlyCap") &&
+           find_type(d, DB_IMAGE) == NULL);
+    }
+    doc_free(d);
+
+    d = parse("<h2 style=\"margin: 4 2\">t</h2>");
+    {
+        DocBlock* h = find_type(d, DB_HEADING);
+        /* 2-value shorthand: top/bottom from value #1, sides from #2 */
+        ck("Y.heading_css_spacing", h != NULL &&
+           h->spacingTop == 2 && h->spacingBottom == 2 && h->indent == 1);
+    }
+    doc_free(d);
+
+    d = parse("<p>a</p><div hidden>b<div><span inert>c</span></div></div>"
+              "<p>d</p><span inert>e<span>f</span></span>");
+    {
+        int ok = d != NULL;
+        /* hidden subtree skipped entirely; inert flags only inside spans */
+        if (ok) {
+            int sawC = 0;
+            for (size_t i = 0; i < d->nBlocks; i++)
+                for (size_t j = 0; j < d->blocks[i].nInlines; j++)
+                    if (txt_is(&d->blocks[i].inlines[j], "c")) sawC = 1;
+            DocBlock* last = &d->blocks[d->nBlocks - 1];
+            ok = !sawC && d->nBlocks == 3 &&
+                 txt_is(inl(last, 0), "e") && inl(last, 0)->inert &&
+                 txt_is(inl(last, 1), "f") && inl(last, 1)->inert;
+        }
+        ck("Y.inert_scope_restored", ok);
+    }
     doc_free(d);
 }
 
@@ -560,10 +1249,16 @@ int selftest_document_run(int* passed, int* failed) {
     case_meta();
     case_base();
     case_caps();
+    case_tables();
+    case_forms();
+    case_boxes();
+    case_media_misc();
+    case_svg_math();
+    case_misc_parity();
 
     *passed = s_pass;
     *failed = s_fail;
-    PLUTO_LOG("[P10] document selftests done: %d passed, %d failed",
+    PLUTO_LOG("[P11] document selftests done: %d passed, %d failed",
               s_pass, s_fail);
     return s_fail;
 }
