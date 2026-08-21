@@ -43,7 +43,9 @@ SRC = \
 	src/core/selftest_http.c \
 	src/html/entities.c \
 	src/html/tokenizer.c \
+	src/html/dom.c \
 	src/html/selftest_tokenizer.c \
+	src/html/selftest_dom.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \

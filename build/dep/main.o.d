@@ -56,7 +56,8 @@ build/src/main.o: src/main.c \
  src/core/storage_data.h src/core/encoding.h src/core/http_client.h \
  src/core/../util/strmap.h src/core/logger.h src/core/selftest_encoding.h \
  src/core/selftest_http.h src/html/tokenizer.h src/util/strmap.h \
- src/html/selftest_tokenizer.h src/core/selftest_storage.h \
+ src/html/dom.h src/html/tokenizer.h src/html/selftest_tokenizer.h \
+ src/html/selftest_dom.h src/core/selftest_storage.h \
  src/core/selftest_tasks.h src/core/selftest_url.h src/core/storage.h \
  src/core/../util/dynarray.h src/core/tasks.h src/html/entities.h \
  src/util/mem.h src/util/selftest_util.h
@@ -191,7 +192,13 @@ src/html/tokenizer.h:
 
 src/util/strmap.h:
 
+src/html/dom.h:
+
+src/html/tokenizer.h:
+
 src/html/selftest_tokenizer.h:
+
+src/html/selftest_dom.h:
 
 src/core/selftest_storage.h:
 

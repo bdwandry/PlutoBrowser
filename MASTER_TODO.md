@@ -1,10 +1,10 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P08 DONE (verified in simulator). NEXT: P09.**
+**Status: PLANNING COMPLETE — PHASES P01–P09 DONE (verified in simulator). NEXT: P10.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
-**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ P07 ✅ P08 ✅ | P09–P36 ⬜
+**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ P07 ✅ P08 ✅ P09 ✅ | P10–P36 ⬜
 
 ---
 
@@ -462,13 +462,32 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       still green (128/70/119/33/75/89); clean make 0 errors / 0 warnings;
       logs exported to logs/phase-P08.log; STOP.
 
-### PHASE P09 — html/dom.c
-- [ ] DOM.build: stack builder; VOID set; implied end tags (p/li/dt/dd/tr/td/th/option);
-      closeOpenP/popToTag; prepareListItem/DtDd/Row/Cell/Option; SKIP_SUBTREE
-      {template,head,selectedcontent}; MAX_NODES=6000 enforcement; node struct
-      {tag,attrs(map),children[],text}.
-- [ ] Dump small doc tree to log; verify structure.
-- [ ] Verify; STOP.
+### PHASE P09 — html/dom.c  ✅ DONE (verified in simulator)
+- [x] DOM.build ported to src/html/dom.{h,c} (~330 LOC): stack builder over the
+      token stream with exact source semantics — VOID set (14 elems), SKIP_SUBTREE
+      {template,head,selectedcontent} with 500-token safety valve (valve resets
+      skipDepth but skippedDepth stays cumulative — oracle-probed: 500 skipped,
+      remaining 350 spans built), BLOCK set closeOpenP scanning past ancestors
+      ("close_through": inner <div> pops p+span), implied-end helpers
+      prepareListItem/DtDd/Row/Cell/Option incl. stray-element stack truncation
+      to root and stray row/cell/option DROPPED (doPush=false).
+- [x] Nested anchors reopen at parent level; closing void/skip tags ignored;
+      self-closing non-void tags appended but never pushed (<div/> siblings OK);
+      MAX_NODES=6000 cap; faithful dead-code quirk: loop breaks before append()
+      can refuse so maxNodesHit stays false even capped (oracle: maxhit=0 @6000).
+- [x] Ownership convention: dom_build TRANSFERS each token's attrs map / text
+      buffer into nodes and nulls the token fields, so htt_free() afterwards
+      stays safe (documented in dom.h); dropped elements destroy their attrs.
+- [x] Oracle p09_oracle.lua drove real tokenizer.lua -> dom.lua over 25 fixtures
+      -> p09_truth.txt; C selftest (src/html/selftest_dom.{h,c}, 49 checks)
+      replays every fixture through the REAL pipeline (htt_tokenize -> dom_build):
+      nesting survival, list/dl/table shapes, skip valve, 6000-node cap,
+      diag counters per case.
+- [x] Tasks integration per token: tasks_yield_check() cancel +
+      tasks_report_progress(0.5 + 0.3*(i/n)) (oracle probe first value 0.8).
+- [x] Verify: **[P09] dom selftests done: 49 passed, 0 failed**; P02–P08 still
+      green (128/70/119/33/75/89/68); clean make 0 errors / 0 warnings; logs
+      exported to logs/phase-P09.log; STOP.
 
 ### PHASE P10 — html/document.c PART 1 (core block building)
 - [ ] Document.parse scaffolding: mode reader/html(ds) switch, opts, baseUrl/base href,
