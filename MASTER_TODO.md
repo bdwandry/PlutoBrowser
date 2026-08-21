@@ -534,14 +534,29 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       logs exported to logs/phase-P10.log; STOP.
 
 ### PHASE P11 — html/document.c PART 2 (tables, svg, misc, parity sweep)
-- [ ] Table parsing (rows/cells/spans as source handles), fieldset, details/summary,
+- [x] Table parsing (rows/cells/spans as source handles), fieldset, details/summary,
       dialog, fencedframe placeholder, select options, button/input blocks, marquee-ish
       leftovers — i.e., EVERY remaining branch of Document.parse walked against source.
-- [ ] Inline SVG extraction → serializeSvgNode → SVGDecoder hook point (decoder arrives P24;
+- [x] Inline SVG extraction → serializeSvgNode → SVGDecoder hook point (decoder arrives P24;
       store serialized XML now).
-- [ ] Line-by-line parity audit of document.lua vs document.c (checklist appended to phase
+- [x] Line-by-line parity audit of document.lua vs document.c (checklist appended to phase
       log listing every source branch → C location).
-- [ ] Verify; STOP.
+- [x] Verify; STOP.
+
+      DONE (2026-08-21). Blocks DB_TABLE / DB_INPUT_FIELD / DB_CHECKBOX_FIELD /
+      DB_INPUT_SUBMIT / DB_SELECT_FIELD / DB_BOX_OPEN / DB_BOX_CLOSE / DB_PLACEHOLDER /
+      DB_METER / DB_MATH implemented; doc.maps + doc.datalists stored. inputType made an
+      owned char* (fixes use-after-free); per-element formaction/formmethod overrides added
+      (d_form_overrides). Faithful quirks kept and selftest-pinned: implicit <tr> nesting
+      (row loss), <option> dropped without <select> ancestor (datalists empty), stray
+      tr/td text leaks as paragraph, viewBox lookup dead in both impls (tokenizer
+      lowercases attr keys) → svg defaults 120x40, progress/meter swallow children,
+      mroot "^(1/" + ")" before last child text, empty-page italic notice,
+      dialog-open block ordering. StrBuf is not NUL-terminated until detach — math
+      join now terminates via sb_reserve before d_collapse_trim (ASAN caught overflow).
+      Selftests: 132 passed, 0 failed (host harness clean under ASAN; simulator log this
+      phase). Build gate 0/0. main.c display label P10→P11. Phase log exported with full
+      parity-audit checklist.
 
 ### PHASE P12 — html/readability.c
 - [ ] distill(tokens, rawTitle, baseUrl): STRIP_TAGS set, wordCount, isBareUrlText,
