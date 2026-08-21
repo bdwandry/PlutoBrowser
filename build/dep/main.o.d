@@ -53,10 +53,11 @@ build/src/main.o: src/main.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
  src/core/constants.h src/core/cookie_jar.h src/core/../util/strbuf.h \
- src/core/storage_data.h src/core/logger.h src/core/selftest_storage.h \
+ src/core/storage_data.h src/core/encoding.h src/core/logger.h \
+ src/core/selftest_encoding.h src/core/selftest_storage.h \
  src/core/selftest_tasks.h src/core/selftest_url.h src/core/storage.h \
- src/core/../util/dynarray.h src/core/tasks.h src/util/mem.h \
- src/util/selftest_util.h
+ src/core/../util/dynarray.h src/core/tasks.h src/html/entities.h \
+ src/util/mem.h src/util/selftest_util.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -172,7 +173,11 @@ src/core/../util/strbuf.h:
 
 src/core/storage_data.h:
 
+src/core/encoding.h:
+
 src/core/logger.h:
+
+src/core/selftest_encoding.h:
 
 src/core/selftest_storage.h:
 
@@ -185,6 +190,8 @@ src/core/storage.h:
 src/core/../util/dynarray.h:
 
 src/core/tasks.h:
+
+src/html/entities.h:
 
 src/util/mem.h:
 
