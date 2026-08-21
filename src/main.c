@@ -21,6 +21,8 @@
 #include "html/dom.h"
 #include "html/selftest_tokenizer.h"
 #include "html/selftest_dom.h"
+#include "html/selftest_document.h"
+#include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
 #include "core/selftest_url.h"
@@ -49,6 +51,8 @@ static int s_ttPass = -1;
 static int s_ttFail = -1;
 static int s_dmPass = -1;
 static int s_dmFail = -1;
+static int s_dcPass = -1;
+static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
 // and log URL / bytes / download ms / KB per second. Log-only: failures are
@@ -176,6 +180,17 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_dcPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P10 document: %d passed, %d failed",
+                     s_dcPass, s_dcFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 200);
+        }
+    }
+
     const char* hint = "Phase P07 raw TCP HTTP client";
     pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 210);
 }
@@ -278,6 +293,13 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_dom_run(&s_dmPass, &s_dmFail);
             if (s_dmFail > 0) {
                 PLUTO_ERROR("P09 SELFTEST FAILURES: %d", s_dmFail);
+            }
+
+            // P10 document model self-tests (dom -> blocks/links pipeline).
+            doc_init(pd);
+            selftest_document_run(&s_dcPass, &s_dcFail);
+            if (s_dcFail > 0) {
+                PLUTO_ERROR("P10 SELFTEST FAILURES: %d", s_dcFail);
             }
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.
