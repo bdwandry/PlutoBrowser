@@ -13,8 +13,10 @@
 #include "core/constants.h"
 #include "core/cookie_jar.h"
 #include "core/encoding.h"
+#include "core/http_client.h"
 #include "core/logger.h"
 #include "core/selftest_encoding.h"
+#include "core/selftest_http.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
 #include "core/selftest_url.h"
@@ -37,6 +39,65 @@ static int s_tkPass = -1;
 static int s_tkFail = -1;
 static int s_enPass = -1;
 static int s_enFail = -1;
+static int s_hcPass = -1;
+static int s_hcFail = -1;
+
+// ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
+// and log URL / bytes / download ms / KB per second. Log-only: failures are
+// expected whenever the simulator has no network or the access prompt blocks.
+static const char* BENCH_URLS[] = {
+    "https://wiesmann.codiferes.net/share/bitmaps/",
+    "http://wiesmann.codiferes.net/share/bitmaps/test_image_4c.png",
+};
+#define BENCH_NURLS (int)(sizeof(BENCH_URLS) / sizeof(BENCH_URLS[0]))
+static int s_benchIdx = -1;
+static int s_benchDone = 0;
+static unsigned s_benchStartMs = 0;
+
+static void bench_start_current(void);
+
+static void bench_on_success(void* ud, int status, const StrMap* headers,
+                             const char* body, size_t bodyLen,
+                             const char* url)
+{
+    (void)ud;
+    (void)headers;
+    unsigned ms = pd->system->getCurrentTimeMilliseconds() - s_benchStartMs;
+    PLUTO_LOG("[P07] bench OK %s status=%d bytes=%u ms=%u kbps=%u", url,
+              status, (unsigned)bodyLen, ms,
+              ms > 0 ? (unsigned)((bodyLen * 1000u) / (ms * 1024u)) : 0);
+    s_benchIdx++;
+    bench_start_current();
+}
+
+static void bench_on_error(void* ud, const char* msg)
+{
+    (void)ud;
+    PLUTO_LOG("[P07] bench FAIL %s (%s)", BENCH_URLS[s_benchIdx],
+              msg ? msg : "?");
+    s_benchIdx++;
+    bench_start_current();
+}
+
+static void bench_start_current(void)
+{
+    if (s_benchIdx >= BENCH_NURLS) {
+        if (!s_benchDone) {
+            PLUTO_LOG("[P07] benchmark done");
+            s_benchDone = 1;
+        }
+        return;
+    }
+    PlutoHttpCallbacks cbs;
+    memset(&cbs, 0, sizeof(cbs));
+    cbs.onSuccess = bench_on_success;
+    cbs.onError = bench_on_error;
+    s_benchStartMs = pd->system->getCurrentTimeMilliseconds();
+    PLUTO_LOG("[P07] bench start %s", BENCH_URLS[s_benchIdx]);
+    // Return value intentionally ignored: synchronous rejections still fire
+    // onError (which advances the chain).
+    hc_get(BENCH_URLS[s_benchIdx], &cbs);
+}
 
 static void draw_placeholder(void)
 {
@@ -107,7 +168,7 @@ static void draw_placeholder(void)
         }
     }
 
-    const char* hint = "Phase P06 charset + entities";
+    const char* hint = "Phase P07 raw TCP HTTP client";
     pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 210);
 }
 
@@ -118,6 +179,14 @@ static int update(void* userdata)
 
     // Cooperative scheduler pump (main.lua Tasks.update() parity).
     tasks_update();
+
+    // HTTP client pump (main.lua HttpClient.update() parity) + P07 benchmark
+    // kick-off once the boot self-tests are long done.
+    hc_update();
+    if (s_frame == 120 && !s_benchDone && s_benchIdx < 0) {
+        s_benchIdx = 0;
+        bench_start_current();
+    }
 
     if (s_frame == 1) {
         PLUTO_LOG("first frame rendered");
@@ -178,6 +247,15 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_encoding_run(&s_enPass, &s_enFail);
             if (s_enFail > 0) {
                 PLUTO_ERROR("P06 SELFTEST FAILURES: %d", s_enFail);
+            }
+
+            // P07 raw TCP HTTP client self-tests (fake TCP vtable + fake
+            // clock; real networking restored afterwards for the benchmark).
+            cj_init(pd); // idempotent: reuses the P04 storage backend
+            hc_init(pd);
+            selftest_http_run(&s_hcPass, &s_hcFail);
+            if (s_hcFail > 0) {
+                PLUTO_ERROR("P07 SELFTEST FAILURES: %d", s_hcFail);
             }
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.

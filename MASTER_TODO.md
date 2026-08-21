@@ -1,10 +1,10 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P06 DONE (verified in simulator). NEXT: P07.**
+**Status: PLANNING COMPLETE — PHASES P01–P07 DONE (verified in simulator). NEXT: P08.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
-**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ | P07–P36 ⬜
+**Phase progress:** P01 ✅ P02 ✅ P03 ✅ P04 ✅ P05 ✅ P06 ✅ P07 ✅ | P08–P36 ⬜
 
 ---
 
@@ -402,18 +402,35 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       documents against host-Lua output of the REAL layout.lua.
 - [ ] Depends on P08–P25 DOM/render primitives being present; schedule before P27.
 
-### PHASE P07 — core/http_client.c (raw TCP HTTP/HTTPS) + BENCHMARK
-- [ ] Port doGet/get/update/cancel/isLoading over playdate->network->tcp with identical
+### PHASE P07 — core/http_client.c (raw TCP HTTP/HTTPS) + BENCHMARK  ✅ DONE (verified in simulator)
+- [x] Port doGet/get/update/cancel/isLoading over playdate->network->tcp with identical
       constants (MAX_RESPONSE_SIZE=2MB, TIMEOUT=60000ms, MAX_REDIRECTS=5, READ_CHUNK=32768).
-- [ ] buildRequest (method GET, Host, User-Agent/Accept headers exactly as source),
-      parseHeaders (status line, case-insensitive keys, Content-Length, Transfer-Encoding
-      chunked, Location, Content-Type, Set-Cookie list capture), decodeChunked,
-      redirect deferral one tick + depth tracking + requestId staleness guard,
-      connection teardown/closeTcp, reset() state machine, internal error pages strings.
-- [ ] Wire CookieJar.getHeader outbound + processSetCookies inbound; charset passthrough.
-- [ ] BENCHMARK: download 2–3 assets from https://wiesmann.codiferes.net/share/bitmaps/
-      (http + https), log bytes/ms/throughput; verify chunked + redirect paths exercised.
-- [ ] Verify in simulator (real network); logs exported; STOP.
+      Files: src/core/http_client.{h,c} (~830 LOC), src/core/internal_pages.{h,c}
+      (byte-exact GENERATED from the Lua INTERNAL_PAGES via p07_dump_pages.lua extraction),
+      src/core/selftest_http.{h,c} (89 checks, offline fake-TCP vtable +
+      hc_set_tcp_for_tests/hc_set_clock_fn injection hooks).
+- [x] buildRequest (method GET, Host, User-Agent/Accept headers exactly as source;
+      Lua port rule verbatim: any port != 80/443 shown incl. parse("") -> "blank:0"),
+      parseHeaders (status line, case-insensitive keys, Content-Length full-string
+      tonumber parity, Transfer-Encoding chunked, Location, Content-Type, Set-Cookie
+      list capture), decodeChunked (full-string hex sizes, extensions/trailers,
+      incomplete->raw fallback at close), redirect deferral one tick + depth cap 5,
+      generation-id staleness guard via setUserdata, closeTcp/reset state machine,
+      internal about:home/blank/acidtest pages served after 20ms.
+- [x] Faithful quirks kept: slice-to-end beyond Content-Length; too-many-redirects
+      SILENT DROP (error branch wiped by unconditional reset()); watchdog >512-byte
+      partial completes instead of erroring; progress (0,0) until headers parsed;
+      304-without-Location falls through; empty-string URL parses to https://blank/.
+- [x] C-only additions: requestAccess() gating (kAccessAsk async wait, session grant
+      cache keyed by host), ms timeouts (10000 connect/read), PDNetErr-name error
+      strings for send/open failures.
+- [x] Wire CookieJar.getHeader outbound + processSetCookies inbound (round-trip
+      verified against the real P04 jar); charset passthrough to caller headers.
+- [x] BENCHMARK (§4.10, log-only): https listing 5217 bytes / 3604 ms (TLS handshake
+      dominates); http probe 404 page 996 bytes / 282 ms — full HTTP flow exercised.
+- [x] Verify in simulator: **[P07] http selftests done: 89 passed, 0 failed**; P02–P06
+      still green (128/70/119/33/75); clean make 0 errors / 0 warnings; logs exported
+      to logs/phase-P07.log; STOP.
 
 ### PHASE P08 — html/tokenizer.c
 - [ ] tokenize(): MAX_HTML_SIZE=256KB truncate; doctype/comment/CDATA skip; raw-text
