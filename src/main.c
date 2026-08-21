@@ -17,6 +17,8 @@
 #include "core/logger.h"
 #include "core/selftest_encoding.h"
 #include "core/selftest_http.h"
+#include "html/tokenizer.h"
+#include "html/selftest_tokenizer.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
 #include "core/selftest_url.h"
@@ -41,6 +43,8 @@ static int s_enPass = -1;
 static int s_enFail = -1;
 static int s_hcPass = -1;
 static int s_hcFail = -1;
+static int s_ttPass = -1;
+static int s_ttFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
 // and log URL / bytes / download ms / KB per second. Log-only: failures are
@@ -256,6 +260,13 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_http_run(&s_hcPass, &s_hcFail);
             if (s_hcFail > 0) {
                 PLUTO_ERROR("P07 SELFTEST FAILURES: %d", s_hcFail);
+            }
+
+            // P08 HTML tokenizer self-tests (oracle replay fixtures).
+            htt_init(pd);
+            selftest_tokenizer_run(&s_ttPass, &s_ttFail);
+            if (s_ttFail > 0) {
+                PLUTO_ERROR("P08 SELFTEST FAILURES: %d", s_ttFail);
             }
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.
