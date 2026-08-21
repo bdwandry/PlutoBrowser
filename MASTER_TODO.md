@@ -490,20 +490,48 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       exported to logs/phase-P09.log; STOP.
 
 ### PHASE P10 — html/document.c PART 1 (core block building)
-- [ ] Document.parse scaffolding: mode reader/html(ds) switch, opts, baseUrl/base href,
-      title capture, meta refresh detection (http-equiv refresh, delay+url), form model
-      collection (action/method/inputs: text/hidden/checkbox/radio/select/submit/button).
-- [ ] Helpers: parseStyle, parseAlign, isDisplayNone (hidden/popover/display:none/
-      visibility:hidden subtree suppression), isInvertedStyle (CSS color inversion
-      approximation EXACT as source), parseBoxSpacing, concatNodeText, validHref,
-      serializeSvgNode.
-- [ ] Block model structs (heading/para/list/table/pre/blockquote/hr/image/form/input/
-      details-summary/dialog/fieldset...) mirroring document.lua block fields.
-- [ ] Implement heading/paragraph/list/blockquote/pre/code/hr/br/image-tag capture paths
-      with inline runs (bold/italic/u/strike/code/small/sub/sup/big flags, links w/
-      anchorIndex, align).
-- [ ] Caps: MAX_BLOCKS=1200, MAX_INLINES=900.
-- [ ] Verify: parse about:acidtest-like fixture; block dump logged; STOP.
+- [x] Document.parse scaffolding: mode switch (READER -> NULL + log until P12),
+      baseUrl/base href override (first nonempty href wins, then validated against
+      ^[a-zA-Z][%w+%-.]*://), title from tokenizer ("Blank Page" early return for
+      empty html), meta refresh detection head-scan + body-walker (body preferred;
+      patterns "N; url=X" / "N"; delay via tonumber semantics; url resolved vs base).
+      Form model collection DEFERRED to P11 per phase-boundary agreement.
+      NOTE: base/meta TOKEN scans run BEFORE dom_build because dom_build TRANSFERS
+      attrs ownership (Lua scanned the same tokens after build via shared refs).
+- [x] Helpers: parseStyle (keys+values lowercased/trimmed, LAST duplicate wins,
+      16-entry map), parseAlign (attr then text-align override), isDisplayNone
+      (hidden/popover/display:none/visibility:hidden -> whole subtree skipped),
+      isInvertedStyle (color white/#fff/#FFFF, bg black/#000 substring approx),
+      parseBoxSpacing (num strips %, floor(n/2); margin shorthand 1/2/3/4-part;
+      padding contributes LEFT only; unitless values only - tonumber("10px")=nil),
+      concatNodeText, validHref (!empty !# !javascript: !data:), serializeSvgNode
+      (recursive, entities_encode text, ["< escaped; hookup lands in P11).
+- [x] Block model structs (document.h): DocInline (DIT_TEXT/DIT_BR/DIT_WBR +
+      11 flags + href + anchorIndex), DocBlock (PARAGRAPH/HEADING/BLOCKQUOTE/
+      LIST_ITEM/CODE_BLOCK/HR/IMAGE + align/spacingTop/spacingBottom/indent/
+      invert/level/isOrdered/number/markerType(static)/depth/dtFlag/ddFlag/
+      codeText+lines/img fields/imgInert), DocLink, DocDocument (+metaDelay/
+      metaUrl); doc_free frees everything recursively.
+- [x] Capture paths: h1-h6 (spacing 18/8), paragraph set p/div/section/article/
+      header/footer/main/nav/aside/noindex/search, blockquote indent=left+12,
+      center/marquee align=center, pre/xmp/listing/plaintext (raw buffer + \r?\n
+      line split incl blank lines), ul/ol/menu/dir ctx stack (start/reversed/type
+      whitelist/depth), li numbering + value= renumbering, dl/dt/dd (dlDepth*20
+      indent, dt/dd flags), figure/figcaption caption attach to image block,
+      inline runs b/i/u/s/mark/small/big/sub/sup/code families, span/font/time/
+      data style-driven flags + time/data value fallback when no inline children,
+      q bold-italic quotes, a links (resolve/anchorIndex/target/title->href text
+      fallback/linkText accumulation across children), br/wbr/hr(6/6), img
+      (src->data-src->srcset first token, alt->title->"Image", defaults 160/80,
+      <=0->defaults, tracking/beacon filter pre-resolve, clamps 360/180, usemap
+      # strip, inherits link href, figure deferral).
+- [x] Caps: MAX_BLOCKS=1200 (truncated flag -> "(Page truncated: too many blocks)"
+      bold centered notice appended past cap), MAX_INLINES=900 (silent drop);
+      empty result -> "(Empty Web Page)" italic notice; aria-hidden inert scope.
+- [x] Verify: **[P10] document selftests done: 69 passed, 0 failed**; P02-P09
+      still green (128/70/119/33/75/89/68/49); clean make 0 errors / 0 warnings;
+      host-side replay harness caught splitter + meta-resolve bugs pre-device;
+      logs exported to logs/phase-P10.log; STOP.
 
 ### PHASE P11 — html/document.c PART 2 (tables, svg, misc, parity sweep)
 - [ ] Table parsing (rows/cells/spans as source handles), fieldset, details/summary,
