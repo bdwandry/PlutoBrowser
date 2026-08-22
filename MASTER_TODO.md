@@ -104,8 +104,8 @@ PlutoBrowser/
 ├── MASTER_TODO.md            # this file
 ├── Makefile                  # Playdate SDK C build (arm-gcc + pdx), sim target
 ├── logs/                     # per-phase exported text logs (never delete)
-├── vendor/keyboard/          # Raphcal some-corelibs-port keyboard (C) — vendored
-└── src/
+├── Source/vendor/keyboard/          # Raphcal some-corelibs-port keyboard (C) — vendored
+└── Source/
     ├── main.c/h              # ← main.lua (state machine, input, menu, forms, loop)
     ├── pdxinfo               # name=PlutoBrowser, bundleID=com.bryanwandrych.plutobrowser
     ├── core/
@@ -207,7 +207,7 @@ harvest, Content-Type charset propagation, internal error pages. NOTE: SDK nativ
 
 ### 4.7 Keyboard (vendored C)
 Fetch `https://github.com/Raphcal/some-corelibs-port/tree/main/keyboard` into
-`vendor/keyboard/`, adapt includes/build, wire callbacks to AddressBar semantics:
+`Source/vendor/keyboard/`, adapt includes/build, wire callbacks to AddressBar semantics:
 show(initialText)/hide(), textChangedCallback, keyboardWillHideCallback(submitted),
 keyboardDidHideCallback. B-release launch gating and skipInputFrames=2 behavior preserved.
 
@@ -235,26 +235,26 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 
 ### PHASE P01 — Scaffolding, build system, logger, app skeleton  ✅ DONE (verified in simulator)
 - [x] Create PlutoBrowser tree per §3; copy fonts/, images/, icon.png, assets/launcher/.
-      NOTE: build layout follows the SDK convention — C sources in `src/`, pdc input
+      NOTE: build layout follows the SDK convention — C sources in `Source/`, pdc input
       (pdxinfo + assets + built pdex.elf/pdex.dylib) in `Source/` (SDK common.mk hardcodes
       `Source` as the pdc input dir). Same split as the official "Hello World" C example.
 - [x] `Source/pdxinfo`: name=PlutoBrowser, author=Bryan Wandrych,
       bundleID=com.bryanwandrych.plutobrowser, version=1.0.0, buildNumber=1,
       imagePath=assets/launcher.
-- [x] Makefile: HEAP_SIZE=8388208 STACK_SIZE=61800, SRC list + VPATH (src:src/core:...),
+- [x] Makefile: HEAP_SIZE=8388208 STACK_SIZE=61800, SRC list + VPATH (src:Source/core:...),
       includes $(SDK)/C_API/buildsupport/common.mk (device arm-gcc pdex.elf + simulator
       clang pdex.dylib + pdc packaging); extra `sim` target opens Playdate Simulator.app.
       SDK fallback /Users/bwandrych/Developer/PlaydateSDK honored.
-- [x] `src/main.c`: eventHandler (kEventInit/kEventTerminate), setUpdateCallback loop,
+- [x] `Source/main.c`: eventHandler (kEventInit/kEventTerminate), setUpdateCallback loop,
       placeholder screen ("PlutoBrowser" + frame counter) using Roobert-11-Medium.
       C-API notes learned: no setTextColor/setColor for text — black text via default
       kDrawModeCopy; white text later via setDrawMode(kDrawModeFillWhite); shape calls
       take LCDColor as a parameter (fillRect(x,y,w,h,color) etc.).
-- [x] `src/core/constants.c/h`: full port of constants.lua (geometry macros PLUTO_*,
+- [x] `Source/core/constants.c/h`: full port of constants.lua (geometry macros PLUTO_*,
       PlutoState/PlutoMode enums + exact-string name functions, SEARCH_ENGINES ×4 verbatim,
       DEFAULT_BOOKMARKS ×9 verbatim, USER_AGENT verbatim, image-mode enums + NAMES order +
       LABELS map).
-- [x] `src/core/logger.c/h`: pluto.log, truncate-on-init banner + gamePath line
+- [x] `Source/core/logger.c/h`: pluto.log, truncate-on-init banner + gamePath line
       ("unknown": C API has no getPath; matches Lua pcall fallback), per-line open/append/
       close "[HH:MM:SS #seq] msg", ERROR prefix + file:line stack equivalent via
       PLUTO_ERROR macro. Timestamps via getSecondsSinceEpoch + convertEpochToDateTime.
@@ -400,7 +400,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       metrics (getImageTextWidth equivalent), margins/padding collapse rules as
       implemented in source, list/table/figure/image geometry, absolute offsets,
       page height computation feeding the scroll renderer.
-      Files: src/render/layout.{h,c} (~1930 LOC). LItem pool + 20 item types;
+      Files: Source/render/layout.{h,c} (~1930 LOC). LItem pool + 20 item types;
       breakLines word-wrap parity (leading-ws drop, ^S+ words, following-ws run
       gap, tab stops via TAB_COLUMNS*spaceW, lineH=max across inline fonts);
       emitFlow merges consecutive same-href+anchor words into one LinkManager
@@ -413,7 +413,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       (isToggle/toggleKey/isImage/src/alt/inert/isFormInput/inputBlock).
 - [x] Oracle-driven like P05/P06; self-tests assert computed rects for fixture
       documents against host-Lua output of the REAL layout.lua.
-      src/render/selftest_layout.{h,c}: **82 pass / 0 fail** in simulator —
+      Source/render/selftest_layout.{h,c}: **82 pass / 0 fail** in simulator —
       roman/alpha markers, tab expansion, empty-doc floor 216, flow geometry
       (marginX=10/startY=32/lineH=16), wrap rows step 16 at marginX, heading
       rule y=61 + h3-no-rule, hr/code(40px)/image-clamp/table(84px) geometry,
@@ -436,9 +436,9 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 ### PHASE P07 — core/http_client.c (raw TCP HTTP/HTTPS) + BENCHMARK  ✅ DONE (verified in simulator)
 - [x] Port doGet/get/update/cancel/isLoading over playdate->network->tcp with identical
       constants (MAX_RESPONSE_SIZE=2MB, TIMEOUT=60000ms, MAX_REDIRECTS=5, READ_CHUNK=32768).
-      Files: src/core/http_client.{h,c} (~830 LOC), src/core/internal_pages.{h,c}
+      Files: Source/core/http_client.{h,c} (~830 LOC), Source/core/internal_pages.{h,c}
       (byte-exact GENERATED from the Lua INTERNAL_PAGES via p07_dump_pages.lua extraction),
-      src/core/selftest_http.{h,c} (89 checks, offline fake-TCP vtable +
+      Source/core/selftest_http.{h,c} (89 checks, offline fake-TCP vtable +
       hc_set_tcp_for_tests/hc_set_clock_fn injection hooks).
 - [x] buildRequest (method GET, Host, User-Agent/Accept headers exactly as source;
       Lua port rule verbatim: any port != 80/443 shown incl. parse("") -> "blank:0"),
@@ -464,7 +464,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       to logs/phase-P07.log; STOP.
 
 ### PHASE P08 — html/tokenizer.c  ✅ DONE (verified in simulator)
-- [x] tokenize() ported to src/html/tokenizer.{h,c} (~330 LOC) with exact source
+- [x] tokenize() ported to Source/html/tokenizer.{h,c} (~330 LOC) with exact source
       semantics: MAX_HTML_SIZE=262144 truncation cutting at first '>' found in the
       [MAX-128, ∞) window (single trailing text token when no '<' survives — oracle
       probed: 262202-byte cut, 262144 when window empty / exactly-MAX untouched);
@@ -483,7 +483,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       SOURCE emits only {text, tag(isClosing,isSelfClosing)} — parity kept to
       source (closing tags always carry isSelfClosing=1).
 - [x] Oracle p08_oracle.lua drove the real tokenizer.lua over 29 fixtures ->
-      p08_truth.txt; C selftest (src/html/selftest_tokenizer.{h,c}, 68 checks)
+      p08_truth.txt; C selftest (Source/html/selftest_tokenizer.{h,c}, 68 checks)
       replays every fixture incl. dup-first-wins, title-prefix hijack
       ("<titles>" consumes following <title> region), truncation lengths.
 - [x] Tasks integration per iteration: tasks_yield_check() cancel +
@@ -494,7 +494,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       logs exported to logs/phase-P08.log; STOP.
 
 ### PHASE P09 — html/dom.c  ✅ DONE (verified in simulator)
-- [x] DOM.build ported to src/html/dom.{h,c} (~330 LOC): stack builder over the
+- [x] DOM.build ported to Source/html/dom.{h,c} (~330 LOC): stack builder over the
       token stream with exact source semantics — VOID set (14 elems), SKIP_SUBTREE
       {template,head,selectedcontent} with 500-token safety valve (valve resets
       skipDepth but skippedDepth stays cumulative — oracle-probed: 500 skipped,
@@ -510,7 +510,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       buffer into nodes and nulls the token fields, so htt_free() afterwards
       stays safe (documented in dom.h); dropped elements destroy their attrs.
 - [x] Oracle p09_oracle.lua drove real tokenizer.lua -> dom.lua over 25 fixtures
-      -> p09_truth.txt; C selftest (src/html/selftest_dom.{h,c}, 49 checks)
+      -> p09_truth.txt; C selftest (Source/html/selftest_dom.{h,c}, 49 checks)
       replays every fixture through the REAL pipeline (htt_tokenize -> dom_build):
       nesting survival, list/dl/table shapes, skip valve, 6000-node cap,
       diag counters per case.
@@ -820,7 +820,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       else embedded DIB (height doubled, AND-mask transparency composited over white,
       1/4/8/24/32bpp, top-down flag), nearest-scale sampling, Dither out.
 - [x] Verify with favicon fixture; log; STOP.
-- **Implementation:** src/render/decoders/ico.{h,c} — ico_decode_gray (container parse +
+- **Implementation:** Source/render/decoders/ico.{h,c} — ico_decode_gray (container parse +
   qsort selection + PNG delegation via png_decode_gray + decodeDIB with doubled-height
   convention, palette 1/4/8bpp, truecolor 24/32bpp, AND-mask → white composite,
   negative-height top-down rows, nearest-neighbor scale cap) + ico_free_rows +
@@ -956,7 +956,7 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 
 ### PHASE P29 — ui/address_bar.c + VENDOR KEYBOARD (Raphcal C lib)
 - [x] Vendor https://github.com/Raphcal/some-corelibs-port/tree/main/keyboard into
-      vendor/keyboard; adapt to SDK C API; ensure it renders + edits text fully in C.
+      Source/vendor/keyboard; adapt to SDK C API; ensure it renders + edits text fully in C.
 - [x] AddressBar.open (prefill non-about currentUrl), launchKeyboard gating (B held check,
       shown-once), keyboardWillHide(submitted): trim whitespace, empty→cancel path,
       isSearchQuery→buildSearchUrl(selected engine) else URL.parse normalized, onSubmit

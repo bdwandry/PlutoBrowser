@@ -1,5 +1,5 @@
-build/src/ui/selftest_settings.o: src/ui/selftest_settings.c \
- src/ui/selftest_settings.h \
+build/Source/ui/selftest_settings.o: Source/ui/selftest_settings.c \
+ Source/ui/selftest_settings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -18,9 +18,10 @@ build/src/ui/selftest_settings.o: src/ui/selftest_settings.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/cookie_jar.h src/core/../util/strbuf.h \
- src/core/storage_data.h src/core/logger.h src/core/storage.h \
- src/core/../util/dynarray.h src/ui/settings_page.h \
+ Source/core/constants.h Source/core/cookie_jar.h \
+ Source/core/../util/strbuf.h Source/core/storage_data.h \
+ Source/core/logger.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/ui/settings_page.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -57,7 +58,7 @@ build/src/ui/selftest_settings.o: src/ui/selftest_settings.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/ui/selftest_settings.h:
+Source/ui/selftest_settings.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -95,21 +96,21 @@ src/ui/selftest_settings.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/cookie_jar.h:
+Source/core/cookie_jar.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/ui/settings_page.h:
+Source/ui/settings_page.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

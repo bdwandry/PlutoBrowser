@@ -1,5 +1,5 @@
-build/src/render/decoders/inflate.o: src/render/decoders/inflate.c \
- src/render/decoders/inflate.h \
+build/Source/render/decoders/inflate.o: Source/render/decoders/inflate.c \
+ Source/render/decoders/inflate.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -25,9 +25,9 @@ build/src/render/decoders/inflate.o: src/render/decoders/inflate.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/tasks.h src/util/mem.h
+ Source/core/tasks.h Source/util/mem.h
 
-src/render/decoders/inflate.h:
+Source/render/decoders/inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -79,6 +79,6 @@ src/render/decoders/inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/util/mem.h:
+Source/util/mem.h:

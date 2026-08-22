@@ -1,9 +1,10 @@
-build/src/html/document.o: src/html/document.c src/html/document.h \
+build/Source/html/document.o: Source/html/document.c \
+ Source/html/document.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/html/tokenizer.h src/util/strmap.h src/html/dom.h \
- src/html/readability.h src/html/entities.h src/core/url.h \
- src/core/../util/strbuf.h src/core/tasks.h src/core/constants.h \
- src/util/mem.h src/util/strbuf.h src/core/logger.h \
+ Source/html/tokenizer.h Source/util/strmap.h Source/html/dom.h \
+ Source/html/readability.h Source/html/entities.h Source/core/url.h \
+ Source/core/../util/strbuf.h Source/core/tasks.h Source/core/constants.h \
+ Source/util/mem.h Source/util/strbuf.h Source/core/logger.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -42,33 +43,33 @@ build/src/html/document.o: src/html/document.c src/html/document.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h
 
-src/html/document.h:
+Source/html/document.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/html/dom.h:
+Source/html/dom.h:
 
-src/html/readability.h:
+Source/html/readability.h:
 
-src/html/entities.h:
+Source/html/entities.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h:
 

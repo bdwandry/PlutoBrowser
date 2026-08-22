@@ -1,5 +1,6 @@
-build/src/render/decoders/selftest_webp.o: \
- src/render/decoders/selftest_webp.c src/render/decoders/selftest_webp.h \
+build/Source/render/decoders/selftest_webp.o: \
+ Source/render/decoders/selftest_webp.c \
+ Source/render/decoders/selftest_webp.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -55,10 +56,11 @@ build/src/render/decoders/selftest_webp.o: \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/logger.h src/render/decoders/scale.h src/render/decoders/webp.h \
- src/render/decoders/selftest_webp_fixtures.h src/util/mem.h
+ Source/core/logger.h Source/render/decoders/scale.h \
+ Source/render/decoders/webp.h \
+ Source/render/decoders/selftest_webp_fixtures.h Source/util/mem.h
 
-src/render/decoders/selftest_webp.h:
+Source/render/decoders/selftest_webp.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -170,12 +172,12 @@ src/render/decoders/selftest_webp.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/decoders/scale.h:
+Source/render/decoders/scale.h:
 
-src/render/decoders/webp.h:
+Source/render/decoders/webp.h:
 
-src/render/decoders/selftest_webp_fixtures.h:
+Source/render/decoders/selftest_webp_fixtures.h:
 
-src/util/mem.h:
+Source/util/mem.h:

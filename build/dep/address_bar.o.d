@@ -1,4 +1,5 @@
-build/src/ui/address_bar.o: src/ui/address_bar.c src/ui/address_bar.h \
+build/Source/ui/address_bar.o: Source/ui/address_bar.c \
+ Source/ui/address_bar.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
@@ -52,13 +53,14 @@ build/src/ui/address_bar.o: src/ui/address_bar.c src/ui/address_bar.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- vendor/keyboard/keyboard.h src/ui/../core/constants.h \
- src/ui/../core/logger.h src/ui/../core/storage.h \
- src/ui/../core/../util/dynarray.h src/ui/../core/storage_data.h \
- src/ui/../core/url.h src/ui/../core/../util/strbuf.h \
- src/ui/../render/style.h src/ui/../util/mem.h src/ui/../util/strbuf.h
+ Source/vendor/keyboard/keyboard.h Source/ui/../core/constants.h \
+ Source/ui/../core/logger.h Source/ui/../core/storage.h \
+ Source/ui/../core/../util/dynarray.h Source/ui/../core/storage_data.h \
+ Source/ui/../core/url.h Source/ui/../core/../util/strbuf.h \
+ Source/ui/../render/style.h Source/ui/../util/mem.h \
+ Source/ui/../util/strbuf.h
 
-src/ui/address_bar.h:
+Source/ui/address_bar.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -166,24 +168,24 @@ src/ui/address_bar.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-vendor/keyboard/keyboard.h:
+Source/vendor/keyboard/keyboard.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:
 
-src/ui/../core/logger.h:
+Source/ui/../core/logger.h:
 
-src/ui/../core/storage.h:
+Source/ui/../core/storage.h:
 
-src/ui/../core/../util/dynarray.h:
+Source/ui/../core/../util/dynarray.h:
 
-src/ui/../core/storage_data.h:
+Source/ui/../core/storage_data.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/../core/../util/strbuf.h:
+Source/ui/../core/../util/strbuf.h:
 
-src/ui/../render/style.h:
+Source/ui/../render/style.h:
 
-src/ui/../util/mem.h:
+Source/ui/../util/mem.h:
 
-src/ui/../util/strbuf.h:
+Source/ui/../util/strbuf.h:

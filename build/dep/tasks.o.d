@@ -1,4 +1,4 @@
-build/src/core/tasks.o: src/core/tasks.c \
+build/Source/core/tasks.o: Source/core/tasks.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -52,7 +52,7 @@ build/src/core/tasks.o: src/core/tasks.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/../util/dynarray.h src/core/logger.h src/core/tasks.h
+ Source/core/../util/dynarray.h Source/core/logger.h Source/core/tasks.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h:
 
@@ -160,8 +160,8 @@ build/src/core/tasks.o: src/core/tasks.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:

@@ -1,5 +1,5 @@
-build/src/render/decoders/png.o: src/render/decoders/png.c \
- src/render/decoders/png.h \
+build/Source/render/decoders/png.o: Source/render/decoders/png.c \
+ Source/render/decoders/png.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -26,9 +26,9 @@ build/src/render/decoders/png.o: src/render/decoders/png.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/tasks.h src/render/decoders/dither.h \
- src/render/decoders/inflate.h src/render/decoders/scale.h src/util/mem.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
+ Source/core/tasks.h Source/render/decoders/dither.h \
+ Source/render/decoders/inflate.h Source/render/decoders/scale.h \
+ Source/util/mem.h /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h \
@@ -56,7 +56,7 @@ build/src/render/decoders/png.o: src/render/decoders/png.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/render/decoders/png.h:
+Source/render/decoders/png.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -110,15 +110,15 @@ src/render/decoders/png.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/render/decoders/dither.h:
+Source/render/decoders/dither.h:
 
-src/render/decoders/inflate.h:
+Source/render/decoders/inflate.h:
 
-src/render/decoders/scale.h:
+Source/render/decoders/scale.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

@@ -1,6 +1,6 @@
-build/src/render/decoders/selftest_decoders.o: \
- src/render/decoders/selftest_decoders.c \
- src/render/decoders/selftest_decoders.h \
+build/Source/render/decoders/selftest_decoders.o: \
+ Source/render/decoders/selftest_decoders.c \
+ Source/render/decoders/selftest_decoders.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -19,12 +19,12 @@ build/src/render/decoders/selftest_decoders.o: \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/render/decoders/dither.h \
+ Source/core/logger.h Source/render/decoders/dither.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h \
- src/render/decoders/scale.h \
+ Source/render/decoders/scale.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
@@ -57,7 +57,7 @@ build/src/render/decoders/selftest_decoders.o: \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/render/decoders/selftest_decoders.h:
+Source/render/decoders/selftest_decoders.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -95,9 +95,9 @@ src/render/decoders/selftest_decoders.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/decoders/dither.h:
+Source/render/decoders/dither.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
@@ -107,7 +107,7 @@ src/render/decoders/dither.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h:
 
-src/render/decoders/scale.h:
+Source/render/decoders/scale.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

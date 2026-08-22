@@ -1,4 +1,4 @@
-build/src/util/mem.o: src/util/mem.c src/util/mem.h \
+build/Source/util/mem.o: Source/util/mem.c Source/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/ieeefp.h \
@@ -20,7 +20,7 @@ build/src/util/mem.o: src/util/mem.c src/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/util/../core/constants.h src/util/../core/logger.h \
+ Source/util/../core/constants.h Source/util/../core/logger.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -54,7 +54,7 @@ build/src/util/mem.o: src/util/mem.c src/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -98,9 +98,9 @@ src/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/util/../core/constants.h:
+Source/util/../core/constants.h:
 
-src/util/../core/logger.h:
+Source/util/../core/logger.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

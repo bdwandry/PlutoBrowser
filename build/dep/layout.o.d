@@ -1,4 +1,5 @@
-build/src/render/layout.o: src/render/layout.c src/render/layout.h \
+build/Source/render/layout.o: Source/render/layout.c \
+ Source/render/layout.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
@@ -36,13 +37,13 @@ build/src/render/layout.o: src/render/layout.c src/render/layout.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/storage_data.h src/core/tasks.h src/html/document.h \
- src/render/image_decoder.h \
+ Source/core/constants.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/storage_data.h \
+ Source/core/tasks.h Source/html/document.h Source/render/image_decoder.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
- src/render/link_manager.h src/render/style.h src/util/mem.h \
+ Source/render/link_manager.h Source/render/style.h Source/util/mem.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
@@ -57,7 +58,7 @@ build/src/render/layout.o: src/render/layout.c src/render/layout.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/render/layout.h:
+Source/render/layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -133,19 +134,19 @@ src/render/layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/html/document.h:
+Source/html/document.h:
 
-src/render/image_decoder.h:
+Source/render/image_decoder.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
@@ -153,11 +154,11 @@ src/render/image_decoder.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

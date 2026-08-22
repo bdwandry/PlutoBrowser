@@ -1,5 +1,6 @@
-build/src/render/selftest_style.o: src/render/selftest_style.c \
- src/render/selftest_style.h src/render/style.h src/core/logger.h \
+build/Source/render/selftest_style.o: Source/render/selftest_style.c \
+ Source/render/selftest_style.h Source/render/style.h \
+ Source/core/logger.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -19,11 +20,11 @@ build/src/render/selftest_style.o: src/render/selftest_style.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h
 
-src/render/selftest_style.h:
+Source/render/selftest_style.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 

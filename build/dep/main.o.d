@@ -1,4 +1,4 @@
-build/src/main.o: src/main.c \
+build/Source/main.o: Source/main.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -52,43 +52,49 @@ build/src/main.o: src/main.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/constants.h src/core/cookie_jar.h src/core/../util/strbuf.h \
- src/core/storage_data.h src/core/encoding.h src/core/http_client.h \
- src/core/../util/strmap.h src/core/logger.h src/core/selftest_encoding.h \
- src/core/selftest_http.h src/html/tokenizer.h src/util/strmap.h \
- src/html/dom.h src/html/tokenizer.h src/html/selftest_tokenizer.h \
- src/html/selftest_dom.h src/html/selftest_document.h \
- src/html/selftest_readability.h src/render/style.h \
- src/render/selftest_style.h src/render/link_manager.h \
- src/render/selftest_link_manager.h \
- src/render/decoders/selftest_decoders.h \
- src/render/decoders/selftest_inflate.h src/render/decoders/png.h \
- src/render/decoders/selftest_png.h \
- src/render/decoders/selftest_png_fixtures.h src/render/decoders/bmp.h \
- src/render/decoders/selftest_bmp.h \
- src/render/decoders/selftest_bmp_fixtures.h src/render/decoders/gif.h \
- src/render/decoders/selftest_gif.h src/render/decoders/selftest_jpeg.h \
- src/render/decoders/jpeg.h src/render/decoders/selftest_jpeg_fixtures.h \
- src/render/decoders/webp.h src/render/decoders/selftest_webp.h \
- src/render/decoders/selftest_webp_fixtures.h src/render/decoders/ico.h \
- src/render/decoders/selftest_ico.h \
- src/render/decoders/selftest_ico_fixtures.h src/render/decoders/svg.h \
- src/render/decoders/selftest_svg.h \
- src/render/decoders/selftest_svg_fixtures.h src/render/image_decoder.h \
- src/render/selftest_image_decoder.h src/render/cloud_layout.h \
- src/render/selftest_cloud_layout.h src/render/layout.h \
- src/render/selftest_layout.h src/ui/chrome.h src/ui/../core/url.h \
- src/ui/../core/../util/strbuf.h src/ui/hud.h src/ui/selftest_ui.h \
- src/ui/home_page.h src/ui/selftest_home_page.h src/ui/address_bar.h \
- vendor/keyboard/keyboard.h src/ui/selftest_address_bar.h \
- src/ui/error_page.h src/ui/bookmarks_page.h src/ui/list_core.h \
- src/ui/history_page.h src/ui/selftest_pages.h src/ui/settings_page.h \
- src/ui/selftest_settings.h src/core/browser.h src/core/url.h \
- src/core/selftest_browser.h src/render/decoders/selftest_gif_fixtures.h \
- src/html/document.h src/core/selftest_storage.h \
- src/core/selftest_tasks.h src/core/selftest_url.h src/core/storage.h \
- src/core/../util/dynarray.h src/core/tasks.h src/html/entities.h \
- src/util/mem.h src/util/selftest_util.h
+ Source/core/constants.h Source/core/cookie_jar.h \
+ Source/core/../util/strbuf.h Source/core/storage_data.h \
+ Source/core/encoding.h Source/core/http_client.h \
+ Source/core/../util/strmap.h Source/core/logger.h \
+ Source/core/selftest_encoding.h Source/core/selftest_http.h \
+ Source/html/tokenizer.h Source/util/strmap.h Source/html/dom.h \
+ Source/html/tokenizer.h Source/html/selftest_tokenizer.h \
+ Source/html/selftest_dom.h Source/html/selftest_document.h \
+ Source/html/selftest_readability.h Source/render/style.h \
+ Source/render/selftest_style.h Source/render/link_manager.h \
+ Source/render/selftest_link_manager.h \
+ Source/render/decoders/selftest_decoders.h \
+ Source/render/decoders/selftest_inflate.h Source/render/decoders/png.h \
+ Source/render/decoders/selftest_png.h \
+ Source/render/decoders/selftest_png_fixtures.h \
+ Source/render/decoders/bmp.h Source/render/decoders/selftest_bmp.h \
+ Source/render/decoders/selftest_bmp_fixtures.h \
+ Source/render/decoders/gif.h Source/render/decoders/selftest_gif.h \
+ Source/render/decoders/selftest_jpeg.h Source/render/decoders/jpeg.h \
+ Source/render/decoders/selftest_jpeg_fixtures.h \
+ Source/render/decoders/webp.h Source/render/decoders/selftest_webp.h \
+ Source/render/decoders/selftest_webp_fixtures.h \
+ Source/render/decoders/ico.h Source/render/decoders/selftest_ico.h \
+ Source/render/decoders/selftest_ico_fixtures.h \
+ Source/render/decoders/svg.h Source/render/decoders/selftest_svg.h \
+ Source/render/decoders/selftest_svg_fixtures.h \
+ Source/render/image_decoder.h Source/render/selftest_image_decoder.h \
+ Source/render/cloud_layout.h Source/render/selftest_cloud_layout.h \
+ Source/render/layout.h Source/render/selftest_layout.h \
+ Source/ui/chrome.h Source/ui/../core/url.h \
+ Source/ui/../core/../util/strbuf.h Source/ui/hud.h \
+ Source/ui/selftest_ui.h Source/ui/home_page.h \
+ Source/ui/selftest_home_page.h Source/ui/address_bar.h \
+ Source/vendor/keyboard/keyboard.h Source/ui/selftest_address_bar.h \
+ Source/ui/error_page.h Source/ui/bookmarks_page.h Source/ui/list_core.h \
+ Source/ui/history_page.h Source/ui/selftest_pages.h \
+ Source/ui/settings_page.h Source/ui/selftest_settings.h \
+ Source/core/browser.h Source/core/url.h Source/core/selftest_browser.h \
+ Source/render/decoders/selftest_gif_fixtures.h Source/html/document.h \
+ Source/core/selftest_storage.h Source/core/selftest_tasks.h \
+ Source/core/selftest_url.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/tasks.h \
+ Source/html/entities.h Source/util/mem.h Source/util/selftest_util.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -196,164 +202,164 @@ build/src/main.o: src/main.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/cookie_jar.h:
+Source/core/cookie_jar.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/encoding.h:
+Source/core/encoding.h:
 
-src/core/http_client.h:
+Source/core/http_client.h:
 
-src/core/../util/strmap.h:
+Source/core/../util/strmap.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/selftest_encoding.h:
+Source/core/selftest_encoding.h:
 
-src/core/selftest_http.h:
+Source/core/selftest_http.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/html/dom.h:
+Source/html/dom.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/html/selftest_tokenizer.h:
+Source/html/selftest_tokenizer.h:
 
-src/html/selftest_dom.h:
+Source/html/selftest_dom.h:
 
-src/html/selftest_document.h:
+Source/html/selftest_document.h:
 
-src/html/selftest_readability.h:
+Source/html/selftest_readability.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/render/selftest_style.h:
+Source/render/selftest_style.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:
 
-src/render/selftest_link_manager.h:
+Source/render/selftest_link_manager.h:
 
-src/render/decoders/selftest_decoders.h:
+Source/render/decoders/selftest_decoders.h:
 
-src/render/decoders/selftest_inflate.h:
+Source/render/decoders/selftest_inflate.h:
 
-src/render/decoders/png.h:
+Source/render/decoders/png.h:
 
-src/render/decoders/selftest_png.h:
+Source/render/decoders/selftest_png.h:
 
-src/render/decoders/selftest_png_fixtures.h:
+Source/render/decoders/selftest_png_fixtures.h:
 
-src/render/decoders/bmp.h:
+Source/render/decoders/bmp.h:
 
-src/render/decoders/selftest_bmp.h:
+Source/render/decoders/selftest_bmp.h:
 
-src/render/decoders/selftest_bmp_fixtures.h:
+Source/render/decoders/selftest_bmp_fixtures.h:
 
-src/render/decoders/gif.h:
+Source/render/decoders/gif.h:
 
-src/render/decoders/selftest_gif.h:
+Source/render/decoders/selftest_gif.h:
 
-src/render/decoders/selftest_jpeg.h:
+Source/render/decoders/selftest_jpeg.h:
 
-src/render/decoders/jpeg.h:
+Source/render/decoders/jpeg.h:
 
-src/render/decoders/selftest_jpeg_fixtures.h:
+Source/render/decoders/selftest_jpeg_fixtures.h:
 
-src/render/decoders/webp.h:
+Source/render/decoders/webp.h:
 
-src/render/decoders/selftest_webp.h:
+Source/render/decoders/selftest_webp.h:
 
-src/render/decoders/selftest_webp_fixtures.h:
+Source/render/decoders/selftest_webp_fixtures.h:
 
-src/render/decoders/ico.h:
+Source/render/decoders/ico.h:
 
-src/render/decoders/selftest_ico.h:
+Source/render/decoders/selftest_ico.h:
 
-src/render/decoders/selftest_ico_fixtures.h:
+Source/render/decoders/selftest_ico_fixtures.h:
 
-src/render/decoders/svg.h:
+Source/render/decoders/svg.h:
 
-src/render/decoders/selftest_svg.h:
+Source/render/decoders/selftest_svg.h:
 
-src/render/decoders/selftest_svg_fixtures.h:
+Source/render/decoders/selftest_svg_fixtures.h:
 
-src/render/image_decoder.h:
+Source/render/image_decoder.h:
 
-src/render/selftest_image_decoder.h:
+Source/render/selftest_image_decoder.h:
 
-src/render/cloud_layout.h:
+Source/render/cloud_layout.h:
 
-src/render/selftest_cloud_layout.h:
+Source/render/selftest_cloud_layout.h:
 
-src/render/layout.h:
+Source/render/layout.h:
 
-src/render/selftest_layout.h:
+Source/render/selftest_layout.h:
 
-src/ui/chrome.h:
+Source/ui/chrome.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/../core/../util/strbuf.h:
+Source/ui/../core/../util/strbuf.h:
 
-src/ui/hud.h:
+Source/ui/hud.h:
 
-src/ui/selftest_ui.h:
+Source/ui/selftest_ui.h:
 
-src/ui/home_page.h:
+Source/ui/home_page.h:
 
-src/ui/selftest_home_page.h:
+Source/ui/selftest_home_page.h:
 
-src/ui/address_bar.h:
+Source/ui/address_bar.h:
 
-vendor/keyboard/keyboard.h:
+Source/vendor/keyboard/keyboard.h:
 
-src/ui/selftest_address_bar.h:
+Source/ui/selftest_address_bar.h:
 
-src/ui/error_page.h:
+Source/ui/error_page.h:
 
-src/ui/bookmarks_page.h:
+Source/ui/bookmarks_page.h:
 
-src/ui/list_core.h:
+Source/ui/list_core.h:
 
-src/ui/history_page.h:
+Source/ui/history_page.h:
 
-src/ui/selftest_pages.h:
+Source/ui/selftest_pages.h:
 
-src/ui/settings_page.h:
+Source/ui/settings_page.h:
 
-src/ui/selftest_settings.h:
+Source/ui/selftest_settings.h:
 
-src/core/browser.h:
+Source/core/browser.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/selftest_browser.h:
+Source/core/selftest_browser.h:
 
-src/render/decoders/selftest_gif_fixtures.h:
+Source/render/decoders/selftest_gif_fixtures.h:
 
-src/html/document.h:
+Source/html/document.h:
 
-src/core/selftest_storage.h:
+Source/core/selftest_storage.h:
 
-src/core/selftest_tasks.h:
+Source/core/selftest_tasks.h:
 
-src/core/selftest_url.h:
+Source/core/selftest_url.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/html/entities.h:
+Source/html/entities.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/selftest_util.h:
+Source/util/selftest_util.h:

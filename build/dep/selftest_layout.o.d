@@ -1,5 +1,5 @@
-build/src/render/selftest_layout.o: src/render/selftest_layout.c \
- src/render/selftest_layout.h \
+build/Source/render/selftest_layout.o: Source/render/selftest_layout.c \
+ Source/render/selftest_layout.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -36,10 +36,10 @@ build/src/render/selftest_layout.o: src/render/selftest_layout.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/logger.h src/html/document.h \
- src/render/layout.h src/render/link_manager.h
+ Source/core/constants.h Source/core/logger.h Source/html/document.h \
+ Source/render/layout.h Source/render/link_manager.h
 
-src/render/selftest_layout.h:
+Source/render/selftest_layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -113,12 +113,12 @@ src/render/selftest_layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/html/document.h:
+Source/html/document.h:
 
-src/render/layout.h:
+Source/render/layout.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:

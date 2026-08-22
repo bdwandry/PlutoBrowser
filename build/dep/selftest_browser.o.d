@@ -1,5 +1,5 @@
-build/src/core/selftest_browser.o: src/core/selftest_browser.c \
- src/core/selftest_browser.h \
+build/Source/core/selftest_browser.o: Source/core/selftest_browser.c \
+ Source/core/selftest_browser.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -53,14 +53,14 @@ build/src/core/selftest_browser.o: src/core/selftest_browser.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/browser.h src/core/url.h src/core/../util/strbuf.h \
- src/core/constants.h src/core/http_client.h src/core/../util/strmap.h \
- src/core/logger.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/storage_data.h src/core/tasks.h src/html/document.h \
- src/render/layout.h src/render/link_manager.h src/util/mem.h \
- src/util/strbuf.h
+ Source/core/browser.h Source/core/url.h Source/core/../util/strbuf.h \
+ Source/core/constants.h Source/core/http_client.h \
+ Source/core/../util/strmap.h Source/core/logger.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/storage_data.h \
+ Source/core/tasks.h Source/html/document.h Source/render/layout.h \
+ Source/render/link_manager.h Source/util/mem.h Source/util/strbuf.h
 
-src/core/selftest_browser.h:
+Source/core/selftest_browser.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -168,34 +168,34 @@ src/core/selftest_browser.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/browser.h:
+Source/core/browser.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/http_client.h:
+Source/core/http_client.h:
 
-src/core/../util/strmap.h:
+Source/core/../util/strmap.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/html/document.h:
+Source/html/document.h:
 
-src/render/layout.h:
+Source/render/layout.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:

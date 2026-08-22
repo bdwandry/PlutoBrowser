@@ -1,4 +1,5 @@
-build/src/ui/error_page.o: src/ui/error_page.c src/ui/error_page.h \
+build/Source/ui/error_page.o: Source/ui/error_page.c \
+ Source/ui/error_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
@@ -52,10 +53,10 @@ build/src/ui/error_page.o: src/ui/error_page.c src/ui/error_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/ui/../core/constants.h src/ui/../core/url.h \
- src/ui/../core/../util/strbuf.h src/ui/../render/style.h
+ Source/ui/../core/constants.h Source/ui/../core/url.h \
+ Source/ui/../core/../util/strbuf.h Source/ui/../render/style.h
 
-src/ui/error_page.h:
+Source/ui/error_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -163,10 +164,10 @@ src/ui/error_page.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/../core/../util/strbuf.h:
+Source/ui/../core/../util/strbuf.h:
 
-src/ui/../render/style.h:
+Source/ui/../render/style.h:

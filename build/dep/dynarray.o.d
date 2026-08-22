@@ -1,4 +1,5 @@
-build/src/util/dynarray.o: src/util/dynarray.c src/util/dynarray.h \
+build/Source/util/dynarray.o: Source/util/dynarray.c \
+ Source/util/dynarray.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -17,9 +18,9 @@ build/src/util/dynarray.o: src/util/dynarray.c src/util/dynarray.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/util/mem.h
+ Source/util/mem.h
 
-src/util/dynarray.h:
+Source/util/dynarray.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -57,4 +58,4 @@ src/util/dynarray.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/util/mem.h:
+Source/util/mem.h:

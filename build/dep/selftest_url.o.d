@@ -1,5 +1,5 @@
-build/src/core/selftest_url.o: src/core/selftest_url.c \
- src/core/selftest_url.h \
+build/Source/core/selftest_url.o: Source/core/selftest_url.c \
+ Source/core/selftest_url.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -33,9 +33,10 @@ build/src/core/selftest_url.o: src/core/selftest_url.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/../core/logger.h src/core/../util/strbuf.h src/core/url.h
+ Source/core/../core/logger.h Source/core/../util/strbuf.h \
+ Source/core/url.h
 
-src/core/selftest_url.h:
+Source/core/selftest_url.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -103,8 +104,8 @@ src/core/selftest_url.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/../core/logger.h:
+Source/core/../core/logger.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/url.h:
+Source/core/url.h:

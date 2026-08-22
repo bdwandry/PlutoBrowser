@@ -1,5 +1,6 @@
-build/src/render/selftest_cloud_layout.o: \
- src/render/selftest_cloud_layout.c src/render/selftest_cloud_layout.h \
+build/Source/render/selftest_cloud_layout.o: \
+ Source/render/selftest_cloud_layout.c \
+ Source/render/selftest_cloud_layout.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -18,11 +19,11 @@ build/src/render/selftest_cloud_layout.o: \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/logger.h src/render/cloud_layout.h \
- src/render/link_manager.h src/render/style.h src/util/json.h \
- src/util/strbuf.h
+ Source/core/constants.h Source/core/logger.h \
+ Source/render/cloud_layout.h Source/render/link_manager.h \
+ Source/render/style.h Source/util/json.h Source/util/strbuf.h
 
-src/render/selftest_cloud_layout.h:
+Source/render/selftest_cloud_layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -60,16 +61,16 @@ src/render/selftest_cloud_layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/cloud_layout.h:
+Source/render/cloud_layout.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/util/json.h:
+Source/util/json.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:

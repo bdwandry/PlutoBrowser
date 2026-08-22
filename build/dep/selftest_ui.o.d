@@ -1,4 +1,5 @@
-build/src/ui/selftest_ui.o: src/ui/selftest_ui.c src/ui/selftest_ui.h \
+build/Source/ui/selftest_ui.o: Source/ui/selftest_ui.c \
+ Source/ui/selftest_ui.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -17,10 +18,10 @@ build/src/ui/selftest_ui.o: src/ui/selftest_ui.c src/ui/selftest_ui.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/ui/chrome.h src/ui/../core/url.h \
- src/ui/../core/../util/strbuf.h src/ui/hud.h
+ Source/core/logger.h Source/ui/chrome.h Source/ui/../core/url.h \
+ Source/ui/../core/../util/strbuf.h Source/ui/hud.h
 
-src/ui/selftest_ui.h:
+Source/ui/selftest_ui.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -58,12 +59,12 @@ src/ui/selftest_ui.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/ui/chrome.h:
+Source/ui/chrome.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/../core/../util/strbuf.h:
+Source/ui/../core/../util/strbuf.h:
 
-src/ui/hud.h:
+Source/ui/hud.h:

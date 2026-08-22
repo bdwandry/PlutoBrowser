@@ -1,5 +1,5 @@
-build/src/core/internal_pages.o: src/core/internal_pages.c \
- src/core/internal_pages.h \
+build/Source/core/internal_pages.o: Source/core/internal_pages.c \
+ Source/core/internal_pages.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -19,7 +19,7 @@ build/src/core/internal_pages.o: src/core/internal_pages.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h
 
-src/core/internal_pages.h:
+Source/core/internal_pages.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 

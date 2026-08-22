@@ -1,6 +1,6 @@
-build/src/ui/chrome.o: src/ui/chrome.c src/ui/chrome.h \
+build/Source/ui/chrome.o: Source/ui/chrome.c Source/ui/chrome.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/ui/../core/url.h src/ui/../core/../util/strbuf.h \
+ Source/ui/../core/url.h Source/ui/../core/../util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -38,8 +38,8 @@ build/src/ui/chrome.o: src/ui/chrome.c src/ui/chrome.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/time.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/time.h \
- src/ui/../core/constants.h src/ui/../core/logger.h \
- src/ui/../render/style.h \
+ Source/ui/../core/constants.h Source/ui/../core/logger.h \
+ Source/ui/../render/style.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
@@ -58,13 +58,13 @@ build/src/ui/chrome.o: src/ui/chrome.c src/ui/chrome.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/ui/chrome.h:
+Source/ui/chrome.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/../core/../util/strbuf.h:
+Source/ui/../core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -140,11 +140,11 @@ src/ui/../core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/time.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:
 
-src/ui/../core/logger.h:
+Source/ui/../core/logger.h:
 
-src/ui/../render/style.h:
+Source/ui/../render/style.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

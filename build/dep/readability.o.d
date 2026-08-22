@@ -1,7 +1,7 @@
-build/src/html/readability.o: src/html/readability.c \
- src/html/readability.h src/html/document.h \
+build/Source/html/readability.o: Source/html/readability.c \
+ Source/html/readability.h Source/html/document.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/html/tokenizer.h src/util/strmap.h \
+ Source/html/tokenizer.h Source/util/strmap.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -38,19 +38,19 @@ build/src/html/readability.o: src/html/readability.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/core/tasks.h src/core/url.h \
- src/core/../util/strbuf.h src/util/dynarray.h src/util/mem.h \
- src/util/strbuf.h
+ Source/core/logger.h Source/core/tasks.h Source/core/url.h \
+ Source/core/../util/strbuf.h Source/util/dynarray.h Source/util/mem.h \
+ Source/util/strbuf.h
 
-src/html/readability.h:
+Source/html/readability.h:
 
-src/html/document.h:
+Source/html/document.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h:
 
@@ -124,16 +124,16 @@ src/util/strmap.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/util/dynarray.h:
+Source/util/dynarray.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:

@@ -1,5 +1,5 @@
-build/src/render/decoders/webp.o: src/render/decoders/webp.c \
- src/render/decoders/webp.h \
+build/Source/render/decoders/webp.o: Source/render/decoders/webp.c \
+ Source/render/decoders/webp.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -25,11 +25,11 @@ build/src/render/decoders/webp.o: src/render/decoders/webp.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/tasks.h src/render/decoders/dither.h \
- src/render/decoders/scale.h src/render/decoders/webp_vp8_data.h \
- src/util/mem.h
+ Source/core/tasks.h Source/render/decoders/dither.h \
+ Source/render/decoders/scale.h Source/render/decoders/webp_vp8_data.h \
+ Source/util/mem.h
 
-src/render/decoders/webp.h:
+Source/render/decoders/webp.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -81,12 +81,12 @@ src/render/decoders/webp.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/render/decoders/dither.h:
+Source/render/decoders/dither.h:
 
-src/render/decoders/scale.h:
+Source/render/decoders/scale.h:
 
-src/render/decoders/webp_vp8_data.h:
+Source/render/decoders/webp_vp8_data.h:
 
-src/util/mem.h:
+Source/util/mem.h:

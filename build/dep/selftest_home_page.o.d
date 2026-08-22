@@ -1,5 +1,5 @@
-build/src/ui/selftest_home_page.o: src/ui/selftest_home_page.c \
- src/ui/selftest_home_page.h \
+build/Source/ui/selftest_home_page.o: Source/ui/selftest_home_page.c \
+ Source/ui/selftest_home_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -19,10 +19,11 @@ build/src/ui/selftest_home_page.o: src/ui/selftest_home_page.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/storage_data.h src/ui/home_page.h
+ Source/core/logger.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/storage_data.h \
+ Source/ui/home_page.h
 
-src/ui/selftest_home_page.h:
+Source/ui/selftest_home_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
 
@@ -62,12 +63,12 @@ src/ui/selftest_home_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/ui/home_page.h:
+Source/ui/home_page.h:

@@ -1,5 +1,5 @@
-build/src/util/selftest_util.o: src/util/selftest_util.c \
- src/util/selftest_util.h \
+build/Source/util/selftest_util.o: Source/util/selftest_util.c \
+ Source/util/selftest_util.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -33,10 +33,11 @@ build/src/util/selftest_util.o: src/util/selftest_util.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/util/../core/logger.h src/util/dynarray.h src/util/json.h \
- src/util/strbuf.h src/util/luapattern.h src/util/mem.h src/util/strmap.h
+ Source/util/../core/logger.h Source/util/dynarray.h Source/util/json.h \
+ Source/util/strbuf.h Source/util/luapattern.h Source/util/mem.h \
+ Source/util/strmap.h
 
-src/util/selftest_util.h:
+Source/util/selftest_util.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h:
 
@@ -104,16 +105,16 @@ src/util/selftest_util.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/util/../core/logger.h:
+Source/util/../core/logger.h:
 
-src/util/dynarray.h:
+Source/util/dynarray.h:
 
-src/util/json.h:
+Source/util/json.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:
 
-src/util/luapattern.h:
+Source/util/luapattern.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:

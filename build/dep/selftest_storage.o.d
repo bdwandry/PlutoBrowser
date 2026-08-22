@@ -1,5 +1,5 @@
-build/src/core/selftest_storage.o: src/core/selftest_storage.c \
- src/core/selftest_storage.h \
+build/Source/core/selftest_storage.o: Source/core/selftest_storage.c \
+ Source/core/selftest_storage.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -33,11 +33,12 @@ build/src/core/selftest_storage.o: src/core/selftest_storage.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/../core/logger.h src/core/../util/dynarray.h \
- src/core/../util/luanum.h src/core/../util/strbuf.h src/core/constants.h \
- src/core/cookie_jar.h src/core/storage_data.h src/core/storage.h
+ Source/core/../core/logger.h Source/core/../util/dynarray.h \
+ Source/core/../util/luanum.h Source/core/../util/strbuf.h \
+ Source/core/constants.h Source/core/cookie_jar.h \
+ Source/core/storage_data.h Source/core/storage.h
 
-src/core/selftest_storage.h:
+Source/core/selftest_storage.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -105,18 +106,18 @@ src/core/selftest_storage.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/../core/logger.h:
+Source/core/../core/logger.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/../util/luanum.h:
+Source/core/../util/luanum.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/cookie_jar.h:
+Source/core/cookie_jar.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/storage.h:
+Source/core/storage.h:

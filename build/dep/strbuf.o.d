@@ -1,4 +1,4 @@
-build/src/util/strbuf.o: src/util/strbuf.c src/util/strbuf.h \
+build/Source/util/strbuf.o: Source/util/strbuf.c Source/util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
@@ -32,9 +32,9 @@ build/src/util/strbuf.o: src/util/strbuf.c src/util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/util/mem.h
+ Source/util/mem.h
 
-src/util/strbuf.h:
+Source/util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -102,4 +102,4 @@ src/util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/util/mem.h:
+Source/util/mem.h:

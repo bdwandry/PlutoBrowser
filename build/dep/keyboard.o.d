@@ -1,5 +1,5 @@
-build/vendor/keyboard/keyboard.o: vendor/keyboard/keyboard.c \
- vendor/keyboard/keyboard.h \
+build/Source/vendor/keyboard/keyboard.o: \
+ Source/vendor/keyboard/keyboard.c Source/vendor/keyboard/keyboard.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -54,7 +54,7 @@ build/vendor/keyboard/keyboard.o: vendor/keyboard/keyboard.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-vendor/keyboard/keyboard.h:
+Source/vendor/keyboard/keyboard.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

@@ -1,8 +1,8 @@
-build/src/html/selftest_dom.o: src/html/selftest_dom.c \
- src/html/selftest_dom.h src/html/dom.h \
+build/Source/html/selftest_dom.o: Source/html/selftest_dom.c \
+ Source/html/selftest_dom.h Source/html/dom.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/util/strmap.h src/html/tokenizer.h src/core/logger.h \
- src/core/tasks.h src/util/mem.h \
+ Source/util/strmap.h Source/html/tokenizer.h Source/core/logger.h \
+ Source/core/tasks.h Source/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -39,21 +39,21 @@ build/src/html/selftest_dom.o: src/html/selftest_dom.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h
 
-src/html/selftest_dom.h:
+Source/html/selftest_dom.h:
 
-src/html/dom.h:
+Source/html/dom.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 

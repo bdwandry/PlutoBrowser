@@ -1,5 +1,5 @@
-build/src/ui/selftest_pages.o: src/ui/selftest_pages.c \
- src/ui/selftest_pages.h \
+build/Source/ui/selftest_pages.o: Source/ui/selftest_pages.c \
+ Source/ui/selftest_pages.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -18,9 +18,10 @@ build/src/ui/selftest_pages.o: src/ui/selftest_pages.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/storage_data.h src/core/url.h src/core/../util/strbuf.h \
- src/ui/bookmarks_page.h \
+ Source/core/logger.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/storage_data.h \
+ Source/core/url.h Source/core/../util/strbuf.h \
+ Source/ui/bookmarks_page.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -56,9 +57,9 @@ build/src/ui/selftest_pages.o: src/ui/selftest_pages.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/ui/list_core.h src/ui/error_page.h src/ui/history_page.h
+ Source/ui/list_core.h Source/ui/error_page.h Source/ui/history_page.h
 
-src/ui/selftest_pages.h:
+Source/ui/selftest_pages.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -96,19 +97,19 @@ src/ui/selftest_pages.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/ui/bookmarks_page.h:
+Source/ui/bookmarks_page.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
@@ -180,8 +181,8 @@ src/ui/bookmarks_page.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/ui/list_core.h:
+Source/ui/list_core.h:
 
-src/ui/error_page.h:
+Source/ui/error_page.h:
 
-src/ui/history_page.h:
+Source/ui/history_page.h:

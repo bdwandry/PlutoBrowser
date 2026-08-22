@@ -1,5 +1,5 @@
-build/src/render/decoders/svg.o: src/render/decoders/svg.c \
- src/render/decoders/svg.h \
+build/Source/render/decoders/svg.o: Source/render/decoders/svg.c \
+ Source/render/decoders/svg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -26,7 +26,7 @@ build/src/render/decoders/svg.o: src/render/decoders/svg.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/render/decoders/dither.h src/util/mem.h \
+ Source/render/decoders/dither.h Source/util/mem.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
@@ -55,7 +55,7 @@ build/src/render/decoders/svg.o: src/render/decoders/svg.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/render/decoders/svg.h:
+Source/render/decoders/svg.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -109,9 +109,9 @@ src/render/decoders/svg.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/render/decoders/dither.h:
+Source/render/decoders/dither.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
