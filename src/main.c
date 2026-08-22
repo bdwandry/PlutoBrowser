@@ -40,6 +40,9 @@
 #include "render/decoders/selftest_jpeg.h"
 #include "render/decoders/jpeg.h"
 #include "render/decoders/selftest_jpeg_fixtures.h"
+#include "render/decoders/webp.h"
+#include "render/decoders/selftest_webp.h"
+#include "render/decoders/selftest_webp_fixtures.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -89,6 +92,9 @@ static int s_giFail = -1;
 static int s_giPass = -1;
 static int s_jpFail = -1;
 static int s_jpPass = -1;
+static int s_wpFail = -1;
+static int s_wpPass = -1;
+static void* s_webpView = NULL;  /* temporary P21 debug viewer */
 static void* s_jpegView = NULL;  /* temporary P20 debug viewer */
 static void* s_gifView = NULL;   /* temporary P19 debug viewer */
 static void* s_pngView = NULL;   /* temporary P17 debug viewer bitmap */
@@ -320,6 +326,17 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_wpPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P21 webp: %d passed, %d failed",
+                     s_wpPass, s_wpFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 350);
+        }
+    }
+
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
     /* temporary debug viewers: decoded bench PNG + BMP (266x200) */
     if (s_pngView != NULL) {
@@ -336,6 +353,10 @@ static void draw_placeholder(void)
     }
     if (s_jpegView != NULL) {
         pd->graphics->drawBitmap((LCDBitmap*)s_jpegView, 10, 20,
+                                 kBitmapUnflipped);
+    }
+    if (s_webpView != NULL) {
+        pd->graphics->drawBitmap((LCDBitmap*)s_webpView, 10, 20,
                                  kBitmapUnflipped);
     }
 #endif
@@ -534,6 +555,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 #endif
             if (s_jpFail > 0) {
                 PLUTO_ERROR("P20 SELFTEST FAILURES: %d", s_jpFail);
+            }
+
+            selftest_webp_set_pd(pd);
+            selftest_webp_run(&s_wpPass, &s_wpFail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            /* temporary P21 debug viewer: decoded bench WebP */
+            s_webpView = webp_decode(pd, fx_w_pil_bench,
+                                     FX_W_PIL_BENCH_LEN, 360, 200);
+#endif
+            if (s_wpFail > 0) {
+                PLUTO_ERROR("P21 SELFTEST FAILURES: %d", s_wpFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);
