@@ -29,6 +29,9 @@
 #include "render/selftest_link_manager.h"
 #include "render/decoders/selftest_decoders.h"
 #include "render/decoders/selftest_inflate.h"
+#include "render/decoders/png.h"
+#include "render/decoders/selftest_png.h"
+#include "render/decoders/selftest_png_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -69,6 +72,10 @@ static int s_dc15Fail = -1;
 static int s_dc15Pass = -1;
 static int s_inFail = -1;
 static int s_inPass = -1;
+static int s_pngFail = -1;
+static int s_pngPass = -1;
+static void* s_pngView = NULL;   /* temporary P17 debug viewer bitmap */
+static int s_pngViewDrawn = 0;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -252,6 +259,25 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_pngPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P17 png: %d passed, %d failed",
+                     s_pngPass, s_pngFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 290);
+        }
+    }
+
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+    /* temporary P17 debug viewer: decoded bench PNG (266x200) */
+    if (s_pngView != NULL) {
+        pd->graphics->drawBitmap((LCDBitmap*)s_pngView, 67, 20,
+                                 kBitmapUnflipped);
+    }
+#endif
+
     const char* hint = "Phase P07 raw TCP HTTP client";
     pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 260);
 }
@@ -402,6 +428,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_inflate_run(&s_inPass, &s_inFail);
             if (s_inFail > 0) {
                 PLUTO_ERROR("P16 SELFTEST FAILURES: %d", s_inFail);
+            }
+
+            selftest_png_set_pd(pd);
+            selftest_png_run(&s_pngPass, &s_pngFail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            /* temporary P17 debug viewer: decoded bench PNG on screen */
+            s_pngView = png_decode(pd, fx_bench, FX_BENCH_LEN,
+                                   360, 200);
+#endif
+            if (s_pngFail > 0) {
+                PLUTO_ERROR("P17 SELFTEST FAILURES: %d", s_pngFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);

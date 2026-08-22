@@ -1,4 +1,5 @@
-build/src/main.o: src/main.c \
+build/src/render/decoders/selftest_png.o: \
+ src/render/decoders/selftest_png.c src/render/decoders/selftest_png.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -28,17 +29,19 @@ build/src/main.o: src/main.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/sched.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/time.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/time.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h \
@@ -52,23 +55,10 @@ build/src/main.o: src/main.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/constants.h src/core/cookie_jar.h src/core/../util/strbuf.h \
- src/core/storage_data.h src/core/encoding.h src/core/http_client.h \
- src/core/../util/strmap.h src/core/logger.h src/core/selftest_encoding.h \
- src/core/selftest_http.h src/html/tokenizer.h src/util/strmap.h \
- src/html/dom.h src/html/tokenizer.h src/html/selftest_tokenizer.h \
- src/html/selftest_dom.h src/html/selftest_document.h \
- src/html/selftest_readability.h src/render/style.h \
- src/render/selftest_style.h src/render/link_manager.h \
- src/render/selftest_link_manager.h \
- src/render/decoders/selftest_decoders.h \
- src/render/decoders/selftest_inflate.h src/render/decoders/png.h \
- src/render/decoders/selftest_png.h \
- src/render/decoders/selftest_png_fixtures.h src/html/document.h \
- src/core/selftest_storage.h src/core/selftest_tasks.h \
- src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/tasks.h src/html/entities.h src/util/mem.h \
- src/util/selftest_util.h
+ src/core/logger.h src/render/decoders/png.h \
+ src/render/decoders/selftest_png_fixtures.h src/util/mem.h
+
+src/render/decoders/selftest_png.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -128,6 +118,12 @@ build/src/main.o: src/main.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h:
 
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h:
+
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h:
@@ -136,6 +132,10 @@ build/src/main.o: src/main.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/time.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/time.h:
+
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
@@ -143,12 +143,6 @@ build/src/main.o: src/main.c \
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h:
 
@@ -176,76 +170,10 @@ build/src/main.o: src/main.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/constants.h:
-
-src/core/cookie_jar.h:
-
-src/core/../util/strbuf.h:
-
-src/core/storage_data.h:
-
-src/core/encoding.h:
-
-src/core/http_client.h:
-
-src/core/../util/strmap.h:
-
 src/core/logger.h:
-
-src/core/selftest_encoding.h:
-
-src/core/selftest_http.h:
-
-src/html/tokenizer.h:
-
-src/util/strmap.h:
-
-src/html/dom.h:
-
-src/html/tokenizer.h:
-
-src/html/selftest_tokenizer.h:
-
-src/html/selftest_dom.h:
-
-src/html/selftest_document.h:
-
-src/html/selftest_readability.h:
-
-src/render/style.h:
-
-src/render/selftest_style.h:
-
-src/render/link_manager.h:
-
-src/render/selftest_link_manager.h:
-
-src/render/decoders/selftest_decoders.h:
-
-src/render/decoders/selftest_inflate.h:
 
 src/render/decoders/png.h:
 
-src/render/decoders/selftest_png.h:
-
 src/render/decoders/selftest_png_fixtures.h:
 
-src/html/document.h:
-
-src/core/selftest_storage.h:
-
-src/core/selftest_tasks.h:
-
-src/core/selftest_url.h:
-
-src/core/storage.h:
-
-src/core/../util/dynarray.h:
-
-src/core/tasks.h:
-
-src/html/entities.h:
-
 src/util/mem.h:
-
-src/util/selftest_util.h:

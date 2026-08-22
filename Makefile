@@ -59,6 +59,8 @@ SRC = \
 	src/render/decoders/selftest_decoders.c \
 	src/render/decoders/inflate.c \
 	src/render/decoders/selftest_inflate.c \
+	src/render/decoders/png.c \
+	src/render/decoders/selftest_png.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
