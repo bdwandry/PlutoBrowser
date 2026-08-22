@@ -65,6 +65,8 @@
 #include "ui/bookmarks_page.h"
 #include "ui/history_page.h"
 #include "ui/selftest_pages.h"
+#include "ui/settings_page.h"
+#include "ui/selftest_settings.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -150,6 +152,9 @@ static int s_abFail = -1;
 static int s_p30Pass = -1;
 static int s_p30Fail = -1;
 static int s_p30Slot = 0;
+/* P31 settings page: selftest counts + demo walk state */
+static int s_spPass = -1;
+static int s_spFail = -1;
 
 // Vendored keyboard lib (vendor/keyboard) resolves the SDK handle through
 // this global symbol; every PlutoBrowser module keeps its own s_pd static.
@@ -523,16 +528,18 @@ static void draw_placeholder(void)
             hp_draw(crank);
         }
 
-        /* P30 rotating page demos (error / bookmarks / history) drawn
-         * at content level, under chrome+hud like the real browser. */
+        /* P30/P31 rotating page demos drawn at content level, under
+         * chrome+hud like the real browser. */
         if (!ab_is_open()) {
-            int slot = s_p30Slot % 3;
+            int slot = s_p30Slot % 4;
             if (slot == 0) {
                 ep_draw();
             } else if (slot == 1) {
                 bm_draw(6.0 * sin((double)s_frame * 0.03));
-            } else {
+            } else if (slot == 2) {
                 hi_draw(6.0 * sin((double)s_frame * 0.03));
+            } else {
+                sp_draw();
             }
         }
 
@@ -588,19 +595,34 @@ static void draw_placeholder(void)
         }
 
         if (s_p30Pass >= 0) {
-            static const char* const slotNames[3] = { "error",
+            static const char* const slotNames[4] = { "error",
                                                       "bookmarks",
-                                                      "history" };
+                                                      "history",
+                                                      "settings" };
             n = snprintf(buf, sizeof(buf),
                          "P30 selftest: %d passed, %d failed (%s)",
                          s_p30Pass, s_p30Fail,
-                         slotNames[s_p30Slot % 3]);
+                         slotNames[s_p30Slot % 4]);
             if (n > 0) {
                 if ((size_t)n >= sizeof(buf)) {
                     n = (int)sizeof(buf) - 1;
                 }
                 pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
                                        70, 485);
+            }
+        }
+
+        if (s_spPass >= 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "P31 selftest: %d passed, %d failed%s",
+                         s_spPass, s_spFail,
+                         sp_is_open() ? " [open]" : "");
+            if (n > 0) {
+                if ((size_t)n >= sizeof(buf)) {
+                    n = (int)sizeof(buf) - 1;
+                }
+                pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
+                                       70, 500);
             }
         }
     }
@@ -765,13 +787,13 @@ static int update(void* userdata)
         PLUTO_LOG("[P29] auto-cancel for P30 showcase");
     }
 
-    /* P30 showcase: rotate pages and script a few inputs each */
+    /* P30/P31 showcase: rotate pages and script a few inputs each */
     if (!ab_is_open()) {
         static int s_p30Step = 0;
         if (s_frame % 120 == 0 && s_frame > 0) s_p30Slot++;
         if (s_frame >= 960 && s_frame % 45 == 0) {
             s_p30Step++;
-            int slot = s_p30Slot % 3;
+            int slot = s_p30Slot % 4;
             if (slot == 0) {
                 static const EpButton epSeq[] = { EP_BTN_RIGHT,
                                                   EP_BTN_RIGHT,
@@ -788,7 +810,7 @@ static int update(void* userdata)
                 LpAction act = bm_handle_input(b, u, sizeof(u));
                 PLUTO_LOG("[P30] bookmarks btn=%d -> act=%d url=%s",
                           (int)b, (int)act, u);
-            } else {
+            } else if (slot == 2) {
                 static const LrButton hiSeq[] = { LR_BTN_DOWN,
                                                   LR_BTN_A };
                 LrButton b = hiSeq[s_p30Step % 2];
@@ -796,6 +818,22 @@ static int update(void* userdata)
                 LpAction act = hi_handle_input(b, u, sizeof(u));
                 PLUTO_LOG("[P30] history btn=%d -> act=%d url=%s",
                           (int)b, (int)act, u);
+            } else {
+                /* Settings overlay: reopen cycle exercises the grow
+                 * animation + engine cycling, then B discards. */
+                static const SpButton spSeq[] = { SP_BTN_RIGHT,
+                                                  SP_BTN_RIGHT,
+                                                  SP_BTN_B };
+                if (!sp_is_open()) {
+                    sp_open("p31demo");
+                    PLUTO_LOG("[P31] demo open (anim)");
+                } else {
+                    SpButton b = spSeq[s_p30Step % 3];
+                    SpAction act = sp_handle_input(b);
+                    PLUTO_LOG("[P31] input btn=%d act=%d engine=%s",
+                              (int)b, (int)act,
+                              sp_staged_engine_name());
+                }
             }
         }
     }
@@ -1064,6 +1102,14 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P30 SELFTEST FAILURES: %d", s_p30Fail);
             }
             PLUTO_LOG("[P30] pages ready");
+
+            // P31 settings overlay.
+            sp_init_pd(pd);
+            selftest_settings_run(&s_spPass, &s_spFail);
+            if (s_spFail > 0) {
+                PLUTO_ERROR("P31 SELFTEST FAILURES: %d", s_spFail);
+            }
+            PLUTO_LOG("[P31] settings page ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");

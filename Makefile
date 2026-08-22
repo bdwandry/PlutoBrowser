@@ -94,6 +94,8 @@ SRC = \
 	src/ui/bookmarks_page.c \
 	src/ui/history_page.c \
 	src/ui/selftest_pages.c \
+	src/ui/settings_page.c \
+	src/ui/selftest_settings.c \
 	vendor/keyboard/keyboard.c \
 	src/util/mem.c \
 	src/util/strbuf.c \

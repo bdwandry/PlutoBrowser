@@ -81,12 +81,12 @@ build/src/main.o: src/main.c \
  src/ui/home_page.h src/ui/selftest_home_page.h src/ui/address_bar.h \
  vendor/keyboard/keyboard.h src/ui/selftest_address_bar.h \
  src/ui/error_page.h src/ui/bookmarks_page.h src/ui/list_core.h \
- src/ui/history_page.h src/ui/selftest_pages.h \
- src/render/decoders/selftest_gif_fixtures.h src/html/document.h \
- src/core/selftest_storage.h src/core/selftest_tasks.h \
- src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/tasks.h src/html/entities.h src/util/mem.h \
- src/util/selftest_util.h
+ src/ui/history_page.h src/ui/selftest_pages.h src/ui/settings_page.h \
+ src/ui/selftest_settings.h src/render/decoders/selftest_gif_fixtures.h \
+ src/html/document.h src/core/selftest_storage.h \
+ src/core/selftest_tasks.h src/core/selftest_url.h src/core/storage.h \
+ src/core/../util/dynarray.h src/core/tasks.h src/html/entities.h \
+ src/util/mem.h src/util/selftest_util.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -319,6 +319,10 @@ src/ui/list_core.h:
 src/ui/history_page.h:
 
 src/ui/selftest_pages.h:
+
+src/ui/settings_page.h:
+
+src/ui/selftest_settings.h:
 
 src/render/decoders/selftest_gif_fixtures.h:
 

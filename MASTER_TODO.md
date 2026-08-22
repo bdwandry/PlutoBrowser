@@ -1,12 +1,12 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P30 DONE (verified in simulator). NEXT: P31.**
+**Status: PLANNING COMPLETE — PHASES P01–P31 DONE (verified in simulator). NEXT: P32.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
 P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ P28 ✅
-P29 ✅ P30 ✅ | P31–P36 ⬜
+P29 ✅ P30 ✅ P31 ✅ | P32–P36 ⬜
 
 ---
 
@@ -965,12 +965,24 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       1230 PASS / 0 FAIL. Log: logs/phase-P30.log.
 
 ### PHASE P31 — ui/settings_page.c
-- [ ] Staged-settings overlay: open(prevState) snapshot, options Search Engine (cycle),
+- [x] Staged-settings overlay: open(prevState) snapshot, options Search Engine (cycle),
       Browse Mode toggle, Invert Crank, Image Mode cycle (NAMES order), Clear Cookies
       action (immediate), Save(A)/Cancel(B) semantics, onChangeCallback re-render trigger,
       ease-out-cubic 300ms open animation (box grows from center, radius lerp, content
       after t>0.4), row painters + < > arrows + "Press A" hint, footer hint.
-- [ ] Verify persistence via Storage.save + reload; STOP.
+- [x] Verify persistence via Storage.save + reload; STOP.
+
+      DONE (this session): staged copy mirrors Lua snapshot defaults; engine cycle
+      ((v-2+n)%n)+1/(v%n)+1, mode/invert toggles, image mode NAMES-order wrap;
+      A on row 5 = immediate cj_clear() staying open; A elsewhere = apply +
+      storage_save() + onChange + SP_ACT_SAVED; B = discard + SP_ACT_CLOSED.
+      Draw: 300ms ease-out-cubic grow-from-center box (radius lerp), content
+      gated at t>0.4 with clip, row inversion via setDrawMode FillWhite,
+      </>/Press-A hints, footer. Selftest 26/0 (three initial failures were
+      test bugs — LEFT/RIGHT fired on row 1 instead of the target rows);
+      persistence proven via storage_load() reload keeping searchEngine=2 then
+      restored to default. Sim demo slot cycles engine + B-discard with logs.
+      Full suite 1256 PASS / 0 FAIL. Log: logs/phase-P31.log.
 
 ### PHASE P32 — main.c state machine, navigation, forms, menu, internal pages
 - [ ] States home/loading/page/error/bookmarks/history/settings; navigateTo flow
