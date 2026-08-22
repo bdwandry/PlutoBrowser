@@ -69,6 +69,8 @@
 #include "ui/selftest_pages.h"
 #include "ui/settings_page.h"
 #include "ui/selftest_settings.h"
+#include "core/browser.h"
+#include "core/selftest_browser.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -188,6 +190,9 @@ static int s_p30Slot = 0;
 /* P31 settings page: selftest counts + demo walk state */
 static int s_spPass = -1;
 static int s_spFail = -1;
+/* P32 browser engine: selftest counts */
+static int s_brPass = -1;
+static int s_brFail = -1;
 
 // Vendored keyboard lib (vendor/keyboard) resolves the SDK handle through
 // this global symbol; every PlutoBrowser module keeps its own s_pd static.
@@ -683,6 +688,27 @@ static void draw_placeholder(void)
                 }
                 pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
                                        70, 500);
+            }
+        }
+
+        if (s_brPass >= 0) {
+            const char* st = "?";
+            switch (br_state()) {
+                case PLUTO_STATE_HOME:    st = "home"; break;
+                case PLUTO_STATE_LOADING: st = "loading"; break;
+                case PLUTO_STATE_PAGE:    st = "page"; break;
+                case PLUTO_STATE_ERROR:   st = "error"; break;
+                default: break;
+            }
+            n = snprintf(buf, sizeof(buf),
+                         "P32 selftest: %d passed, %d failed [st=%s]",
+                         s_brPass, s_brFail, st);
+            if (n > 0) {
+                if ((size_t)n >= sizeof(buf)) {
+                    n = (int)sizeof(buf) - 1;
+                }
+                pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
+                                       70, 515);
             }
         }
     }
@@ -1195,6 +1221,13 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P31 SELFTEST FAILURES: %d", s_spFail);
             }
             PLUTO_LOG("[P31] settings page ready");
+
+            // P32 browser engine.
+            selftest_browser_run(pd, &s_brPass, &s_brFail);
+            if (s_brFail > 0) {
+                PLUTO_ERROR("P32 SELFTEST FAILURES: %d", s_brFail);
+            }
+            PLUTO_LOG("[P32] browser engine ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");

@@ -39,8 +39,10 @@ SRC = \
 	src/core/encoding.c \
 	src/core/selftest_encoding.c \
 	src/core/internal_pages.c \
+	src/core/browser.c \
 	src/core/http_client.c \
-	src/core/selftest_http.c \
+ 	src/core/selftest_http.c \
+ 	src/core/selftest_browser.c \
 	src/html/entities.c \
 	src/html/tokenizer.c \
 	src/html/dom.c \
