@@ -681,11 +681,13 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 - [x] Verify; STOP.
 
 ### PHASE P19 — gif.c
-- [ ] GIF87a/89a: header/screen descriptor, global/local palettes (grayscale shortcut),
+- [x] GIF87a/89a: header/screen descriptor, global/local palettes (grayscale shortcut),
       LZW streaming into box downscaler, first-frame-only, interlace handling per source,
       Tasks yield points, transparent index → white composite.
-- [ ] Benchmark GIF sample; log.
-- [ ] Verify; STOP.
+      (quirks preserved: imgTop unused — rows composite from canvas row 0; only
+      imgH rows streamed to the downscaler even though it uses logical-screen dims)
+- [x] Benchmark GIF sample; log. (generated 600x400 fixture: 300x200 in ~4 ms)
+- [x] Verify; STOP.
 
 ### PHASE P20 — jpeg.c
 - [ ] Baseline SOF0: markers, quant tables, Huffman buildHuff/decodeSymbol/extend,

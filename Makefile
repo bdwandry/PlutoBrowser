@@ -63,6 +63,8 @@ SRC = \
 	src/render/decoders/selftest_png.c \
 	src/render/decoders/bmp.c \
 	src/render/decoders/selftest_bmp.c \
+	src/render/decoders/gif.c \
+	src/render/decoders/selftest_gif.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
