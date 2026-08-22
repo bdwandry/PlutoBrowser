@@ -43,6 +43,9 @@
 #include "render/decoders/webp.h"
 #include "render/decoders/selftest_webp.h"
 #include "render/decoders/selftest_webp_fixtures.h"
+#include "render/decoders/ico.h"
+#include "render/decoders/selftest_ico.h"
+#include "render/decoders/selftest_ico_fixtures.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -94,8 +97,11 @@ static int s_jpFail = -1;
 static int s_jpPass = -1;
 static int s_wpFail = -1;
 static int s_wpPass = -1;
+static int s_icPass = -1;
+static int s_icFail = -1;
 static void* s_webpView = NULL;  /* temporary P21 debug viewer */
 static void* s_jpegView = NULL;  /* temporary P20 debug viewer */
+static void* s_icoView = NULL;   /* temporary P23 debug viewer */
 static void* s_gifView = NULL;   /* temporary P19 debug viewer */
 static void* s_pngView = NULL;   /* temporary P17 debug viewer bitmap */
 static void* s_bmpView = NULL;   /* temporary P18 debug viewer bitmap */
@@ -337,6 +343,17 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_icPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P23 ico: %d passed, %d failed",
+                     s_icPass, s_icFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 365);
+        }
+    }
+
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
     /* temporary debug viewers: decoded bench PNG + BMP (266x200) */
     if (s_pngView != NULL) {
@@ -357,6 +374,10 @@ static void draw_placeholder(void)
     }
     if (s_webpView != NULL) {
         pd->graphics->drawBitmap((LCDBitmap*)s_webpView, 10, 20,
+                                 kBitmapUnflipped);
+    }
+    if (s_icoView != NULL) {
+        pd->graphics->drawBitmap((LCDBitmap*)s_icoView, 124, 124,
                                  kBitmapUnflipped);
     }
 #endif
@@ -566,6 +587,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 #endif
             if (s_wpFail > 0) {
                 PLUTO_ERROR("P21 SELFTEST FAILURES: %d", s_wpFail);
+            }
+
+            selftest_ico_set_pd(pd);
+            selftest_ico_run(&s_icPass, &s_icFail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            /* temporary P23 debug viewer: decoded scaled ICO */
+            s_icoView = ico_decode(pd, fx_i_scaled, FX_I_I_SCALED_LEN,
+                                   360, 200);
+#endif
+            if (s_icFail > 0) {
+                PLUTO_ERROR("P23 SELFTEST FAILURES: %d", s_icFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);
