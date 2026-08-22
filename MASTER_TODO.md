@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P23 DONE (verified in simulator). NEXT: P24.**
+**Status: PLANNING COMPLETE — PHASES P01–P24 DONE (verified in simulator). NEXT: P25.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ | P24–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ | P25–P36 ⬜
 
 ---
 
@@ -810,16 +810,22 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
   phase; bench 266×200 = 0.858 ms/iter). Build gate 0 errors / 0 warnings (pre-existing
   jpeg.c notes only). Phase log exported to logs/phase-P23.log.
 
-### PHASE P24 — svg.c
-- [ ] SVGDecoder.decode: viewBox/width/height parse, scale cap ×2, min 20px, white canvas,
+### PHASE P24 — svg.c  ✅ DONE (verified in simulator)
+- [x] SVGDecoder.decode: viewBox/width/height parse, scale cap ×2, min 20px, white canvas,
       expandUses (<use href> resolution), scanTags (comments/CDATA/doctype skips),
       mergeStyle(style attr wins), hidden/display:none subtree skip stack, hasInk rule,
       shapes rect(rx)/circle/ellipse(fallback rings)/line/polygon(close)/polyline,
       path M/L/H/V/Z/C(8 seg)/S/Q(6 seg)/T/A(straight chord) with relative support and
       smooth-control reflection, tokenizePathNumbers char-level parser (sign/dot/exponent
       edge cases), draw into offscreen bitmap, zero-drawn → nil.
-- [ ] Fixture icons rendered; visual check; log shape counts.
-- [ ] Verify; STOP.
+- [x] Fixture icons rendered; visual check; log shape counts.
+      (svg.c ~1250-line pure-C rasterizer+parser port; goldens from independent Python
+      replica of the same spec via tools/gen_svg_fixtures.py — 10 fixtures ×
+      dims/FNV-1a cksum/drawn-count/probe points + guards G.no_svg/zero_drawn/bad_dims/
+      trunc_tag/null_args_reject; bench fixture s_bench 192×192: 47 passed / 0 failed,
+      bench 0.021 ms/iter. All phases regression-green. Build gate 0 errors / 0 warnings
+      (pre-existing jpeg.c notes only). Phase log exported to logs/phase-P24.log.)
+- [x] Verify; STOP.
 
 ### PHASE P25 — render/image_decoder.c
 - [ ] Cache (url→bitmap|PENDING|FAILED), downloadQueue FIFO, processNextImage via

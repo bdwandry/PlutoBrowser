@@ -72,7 +72,9 @@ build/src/main.o: src/main.c \
  src/render/decoders/webp.h src/render/decoders/selftest_webp.h \
  src/render/decoders/selftest_webp_fixtures.h src/render/decoders/ico.h \
  src/render/decoders/selftest_ico.h \
- src/render/decoders/selftest_ico_fixtures.h \
+ src/render/decoders/selftest_ico_fixtures.h src/render/decoders/svg.h \
+ src/render/decoders/selftest_svg.h \
+ src/render/decoders/selftest_svg_fixtures.h \
  src/render/decoders/selftest_gif_fixtures.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
@@ -266,6 +268,12 @@ src/render/decoders/ico.h:
 src/render/decoders/selftest_ico.h:
 
 src/render/decoders/selftest_ico_fixtures.h:
+
+src/render/decoders/svg.h:
+
+src/render/decoders/selftest_svg.h:
+
+src/render/decoders/selftest_svg_fixtures.h:
 
 src/render/decoders/selftest_gif_fixtures.h:
 
