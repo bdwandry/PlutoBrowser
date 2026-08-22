@@ -27,6 +27,7 @@
 #include "render/selftest_style.h"
 #include "render/link_manager.h"
 #include "render/selftest_link_manager.h"
+#include "render/decoders/selftest_decoders.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -63,6 +64,8 @@ static int s_syFail = -1;
 static int s_syPass = -1;
 static int s_lmFail = -1;
 static int s_lmPass = -1;
+static int s_dc15Fail = -1;
+static int s_dc15Pass = -1;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -235,6 +238,17 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_dc15Pass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P15 dither/scale: %d passed, %d failed",
+                     s_dc15Pass, s_dc15Fail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 275);
+        }
+    }
+
     const char* hint = "Phase P07 raw TCP HTTP client";
     pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 260);
 }
@@ -372,6 +386,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_link_manager_run(&s_lmPass, &s_lmFail);
             if (s_lmFail > 0) {
                 PLUTO_ERROR("P14 SELFTEST FAILURES: %d", s_lmFail);
+            }
+
+            selftest_decoders_run(&s_dc15Pass, &s_dc15Fail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            selftest_decoders_device(pd);
+#endif
+            if (s_dc15Fail > 0) {
+                PLUTO_ERROR("P15 SELFTEST FAILURES: %d", s_dc15Fail);
             }
 
             pd->system->setUpdateCallback(update, NULL);

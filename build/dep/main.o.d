@@ -60,7 +60,8 @@ build/src/main.o: src/main.c \
  src/html/selftest_dom.h src/html/selftest_document.h \
  src/html/selftest_readability.h src/render/style.h \
  src/render/selftest_style.h src/render/link_manager.h \
- src/render/selftest_link_manager.h src/html/document.h \
+ src/render/selftest_link_manager.h \
+ src/render/decoders/selftest_decoders.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
  src/core/tasks.h src/html/entities.h src/util/mem.h \
@@ -215,6 +216,8 @@ src/render/selftest_style.h:
 src/render/link_manager.h:
 
 src/render/selftest_link_manager.h:
+
+src/render/decoders/selftest_decoders.h:
 
 src/html/document.h:
 
