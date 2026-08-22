@@ -32,6 +32,7 @@ build/src/main.o: src/main.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -47,7 +48,6 @@ build/src/main.o: src/main.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
@@ -78,6 +78,7 @@ build/src/main.o: src/main.c \
  src/render/selftest_image_decoder.h src/render/cloud_layout.h \
  src/render/selftest_cloud_layout.h src/ui/chrome.h src/ui/../core/url.h \
  src/ui/../core/../util/strbuf.h src/ui/hud.h src/ui/selftest_ui.h \
+ src/ui/home_page.h src/ui/selftest_home_page.h \
  src/render/decoders/selftest_gif_fixtures.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
@@ -150,6 +151,8 @@ build/src/main.o: src/main.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
+
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
@@ -179,8 +182,6 @@ build/src/main.o: src/main.c \
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h:
 
@@ -295,6 +296,10 @@ src/ui/../core/../util/strbuf.h:
 src/ui/hud.h:
 
 src/ui/selftest_ui.h:
+
+src/ui/home_page.h:
+
+src/ui/selftest_home_page.h:
 
 src/render/decoders/selftest_gif_fixtures.h:
 

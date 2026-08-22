@@ -85,6 +85,8 @@ SRC = \
 	src/ui/chrome.c \
 	src/ui/hud.c \
 	src/ui/selftest_ui.c \
+	src/ui/home_page.c \
+	src/ui/selftest_home_page.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \

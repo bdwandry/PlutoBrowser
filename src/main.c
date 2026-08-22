@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "pd_api.h"
 
@@ -56,6 +57,8 @@
 #include "ui/chrome.h"
 #include "ui/hud.h"
 #include "ui/selftest_ui.h"
+#include "ui/home_page.h"
+#include "ui/selftest_home_page.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -131,6 +134,9 @@ static int s_clScroll = 0;
 static int s_uiPass = -1;
 static int s_uiFail = -1;
 static int s_p27Scenario = 0;
+/* P28 home page visual + scripted input walk */
+static int s_hpPass = -1;
+static int s_hpFail = -1;
 /* Fixture mirroring the cloud payload shape served on MODE_OPERA_DS. */
 static const char* kClFixture =
     "{\"title\":\"Cloud Demo\",\"totalHeight\":500,\"elements\":["
@@ -492,6 +498,14 @@ static void draw_placeholder(void)
             break;
         }
 
+        /* Home page slot: every 6th scenario shows the speed dial page
+         * with an oscillating crank scroll; chrome+hud compose on top
+         * (real frame order). */
+        if ((s_p27Scenario % 6) == 5) {
+            double crank = 14.0 * sin((double)s_frame * 0.04);
+            hp_draw(crank);
+        }
+
         ch_draw(&demo, NULL, loading, cur, tot, reader);
         hud_draw(120, 500,
                  "https://very.long.example-domain.io/some/deep/path?q=1");
@@ -508,6 +522,20 @@ static void draw_placeholder(void)
                 }
                 pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
                                        70, 440);
+            }
+        }
+
+        if (s_hpPass >= 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "P28 selftest: %d passed, %d failed "
+                         "(sel=%d)", s_hpPass, s_hpFail,
+                         hp_selected_index());
+            if (n > 0) {
+                if ((size_t)n >= sizeof(buf)) {
+                    n = (int)sizeof(buf) - 1;
+                }
+                pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
+                                       70, 455);
             }
         }
     }
@@ -629,6 +657,20 @@ static int update(void* userdata)
 
     /* P27 showcase rotation */
     if (s_frame % 60 == 0) s_p27Scenario++;
+
+    /* P28 scripted input walk: down, down, up, down ... logging each
+     * selection transition through hp_handle_input. */
+    if (s_frame >= 240 && s_frame % 45 == 0) {
+        static const HpButton walk[] = { HP_BTN_DOWN, HP_BTN_DOWN,
+                                         HP_BTN_UP, HP_BTN_DOWN,
+                                         HP_BTN_RIGHT };
+        static int wi = 0;
+        HpButton b = walk[wi % 5];
+        wi++;
+        hp_handle_input(b, NULL, 0);
+        PLUTO_LOG("[P28] input walk btn=%d -> sel=%d", (int)b,
+                  hp_selected_index());
+    }
 
     if (s_frame == 1) {
         PLUTO_LOG("first frame rendered");
@@ -863,6 +905,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P27 SELFTEST FAILURES: %d", s_uiFail);
             }
             PLUTO_LOG("[P27] chrome/hud ready");
+
+            // P28 home page: speed dial grid + input rules.
+            hp_init(pd);
+            selftest_home_page_run(&s_hpPass, &s_hpFail);
+            if (s_hpFail > 0) {
+                PLUTO_ERROR("P28 SELFTEST FAILURES: %d", s_hpFail);
+            }
+            PLUTO_LOG("[P28] home page ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");
