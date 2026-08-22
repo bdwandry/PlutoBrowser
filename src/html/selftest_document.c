@@ -56,8 +56,11 @@ static void case_empty(void) {
 }
 
 static void case_reader_gate(void) {
+    /* P12: reader mode now distills instead of returning NULL */
     DocDocument* d = doc_parse("<p>hi</p>", BASE, PLUTO_MODE_READER);
-    ck("B.reader_null", d == NULL);
+    ck("B.reader_doc", d != NULL && d->isReaderMode == 1 &&
+       d->nBlocks >= 3 && d->blocks[0].type == DB_READER_HEADER);
+    doc_free(d);
 }
 
 /* ── C. headings ──────────────────────────────────────────────────────── */

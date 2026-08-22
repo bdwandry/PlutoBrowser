@@ -42,7 +42,8 @@ enum {
     DB_BOX_CLOSE,
     DB_PLACEHOLDER,
     DB_METER,
-    DB_MATH
+    DB_MATH,
+    DB_READER_HEADER
 };
 
 /* tables */
@@ -188,6 +189,11 @@ typedef struct DocBlock {
 
     /* meter */
     double mValue, mMax, mMin, mLow, mHigh, mOptimum;
+
+    /* reader_header (readability.c, P12) */
+    char* readerHost;        /* owned uppercased host or "BLANK" */
+    char* readerTitle;       /* owned page title */
+    char* readingTime;       /* owned "N min read (M words)" */
 } DocBlock;
 
 /* ── Links & document ─────────────────────────────────────────────────── */
@@ -223,6 +229,10 @@ typedef struct DocDocument {
     DocDatalist* datalists;
     size_t nDatalists;
     size_t capDatalists;
+
+    /* reader-mode extras (readability.c, P12) */
+    int readerWords;     /* result wordCount over selected blocks */
+    char* readerTime;    /* owned same string as header block */
 } DocDocument;
 
 #define DOC_ALIGN_NONE    ((const char*)NULL)
@@ -250,5 +260,9 @@ DocDocument* doc_parse_opts(const char* htmlString, const char* baseUrlStr,
     doc_parse_opts((html), (base), (m), (const DocParseOpts*)NULL)
 
 void doc_free(DocDocument* d);
+
+/* deep-free every owned field inside one block (shell struct itself is
+ * NOT freed) -- shared with readability.c */
+void doc_free_block_fields(DocBlock* b);
 
 #endif

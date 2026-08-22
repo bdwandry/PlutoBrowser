@@ -45,9 +45,11 @@ SRC = \
 	src/html/tokenizer.c \
 	src/html/dom.c \
 	src/html/document.c \
+	src/html/readability.c \
 	src/html/selftest_tokenizer.c \
 	src/html/selftest_dom.c \
 	src/html/selftest_document.c \
+	src/html/selftest_readability.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \

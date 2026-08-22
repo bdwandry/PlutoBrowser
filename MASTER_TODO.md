@@ -559,11 +559,27 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       parity-audit checklist.
 
 ### PHASE P12 — html/readability.c
-- [ ] distill(tokens, rawTitle, baseUrl): STRIP_TAGS set, wordCount, isBareUrlText,
+- [x] distill(tokens, rawTitle, baseUrl): STRIP_TAGS set, wordCount, isBareUrlText,
       mergeParagraphFragments, scoring/selection identical, reader block emission,
       title fallbacks.
-- [ ] Fixture article → distilled block dump logged.
-- [ ] Verify; STOP.
+- [x] Fixture article → distilled block dump logged.
+- [x] Verify; STOP.
+
+      DONE (2026-08-21). readability_distill() consumes HttTokens and returns a
+      reader-mode DocDocument (DB_READER_HEADER + h1 + hr + merged content);
+      doc_parse_opts(PLUTO_MODE_READER) wires it (rawHtml attached, as Lua).
+      New DocBlock fields readerHost/readerTitle/readingTime; DocDocument
+      readerWords/readerTime; doc_free_block_fields exported for reuse.
+      Faithful quirks pinned by tests: nav/header/footer/aside container branch
+      is dead code in source (they are STRIP_TAGS); containers walked in
+      table.sort order despite "document order" comment; running fragment
+      accumulator over-merges until a sentence-ending punct appears; inline
+      texts join raw without injected spaces; formMethod persists after
+      </form> while formAction resets; button uses open-time action snapshot,
+      input-submit uses the live one. isBareUrlText replicates Lua pattern
+      backtracking via right-to-left dot scan.
+      Selftests: 36 passed, 0 failed (host + ASAN clean + simulator log this
+      phase). Build gate 0/0. Phase log exported with full parity map.
 
 ### PHASE P13 — render/style.c + fonts
 - [ ] Load fonts: Roobert-20-Medium, Roobert-10-Bold, Roobert-11-Medium,

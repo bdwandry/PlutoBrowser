@@ -1,9 +1,9 @@
 build/src/html/document.o: src/html/document.c src/html/document.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  src/html/tokenizer.h src/util/strmap.h src/html/dom.h \
- src/html/entities.h src/core/url.h src/core/../util/strbuf.h \
- src/core/tasks.h src/core/constants.h src/util/mem.h src/util/strbuf.h \
- src/core/logger.h \
+ src/html/readability.h src/html/entities.h src/core/url.h \
+ src/core/../util/strbuf.h src/core/tasks.h src/core/constants.h \
+ src/util/mem.h src/util/strbuf.h src/core/logger.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -51,6 +51,8 @@ src/html/tokenizer.h:
 src/util/strmap.h:
 
 src/html/dom.h:
+
+src/html/readability.h:
 
 src/html/entities.h:
 
