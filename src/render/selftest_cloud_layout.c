@@ -85,7 +85,7 @@ static void case_parse_valid(void) {
 
     /* font slot mapping */
     int sz, lh;
-    PlutoFont* h1 = style_get_heading_font(1, &sz, &lh);
+    PlutoFont* h1 = style_get_heading_font(1, NULL, NULL);
     PlutoFont* bb = style_get_body_font(1, 0, &sz);
     PlutoFont* mo = style_get_body_font(0, 1, &sz);
     PlutoFont* bo = style_get_body_font(0, 0, &sz);

@@ -24,6 +24,19 @@ void lm_init(struct PlaydateAPI* pd);
 
 typedef struct {
     int x, y, w, h;   /* w or h == -1 means "unset" (hit-test default) */
+    /* Per-rect extras carried opaquely inside Lua rect tables (layout.c
+     * passes them through addLinkRect; link_manager.lua stores them
+     * verbatim). All zero/NULL when absent. Strings are BORROWED from the
+     * Layout render items / document and must outlive the link. */
+    int   isToggle;          /* <summary> tap target */
+    int   toggleOpen;
+    const char* toggleKey;   /* "dN" */
+    int   isImage;
+    const char* src;
+    const char* alt;
+    int   inert;
+    int   isFormInput;       /* layout.lua registers these per-rect */
+    void* inputBlock;        /* borrowed LItem */
 } LmRect;
 
 typedef struct {

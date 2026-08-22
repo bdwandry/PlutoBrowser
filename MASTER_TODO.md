@@ -1,6 +1,6 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P31 DONE (verified in simulator). NEXT: P32.**
+**Status: PLANNING COMPLETE — PHASES P01–P31 DONE + INSERTED P26B DONE (verified in simulator). NEXT: P32.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
@@ -393,16 +393,45 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       probes (verbatim is correct without a dispatching charset) and used raw
       Latin-1 bytes instead of UTF-8 in the transliteration fixture.
 
-### PHASE P26B — render/layout.c (block layout engine)  ⬜ (INSERTED)
+### PHASE P26B — render/layout.c (block layout engine)  ✅ DONE (verified in simulator)
 > Gap found during P06: render/layout.lua (~1472 LOC) had no dedicated phase;
 > P32/P33 assume it exists. This phase closes that gap before P27 consumes it.
-- [ ] Port block layout: node tree walk, inline text wrapping vs Playdate font
+- [x] Port block layout: node tree walk, inline text wrapping vs Playdate font
       metrics (getImageTextWidth equivalent), margins/padding collapse rules as
       implemented in source, list/table/figure/image geometry, absolute offsets,
       page height computation feeding the scroll renderer.
-- [ ] Oracle-driven like P05/P06; self-tests assert computed rects for fixture
+      Files: src/render/layout.{h,c} (~1930 LOC). LItem pool + 20 item types;
+      breakLines word-wrap parity (leading-ws drop, ^S+ words, following-ws run
+      gap, tab stops via TAB_COLUMNS*spaceW, lineH=max across inline fonts);
+      emitFlow merges consecutive same-href+anchor words into one LinkManager
+      rect spanning gaps, sub/sup dy +3/-4; all block painters (headings w/
+      underline rules level<=2, hr, code box, quote bar, table box, five image
+      modes, form controls input/checkbox/select/submit/hidden, meter, box
+      frames, reader badge); totalHeight=max(currentY+20,216); scrollbar,
+      on-demand image overlay state machine (show/handle/clear/consumed),
+      evictOffscreen VIEWPORT-only bounds. LmRect extended per-rect extras
+      (isToggle/toggleKey/isImage/src/alt/inert/isFormInput/inputBlock).
+- [x] Oracle-driven like P05/P06; self-tests assert computed rects for fixture
       documents against host-Lua output of the REAL layout.lua.
-- [ ] Depends on P08–P25 DOM/render primitives being present; schedule before P27.
+      src/render/selftest_layout.{h,c}: **82 pass / 0 fail** in simulator —
+      roman/alpha markers, tab expansion, empty-doc floor 216, flow geometry
+      (marginX=10/startY=32/lineH=16), wrap rows step 16 at marginX, heading
+      rule y=61 + h3-no-rule, hr/code(40px)/image-clamp/table(84px) geometry,
+      checkbox label truncation + input: links, submit >=50 clamp + action,
+      select borrowed options + select:q, list ix./depth-14 indent, quote bar,
+      toggle strips d1, hidden fields zero-footprint, badge h28, parser
+      integration (resolved hrefs carried on text items), on-demand overlay
+      state machine incl. A-view/B-link/cancel paths.
+- [x] Depends on P08–P25 DOM/render primitives being present; schedule before P27.
+      Fixed latent P13 bug en route: style_get_heading_font had swapped size/
+      lineHeight semantics vs Lua (now returns font + out lineHeight/marginB
+      24/18/16 + 6/5/4); all call sites updated. Fixed roman lowercase for
+      ordered type="i" (was emitting uppercase). document.c maps type=hidden
+      inputs to DB_INPUT_FIELD(inputType=hidden) -> zero-footprint items.
+      Visual slot in main.c: kLyFixture demo page (63 items / totalH 737 /
+      5 links) sweeping scroll with HUD counters. Clean make 0 errors /
+      0 warnings; no regressions (all prior-phase selftests green this boot);
+      log exported to logs/phase-P26B.log; STOP.
 
 ### PHASE P07 — core/http_client.c (raw TCP HTTP/HTTPS) + BENCHMARK  ✅ DONE (verified in simulator)
 - [x] Port doGet/get/update/cancel/isLoading over playdate->network->tcp with identical

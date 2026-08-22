@@ -224,7 +224,7 @@ void hp_draw(double crankChange) {
     DynArray* bookmarks = storage_bookmarks();
     int count = bookmarks ? (int)bookmarks->count : 0;
     int sz, lh;
-    PlutoFont* fontHeading = style_get_heading_font(1, &sz, &lh);
+    PlutoFont* fontHeading = style_get_heading_font(1, NULL, NULL);
     PlutoFont* fontBold = style_get_body_font(1, 0, &sz);
     PlutoFont* fontBody = style_get_body_font(0, 0, &sz);
     PlutoFont* fontSmall = style_get_ui_small_font();

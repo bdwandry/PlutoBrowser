@@ -246,8 +246,7 @@ void sp_draw(void) {
 
     if (t <= 0.4f) return;
 
-    int hsz = 0, hlh = 0;
-    PlutoFont* fontH = style_get_heading_font(2, &hsz, &hlh);
+        PlutoFont* fontH = style_get_heading_font(2, NULL, NULL);
     int bsz = 0;
     PlutoFont* fontBold = style_get_body_font(1, 0, &bsz);
     PlutoFont* fontSmall = style_get_ui_small_font();
