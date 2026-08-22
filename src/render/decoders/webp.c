@@ -1,11 +1,14 @@
-// webp.c — C port of Source/render/decoders/webp.lua (P21: lossless VP8L).
+// webp.c — C port of Source/render/decoders/webp.lua.
 //
-// Parses the RIFF container and decodes a VP8L payload into a full-
-// resolution ARGB grid (0xAARRGGBB). Covers the little-endian bit reader,
-// two-level Huffman tables (rootBits 8, code-length table 7), meta
-// Huffman groups, LZ77 with distance mapping, the color cache, and all
-// four inverse transforms (predictor, cross-color, subtract-green,
-// color-indexing). Lossy VP8 and animation arrive in P22/P23.
+// Parses the RIFF container and decodes VP8L (lossless), VP8 (lossy)
+// and animated payloads into a full-resolution ARGB grid (0xAARRGGBB).
+// Lossless: little-endian bit reader, two-level Huffman tables (rootBits
+// 8, code-length table 7), meta Huffman groups, LZ77 with distance
+// mapping, color cache, and all four inverse transforms. Lossy:
+// boolean decoder (BITS=24), segment/filter/quant/probability headers,
+// residual tokens, intra predictions, DCT/WHT transforms, loop filter,
+// and fancy chroma upsampling byte-compatible with `dwebp -ppm`.
+// Animation: VP8X/ANIM/ANMF demux + non-premultiplied blender.
 
 #include "render/decoders/webp.h"
 
@@ -15,6 +18,7 @@
 #include "core/tasks.h"
 #include "render/decoders/dither.h"
 #include "render/decoders/scale.h"
+#include "render/decoders/webp_vp8_data.h"
 #include "util/mem.h"
 
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
@@ -1193,42 +1197,2506 @@ static uint32_t* apply_inverse_transforms(VP8LCtx* ctx, uint32_t* data,
     return in_;
 }
 
-/* RIFF container: locate the VP8L chunk payload. */
-static int parse_webp(const uint8_t* data, size_t len,
-                      const uint8_t** outPayload, size_t* outLen) {
-    size_t pos;
-    if (len < 20) return 0;
-    if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WEBP", 4) != 0)
-        return 0;
-    pos = 12;
-    while (pos + 8 <= len) {
-        uint32_t size = (uint32_t)data[pos + 4] |
-                        ((uint32_t)data[pos + 5] << 8) |
-                        ((uint32_t)data[pos + 6] << 16) |
-                        ((uint32_t)data[pos + 7] << 24);
-        if (memcmp(data + pos, "VP8L", 4) == 0) {
-            size_t avail = len - (pos + 8);
-            *outPayload = data + pos + 8;
-            *outLen = size < avail ? size : avail;
-            return 1;
+/* ------------------------------------------------------------------ */
+/* P22: ALPH chunk (alpha plane for lossy images)                      */
+
+static void alpha_unfilter(uint8_t* alpha, int width, int height,
+                           int filter) {
+    int y;
+    for (y = 0; y < height; y++) {
+        int o = y * width;
+        if (y == 0 || filter == 1) {
+            /* Horizontal: prediction carries across rows when filter==1. */
+            int pred = (y == 0) ? 0 : alpha[o - width];
+            int x;
+            for (x = 0; x < width; x++) {
+                int v = (pred + alpha[o + x]) & 0xFF;
+                alpha[o + x] = (uint8_t)v;
+                pred = v;
+            }
+        } else if (filter == 2) { /* Vertical */
+            int prev = o - width;
+            int x;
+            for (x = 0; x < width; x++)
+                alpha[o + x] =
+                    (uint8_t)((alpha[prev + x] + alpha[o + x]) & 0xFF);
+        } else if (filter == 3) { /* Gradient */
+            int prev = o - width;
+            int top = alpha[prev];
+            int topLeft = top;
+            int left = top;
+            int x;
+            for (x = 0; x < width; x++) {
+                int g;
+                top = alpha[prev + x];
+                g = left + top - topLeft;
+                if ((g & ~0xff) != 0) g = (g < 0) ? 0 : 255;
+                left = (alpha[o + x] + g) & 0xFF;
+                topLeft = top;
+                alpha[o + x] = (uint8_t)left;
+            }
         }
-        pos += 8 + size + (size & 1);
     }
+}
+
+/* Returns a malloc'd width*height alpha plane, or NULL. A NULL payload
+ * (no ALPH chunk) yields NULL: the image is opaque. */
+static uint8_t* alpha_decode_plane(const uint8_t* payload, size_t plen,
+                                   int width, int height) {
+    int h0, method, filter, total, i;
+    uint8_t* alpha;
+    if (!payload || plen < 2) return NULL;
+    h0 = payload[0];
+    method = h0 & 0x03;
+    filter = (h0 >> 2) & 0x03;
+    if (method > 1 || ((h0 >> 4) & 0x03) > 1 || ((h0 >> 6) & 0x03) != 0)
+        return NULL;
+    total = width * height;
+    if (total < 1 || total > WEBP_MAX_PIXELS) return NULL;
+
+    if (method == 0) {
+        if ((size_t)(plen - 1) < (size_t)total) return NULL;
+        alpha = (uint8_t*)pluto_malloc((size_t)total);
+        if (!alpha) return NULL;
+        memcpy(alpha, payload + 1, (size_t)total);
+    } else {
+        Br br;
+        VP8LCtx ctx;
+        uint32_t* flat;
+        uint32_t* argb;
+        int tw, th;
+        memset(&ctx, 0, sizeof(ctx));
+        br.data = payload;
+        br.len = plen;
+        br.pos = 1; /* bitstream starts right after the ALPH header byte */
+        br.window = 0;
+        br.nbits = 0;
+        br.eos = 0;
+        if (!decode_image_stream(width, height, 1, &br, &ctx, NULL)) {
+            ctx_free(&ctx);
+            return NULL;
+        }
+        tw = ctx.transformXsize;
+        th = ctx.transformYsize;
+        if (tw < 1 || th < 1 || tw * th > WEBP_MAX_PIXELS) {
+            ctx_free(&ctx);
+            return NULL;
+        }
+        flat = (uint32_t*)pluto_calloc((size_t)tw * (size_t)th,
+                                       sizeof(uint32_t));
+        if (!flat) {
+            ctx_free(&ctx);
+            return NULL;
+        }
+        if (!decode_image_data(&br, &ctx, flat, tw, th)) {
+            pluto_free(flat);
+            ctx_free(&ctx);
+            return NULL;
+        }
+        if (br.eos) {
+            pluto_free(flat);
+            ctx_free(&ctx);
+            return NULL;
+        }
+        argb = apply_inverse_transforms(&ctx, flat, th);
+        flat = NULL; /* consumed (freed or returned) */
+        ctx_free(&ctx);
+        if (!argb) return NULL;
+        alpha = (uint8_t*)pluto_malloc((size_t)total);
+        if (!alpha) {
+            pluto_free(argb);
+            return NULL;
+        }
+        for (i = 0; i < total; i++)
+            alpha[i] = (uint8_t)((argb[i] >> 8) & 0xFF);
+        pluto_free(argb);
+    }
+    if (filter != 0) alpha_unfilter(alpha, width, height, filter);
+    return alpha;
+}
+
+/* ------------------------------------------------------------------ */
+/* P22: VP8 lossy decoder (boolean decoder, headers, transforms, intra */
+/* predictions, loop filter) byte-compatible with `dwebp -ppm`.        */
+
+#define VP8_BPS   32 /* working-buffer row stride */
+#define VP8_YBASE 64 /* top-left of the luma block inside the buffer */
+#define VP8_UBASE 32 /* chroma block offset (stride 32, 1px border) */
+#define VP8_VBASE 32
+
+#define VP8_DC_PRED 0
+#define VP8_TM_PRED 1
+#define VP8_V_PRED  2
+#define VP8_H_PRED  3
+
+static const int kFilterExtraRows[3] = { 0, 2, 8 };
+
+/* Persistent working buffers, zero-initialized once (mirrors the file-
+ * level locals in webp.lua that survive across decodes). */
+static uint8_t s_yArr[640];
+/* Lua tables accept negative keys; the ported working-buffer math dips
+ * to index -4 on the chroma planes during column shifts, so both arrays
+ * get 4 bytes of lead-in padding reached through an offset pointer. */
+static uint8_t s_uStorage[324];
+static uint8_t s_vStorage[324];
+#define s_uArr (s_uStorage + 4)
+#define s_vArr (s_vStorage + 4)
+
+static int s_vp8Log2[256];
+static int s_vp8Log2Init = 0;
+
+static void vp8_init_log2(void) {
+    int i;
+    if (s_vp8Log2Init) return;
+    for (i = 1; i <= 255; i++) {
+        int v = i, n = 0;
+        while (v > 1) {
+            v >>= 1;
+            n++;
+        }
+        s_vp8Log2[i] = n;
+    }
+    s_vp8Log2Init = 1;
+}
+
+static int vp8_clip8(int v) {
+    if ((v & ~0xff) == 0) return v;
+    return (v < 0) ? 0 : 255;
+}
+
+static int vp8_ksclip1(int v) {
+    if (v < -128) return -128;
+    if (v > 127) return 127;
+    return v;
+}
+
+static int vp8_ksclip2(int v) {
+    if (v < -16) return -16;
+    if (v > 15) return 15;
+    return v;
+}
+
+static int vp8_kabs0(int v) { return (v < 0) ? -v : v; }
+
+/* Boolean decoder (BITS=24). The cursor p is 1-based like the Lua
+ * original; reads outside [1..limit] yield 0 (`or 0` semantics).
+ * p/end1/max1 are signed long long so max1 (= end-3) cannot underflow
+ * on tiny partitions. */
+typedef struct {
+    const uint8_t* data;
+    long long limit;
+    long long p, end1, max1;
+    uint32_t value;
+    int range;
+    int bits;
+    int eof;
+} Vp8Br;
+
+static unsigned int vp8_byte(const Vp8Br* br, long long idx) {
+    if (idx < 1 || idx > br->limit) return 0;
+    return br->data[idx - 1];
+}
+
+static void vp8_load_new(Vp8Br* br) {
+    if (br->p < br->max1) {
+        unsigned int b0 = vp8_byte(br, br->p);
+        unsigned int b1 = vp8_byte(br, br->p + 1);
+        unsigned int b2 = vp8_byte(br, br->p + 2);
+        br->value = (br->value << 24) | (b0 << 16) | (b1 << 8) | b2;
+        br->bits += 24;
+        br->p += 3;
+    } else if (br->p < br->end1) {
+        br->value = (br->value << 8) | vp8_byte(br, br->p);
+        br->bits += 8;
+        br->p += 1;
+    } else if (br->eof == 0) {
+        br->value <<= 8;
+        br->bits += 8;
+        br->eof = 1;
+    } else {
+        br->bits = 0;
+    }
+}
+
+static void vp8_new_br(Vp8Br* br, const uint8_t* data, size_t limit,
+                       long long start, long long size) {
+    br->data = data;
+    br->limit = (long long)limit;
+    br->p = start;
+    br->end1 = start + size;
+    br->max1 = start + size - 3;
+    br->range = 254;
+    br->value = 0;
+    br->bits = -8;
+    br->eof = 0;
+    vp8_load_new(br);
+}
+
+static int vp8_get_bit(Vp8Br* br, int prob) {
+    int pos, range, split, bit, shift;
+    unsigned int value;
+    if (br->bits < 0) vp8_load_new(br);
+    pos = br->bits;
+    range = br->range;
+    split = (range * prob) >> 8;
+    value = br->value >> pos;
+    if (value > (unsigned int)split) {
+        bit = 1;
+        range -= split;
+        br->value -= ((unsigned int)split + 1u) << pos;
+    } else {
+        bit = 0;
+        range = split + 1;
+    }
+    shift = 7 - s_vp8Log2[range];
+    range <<= shift;
+    br->bits = pos - shift;
+    br->range = range - 1;
+    return bit;
+}
+
+static int vp8_get_signed(Vp8Br* br, int v) {
+    int pos, split, mask;
+    unsigned int value;
+    if (br->bits < 0) vp8_load_new(br);
+    pos = br->bits;
+    split = br->range >> 1;
+    value = br->value >> pos;
+    mask = (value > (unsigned int)split) ? -1 : 0;
+    br->bits = pos - 1;
+    br->range = (br->range + mask) | 1;
+    br->value -= (((unsigned int)split + 1u) & (unsigned int)mask) << pos;
+    return (v ^ mask) - mask;
+}
+
+static int vp8_get_value(Vp8Br* br, int bits) {
+    int v = 0, i;
+    for (i = bits - 1; i >= 0; i--)
+        v |= vp8_get_bit(br, 128) << i;
+    return v;
+}
+
+static int vp8_get_signed_value(Vp8Br* br, int bits) {
+    int value = vp8_get_value(br, bits);
+    if (vp8_get_bit(br, 128) != 0) return -value;
+    return value;
+}
+
+/* ------------------------------------------------------------------ */
+/* VP8 header parsing                                                  */
+
+typedef struct {
+    int useSegment, updateMap, absoluteDelta;
+    int quantizer[4];
+    int filterStrength[4];
+} Vp8SegmentHdr;
+
+typedef struct {
+    int simple, level, sharpness, useLfDelta;
+    int refLfDelta[4], modeLfDelta[4];
+} Vp8FilterHdr;
+
+typedef struct {
+    int fLimit, fIlevel, fInner, hevThresh;
+} Vp8FStrength;
+
+typedef struct {
+    int nz, nzDc;
+} Vp8MbInfo;
+
+typedef struct {
+    int segment, skip, isI4x4;
+    int imodes[16];
+    int uvMode;
+    int coeffs[384];
+    unsigned int nonZeroY, nonZeroUv;
+    int dither;
+    int fLimit, fIlevel, hevThresh, fInner;
+} Vp8Block;
+
+typedef struct {
+    int y[16];
+    int u[8];
+    int v[8];
+} Vp8TopYuv;
+
+typedef struct {
+    int y1[2]; /* DC, AC */
+    int y2[2];
+    int uv[2];
+} Vp8Quant;
+
+typedef struct {
+    int width, height, mbW, mbH;
+    int filterType;
+    Vp8SegmentHdr segmentHdr;
+    Vp8FilterHdr filterHdr;
+    int probaSegments[3];
+    uint8_t proba[1056];
+    Vp8Quant dqm[4];
+    Vp8FStrength fstrengths[4][2];
+    int useSkipProba, skipP;
+    Vp8Br br;
+    int numPartsMinusOne;
+    Vp8Br parts[16];
+    int extra, extraUV;
+    int cacheYStride, cacheUvStride;
+    uint8_t* cacheY; /* (extra+16)*yBps */
+    uint8_t* cacheU; /* (extraUV+8)*uvBps */
+    uint8_t* cacheV;
+    uint8_t* rgb; /* width*height*3 */
+    uint8_t* tmpY; /* width */
+    uint8_t* tmpU; /* uvWidth */
+    uint8_t* tmpV;
+    Vp8Block* mbData;   /* [mbW] */
+    Vp8MbInfo* mbInfo;  /* [mbW+1]: [0]=left col, [mbX+1]=current col */
+    int* intraT;        /* [4*mbW] */
+    int intraL[4];
+    Vp8TopYuv* yuvT;    /* [mbW+1] */
+    int mbX, mbY;
+} Vp8Dec;
+
+static int vp8_parse_segment_header(Vp8Br* br, Vp8Dec* dec) {
+    Vp8SegmentHdr* hdr = &dec->segmentHdr;
+    int s;
+    hdr->useSegment = vp8_get_bit(br, 128);
+    if (hdr->useSegment != 0) {
+        hdr->updateMap = vp8_get_bit(br, 128);
+        if (vp8_get_bit(br, 128) != 0) {
+            hdr->absoluteDelta = vp8_get_bit(br, 128);
+            for (s = 0; s < 4; s++)
+                hdr->quantizer[s] =
+                    (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 7) : 0;
+            for (s = 0; s < 4; s++)
+                hdr->filterStrength[s] =
+                    (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 6) : 0;
+        }
+        if (hdr->updateMap != 0) {
+            for (s = 0; s < 3; s++)
+                dec->probaSegments[s] =
+                    (vp8_get_bit(br, 128) != 0) ? vp8_get_value(br, 8) : 255;
+        }
+    } else {
+        hdr->updateMap = 0;
+    }
+    return br->eof == 0;
+}
+
+static int vp8_parse_filter_header(Vp8Br* br, Vp8Dec* dec) {
+    Vp8FilterHdr* hdr = &dec->filterHdr;
+    int i;
+    hdr->simple = vp8_get_bit(br, 128);
+    hdr->level = vp8_get_value(br, 6);
+    hdr->sharpness = vp8_get_value(br, 3);
+    hdr->useLfDelta = vp8_get_bit(br, 128);
+    if (hdr->useLfDelta != 0) {
+        if (vp8_get_bit(br, 128) != 0) {
+            for (i = 0; i < 4; i++)
+                if (vp8_get_bit(br, 128) != 0)
+                    hdr->refLfDelta[i] = vp8_get_signed_value(br, 6);
+            for (i = 0; i < 4; i++)
+                if (vp8_get_bit(br, 128) != 0)
+                    hdr->modeLfDelta[i] = vp8_get_signed_value(br, 6);
+        }
+    }
+    if (hdr->level == 0)
+        dec->filterType = 0;
+    else if (hdr->simple != 0)
+        dec->filterType = 1;
+    else
+        dec->filterType = 2;
+    return br->eof == 0;
+}
+
+static int vp8_clip_q(int v, int m) {
+    if (v < 0) return 0;
+    if (v > m) return m;
+    return v;
+}
+
+static void vp8_parse_quant(Vp8Br* br, Vp8Dec* dec) {
+    const Vp8SegmentHdr* hdr = &dec->segmentHdr;
+    int baseQ0 = vp8_get_value(br, 7);
+    int dqy1dc = (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 4) : 0;
+    int dqy2dc = (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 4) : 0;
+    int dqy2ac = (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 4) : 0;
+    int dquvdc = (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 4) : 0;
+    int dquvac = (vp8_get_bit(br, 128) != 0) ? vp8_get_signed_value(br, 4) : 0;
+    int i;
+    for (i = 0; i < 4; i++) {
+        int q, t;
+        if (hdr->useSegment == 0 && i > 0) {
+            dec->dqm[i] = dec->dqm[0];
+            continue;
+        }
+        if (hdr->useSegment != 0) {
+            q = hdr->quantizer[i];
+            if (hdr->absoluteDelta == 0) q += baseQ0;
+        } else {
+            q = baseQ0;
+        }
+        dec->dqm[i].y1[0] = kDcTable[vp8_clip_q(q + dqy1dc, 127)];
+        dec->dqm[i].y1[1] = kAcTable[vp8_clip_q(q, 127)];
+        dec->dqm[i].y2[0] = kDcTable[vp8_clip_q(q + dqy2dc, 127)] * 2;
+        t = kAcTable[vp8_clip_q(q + dqy2ac, 127)];
+        dec->dqm[i].y2[1] = (t * 101581) >> 16;
+        if (dec->dqm[i].y2[1] < 8) dec->dqm[i].y2[1] = 8;
+        dec->dqm[i].uv[0] = kDcTable[vp8_clip_q(q + dquvdc, 117)];
+        dec->dqm[i].uv[1] = kAcTable[vp8_clip_q(q + dquvac, 127)];
+    }
+}
+
+static void vp8_parse_proba(Vp8Br* br, Vp8Dec* dec) {
+    int t, b, c, p, ci = 0;
+    for (t = 0; t < 4; t++) {
+        for (b = 0; b < 8; b++) {
+            for (c = 0; c < 3; c++) {
+                for (p = 0; p <= 10; p++, ci++) {
+                    if (vp8_get_bit(br, CoeffsUpdateProba[ci]) != 0)
+                        dec->proba[ci] = vp8_get_value(br, 8);
+                    else
+                        dec->proba[ci] = CoeffsProba0[ci];
+                }
+            }
+        }
+    }
+    dec->useSkipProba = vp8_get_bit(br, 128);
+    if (dec->useSkipProba != 0) dec->skipP = vp8_get_value(br, 8);
+}
+
+/* ------------------------------------------------------------------ */
+/* VP8 transforms                                                      */
+
+static int vp8_sar(int v, int n) {
+    return (v >= 0) ? (v >> n) : ~(~v >> n);
+}
+
+static int vp8_mul1(int a) { return vp8_sar(a * 20091, 16) + a; }
+
+static int vp8_mul2(int a) { return vp8_sar(a * 35468, 16); }
+
+static void vp8_transform_one(const int* in_, int inOff, uint8_t* buf,
+                              int dst) {
+    int t[16];
+    int i;
+    for (i = 0; i < 4; i++) {
+        int a = in_[inOff + i] + in_[inOff + 8 + i];
+        int b = in_[inOff + i] - in_[inOff + 8 + i];
+        int c = vp8_mul2(in_[inOff + 4 + i]) - vp8_mul1(in_[inOff + 12 + i]);
+        int d = vp8_mul1(in_[inOff + 4 + i]) + vp8_mul2(in_[inOff + 12 + i]);
+        t[i * 4] = a + d;
+        t[i * 4 + 1] = b + c;
+        t[i * 4 + 2] = b - c;
+        t[i * 4 + 3] = a - d;
+    }
+    for (i = 0; i < 4; i++) {
+        int o = dst + i * VP8_BPS;
+        int dc = t[i] + 4;
+        int a = dc + t[i + 8];
+        int b = dc - t[i + 8];
+        int c = vp8_mul2(t[i + 4]) - vp8_mul1(t[i + 12]);
+        int d = vp8_mul1(t[i + 4]) + vp8_mul2(t[i + 12]);
+        buf[o]     = (uint8_t)vp8_clip8(buf[o]     + vp8_sar(a + d, 3));
+        buf[o + 1] = (uint8_t)vp8_clip8(buf[o + 1] + vp8_sar(b + c, 3));
+        buf[o + 2] = (uint8_t)vp8_clip8(buf[o + 2] + vp8_sar(b - c, 3));
+        buf[o + 3] = (uint8_t)vp8_clip8(buf[o + 3] + vp8_sar(a - d, 3));
+    }
+}
+
+static void vp8_transform_ac3(const int* in_, int inOff, uint8_t* buf,
+                              int dst) {
+    int a = in_[inOff] + 4;
+    int c4 = vp8_mul2(in_[inOff + 4]);
+    int d4 = vp8_mul1(in_[inOff + 4]);
+    int c1 = vp8_mul2(in_[inOff + 1]);
+    int d1 = vp8_mul1(in_[inOff + 1]);
+    int y;
+    for (y = 0; y < 4; y++) {
+        int dc;
+        int o;
+        switch (y) {
+            case 0: dc = a + d4; break;
+            case 1: dc = a + c4; break;
+            case 2: dc = a - c4; break;
+            default: dc = a - d4; break;
+        }
+        o = dst + y * VP8_BPS;
+        buf[o]     = (uint8_t)vp8_clip8(buf[o]     + vp8_sar(dc + d1, 3));
+        buf[o + 1] = (uint8_t)vp8_clip8(buf[o + 1] + vp8_sar(dc + c1, 3));
+        buf[o + 2] = (uint8_t)vp8_clip8(buf[o + 2] + vp8_sar(dc - c1, 3));
+        buf[o + 3] = (uint8_t)vp8_clip8(buf[o + 3] + vp8_sar(dc - d1, 3));
+    }
+}
+
+static void vp8_transform_dc(const int* in_, int inOff, uint8_t* buf,
+                             int dst) {
+    int v = vp8_sar(in_[inOff] + 4, 3);
+    int j;
+    for (j = 0; j < 4; j++) {
+        int o = dst + j * VP8_BPS;
+        int i;
+        for (i = 0; i < 4; i++)
+            buf[o + i] = (uint8_t)vp8_clip8(buf[o + i] + v);
+    }
+}
+
+static void vp8_transform_uv(const int* in_, int inOff, uint8_t* buf,
+                             int dst) {
+    vp8_transform_one(in_, inOff, buf, dst);
+    vp8_transform_one(in_, inOff + 16, buf, dst + 4);
+    vp8_transform_one(in_, inOff + 32, buf, dst + 4 * VP8_BPS);
+    vp8_transform_one(in_, inOff + 48, buf, dst + 4 * VP8_BPS + 4);
+}
+
+static void vp8_transform_dcuv(const int* in_, int inOff, uint8_t* buf,
+                               int dst) {
+    if (in_[inOff] != 0)      vp8_transform_dc(in_, inOff, buf, dst);
+    if (in_[inOff + 16] != 0) vp8_transform_dc(in_, inOff + 16, buf, dst + 4);
+    if (in_[inOff + 32] != 0)
+        vp8_transform_dc(in_, inOff + 32, buf, dst + 4 * VP8_BPS);
+    if (in_[inOff + 48] != 0)
+        vp8_transform_dc(in_, inOff + 48, buf, dst + 4 * VP8_BPS + 4);
+}
+
+static void vp8_transform_wht(const int* in_, int inOff, int* out,
+                              int outOff) {
+    int t[16];
+    int i;
+    for (i = 0; i < 4; i++) {
+        int a0 = in_[inOff + i] + in_[inOff + 12 + i];
+        int a1 = in_[inOff + 4 + i] + in_[inOff + 8 + i];
+        int a2 = in_[inOff + 4 + i] - in_[inOff + 8 + i];
+        int a3 = in_[inOff + i] - in_[inOff + 12 + i];
+        t[i] = a0 + a1;
+        t[8 + i] = a0 - a1;
+        t[4 + i] = a3 + a2;
+        t[12 + i] = a3 - a2;
+    }
+    for (i = 0; i < 4; i++) {
+        int dc = t[i * 4] + 3;
+        int a0 = dc + t[i * 4 + 3];
+        int a1 = t[i * 4 + 1] + t[i * 4 + 2];
+        int a2 = t[i * 4 + 1] - t[i * 4 + 2];
+        int a3 = dc - t[i * 4 + 3];
+        out[outOff]      = vp8_sar(a0 + a1, 3);
+        out[outOff + 16] = vp8_sar(a3 + a2, 3);
+        out[outOff + 32] = vp8_sar(a0 - a1, 3);
+        out[outOff + 48] = vp8_sar(a3 - a2, 3);
+        outOff += 64;
+    }
+}
+
+static void vp8_do_transform(unsigned int bits, const int* coeffs, int inOff,
+                             uint8_t* buf, int dst) {
+    switch ((int)(bits >> 30)) {
+        case 3: vp8_transform_one(coeffs, inOff, buf, dst); break;
+        case 2: vp8_transform_ac3(coeffs, inOff, buf, dst); break;
+        case 1: vp8_transform_dc(coeffs, inOff, buf, dst); break;
+        default: break;
+    }
+}
+
+static void vp8_do_uv_transform(unsigned int bits, const int* coeffs,
+                                int inOff, uint8_t* buf, int dst) {
+    if ((bits & 0xffu) != 0) {
+        if ((bits & 0xaau) != 0)
+            vp8_transform_uv(coeffs, inOff, buf, dst);
+        else
+            vp8_transform_dcuv(coeffs, inOff, buf, dst);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* VP8 intra predictions (stride 32)                                   */
+
+static int vp8_avg2(int a, int b) { return (a + b + 1) >> 1; }
+
+static int vp8_avg3(int a, int b, int c) {
+    return (a + 2 * b + c + 2) >> 2;
+}
+
+static void vp8_true_motion(uint8_t* buf, int dst, int size) {
+    int topBase = dst - VP8_BPS;
+    int topleft = buf[topBase - 1];
+    int y, x;
+    for (y = 0; y < size; y++) {
+        int left = buf[dst - 1 + y * VP8_BPS];
+        int r = dst + y * VP8_BPS;
+        for (x = 0; x < size; x++)
+            buf[r + x] =
+                (uint8_t)vp8_clip8(buf[topBase + x] + left - topleft);
+    }
+}
+
+static void vp8_fill_const(uint8_t* buf, int dst, int size, int v) {
+    int j, i;
+    for (j = 0; j < size; j++) {
+        int r = dst + j * VP8_BPS;
+        for (i = 0; i < size; i++) buf[r + i] = (uint8_t)v;
+    }
+}
+
+static void vp8_dc16(uint8_t* buf, int dst) {
+    int dc = 16, j;
+    for (j = 0; j < 16; j++)
+        dc += buf[dst - 1 + j * VP8_BPS] + buf[dst - VP8_BPS + j];
+    vp8_fill_const(buf, dst, 16, dc >> 5);
+}
+
+static void vp8_dc16_no_top(uint8_t* buf, int dst) {
+    int dc = 8, j;
+    for (j = 0; j < 16; j++) dc += buf[dst - 1 + j * VP8_BPS];
+    vp8_fill_const(buf, dst, 16, dc >> 4);
+}
+
+static void vp8_dc16_no_left(uint8_t* buf, int dst) {
+    int dc = 8, i;
+    for (i = 0; i < 16; i++) dc += buf[dst - VP8_BPS + i];
+    vp8_fill_const(buf, dst, 16, dc >> 4);
+}
+
+static void vp8_ve16(uint8_t* buf, int dst) {
+    int top = dst - VP8_BPS;
+    int j, i;
+    for (j = 0; j < 16; j++) {
+        int r = dst + j * VP8_BPS;
+        for (i = 0; i < 16; i++) buf[r + i] = buf[top + i];
+    }
+}
+
+static void vp8_he16(uint8_t* buf, int dst) {
+    int j, i;
+    for (j = 0; j < 16; j++) {
+        int v = buf[dst - 1 + j * VP8_BPS];
+        int r = dst + j * VP8_BPS;
+        for (i = 0; i < 16; i++) buf[r + i] = (uint8_t)v;
+    }
+}
+
+static void vp8_pred_luma16(int mode, uint8_t* buf, int dst) {
+    switch (mode) {
+        case 0: vp8_dc16(buf, dst); break;
+        case 1: vp8_true_motion(buf, dst, 16); break;
+        case 2: vp8_ve16(buf, dst); break;
+        case 3: vp8_he16(buf, dst); break;
+        case 4: vp8_dc16_no_top(buf, dst); break;
+        case 5: vp8_dc16_no_left(buf, dst); break;
+        default: vp8_fill_const(buf, dst, 16, 128); break;
+    }
+}
+
+static void vp8_dc8uv(uint8_t* buf, int dst) {
+    int dc0 = 8, i;
+    for (i = 0; i < 8; i++)
+        dc0 += buf[dst - VP8_BPS + i] + buf[dst - 1 + i * VP8_BPS];
+    vp8_fill_const(buf, dst, 8, dc0 >> 4);
+}
+
+static void vp8_dc8uv_no_top(uint8_t* buf, int dst) {
+    int dc0 = 4, i;
+    for (i = 0; i < 8; i++) dc0 += buf[dst - 1 + i * VP8_BPS];
+    vp8_fill_const(buf, dst, 8, dc0 >> 3);
+}
+
+static void vp8_dc8uv_no_left(uint8_t* buf, int dst) {
+    int dc0 = 4, i;
+    for (i = 0; i < 8; i++) dc0 += buf[dst - VP8_BPS + i];
+    vp8_fill_const(buf, dst, 8, dc0 >> 3);
+}
+
+static void vp8_ve8uv(uint8_t* buf, int dst) {
+    int top = dst - VP8_BPS;
+    int j, i;
+    for (j = 0; j < 8; j++) {
+        int r = dst + j * VP8_BPS;
+        for (i = 0; i < 8; i++) buf[r + i] = buf[top + i];
+    }
+}
+
+static void vp8_he8uv(uint8_t* buf, int dst) {
+    int j, i;
+    for (j = 0; j < 8; j++) {
+        int v = buf[dst - 1 + j * VP8_BPS];
+        int r = dst + j * VP8_BPS;
+        for (i = 0; i < 8; i++) buf[r + i] = (uint8_t)v;
+    }
+}
+
+static void vp8_pred_chroma8(int mode, uint8_t* buf, int dst) {
+    switch (mode) {
+        case 0: vp8_dc8uv(buf, dst); break;
+        case 1: vp8_true_motion(buf, dst, 8); break;
+        case 2: vp8_ve8uv(buf, dst); break;
+        case 3: vp8_he8uv(buf, dst); break;
+        case 4: vp8_dc8uv_no_top(buf, dst); break;
+        case 5: vp8_dc8uv_no_left(buf, dst); break;
+        default: vp8_fill_const(buf, dst, 8, 128); break;
+    }
+}
+
+static void vp8_dc4(uint8_t* buf, int dst) {
+    int dc = 4, i;
+    for (i = 0; i < 4; i++)
+        dc += buf[dst - VP8_BPS + i] + buf[dst - 1 + i * VP8_BPS];
+    vp8_fill_const(buf, dst, 4, dc >> 3);
+}
+
+static void vp8_ve4(uint8_t* buf, int dst) {
+    int top = dst - VP8_BPS;
+    int v0 = vp8_avg3(buf[top - 1], buf[top], buf[top + 1]);
+    int v1 = vp8_avg3(buf[top], buf[top + 1], buf[top + 2]);
+    int v2 = vp8_avg3(buf[top + 1], buf[top + 2], buf[top + 3]);
+    int v3 = vp8_avg3(buf[top + 2], buf[top + 3], buf[top + 4]);
+    int j;
+    for (j = 0; j < 4; j++) {
+        int r = dst + j * VP8_BPS;
+        buf[r] = (uint8_t)v0;
+        buf[r + 1] = (uint8_t)v1;
+        buf[r + 2] = (uint8_t)v2;
+        buf[r + 3] = (uint8_t)v3;
+    }
+}
+
+static void vp8_he4(uint8_t* buf, int dst) {
+    int a = buf[dst - 1 - VP8_BPS];
+    int b = buf[dst - 1];
+    int c = buf[dst - 1 + VP8_BPS];
+    int d = buf[dst - 1 + 2 * VP8_BPS];
+    int e = buf[dst - 1 + 3 * VP8_BPS];
+    int w0 = vp8_avg3(a, b, c);
+    int w1 = vp8_avg3(b, c, d);
+    int w2 = vp8_avg3(c, d, e);
+    int w3 = vp8_avg3(d, e, e);
+    int j, i;
+    for (j = 0; j < 4; j++) {
+        int w;
+        switch (j) {
+            case 0: w = w0; break;
+            case 1: w = w1; break;
+            case 2: w = w2; break;
+            default: w = w3; break;
+        }
+        for (i = 0; i < 4; i++)
+            buf[dst + j * VP8_BPS + i] = (uint8_t)w;
+    }
+}
+
+static void vp8_rd4(uint8_t* buf, int dst) {
+    int i = buf[dst - 1];
+    int j = buf[dst - 1 + VP8_BPS];
+    int k = buf[dst - 1 + 2 * VP8_BPS];
+    int l = buf[dst - 1 + 3 * VP8_BPS];
+    int x = buf[dst - 1 - VP8_BPS];
+    int a = buf[dst - VP8_BPS];
+    int b = buf[dst - VP8_BPS + 1];
+    int c = buf[dst - VP8_BPS + 2];
+    int d = buf[dst - VP8_BPS + 3];
+    buf[dst + 3 * VP8_BPS] = (uint8_t)vp8_avg3(j, k, l);
+    buf[dst + 1 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(i, j, k);
+    buf[dst + 0 + 2 * VP8_BPS] = buf[dst + 1 + 3 * VP8_BPS];
+    buf[dst + 2 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(x, i, j);
+    buf[dst + 1 + 2 * VP8_BPS] = buf[dst + 2 + 3 * VP8_BPS];
+    buf[dst + 0 + 1 * VP8_BPS] = buf[dst + 2 + 3 * VP8_BPS];
+    buf[dst + 3 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(a, x, i);
+    buf[dst + 2 + 2 * VP8_BPS] = buf[dst + 3 + 3 * VP8_BPS];
+    buf[dst + 1 + 1 * VP8_BPS] = buf[dst + 3 + 3 * VP8_BPS];
+    buf[dst + 0 + 0 * VP8_BPS] = buf[dst + 3 + 3 * VP8_BPS];
+    buf[dst + 3 + 2 * VP8_BPS] = (uint8_t)vp8_avg3(b, a, x);
+    buf[dst + 2 + 1 * VP8_BPS] = buf[dst + 3 + 2 * VP8_BPS];
+    buf[dst + 1 + 0 * VP8_BPS] = buf[dst + 3 + 2 * VP8_BPS];
+    buf[dst + 3 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(c, b, a);
+    buf[dst + 2 + 0 * VP8_BPS] = buf[dst + 3 + 1 * VP8_BPS];
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(d, c, b);
+}
+
+static void vp8_ld4(uint8_t* buf, int dst) {
+    int a = buf[dst - VP8_BPS];
+    int b = buf[dst - VP8_BPS + 1];
+    int c = buf[dst - VP8_BPS + 2];
+    int d = buf[dst - VP8_BPS + 3];
+    int e = buf[dst - VP8_BPS + 4];
+    int f = buf[dst - VP8_BPS + 5];
+    int g = buf[dst - VP8_BPS + 6];
+    int h = buf[dst - VP8_BPS + 7];
+    buf[dst + 0 * VP8_BPS] = (uint8_t)vp8_avg3(a, b, c);
+    buf[dst + 1 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(b, c, d);
+    buf[dst + 0 + 1 * VP8_BPS] = buf[dst + 1 + 0 * VP8_BPS];
+    buf[dst + 2 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(c, d, e);
+    buf[dst + 1 + 1 * VP8_BPS] = buf[dst + 2 + 0 * VP8_BPS];
+    buf[dst + 0 + 2 * VP8_BPS] = buf[dst + 2 + 0 * VP8_BPS];
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(d, e, f);
+    buf[dst + 2 + 1 * VP8_BPS] = buf[dst + 3 + 0 * VP8_BPS];
+    buf[dst + 1 + 2 * VP8_BPS] = buf[dst + 3 + 0 * VP8_BPS];
+    buf[dst + 0 + 3 * VP8_BPS] = buf[dst + 3 + 0 * VP8_BPS];
+    buf[dst + 3 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(e, f, g);
+    buf[dst + 2 + 2 * VP8_BPS] = buf[dst + 3 + 1 * VP8_BPS];
+    buf[dst + 1 + 3 * VP8_BPS] = buf[dst + 3 + 1 * VP8_BPS];
+    buf[dst + 3 + 2 * VP8_BPS] = (uint8_t)vp8_avg3(f, g, h);
+    buf[dst + 2 + 3 * VP8_BPS] = buf[dst + 3 + 2 * VP8_BPS];
+    buf[dst + 3 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(g, h, h);
+}
+
+static void vp8_vr4(uint8_t* buf, int dst) {
+    int i = buf[dst - 1];
+    int j = buf[dst - 1 + VP8_BPS];
+    int k = buf[dst - 1 + 2 * VP8_BPS];
+    int x = buf[dst - 1 - VP8_BPS];
+    int a = buf[dst - VP8_BPS];
+    int b = buf[dst - VP8_BPS + 1];
+    int c = buf[dst - VP8_BPS + 2];
+    int d = buf[dst - VP8_BPS + 3];
+    buf[dst + 0 * VP8_BPS] = (uint8_t)vp8_avg2(x, a);
+    buf[dst + 1 + 2 * VP8_BPS] = buf[dst + 0 * VP8_BPS];
+    buf[dst + 1 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(a, b);
+    buf[dst + 2 + 2 * VP8_BPS] = buf[dst + 1 + 0 * VP8_BPS];
+    buf[dst + 2 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(b, c);
+    buf[dst + 3 + 2 * VP8_BPS] = buf[dst + 2 + 0 * VP8_BPS];
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(c, d);
+    buf[dst + 0 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(k, j, i);
+    buf[dst + 0 + 2 * VP8_BPS] = (uint8_t)vp8_avg3(j, i, x);
+    buf[dst + 0 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(i, x, a);
+    buf[dst + 1 + 3 * VP8_BPS] = buf[dst + 0 + 1 * VP8_BPS];
+    buf[dst + 1 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(x, a, b);
+    buf[dst + 2 + 3 * VP8_BPS] = buf[dst + 1 + 1 * VP8_BPS];
+    buf[dst + 2 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(a, b, c);
+    buf[dst + 3 + 3 * VP8_BPS] = buf[dst + 2 + 1 * VP8_BPS];
+    buf[dst + 3 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(b, c, d);
+}
+
+static void vp8_vl4(uint8_t* buf, int dst) {
+    int a = buf[dst - VP8_BPS];
+    int b = buf[dst - VP8_BPS + 1];
+    int c = buf[dst - VP8_BPS + 2];
+    int d = buf[dst - VP8_BPS + 3];
+    int e = buf[dst - VP8_BPS + 4];
+    int f = buf[dst - VP8_BPS + 5];
+    int g = buf[dst - VP8_BPS + 6];
+    int h = buf[dst - VP8_BPS + 7];
+    buf[dst + 0 * VP8_BPS] = (uint8_t)vp8_avg2(a, b);
+    buf[dst + 1 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(b, c);
+    buf[dst + 0 + 2 * VP8_BPS] = buf[dst + 1 + 0 * VP8_BPS];
+    buf[dst + 2 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(c, d);
+    buf[dst + 1 + 2 * VP8_BPS] = buf[dst + 2 + 0 * VP8_BPS];
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(d, e);
+    buf[dst + 2 + 2 * VP8_BPS] = buf[dst + 3 + 0 * VP8_BPS];
+    buf[dst + 0 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(a, b, c);
+    buf[dst + 1 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(b, c, d);
+    buf[dst + 0 + 3 * VP8_BPS] = buf[dst + 1 + 1 * VP8_BPS];
+    buf[dst + 2 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(c, d, e);
+    buf[dst + 1 + 3 * VP8_BPS] = buf[dst + 2 + 1 * VP8_BPS];
+    buf[dst + 3 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(d, e, f);
+    buf[dst + 2 + 3 * VP8_BPS] = buf[dst + 3 + 1 * VP8_BPS];
+    buf[dst + 3 + 2 * VP8_BPS] = (uint8_t)vp8_avg3(e, f, g);
+    buf[dst + 3 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(f, g, h);
+}
+
+static void vp8_hd4(uint8_t* buf, int dst) {
+    int i = buf[dst - 1];
+    int j = buf[dst - 1 + VP8_BPS];
+    int k = buf[dst - 1 + 2 * VP8_BPS];
+    int l = buf[dst - 1 + 3 * VP8_BPS];
+    int x = buf[dst - 1 - VP8_BPS];
+    int a = buf[dst - VP8_BPS];
+    int b = buf[dst - VP8_BPS + 1];
+    int c = buf[dst - VP8_BPS + 2];
+    buf[dst + 0 * VP8_BPS] = (uint8_t)vp8_avg2(i, x);
+    buf[dst + 2 + 1 * VP8_BPS] = buf[dst + 0 * VP8_BPS];
+    buf[dst + 0 + 1 * VP8_BPS] = (uint8_t)vp8_avg2(j, i);
+    buf[dst + 2 + 2 * VP8_BPS] = buf[dst + 0 + 1 * VP8_BPS];
+    buf[dst + 0 + 2 * VP8_BPS] = (uint8_t)vp8_avg2(k, j);
+    buf[dst + 2 + 3 * VP8_BPS] = buf[dst + 0 + 2 * VP8_BPS];
+    buf[dst + 0 + 3 * VP8_BPS] = (uint8_t)vp8_avg2(l, k);
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(a, b, c);
+    buf[dst + 2 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(x, a, b);
+    buf[dst + 1 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(i, x, a);
+    buf[dst + 3 + 1 * VP8_BPS] = buf[dst + 1 + 0 * VP8_BPS];
+    buf[dst + 1 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(j, i, x);
+    buf[dst + 3 + 2 * VP8_BPS] = buf[dst + 1 + 1 * VP8_BPS];
+    buf[dst + 1 + 2 * VP8_BPS] = (uint8_t)vp8_avg3(k, j, i);
+    buf[dst + 3 + 3 * VP8_BPS] = buf[dst + 1 + 2 * VP8_BPS];
+    buf[dst + 1 + 3 * VP8_BPS] = (uint8_t)vp8_avg3(l, k, j);
+}
+
+static void vp8_hu4(uint8_t* buf, int dst) {
+    int i = buf[dst - 1];
+    int j = buf[dst - 1 + VP8_BPS];
+    int k = buf[dst - 1 + 2 * VP8_BPS];
+    int l = buf[dst - 1 + 3 * VP8_BPS];
+    buf[dst + 0 * VP8_BPS] = (uint8_t)vp8_avg2(i, j);
+    buf[dst + 2 + 0 * VP8_BPS] = (uint8_t)vp8_avg2(j, k);
+    buf[dst + 0 + 1 * VP8_BPS] = buf[dst + 2 + 0 * VP8_BPS];
+    buf[dst + 2 + 1 * VP8_BPS] = (uint8_t)vp8_avg2(k, l);
+    buf[dst + 0 + 2 * VP8_BPS] = buf[dst + 2 + 1 * VP8_BPS];
+    buf[dst + 1 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(i, j, k);
+    buf[dst + 3 + 0 * VP8_BPS] = (uint8_t)vp8_avg3(j, k, l);
+    buf[dst + 1 + 1 * VP8_BPS] = buf[dst + 3 + 0 * VP8_BPS];
+    buf[dst + 3 + 1 * VP8_BPS] = (uint8_t)vp8_avg3(k, l, l);
+    buf[dst + 1 + 2 * VP8_BPS] = buf[dst + 3 + 1 * VP8_BPS];
+    buf[dst + 3 + 2 * VP8_BPS] = (uint8_t)l;
+    buf[dst + 2 + 2 * VP8_BPS] = (uint8_t)l;
+    buf[dst + 0 + 3 * VP8_BPS] = (uint8_t)l;
+    buf[dst + 1 + 3 * VP8_BPS] = (uint8_t)l;
+    buf[dst + 2 + 3 * VP8_BPS] = (uint8_t)l;
+    buf[dst + 3 + 3 * VP8_BPS] = (uint8_t)l;
+}
+
+static void vp8_pred_luma4(int mode, uint8_t* buf, int dst) {
+    switch (mode) {
+        case 0: vp8_dc4(buf, dst); break;
+        case 1: vp8_true_motion(buf, dst, 4); break;
+        case 2: vp8_ve4(buf, dst); break;
+        case 3: vp8_he4(buf, dst); break;
+        case 4: vp8_rd4(buf, dst); break;
+        case 5: vp8_vr4(buf, dst); break;
+        case 6: vp8_ld4(buf, dst); break;
+        case 7: vp8_vl4(buf, dst); break;
+        case 8: vp8_hd4(buf, dst); break;
+        default: vp8_hu4(buf, dst); break;
+    }
+}
+
+static int vp8_check_mode(int mbX, int mbY, int mode) {
+    if (mode == VP8_DC_PRED) {
+        if (mbX == 0) {
+            if (mbY == 0) return 6;
+            return 5;
+        }
+        if (mbY == 0) return 4;
+        return 0;
+    }
+    return mode;
+}
+
+/* ------------------------------------------------------------------ */
+/* In-loop filtering                                                   */
+
+static void vp8_do_filter2(uint8_t* buf, int p, int step) {
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    int a = 3 * (q0 - p0) + vp8_ksclip1(p1 - q1);
+    int a1 = vp8_ksclip2(vp8_sar(a + 4, 3));
+    int a2 = vp8_ksclip2(vp8_sar(a + 3, 3));
+    buf[p - step] = (uint8_t)vp8_clip8(p0 + a2);
+    buf[p] = (uint8_t)vp8_clip8(q0 - a1);
+}
+
+static void vp8_do_filter4(uint8_t* buf, int p, int step) {
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    int a = 3 * (q0 - p0);
+    int a1 = vp8_ksclip2(vp8_sar(a + 4, 3));
+    int a2 = vp8_ksclip2(vp8_sar(a + 3, 3));
+    int a3 = vp8_sar(a1 + 1, 1);
+    buf[p - 2 * step] = (uint8_t)vp8_clip8(p1 + a3);
+    buf[p - step] = (uint8_t)vp8_clip8(p0 + a2);
+    buf[p] = (uint8_t)vp8_clip8(q0 - a1);
+    buf[p + step] = (uint8_t)vp8_clip8(q1 - a3);
+}
+
+static void vp8_do_filter6(uint8_t* buf, int p, int step) {
+    int p2 = buf[p - 3 * step];
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    int q2 = buf[p + 2 * step];
+    int a = vp8_ksclip1(3 * (q0 - p0) + vp8_ksclip1(p1 - q1));
+    int a1 = vp8_sar(27 * a + 63, 7);
+    int a2 = vp8_sar(18 * a + 63, 7);
+    int a3 = vp8_sar(9 * a + 63, 7);
+    buf[p - 3 * step] = (uint8_t)vp8_clip8(p2 + a3);
+    buf[p - 2 * step] = (uint8_t)vp8_clip8(p1 + a2);
+    buf[p - step] = (uint8_t)vp8_clip8(p0 + a1);
+    buf[p] = (uint8_t)vp8_clip8(q0 - a1);
+    buf[p + step] = (uint8_t)vp8_clip8(q1 - a2);
+    buf[p + 2 * step] = (uint8_t)vp8_clip8(q2 - a3);
+}
+
+static int vp8_hev(const uint8_t* buf, int p, int step, int thresh) {
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    return (vp8_kabs0(p1 - p0) > thresh) || (vp8_kabs0(q1 - q0) > thresh);
+}
+
+static int vp8_needs_filter(const uint8_t* buf, int p, int step, int t) {
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    return (4 * vp8_kabs0(p0 - q0) + vp8_kabs0(p1 - q1)) <= t;
+}
+
+static int vp8_needs_filter2(const uint8_t* buf, int p, int step, int t,
+                             int it) {
+    int p3 = buf[p - 4 * step];
+    int p2 = buf[p - 3 * step];
+    int p1 = buf[p - 2 * step];
+    int p0 = buf[p - step];
+    int q0 = buf[p];
+    int q1 = buf[p + step];
+    int q2 = buf[p + 2 * step];
+    int q3 = buf[p + 3 * step];
+    if ((4 * vp8_kabs0(p0 - q0) + vp8_kabs0(p1 - q1)) > t) return 0;
+    return vp8_kabs0(p3 - p2) <= it && vp8_kabs0(p2 - p1) <= it &&
+           vp8_kabs0(p1 - p0) <= it && vp8_kabs0(q3 - q2) <= it &&
+           vp8_kabs0(q2 - q1) <= it && vp8_kabs0(q1 - q0) <= it;
+}
+
+static void vp8_filter_loop26(uint8_t* buf, int p, int hstride, int vstride,
+                              int size, int thresh, int ithresh,
+                              int hevThresh) {
+    int t = 2 * thresh + 1;
+    int n;
+    for (n = 0; n < size; n++) {
+        if (vp8_needs_filter2(buf, p, hstride, t, ithresh)) {
+            if (vp8_hev(buf, p, hstride, hevThresh))
+                vp8_do_filter2(buf, p, hstride);
+            else
+                vp8_do_filter6(buf, p, hstride);
+        }
+        p += vstride;
+    }
+}
+
+static void vp8_filter_loop24(uint8_t* buf, int p, int hstride, int vstride,
+                              int size, int thresh, int ithresh,
+                              int hevThresh) {
+    int t = 2 * thresh + 1;
+    int n;
+    for (n = 0; n < size; n++) {
+        if (vp8_needs_filter2(buf, p, hstride, t, ithresh)) {
+            if (vp8_hev(buf, p, hstride, hevThresh))
+                vp8_do_filter2(buf, p, hstride);
+            else
+                vp8_do_filter4(buf, p, hstride);
+        }
+        p += vstride;
+    }
+}
+
+static void vp8_vfilter16(uint8_t* buf, int p, int stride, int thresh,
+                          int ithresh, int hevThresh) {
+    vp8_filter_loop26(buf, p, stride, 1, 16, thresh, ithresh, hevThresh);
+}
+
+static void vp8_hfilter16(uint8_t* buf, int p, int stride, int thresh,
+                          int ithresh, int hevThresh) {
+    vp8_filter_loop26(buf, p, 1, stride, 16, thresh, ithresh, hevThresh);
+}
+
+static void vp8_vfilter16i(uint8_t* buf, int p, int stride, int thresh,
+                           int ithresh, int hevThresh) {
+    int k;
+    for (k = 0; k < 3; k++) {
+        p += 4 * stride;
+        vp8_filter_loop24(buf, p, stride, 1, 16, thresh, ithresh, hevThresh);
+    }
+}
+
+static void vp8_hfilter16i(uint8_t* buf, int p, int stride, int thresh,
+                           int ithresh, int hevThresh) {
+    int k;
+    for (k = 0; k < 3; k++) {
+        p += 4;
+        vp8_filter_loop24(buf, p, 1, stride, 16, thresh, ithresh, hevThresh);
+    }
+}
+
+static void vp8_vfilter8(uint8_t* bufU, int u, uint8_t* bufV, int v,
+                         int stride, int thresh, int ithresh, int hevThresh) {
+    vp8_filter_loop26(bufU, u, stride, 1, 8, thresh, ithresh, hevThresh);
+    vp8_filter_loop26(bufV, v, stride, 1, 8, thresh, ithresh, hevThresh);
+}
+
+static void vp8_vfilter8i(uint8_t* bufU, int u, uint8_t* bufV, int v,
+                          int stride, int thresh, int ithresh,
+                          int hevThresh) {
+    vp8_filter_loop24(bufU, u + 4 * stride, stride, 1, 8, thresh, ithresh,
+                      hevThresh);
+    vp8_filter_loop24(bufV, v + 4 * stride, stride, 1, 8, thresh, ithresh,
+                      hevThresh);
+}
+
+static void vp8_hfilter8(uint8_t* bufU, int u, uint8_t* bufV, int v,
+                         int stride, int thresh, int ithresh, int hevThresh) {
+    vp8_filter_loop26(bufU, u, 1, stride, 8, thresh, ithresh, hevThresh);
+    vp8_filter_loop26(bufV, v, 1, stride, 8, thresh, ithresh, hevThresh);
+}
+
+static void vp8_hfilter8i(uint8_t* bufU, int u, uint8_t* bufV, int v,
+                          int stride, int thresh, int ithresh,
+                          int hevThresh) {
+    vp8_filter_loop24(bufU, u + 4, 1, stride, 8, thresh, ithresh, hevThresh);
+    vp8_filter_loop24(bufV, v + 4, 1, stride, 8, thresh, ithresh, hevThresh);
+}
+
+static void vp8_simple_vfilter16(uint8_t* buf, int p, int stride, int thresh) {
+    int t = 2 * thresh + 1;
+    int i;
+    for (i = 0; i < 16; i++) {
+        int pp = p + i;
+        if (vp8_needs_filter(buf, pp, stride, t)) vp8_do_filter2(buf, pp, stride);
+    }
+}
+
+static void vp8_simple_hfilter16(uint8_t* buf, int p, int stride, int thresh) {
+    int t = 2 * thresh + 1;
+    int i;
+    for (i = 0; i < 16; i++) {
+        int pp = p + i * stride;
+        if (vp8_needs_filter(buf, pp, 1, t)) vp8_do_filter2(buf, pp, 1);
+    }
+}
+
+static void vp8_simple_vfilter16i(uint8_t* buf, int p, int stride,
+                                  int thresh) {
+    int k;
+    for (k = 0; k < 3; k++) {
+        p += 4 * stride;
+        vp8_simple_vfilter16(buf, p, stride, thresh);
+    }
+}
+
+static void vp8_simple_hfilter16i(uint8_t* buf, int p, int stride,
+                                  int thresh) {
+    int k;
+    for (k = 0; k < 3; k++) {
+        p += 4;
+        vp8_simple_hfilter16(buf, p, stride, thresh);
+    }
+}
+
+static void vp8_precompute_filter_strengths(Vp8Dec* dec) {
+    const Vp8FilterHdr* hdr = &dec->filterHdr;
+    const Vp8SegmentHdr* segHdr = &dec->segmentHdr;
+    int s, i4x4;
+    if (dec->filterType <= 0) return;
+    for (s = 0; s < 4; s++) {
+        int baseLevel;
+        if (segHdr->useSegment != 0) {
+            baseLevel = segHdr->filterStrength[s];
+            if (segHdr->absoluteDelta == 0) baseLevel += hdr->level;
+        } else {
+            baseLevel = hdr->level;
+        }
+        for (i4x4 = 0; i4x4 <= 1; i4x4++) {
+            Vp8FStrength* fs = &dec->fstrengths[s][i4x4];
+            int level = baseLevel;
+            if (hdr->useLfDelta != 0) {
+                level += hdr->refLfDelta[0];
+                if (i4x4 == 1) level += hdr->modeLfDelta[0];
+            }
+            if (level < 0) level = 0;
+            if (level > 63) level = 63;
+            fs->fLimit = 0;
+            fs->fIlevel = 0;
+            fs->fInner = i4x4;
+            fs->hevThresh = 0;
+            if (level > 0) {
+                int ilevel = level;
+                if (hdr->sharpness > 0) {
+                    ilevel >>= (hdr->sharpness > 4) ? 2 : 1;
+                    if (ilevel > 9 - hdr->sharpness)
+                        ilevel = 9 - hdr->sharpness;
+                }
+                if (ilevel < 1) ilevel = 1;
+                fs->fIlevel = ilevel;
+                fs->fLimit = 2 * level + ilevel;
+                if (level >= 40)
+                    fs->hevThresh = 2;
+                else if (level >= 15)
+                    fs->hevThresh = 1;
+            }
+        }
+    }
+}
+
+static void vp8_do_filter(Vp8Dec* dec, int mbX, int mbY) {
+    const Vp8Block* block = &dec->mbData[mbX];
+    int yBps = dec->cacheYStride;
+    int yDst = dec->extra * yBps + mbX * 16;
+    int ilevel = block->fIlevel;
+    int limit = block->fLimit;
+    if (limit == 0) return;
+    if (dec->filterType == 1) {
+        if (mbX > 0)
+            vp8_simple_hfilter16(dec->cacheY, yDst, yBps, limit + 4);
+        if (block->fInner == 1)
+            vp8_simple_hfilter16i(dec->cacheY, yDst, yBps, limit);
+        if (mbY > 0)
+            vp8_simple_vfilter16(dec->cacheY, yDst, yBps, limit + 4);
+        if (block->fInner == 1)
+            vp8_simple_vfilter16i(dec->cacheY, yDst, yBps, limit);
+    } else {
+        int uvBps = dec->cacheUvStride;
+        int uvDst = dec->extraUV * uvBps + mbX * 8;
+        int hevThresh = block->hevThresh;
+        if (mbX > 0) {
+            vp8_hfilter16(dec->cacheY, yDst, yBps, limit + 4, ilevel,
+                          hevThresh);
+            vp8_hfilter8(dec->cacheU, uvDst, dec->cacheV, uvDst, uvBps,
+                         limit + 4, ilevel, hevThresh);
+        }
+        if (block->fInner == 1) {
+            vp8_hfilter16i(dec->cacheY, yDst, yBps, limit, ilevel, hevThresh);
+            vp8_hfilter8i(dec->cacheU, uvDst, dec->cacheV, uvDst, uvBps,
+                          limit, ilevel, hevThresh);
+        }
+        if (mbY > 0) {
+            vp8_vfilter16(dec->cacheY, yDst, yBps, limit + 4, ilevel,
+                          hevThresh);
+            vp8_vfilter8(dec->cacheU, uvDst, dec->cacheV, uvDst, uvBps,
+                         limit + 4, ilevel, hevThresh);
+        }
+        if (block->fInner == 1) {
+            vp8_vfilter16i(dec->cacheY, yDst, yBps, limit, ilevel, hevThresh);
+            vp8_vfilter8i(dec->cacheU, uvDst, dec->cacheV, uvDst, uvBps,
+                          limit, ilevel, hevThresh);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Coefficient decoding                                                */
+
+static int vp8_get_large_value(Vp8Br* br, const uint8_t* proba, int p) {
+    int v;
+    if (vp8_get_bit(br, proba[p + 3]) == 0) {
+        if (vp8_get_bit(br, proba[p + 4]) == 0)
+            v = 2;
+        else
+            v = 3 + vp8_get_bit(br, proba[p + 5]);
+    } else if (vp8_get_bit(br, proba[p + 6]) == 0) {
+        if (vp8_get_bit(br, proba[p + 7]) == 0) {
+            v = 5 + vp8_get_bit(br, 159);
+        } else {
+            v = 7 + 2 * vp8_get_bit(br, 165);
+            v += vp8_get_bit(br, 145);
+        }
+    } else {
+        int bit1 = vp8_get_bit(br, proba[p + 8]);
+        int bit0 = vp8_get_bit(br, proba[p + 9 + bit1]);
+        int cat = 2 * bit1 + bit0;
+        const uint8_t* tab = kCat3456[cat];
+        int i;
+        v = 0;
+        for (i = 0; tab[i] != 0; i++)
+            v = v + v + vp8_get_bit(br, tab[i]);
+        v += 3 + (8 << cat);
+    }
+    return v;
+}
+
+/* proba is a flat 1056-entry table; dc/ac are this segment's quantizers. */
+static int vp8_get_coeffs(Vp8Br* br, const uint8_t* proba, int t, int n,
+                          int ctxIdx, int dc, int ac, int* out, int outOff) {
+    int p = ((t * 8 + kBands[n]) * 3 + ctxIdx) * 11;
+    while (n < 16) {
+        int v;
+        if (vp8_get_bit(br, proba[p]) == 0) return n;
+        while (vp8_get_bit(br, proba[p + 1]) == 0) {
+            n++;
+            if (n == 16) return 16;
+            p = (t * 8 + kBands[n]) * 33;
+        }
+        if (vp8_get_bit(br, proba[p + 2]) == 0) {
+            v = 1;
+            p = (t * 8 + kBands[n + 1]) * 33 + 11;
+        } else {
+            v = vp8_get_large_value(br, proba, p);
+            p = (t * 8 + kBands[n + 1]) * 33 + 22;
+        }
+        out[outOff + kZigzag[n]] =
+            vp8_get_signed(br, v) * ((n > 0) ? ac : dc);
+        n++;
+    }
+    return 16;
+}
+
+static int vp8_parse_residuals(Vp8Dec* dec, Vp8Br* tokenBr) {
+    int mbX = dec->mbX;
+    Vp8MbInfo* mb = &dec->mbInfo[mbX + 1];
+    Vp8MbInfo* leftMb = &dec->mbInfo[0];
+    Vp8Block* block = &dec->mbData[mbX];
+    const int* q = dec->dqm[block->segment].y1; /* luma AC quantizer pair */
+    const int* qy2 = dec->dqm[block->segment].y2;
+    const int* quv = dec->dqm[block->segment].uv;
+    int* dst = block->coeffs;
+    unsigned int nonZeroY = 0, nonZeroUv = 0;
+    int first, outOff = 0;
+    int acT, tnz, lnz, outTNz, outLNz;
+    int y, x, ch;
+    memset(dst, 0, sizeof(int) * 384);
+    if (block->isI4x4 == 0) {
+        int dc[16];
+        int ctxIdx = mb->nzDc + leftMb->nzDc;
+        int nz;
+        memset(dc, 0, sizeof(dc));
+        nz = vp8_get_coeffs(tokenBr, dec->proba, 1, 0, ctxIdx, qy2[0], qy2[1],
+                            dc, 0);
+        mb->nzDc = (nz > 0) ? 1 : 0;
+        leftMb->nzDc = mb->nzDc;
+        if (nz > 1) {
+            vp8_transform_wht(dc, 0, dst, 0);
+        } else {
+            int dc0 = vp8_sar(dc[0] + 3, 3);
+            int i;
+            for (i = 0; i < 16; i++) dst[i * 16] = dc0;
+        }
+        first = 1;
+    } else {
+        first = 0;
+    }
+    acT = (block->isI4x4 == 0) ? 0 : 3;
+    tnz = mb->nz & 0x0f;
+    lnz = leftMb->nz & 0x0f;
+    for (y = 0; y < 4; y++) {
+        int l = lnz & 1;
+        int nzCoeffs = 0;
+        for (x = 0; x < 4; x++) {
+            int ctxIdx = l + (tnz & 1);
+            int nz = vp8_get_coeffs(tokenBr, dec->proba, acT, first, ctxIdx,
+                                    q[0], q[1], dst, outOff);
+            l = (nz > first) ? 1 : 0;
+            tnz = ((tnz >> 1) | (l << 7)) & 0xff;
+            {
+                int code = 0;
+                if (nz > 3)
+                    code = 3;
+                else if (nz > 1)
+                    code = 2;
+                else if (dst[outOff] != 0)
+                    code = 1;
+                nzCoeffs = ((nzCoeffs << 2) | code) & 0xff;
+            }
+            outOff += 16;
+        }
+        tnz >>= 4;
+        lnz = ((lnz >> 1) | (l << 7)) & 0xff;
+        nonZeroY = ((nonZeroY << 8) | (unsigned int)nzCoeffs);
+    }
+    outTNz = tnz;
+    outLNz = lnz >> 4;
+    for (ch = 0; ch <= 2; ch += 2) {
+        int nzCoeffs = 0;
+        tnz = (mb->nz >> (4 + ch)) & 0xff;
+        lnz = (leftMb->nz >> (4 + ch)) & 0xff;
+        for (y = 0; y < 2; y++) {
+            int l = lnz & 1;
+            for (x = 0; x < 2; x++) {
+                int ctxIdx = l + (tnz & 1);
+                int nz = vp8_get_coeffs(tokenBr, dec->proba, 2, 0, ctxIdx,
+                                        quv[0], quv[1], dst, outOff);
+                l = (nz > 0) ? 1 : 0;
+                tnz = ((tnz >> 1) | (l << 3)) & 0xff;
+                {
+                    int code = 0;
+                    if (nz > 3)
+                        code = 3;
+                    else if (nz > 1)
+                        code = 2;
+                    else if (dst[outOff] != 0)
+                        code = 1;
+                    nzCoeffs = ((nzCoeffs << 2) | code) & 0xff;
+                }
+                outOff += 16;
+            }
+            tnz >>= 2;
+            lnz = ((lnz >> 1) | (l << 5)) & 0xff;
+        }
+        nonZeroUv |= (unsigned int)nzCoeffs << (4 * ch);
+        outTNz |= (tnz << 4) << ch;
+        outLNz |= (lnz & 0xf0) << ch;
+    }
+    mb->nz = outTNz & 0xff;
+    leftMb->nz = outLNz & 0xff;
+    block->nonZeroY = nonZeroY;
+    block->nonZeroUv = nonZeroUv;
+    block->dither = 0;
+    return (nonZeroY | nonZeroUv) == 0;
+}
+
+static void vp8_parse_intra_mode(Vp8Br* br, Vp8Dec* dec, int mbX) {
+    int topBase = mbX * 4;
+    Vp8Block* block = &dec->mbData[mbX];
+    if (dec->segmentHdr.updateMap != 0) {
+        if (vp8_get_bit(br, dec->probaSegments[0]) == 0)
+            block->segment = vp8_get_bit(br, dec->probaSegments[1]);
+        else
+            block->segment = vp8_get_bit(br, dec->probaSegments[2]) + 2;
+    } else {
+        block->segment = 0;
+    }
+    if (dec->useSkipProba != 0) block->skip = vp8_get_bit(br, dec->skipP);
+    block->isI4x4 = (vp8_get_bit(br, 145) == 0) ? 1 : 0;
+    if (block->isI4x4 == 0) {
+        int ymode;
+        if (vp8_get_bit(br, 156) != 0)
+            ymode = (vp8_get_bit(br, 128) != 0) ? VP8_TM_PRED : VP8_H_PRED;
+        else
+            ymode = (vp8_get_bit(br, 163) != 0) ? VP8_V_PRED : VP8_DC_PRED;
+        block->imodes[0] = ymode;
+        {
+            int i;
+            for (i = 0; i < 4; i++) {
+                dec->intraT[topBase + i] = ymode;
+                dec->intraL[i] = ymode;
+            }
+        }
+    } else {
+        int y, x;
+        for (y = 0; y < 4; y++) {
+            int ymode = dec->intraL[y];
+            for (x = 0; x < 4; x++) {
+                int base = (dec->intraT[topBase + x] * 10 + ymode) * 9;
+                if (vp8_get_bit(br, kBModesProba[base]) == 0)
+                    ymode = 0;
+                else if (vp8_get_bit(br, kBModesProba[base + 1]) == 0)
+                    ymode = 1;
+                else if (vp8_get_bit(br, kBModesProba[base + 2]) == 0)
+                    ymode = 2;
+                else if (vp8_get_bit(br, kBModesProba[base + 3]) == 0) {
+                    if (vp8_get_bit(br, kBModesProba[base + 4]) == 0)
+                        ymode = 3;
+                    else if (vp8_get_bit(br, kBModesProba[base + 5]) == 0)
+                        ymode = 4;
+                    else
+                        ymode = 5;
+                } else if (vp8_get_bit(br, kBModesProba[base + 6]) == 0) {
+                    ymode = 6;
+                } else if (vp8_get_bit(br, kBModesProba[base + 7]) == 0) {
+                    ymode = 7;
+                } else if (vp8_get_bit(br, kBModesProba[base + 8]) == 0) {
+                    ymode = 8;
+                } else {
+                    ymode = 9;
+                }
+                dec->intraT[topBase + x] = ymode;
+                block->imodes[y * 4 + x] = ymode;
+            }
+            dec->intraL[y] = ymode;
+        }
+    }
+    if (vp8_get_bit(br, 142) == 0) {
+        block->uvMode = VP8_DC_PRED;
+    } else if (vp8_get_bit(br, 114) == 0) {
+        block->uvMode = VP8_V_PRED;
+    } else {
+        block->uvMode = (vp8_get_bit(br, 183) != 0) ? VP8_TM_PRED : VP8_H_PRED;
+    }
+}
+
+static int vp8_parse_intra_mode_row(Vp8Br* br, Vp8Dec* dec) {
+    int mbX;
+    for (mbX = 0; mbX < dec->mbW; mbX++)
+        vp8_parse_intra_mode(br, dec, mbX);
+    return br->eof == 0;
+}
+
+static void vp8_init_scanline(Vp8Dec* dec) {
+    Vp8MbInfo* leftMb = &dec->mbInfo[0];
+    leftMb->nz = 0;
+    leftMb->nzDc = 0;
+    dec->intraL[0] = 0;
+    dec->intraL[1] = 0;
+    dec->intraL[2] = 0;
+    dec->intraL[3] = 0;
+    dec->mbX = 0;
+}
+
+static int vp8_decode_mb(Vp8Dec* dec, Vp8Br* tokenBr) {
+    int mbX = dec->mbX;
+    Vp8MbInfo* leftMb = &dec->mbInfo[0];
+    Vp8MbInfo* mb = &dec->mbInfo[mbX + 1];
+    Vp8Block* block = &dec->mbData[mbX];
+    int skip = (dec->useSkipProba != 0) ? block->skip : 0;
+    if (skip == 0) {
+        skip = vp8_parse_residuals(dec, tokenBr) ? 1 : 0;
+    } else {
+        leftMb->nz = 0;
+        mb->nz = 0;
+        if (block->isI4x4 == 0) {
+            leftMb->nzDc = 0;
+            mb->nzDc = 0;
+        }
+        block->nonZeroY = 0;
+        block->nonZeroUv = 0;
+        block->dither = 0;
+    }
+    if (dec->filterType > 0) {
+        const Vp8FStrength* fs = &dec->fstrengths[block->segment][block->isI4x4];
+        block->fLimit = fs->fLimit;
+        block->fIlevel = fs->fIlevel;
+        block->hevThresh = fs->hevThresh;
+        block->fInner = (fs->fInner != 0 || skip == 0) ? 1 : 0;
+    }
+    return tokenBr->eof == 0;
+}
+
+static void vp8_reconstruct_row(Vp8Dec* dec, int mbY) {
+    int mbW = dec->mbW;
+    int mbH = dec->mbH;
+    int yBps = dec->cacheYStride;
+    int uvBps = dec->cacheUvStride;
+    uint8_t* cacheY = dec->cacheY;
+    uint8_t* cacheU = dec->cacheU;
+    uint8_t* cacheV = dec->cacheV;
+    int j, i, mbX;
+
+    for (j = 0; j < 16; j++) s_yArr[VP8_YBASE + j * VP8_BPS - 1] = 129;
+    for (j = 0; j < 8; j++) {
+        s_uArr[VP8_UBASE + j * VP8_BPS - 1] = 129;
+        s_vArr[VP8_VBASE + j * VP8_BPS - 1] = 129;
+    }
+    if (mbY > 0) {
+        s_yArr[VP8_YBASE - 33] = 129;
+        s_uArr[VP8_UBASE - 33] = 129;
+        s_vArr[VP8_VBASE - 33] = 129;
+    } else {
+        for (i = -1; i <= 19; i++) s_yArr[VP8_YBASE - 32 + i] = 127;
+        for (i = -1; i <= 7; i++) {
+            s_uArr[VP8_UBASE - 32 + i] = 127;
+            s_vArr[VP8_VBASE - 32 + i] = 127;
+        }
+    }
+
+    for (mbX = 0; mbX < mbW; mbX++) {
+        Vp8Block* block = &dec->mbData[mbX];
+        const int* coeffs = block->coeffs;
+        Vp8TopYuv* topYuv = &dec->yuvT[mbX];
+        if (mbX > 0) {
+            /* Shift the cache columns 4px to the right. */
+            for (j = -1; j <= 15; j++) {
+                for (i = 0; i < 4; i++)
+                    s_yArr[VP8_YBASE + j * VP8_BPS - 4 + i] =
+                        s_yArr[VP8_YBASE + j * VP8_BPS + 12 + i];
+            }
+            for (j = -1; j <= 7; j++) {
+                for (i = 0; i < 4; i++) {
+                    s_uArr[VP8_UBASE + j * VP8_BPS - 4 + i] =
+                        s_uArr[VP8_UBASE + j * VP8_BPS + 4 + i];
+                    s_vArr[VP8_VBASE + j * VP8_BPS - 4 + i] =
+                        s_vArr[VP8_VBASE + j * VP8_BPS + 4 + i];
+                }
+            }
+        }
+        if (mbY > 0) {
+            for (i = 0; i < 16; i++)
+                s_yArr[VP8_YBASE - VP8_BPS + i] = (uint8_t)topYuv->y[i];
+            for (i = 0; i < 8; i++) {
+                s_uArr[VP8_UBASE - VP8_BPS + i] = (uint8_t)topYuv->u[i];
+                s_vArr[VP8_VBASE - VP8_BPS + i] = (uint8_t)topYuv->v[i];
+            }
+        }
+        if (block->isI4x4 != 0) {
+            if (mbY > 0) {
+                if (mbX >= mbW - 1) {
+                    int v = topYuv->y[15];
+                    for (i = 0; i < 4; i++)
+                        s_yArr[VP8_YBASE - VP8_BPS + 16 + i] = (uint8_t)v;
+                } else {
+                    const Vp8TopYuv* nxt = &dec->yuvT[mbX + 1];
+                    for (i = 0; i < 4; i++)
+                        s_yArr[VP8_YBASE - VP8_BPS + 16 + i] =
+                            (uint8_t)nxt->y[i];
+                }
+            }
+            for (j = 1; j <= 3; j++) {
+                for (i = 0; i < 4; i++)
+                    s_yArr[VP8_YBASE - VP8_BPS + 16 + j * 128 + i] =
+                        s_yArr[VP8_YBASE - VP8_BPS + 16 + i];
+            }
+            {
+                unsigned int bits = block->nonZeroY;
+                int n;
+                for (n = 0; n < 16; n++) {
+                    int d = VP8_YBASE + kScan[n];
+                    vp8_pred_luma4(block->imodes[n], s_yArr, d);
+                    vp8_do_transform(bits, coeffs, n * 16, s_yArr, d);
+                    bits <<= 2;
+                }
+            }
+        } else {
+            int pred = vp8_check_mode(mbX, mbY, block->imodes[0]);
+            vp8_pred_luma16(pred, s_yArr, VP8_YBASE);
+            if (block->nonZeroY != 0) {
+                unsigned int bits = block->nonZeroY;
+                int n;
+                for (n = 0; n < 16; n++) {
+                    vp8_do_transform(bits, coeffs, n * 16, s_yArr,
+                                     VP8_YBASE + kScan[n]);
+                    bits <<= 2;
+                }
+            }
+        }
+        {
+            unsigned int bitsUV = block->nonZeroUv;
+            int pred = vp8_check_mode(mbX, mbY, block->uvMode);
+            vp8_pred_chroma8(pred, s_uArr, VP8_UBASE);
+            vp8_pred_chroma8(pred, s_vArr, VP8_VBASE);
+            vp8_do_uv_transform(bitsUV & 0xffu, coeffs, 256, s_uArr,
+                                VP8_UBASE);
+            vp8_do_uv_transform(bitsUV >> 8, coeffs, 320, s_vArr, VP8_VBASE);
+        }
+        if (mbY < mbH - 1) {
+            for (i = 0; i < 16; i++)
+                topYuv->y[i] = s_yArr[VP8_YBASE + 480 + i];
+            for (i = 0; i < 8; i++) {
+                topYuv->u[i] = s_uArr[VP8_UBASE + 224 + i];
+                topYuv->v[i] = s_vArr[VP8_VBASE + 224 + i];
+            }
+        }
+        {
+            int yOut = dec->extra * yBps + mbX * 16;
+            int uvOut = dec->extraUV * uvBps + mbX * 8;
+            for (j = 0; j < 16; j++) {
+                int sr = VP8_YBASE + j * VP8_BPS;
+                int dr = yOut + j * yBps;
+                for (i = 0; i < 16; i++) cacheY[dr + i] = s_yArr[sr + i];
+            }
+            for (j = 0; j < 8; j++) {
+                int sr = VP8_UBASE + j * VP8_BPS;
+                int dr = uvOut + j * uvBps;
+                for (i = 0; i < 8; i++) {
+                    cacheU[dr + i] = s_uArr[sr + i];
+                    cacheV[dr + i] = s_vArr[sr + i];
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Fancy chroma upsampling + RGB conversion                            */
+
+static int vp8_clip_yuv(int v) {
+    if ((v & ~16383) == 0) return v >> 6;
+    return (v < 0) ? 0 : 255;
+}
+
+static void vp8_write_rgb_pixel(uint8_t* rgb, int o, int yv, int u, int v) {
+    rgb[o] = (uint8_t)vp8_clip_yuv(((yv * 19077) >> 8) + ((v * 26149) >> 8) -
+                                   14234);
+    rgb[o + 1] =
+        (uint8_t)vp8_clip_yuv(((yv * 19077) >> 8) - ((u * 6419) >> 8) -
+                              ((v * 13320) >> 8) + 8708);
+    rgb[o + 2] = (uint8_t)vp8_clip_yuv(((yv * 19077) >> 8) +
+                                       ((u * 33050) >> 8) - 17685);
+}
+
+/* Port of libwebp's UpsampleRgbLinePair_C. yBot == NULL mirrors the
+ * single-row case (dstBot unused then). Each sample row is described by
+ * (arr, base); samples are arr[base + i]. */
+static void vp8_upsample_line_pair(
+        const uint8_t* yTop, int yTopBase,
+        const uint8_t* yBot, int yBotBase,
+        const uint8_t* uTop, int uTopBase,
+        const uint8_t* vTop, int vTopBase,
+        const uint8_t* uBot, int uBotBase,
+        const uint8_t* vBot, int vBotBase,
+        uint8_t* rgb, int width, int dstTop, int dstBot) {
+    int lastPair = (width - 1) >> 1;
+    int tlU = uTop[uTopBase];
+    int tlV = vTop[vTopBase];
+    int lU = uBot[uBotBase];
+    int lV = vBot[vBotBase];
+    int o = dstTop * width * 3;
+    int x;
+
+    vp8_write_rgb_pixel(rgb, o, yTop[yTopBase], (3 * tlU + lU + 2) >> 2,
+                        (3 * tlV + lV + 2) >> 2);
+    if (yBot != NULL) {
+        int ob = dstBot * width * 3;
+        vp8_write_rgb_pixel(rgb, ob, yBot[yBotBase], (3 * lU + tlU + 2) >> 2,
+                            (3 * lV + tlV + 2) >> 2);
+    }
+    for (x = 1; x <= lastPair; x++) {
+        int tU = uTop[uTopBase + x];
+        int tV = vTop[vTopBase + x];
+        int cU = uBot[uBotBase + x];
+        int cV = vBot[vBotBase + x];
+        int avgU = tlU + tU + lU + cU + 8;
+        int avgV = tlV + tV + lV + cV + 8;
+        int d12U = (avgU + 2 * (tU + lU)) >> 3;
+        int d03U = (avgU + 2 * (tlU + cU)) >> 3;
+        int d12V = (avgV + 2 * (tV + lV)) >> 3;
+        int d03V = (avgV + 2 * (tlV + cV)) >> 3;
+        int o2 = o + (2 * x - 1) * 3;
+        vp8_write_rgb_pixel(rgb, o2, yTop[yTopBase + 2 * x - 1],
+                            (d12U + tlU) >> 1, (d12V + tlV) >> 1);
+        vp8_write_rgb_pixel(rgb, o2 + 3, yTop[yTopBase + 2 * x],
+                            (d03U + tU) >> 1, (d03V + tV) >> 1);
+        if (yBot != NULL) {
+            int ob = dstBot * width * 3 + (2 * x - 1) * 3;
+            vp8_write_rgb_pixel(rgb, ob, yBot[yBotBase + 2 * x - 1],
+                                (d03U + lU) >> 1, (d03V + lV) >> 1);
+            vp8_write_rgb_pixel(rgb, ob + 3, yBot[yBotBase + 2 * x],
+                                (d12U + cU) >> 1, (d12V + cV) >> 1);
+        }
+        tlU = tU;
+        tlV = tV;
+        lU = cU;
+        lV = cV;
+    }
+    if ((width & 1) == 0) {
+        int o2 = o + (width - 1) * 3;
+        vp8_write_rgb_pixel(rgb, o2, yTop[yTopBase + width - 1],
+                            (3 * tlU + lU + 2) >> 2, (3 * tlV + lV + 2) >> 2);
+        if (yBot != NULL) {
+            int ob = dstBot * width * 3 + (width - 1) * 3;
+            vp8_write_rgb_pixel(rgb, ob, yBot[yBotBase + width - 1],
+                                (3 * lU + tlU + 2) >> 2,
+                                (3 * lV + tlV + 2) >> 2);
+        }
+    }
+}
+
+static void vp8_finish_row(Vp8Dec* dec, int isFirst, int isLast) {
+    int width = dec->width;
+    int height = dec->height;
+    int mbY = dec->mbY;
+    int yStart = mbY * 16;
+    int yEnd = yStart + 16;
+    int k = 1;
+    int curY;
+    if (!isFirst) yStart -= dec->extra;
+    if (!isLast) yEnd -= dec->extra;
+    if (yEnd > height) yEnd = height;
+    if (yStart < yEnd) {
+        int rowOff = isFirst ? dec->extra : 0;
+        int uvOff = isFirst ? dec->extraUV : 0;
+        int yBps = dec->cacheYStride;
+        int uvBps = dec->cacheUvStride;
+        uint8_t* cacheY = dec->cacheY;
+        uint8_t* cacheU = dec->cacheU;
+        uint8_t* cacheV = dec->cacheV;
+        uint8_t* rgb = dec->rgb;
+        if (yStart == 0) {
+            /* First line is special-cased: mirror u/v at the boundary. */
+            int yBase = rowOff * yBps;
+            int uvBase = uvOff * uvBps;
+            vp8_upsample_line_pair(cacheY, yBase, NULL, 0,
+                                   cacheU, uvBase, cacheV, uvBase,
+                                   cacheU, uvBase, cacheV, uvBase,
+                                   rgb, width, 0, 0);
+        } else {
+            /* Finish the left-over row from the previous call. */
+            int uvBase = uvOff * uvBps;
+            vp8_upsample_line_pair(dec->tmpY, 0, cacheY, rowOff * yBps,
+                                   dec->tmpU, 0, dec->tmpV, 0,
+                                   cacheU, uvBase, cacheV, uvBase,
+                                   rgb, width, yStart - 1, yStart);
+        }
+        while (yStart + 2 * k < yEnd) {
+            int yRow = rowOff + 2 * k - 1;
+            int uvRow = uvOff + k - 1;
+            vp8_upsample_line_pair(cacheY, yRow * yBps, cacheY,
+                                   (yRow + 1) * yBps,
+                                   cacheU, uvRow * uvBps, cacheV,
+                                   uvRow * uvBps,
+                                   cacheU, (uvRow + 1) * uvBps, cacheV,
+                                   (uvRow + 1) * uvBps,
+                                   rgb, width, yStart + 2 * k - 1,
+                                   yStart + 2 * k);
+            k++;
+        }
+        curY = yStart + 2 * (k - 1) + 1;
+        if (yEnd < height) {
+            /* Save the unfinished samples for the next call. */
+            int yBase = (rowOff + curY - yStart) * yBps;
+            int uvBase = (uvOff + ((curY >> 1) - (yStart >> 1))) * uvBps;
+            int uvWidth = (width + 1) >> 1;
+            int i;
+            for (i = 0; i < width; i++) dec->tmpY[i] = cacheY[yBase + i];
+            for (i = 0; i < uvWidth; i++) {
+                dec->tmpU[i] = cacheU[uvBase + i];
+                dec->tmpV[i] = cacheV[uvBase + i];
+            }
+        } else if ((yEnd & 1) == 0) {
+            /* Very last row of an even-sized picture. */
+            int yBase = (rowOff + yEnd - 1 - yStart) * yBps;
+            int uvBase = (uvOff + ((yEnd - 1 - yStart) >> 1)) * uvBps;
+            vp8_upsample_line_pair(cacheY, yBase, NULL, 0,
+                                   cacheU, uvBase, cacheV, uvBase,
+                                   cacheU, uvBase, cacheV, uvBase,
+                                   rgb, width, yEnd - 1, 0);
+        }
+    }
+    if (!isLast) {
+        int yBps = dec->cacheYStride;
+        int uvBps = dec->cacheUvStride;
+        uint8_t* cacheY = dec->cacheY;
+        uint8_t* cacheU = dec->cacheU;
+        uint8_t* cacheV = dec->cacheV;
+        int kk, i;
+        for (kk = 0; kk < dec->extra; kk++) {
+            int src = (16 + kk) * yBps;
+            int dst = kk * yBps;
+            for (i = 0; i < yBps; i++) cacheY[dst + i] = cacheY[src + i];
+        }
+        for (kk = 0; kk < dec->extraUV; kk++) {
+            int src = (8 + kk) * uvBps;
+            int dst = kk * uvBps;
+            for (i = 0; i < uvBps; i++) {
+                cacheU[dst + i] = cacheU[src + i];
+                cacheV[dst + i] = cacheV[src + i];
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* VP8 payload entry point                                             */
+
+/* Guarded little-endian read: bytes beyond len yield 0 (`or 0`). */
+static unsigned int webp_read_le24(const uint8_t* data, size_t len,
+                                   size_t pos) {
+    unsigned int b1 = (pos < len) ? data[pos] : 0;
+    unsigned int b2 = (pos + 1 < len) ? data[pos + 1] : 0;
+    unsigned int b3 = (pos + 2 < len) ? data[pos + 2] : 0;
+    return b1 | (b2 << 8) | (b3 << 16);
+}
+
+/* Decodes one lossy key frame. On success returns 1 and sets outRgb
+ * (w*h*3 bytes, malloc'd) plus an optional outAlpha plane (NULL when no
+ * ALPH chunk is present). Caller frees both buffers. */
+static int vp8_decode_payload(const uint8_t* payload, size_t len,
+                              const uint8_t* alphaPayload, size_t alphaLen,
+                              uint8_t** outRgb, uint8_t** outAlpha,
+                              int* outW, int* outH) {
+    Vp8Dec dec;
+    unsigned int bits;
+    long long partitionLength, sizesStart, partStart;
+    int profile, nParts, last, p, w, h;
+    int extra, extraUV, yBps, uvBps, i;
+    int mbY, mbX;
+
+    vp8_init_log2();
+    memset(&dec, 0, sizeof(dec));
+    *outRgb = NULL;
+    *outAlpha = NULL;
+    *outW = 0;
+    *outH = 0;
+
+    if (len < 11) return 0;
+    bits = (unsigned int)payload[0] | ((unsigned int)payload[1] << 8) |
+           ((unsigned int)payload[2] << 16);
+    if ((bits & 1u) != 0) return 0; /* interframe */
+    profile = (int)((bits >> 1) & 7u);
+    if (profile > 3) return 0;
+    if (((bits >> 4) & 1u) == 0) return 0; /* not a key frame */
+    partitionLength = (long long)(bits >> 5);
+    if (payload[3] != 0x9d || payload[4] != 0x01 || payload[5] != 0x2a)
+        return 0;
+    w = (int)(((unsigned int)payload[7] << 8 | payload[6]) & 0x3fff);
+    h = (int)(((unsigned int)payload[9] << 8 | payload[8]) & 0x3fff);
+    if (w < 1 || h < 1 || (long long)w * h > WEBP_MAX_PIXELS) return 0;
+    if (11 + partitionLength > (long long)len + 1) return 0;
+
+    dec.width = w;
+    dec.height = h;
+    dec.mbW = (w + 15) >> 4;
+    dec.mbH = (h + 15) >> 4;
+    dec.filterType = 0;
+    dec.probaSegments[0] = 255;
+    dec.probaSegments[1] = 255;
+    dec.probaSegments[2] = 255;
+    memcpy(dec.proba, CoeffsProba0, sizeof(dec.proba));
+    vp8_new_br(&dec.br, payload, len, 11, partitionLength);
+
+    (void)vp8_get_bit(&dec.br, 128); /* colorspace */
+    (void)vp8_get_bit(&dec.br, 128); /* clamp_type */
+    if (!vp8_parse_segment_header(&dec.br, &dec)) return 0;
+    if (!vp8_parse_filter_header(&dec.br, &dec)) return 0;
+    nParts = 1 << vp8_get_value(&dec.br, 2);
+    dec.numPartsMinusOne = nParts - 1;
+    last = nParts - 1;
+    sizesStart = 11 + partitionLength;
+    partStart = sizesStart + 3LL * last;
+    if (partStart > (long long)len + 1) return 0;
+    for (p = 0; p < last; p++) {
+        long long psize =
+            (long long)webp_read_le24(payload, len,
+                                      (size_t)sizesStart + (size_t)p * 3);
+        long long remaining = (long long)len - partStart + 1;
+        if (psize > remaining) psize = remaining;
+        vp8_new_br(&dec.parts[p], payload, len, partStart, psize);
+        partStart += psize;
+    }
+    vp8_new_br(&dec.parts[last], payload, len, partStart,
+               (long long)len - partStart + 1);
+
+    vp8_parse_quant(&dec.br, &dec);
+    (void)vp8_get_bit(&dec.br, 128); /* refresh entropy probabilities */
+    vp8_parse_proba(&dec.br, &dec);
+
+    extra = kFilterExtraRows[dec.filterType];
+    extraUV = extra >> 1;
+    yBps = 16 * dec.mbW;
+    uvBps = 8 * dec.mbW;
+    dec.extra = extra;
+    dec.extraUV = extraUV;
+    dec.cacheYStride = yBps;
+    dec.cacheUvStride = uvBps;
+
+    dec.cacheY = (uint8_t*)pluto_malloc((size_t)(extra + 16) * (size_t)yBps);
+    dec.cacheU = (uint8_t*)pluto_malloc((size_t)(extraUV + 8) *
+                                        (size_t)uvBps);
+    dec.cacheV = (uint8_t*)pluto_malloc((size_t)(extraUV + 8) *
+                                        (size_t)uvBps);
+    dec.rgb = (uint8_t*)pluto_calloc((size_t)w * (size_t)h * 3, 1);
+    dec.tmpY = (uint8_t*)pluto_calloc((size_t)w, 1);
+    dec.tmpU = (uint8_t*)pluto_calloc((size_t)((w + 1) / 2), 1);
+    dec.tmpV = (uint8_t*)pluto_calloc((size_t)((w + 1) / 2), 1);
+    dec.mbData = (Vp8Block*)pluto_calloc((size_t)dec.mbW, sizeof(Vp8Block));
+    dec.mbInfo =
+        (Vp8MbInfo*)pluto_calloc((size_t)dec.mbW + 1, sizeof(Vp8MbInfo));
+    dec.intraT = (int*)pluto_calloc((size_t)4 * (size_t)dec.mbW, sizeof(int));
+    dec.yuvT =
+        (Vp8TopYuv*)pluto_calloc((size_t)dec.mbW + 1, sizeof(Vp8TopYuv));
+    if (!dec.cacheY || !dec.cacheU || !dec.cacheV || !dec.rgb ||
+        !dec.tmpY || !dec.tmpU || !dec.tmpV || !dec.mbData ||
+        !dec.mbInfo || !dec.intraT || !dec.yuvT)
+        goto fail;
+    for (i = 0; i < (extra + 16) * yBps; i++) dec.cacheY[i] = 127;
+    for (i = 0; i < (extraUV + 8) * uvBps; i++) dec.cacheU[i] = 127;
+    for (i = 0; i < (extraUV + 8) * uvBps; i++) dec.cacheV[i] = 127;
+    vp8_precompute_filter_strengths(&dec);
+
+    dec.mbX = 0;
+    for (mbY = 0; mbY < dec.mbH; mbY++) {
+        Vp8Br* tokenBr;
+        tasks_yield_check();
+        dec.mbY = mbY;
+        tokenBr = &dec.parts[mbY & dec.numPartsMinusOne];
+        if (!vp8_parse_intra_mode_row(&dec.br, &dec)) goto fail;
+        for (mbX = 0; mbX < dec.mbW; mbX++) {
+            dec.mbX = mbX;
+            if (!vp8_decode_mb(&dec, tokenBr)) goto fail;
+        }
+        vp8_init_scanline(&dec);
+        vp8_reconstruct_row(&dec, mbY);
+        if (dec.filterType > 0) {
+            for (mbX = 0; mbX < dec.mbW; mbX++)
+                vp8_do_filter(&dec, mbX, mbY);
+        }
+        vp8_finish_row(&dec, mbY == 0, mbY == dec.mbH - 1);
+    }
+
+    *outAlpha = alpha_decode_plane(alphaPayload, alphaLen, w, h);
+    *outRgb = dec.rgb;
+    *outW = w;
+    *outH = h;
+    pluto_free(dec.cacheY);
+    pluto_free(dec.cacheU);
+    pluto_free(dec.cacheV);
+    pluto_free(dec.tmpY);
+    pluto_free(dec.tmpU);
+    pluto_free(dec.tmpV);
+    pluto_free(dec.mbData);
+    pluto_free(dec.mbInfo);
+    pluto_free(dec.intraT);
+    pluto_free(dec.yuvT);
+    return 1;
+
+fail:
+    pluto_free(dec.cacheY);
+    pluto_free(dec.cacheU);
+    pluto_free(dec.cacheV);
+    pluto_free(dec.rgb);
+    pluto_free(dec.tmpY);
+    pluto_free(dec.tmpU);
+    pluto_free(dec.tmpV);
+    pluto_free(dec.mbData);
+    pluto_free(dec.mbInfo);
+    pluto_free(dec.intraT);
+    pluto_free(dec.yuvT);
     return 0;
 }
 
-int webp_decode_argb(const uint8_t* data, size_t len, int maxW, int maxH,
-                     uint32_t*** outRows, int* outW, int* outH) {
-    const uint8_t* payload = NULL;
-    size_t plen = 0;
+/* Decodes one lossless payload into a flat w*h ARGB grid. Returns 1 on
+ * success; caller frees *outPix. */
+static int vp8l_decode_payload(const uint8_t* payload, size_t plen,
+                               uint32_t** outPix, int* outW, int* outH) {
     uint32_t bits;
     int w, h;
     Br br;
     VP8LCtx ctx;
     uint32_t* flat = NULL;
     uint32_t* finalPix = NULL;
+
+    memset(&ctx, 0, sizeof(ctx));
+    *outPix = NULL;
+    *outW = 0;
+    *outH = 0;
+    if (plen < 5 || payload[0] != VP8L_MAGIC_BYTE) return 0;
+    bits = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8) |
+           ((uint32_t)payload[3] << 16);
+    w = (int)(bits & 0x3FFF) + 1;
+    h = (int)((bits >> 14) & 0x3FFF) + 1;
+    if (((bits >> 22) & 7) != 0) return 0; /* unknown version */
+    if (w < 1 || h < 1 || (long long)w * h > WEBP_MAX_PIXELS) return 0;
+
+    br.data = payload;
+    br.len = plen;
+    br.pos = 5;
+    br.window = 0;
+    br.nbits = 0;
+    br.eos = 0;
+    tasks_yield_check();
+    if (!decode_image_stream(w, h, 1, &br, &ctx, NULL)) goto fail;
+
+    {
+        int tw = ctx.transformXsize;
+        int th = ctx.transformYsize;
+        if (tw < 1 || th < 1 || tw * th > WEBP_MAX_PIXELS)
+            goto fail;
+        flat = (uint32_t*)pluto_calloc((size_t)tw * (size_t)th,
+                                       sizeof(uint32_t));
+        if (!flat) goto fail;
+        if (!decode_image_data(&br, &ctx, flat, tw, th)) goto fail;
+        if (br.eos) goto fail;
+        finalPix = apply_inverse_transforms(&ctx, flat, th);
+        flat = NULL; /* consumed (freed or returned) */
+        if (!finalPix) goto fail;
+        ctx_free(&ctx);
+        /* The inverse transforms expand the (possibly sub-sampled)
+         * decode grid back to the full header width; rows stay th. */
+        *outPix = finalPix;
+        *outW = w;
+        *outH = th;
+        return 1;
+    }
+
+fail:
+    pluto_free(finalPix);
+    pluto_free(flat);
+    ctx_free(&ctx);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* P22: animated WebP (VP8X + ANIM + ANMF demux + non-premultiplied    */
+/* blending, ported from libwebp 1.6.0 demux.c / anim_decode.c)        */
+
+enum { WEBP_CID_NONE = 0, WEBP_CID_VP8L, WEBP_CID_VP8 };
+
+static int vp8l_decode_payload(const uint8_t* payload, size_t plen,
+                               uint32_t** outPix, int* outW, int* outH);
+
+typedef struct {
+    int x, y, w, h;
+    int durationMs;
+    int dispose, noBlend;
+    int cid;
+    const uint8_t* payload;
+    size_t plen;
+    const uint8_t* alpha;
+    size_t alen;
+} WebPFrameRec;
+
+static unsigned int webp_byte_at(const uint8_t* data, size_t len,
+                                 size_t pos) {
+    return (pos < len) ? data[pos] : 0;
+}
+
+static uint32_t webp_chunk_size(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+/* Parses the container of an animated WebP. Returns 0 if not animated.
+ * Frame payloads point into `data` (no copies taken). */
+static int anim_parse_webp_animation(
+        const uint8_t* data, size_t len,
+        int* outCw, int* outCh, uint32_t* outBgcolor, int* outLoopCount,
+        WebPFrameRec** outFrames, int* outNumFrames) {
+    size_t pos = 12;
+    int canvasW = 0, canvasH = 0, loopCount = 0;
+    uint32_t bgcolor = 0;
+    int isExtended = 0, seenAnim = 0;
+    WebPFrameRec* frames = NULL;
+    int numFrames = 0, capFrames = 0;
+
+    *outFrames = NULL;
+    *outNumFrames = 0;
+    if (len < 20) return 0;
+    if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WEBP", 4) != 0)
+        return 0;
+    while (pos + 8 <= len) {
+        uint32_t size = webp_chunk_size(data + pos + 4);
+        if (memcmp(data + pos, "VP8X", 4) == 0) {
+            size_t cp = pos + 8;
+            unsigned int flags;
+            isExtended = 1;
+            flags = webp_byte_at(data, len, cp);
+            /* VP8X payload: 3 reserved bytes, flags byte, then
+             * canvas-width-1 and canvas-height-1 as LE24. */
+            canvasW = (int)webp_read_le24(data, len, cp + 4) + 1;
+            canvasH = (int)webp_read_le24(data, len, cp + 7) + 1;
+            if (canvasW < 1 || canvasH < 1 ||
+                (long long)canvasW * canvasH > WEBP_MAX_PIXELS)
+                goto fail;
+            if ((flags & 0x02u) == 0)
+                goto fail; /* ANIMATION_FLAG not set */
+        } else if (memcmp(data + pos, "ANIM", 4) == 0) {
+            size_t ap = pos + 8;
+            unsigned int a, r, g, b;
+            seenAnim = 1;
+            /* ANIM stores the canvas background color in BGRA byte
+             * order; expose it as a canonical 0xAARRGGBB word. */
+            b = webp_byte_at(data, len, ap);
+            g = webp_byte_at(data, len, ap + 1);
+            r = webp_byte_at(data, len, ap + 2);
+            a = webp_byte_at(data, len, ap + 3);
+            bgcolor = (a << 24) | (r << 16) | (g << 8) | b;
+            loopCount = (int)(webp_byte_at(data, len, ap + 4) |
+                              (webp_byte_at(data, len, ap + 5) << 8));
+        } else if (memcmp(data + pos, "ANMF", 4) == 0) {
+            WebPFrameRec f;
+            size_t avail = len - (pos + 8);
+            size_t fplen = size < avail ? size : avail;
+            const uint8_t* fpay = data + pos + 8;
+            size_t ipos = 16;
+            unsigned int bits2;
+            if (!seenAnim || canvasW == 0) goto fail;
+            if (fplen < 16) goto fail;
+            memset(&f, 0, sizeof(f));
+            f.x = (int)(2u * webp_read_le24(fpay, fplen, 0));
+            f.y = (int)(2u * webp_read_le24(fpay, fplen, 3));
+            f.w = (int)webp_read_le24(fpay, fplen, 6) + 1;
+            f.h = (int)webp_read_le24(fpay, fplen, 9) + 1;
+            f.durationMs = (int)webp_read_le24(fpay, fplen, 12);
+            bits2 = webp_byte_at(fpay, fplen, 15);
+            f.dispose = (bits2 & 1u) ? 1 : 0;
+            f.noBlend = ((bits2 >> 1) & 1u) ? 1 : 0;
+            while (ipos + 8 <= fplen) {
+                uint32_t isize = webp_chunk_size(fpay + ipos + 4);
+                size_t iavail = fplen - (ipos + 8);
+                size_t ilen = isize < iavail ? isize : iavail;
+                if (memcmp(fpay + ipos, "ALPH", 4) == 0) {
+                    f.alpha = fpay + ipos + 8;
+                    f.alen = ilen;
+                } else if (memcmp(fpay + ipos, "VP8L", 4) == 0) {
+                    f.cid = WEBP_CID_VP8L;
+                    f.payload = fpay + ipos + 8;
+                    f.plen = ilen;
+                } else if (memcmp(fpay + ipos, "VP8 ", 4) == 0) {
+                    f.cid = WEBP_CID_VP8;
+                    f.payload = fpay + ipos + 8;
+                    f.plen = ilen;
+                }
+                ipos += 8 + (size_t)isize + (isize & 1u);
+            }
+            if (f.cid == WEBP_CID_NONE || f.payload == NULL) goto fail;
+            if (f.w < 1 || f.h < 1 || f.x < 0 || f.y < 0 ||
+                f.x + f.w > canvasW || f.y + f.h > canvasH)
+                goto fail;
+            if (numFrames == capFrames) {
+                int ncap = capFrames == 0 ? 8 : capFrames * 2;
+                WebPFrameRec* nf = (WebPFrameRec*)pluto_realloc(
+                    frames, (size_t)ncap * sizeof(WebPFrameRec));
+                if (nf == NULL) goto fail;
+                frames = nf;
+                capFrames = ncap;
+            }
+            frames[numFrames++] = f;
+        }
+        pos += 8 + (size_t)size + (size & 1u);
+    }
+    if (!isExtended || numFrames == 0) goto fail;
+    *outCw = canvasW;
+    *outCh = canvasH;
+    *outBgcolor = bgcolor;
+    *outLoopCount = loopCount;
+    *outFrames = frames;
+    *outNumFrames = numFrames;
+    return 1;
+fail:
+    pluto_free(frames);
+    return 0;
+}
+
+/* Non-premultiplied alpha blending (libwebp AnimDecoder blend_func).
+ * Returns src over dst in ARGB. */
+static uint32_t anim_blend_pixel(uint32_t src, uint32_t dst) {
+    unsigned int srcA = (src >> 24) & 0xFFu;
+    unsigned int dstFactorA, blendA, scale, out;
+    int shift;
+    if (srcA == 0) return dst;
+    dstFactorA = (((dst >> 24) & 0xFFu) * (256u - srcA)) >> 8;
+    blendA = srcA + dstFactorA;
+    scale = 16777216u / blendA;
+    out = blendA << 24;
+    for (shift = 0; shift <= 16; shift += 8) {
+        uint64_t sc = (src >> shift) & 0xFFu;
+        uint64_t dc = (dst >> shift) & 0xFFu;
+        unsigned int c =
+            (unsigned)(((sc * srcA + dc * dstFactorA) * scale) / 16777216u);
+        out |= c << shift;
+    }
+    return out;
+}
+
+/* Blends one horizontal range of semi-transparent pixels onto the
+ * previous canvas contents. */
+static void anim_blend_range(uint32_t* curr, const uint32_t* prev,
+                             size_t off, int width) {
+    int fx;
+    for (fx = 0; fx < width; fx++) {
+        uint32_t v = curr[off + (size_t)fx];
+        if (((v >> 24) & 0xFFu) != 0xFFu)
+            curr[off + (size_t)fx] =
+                anim_blend_pixel(v, prev[off + (size_t)fx]);
+    }
+}
+
+/* Decodes every frame of an animated WebP into a canvas-sized blended
+ * ARGB grid (libwebp AnimDecoder semantics). Returns 0 on success,
+ * -1 on failure; caller frees with webp_anim_free(). */
+int webp_decode_anim(const uint8_t* data, size_t len, WebPAnim** outAnim) {
+    WebPFrameRec* recs = NULL;
+    int numRecs = 0, cw = 0, chh = 0, loop = 0;
+    uint32_t bg = 0;
+    WebPAnim* anim = NULL;
+    uint32_t* curr = NULL;
+    uint32_t* prevDisposed = NULL;
+    int i, prevWasKey = 1;
+    size_t total;
+
+    *outAnim = NULL;
+    if (!anim_parse_webp_animation(data, len, &cw, &chh, &bg, &loop, &recs,
+                                   &numRecs))
+        return -1;
+    total = (size_t)cw * (size_t)chh;
+    curr = (uint32_t*)pluto_calloc(total, sizeof(uint32_t));
+    prevDisposed = (uint32_t*)pluto_malloc(total * sizeof(uint32_t));
+    anim = (WebPAnim*)pluto_calloc(1, sizeof(WebPAnim));
+    anim->frames =
+        (WebPAnimFrame*)pluto_calloc((size_t)numRecs, sizeof(WebPAnimFrame));
+    if (!curr || !prevDisposed || !anim || !anim->frames) goto fail2;
+
+    for (i = 0; i < numRecs; i++) {
+        const WebPFrameRec* f = &recs[i];
+        const WebPFrameRec* prev = (i > 0) ? &recs[i - 1] : NULL;
+        uint32_t* fargb = NULL;
+        uint8_t* rgb = NULL;
+        uint8_t* alpha = NULL;
+        int hasAlpha, isKey, fw = 0, fh = 0, fy;
+
+        tasks_yield_check();
+        if (f->cid == WEBP_CID_VP8L) {
+            if (!vp8l_decode_payload(f->payload, f->plen, &fargb, &fw, &fh))
+                goto fail2;
+            hasAlpha = 1;
+        } else {
+            size_t j, npix;
+            if (!vp8_decode_payload(f->payload, f->plen, f->alpha, f->alen,
+                                    &rgb, &alpha, &fw, &fh))
+                goto fail2;
+            hasAlpha = (alpha != NULL);
+            npix = (size_t)fw * (size_t)fh;
+            fargb = (uint32_t*)pluto_malloc(npix * sizeof(uint32_t));
+            if (!fargb) {
+                pluto_free(rgb);
+                pluto_free(alpha);
+                goto fail2;
+            }
+            for (j = 0; j < npix; j++) {
+                unsigned int a = alpha ? alpha[j] : 0xFFu;
+                fargb[j] = (a << 24) | ((uint32_t)rgb[j * 3] << 16) |
+                           ((uint32_t)rgb[j * 3 + 1] << 8) |
+                           rgb[j * 3 + 2];
+            }
+            pluto_free(rgb);
+            pluto_free(alpha);
+        }
+        if (fw != f->w || fh != f->h) {
+            pluto_free(fargb);
+            goto fail2;
+        }
+
+        /* Keyframe detection (libwebp is_key_frame). */
+        if (i == 0) {
+            isKey = 1;
+        } else if ((!hasAlpha || f->noBlend) && f->w == cw && f->h == chh) {
+            isKey = 1;
+        } else if (prev->dispose && (prev->w == cw || prevWasKey)) {
+            isKey = 1;
+        } else {
+            isKey = 0;
+        }
+
+        if (isKey) {
+            memset(curr, 0, total * sizeof(uint32_t));
+        } else {
+            memcpy(curr, prevDisposed, total * sizeof(uint32_t));
+        }
+
+        /* Copy the frame rectangle onto the canvas. */
+        for (fy = 0; fy < f->h; fy++) {
+            uint32_t* d = curr + (size_t)(f->y + fy) * cw + (size_t)f->x;
+            const uint32_t* s = fargb + (size_t)fy * f->w;
+            memcpy(d, s, sizeof(uint32_t) * (size_t)f->w);
+        }
+
+        /* Blend against the disposed background where needed. */
+        if (i > 0 && !f->noBlend && !isKey) {
+            if (!prev->dispose) {
+                for (fy = 0; fy < f->h; fy++) {
+                    anim_blend_range(curr, prevDisposed,
+                                     (size_t)(f->y + fy) * cw + (size_t)f->x,
+                                     f->w);
+                }
+            } else {
+                /* Only pixels outside the previously-disposed rectangle
+                 * have a defined background. */
+                int srcMaxX = f->x + f->w;
+                int dstMaxX = prev->x + prev->w;
+                int dstMaxY = prev->y + prev->h;
+                for (fy = 0; fy < f->h; fy++) {
+                    int canvasY = f->y + fy;
+                    if (canvasY < prev->y || canvasY >= dstMaxY ||
+                        f->x >= dstMaxX || srcMaxX <= prev->x) {
+                        anim_blend_range(curr, prevDisposed,
+                                         (size_t)canvasY * cw +
+                                             (size_t)f->x,
+                                         f->w);
+                    } else {
+                        if (f->x < prev->x)
+                            anim_blend_range(curr, prevDisposed,
+                                             (size_t)canvasY * cw +
+                                                 (size_t)f->x,
+                                             prev->x - f->x);
+                        if (srcMaxX > dstMaxX)
+                            anim_blend_range(curr, prevDisposed,
+                                             (size_t)canvasY * cw +
+                                                 (size_t)dstMaxX,
+                                             srcMaxX - dstMaxX);
+                    }
+                }
+            }
+        }
+
+        memcpy(prevDisposed, curr, total * sizeof(uint32_t));
+
+        anim->frames[i].pix =
+            (uint32_t*)pluto_malloc(total * sizeof(uint32_t));
+        if (!anim->frames[i].pix) {
+            pluto_free(fargb);
+            goto fail2;
+        }
+        memcpy(anim->frames[i].pix, curr, total * sizeof(uint32_t));
+        anim->frames[i].durationMs = f->durationMs;
+
+        if (f->dispose) {
+            for (fy = 0; fy < f->h; fy++) {
+                uint32_t* d = prevDisposed + (size_t)(f->y + fy) * cw +
+                              (size_t)f->x;
+                memset(d, 0, sizeof(uint32_t) * (size_t)f->w);
+            }
+        }
+        pluto_free(fargb);
+        prevWasKey = isKey;
+    }
+
+    anim->width = cw;
+    anim->height = chh;
+    anim->bgcolor = bg;
+    anim->loopCount = loop;
+    anim->numFrames = numRecs;
+    pluto_free(recs);
+    pluto_free(curr);
+    pluto_free(prevDisposed);
+    *outAnim = anim;
+    return 0;
+
+fail2:
+    if (anim != NULL && anim->frames != NULL) {
+        for (i = 0; i < numRecs; i++)
+            pluto_free(anim->frames[i].pix);
+        pluto_free(anim->frames);
+    }
+    pluto_free(anim);
+    pluto_free(curr);
+    pluto_free(prevDisposed);
+    pluto_free(recs);
+    return -1;
+}
+
+void webp_anim_free(WebPAnim* anim) {
+    int i;
+    if (!anim) return;
+    if (anim->frames) {
+        for (i = 0; i < anim->numFrames; i++)
+            pluto_free(anim->frames[i].pix);
+        pluto_free(anim->frames);
+    }
+    pluto_free(anim);
+}
+
+/* ------------------------------------------------------------------ */
+/* RIFF container parsing (still images).                              */
+
+enum { WEBP_CHUNK_NONE = 0, WEBP_CHUNK_VP8L, WEBP_CHUNK_VP8 };
+
+/* Locates the primary image chunk of a simple or extended WebP file
+ * plus an optional sibling ALPH chunk. Animation chunks (ANIM/ANMF)
+ * are skipped: animated decoding goes through webp_decode_anim(). */
+static int parse_webp(const uint8_t* data, size_t len,
+                      const uint8_t** outPayload, size_t* outLen,
+                      const uint8_t** outAlpha, size_t* outAlphaLen,
+                      int* outKind) {
+    size_t pos;
+    if (len < 20) return 0;
+    if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WEBP", 4) != 0)
+        return 0;
+    *outPayload = NULL;
+    *outLen = 0;
+    *outAlpha = NULL;
+    *outAlphaLen = 0;
+    *outKind = WEBP_CHUNK_NONE;
+    pos = 12;
+    while (pos + 8 <= len) {
+        uint32_t size = (uint32_t)data[pos + 4] |
+                        ((uint32_t)data[pos + 5] << 8) |
+                        ((uint32_t)data[pos + 6] << 16) |
+                        ((uint32_t)data[pos + 7] << 24);
+        size_t avail = len - (pos + 8);
+        size_t clen = size < avail ? size : avail;
+        if (memcmp(data + pos, "VP8L", 4) == 0 ||
+            memcmp(data + pos, "VP8 ", 4) == 0) {
+            if (*outPayload == NULL) {
+                *outKind = (data[pos + 3] == 'L') ? WEBP_CHUNK_VP8L
+                                                  : WEBP_CHUNK_VP8;
+                *outPayload = data + pos + 8;
+                *outLen = clen;
+            }
+        } else if (memcmp(data + pos, "ALPH", 4) == 0 &&
+                   *outAlpha == NULL) {
+            *outAlpha = data + pos + 8;
+            *outAlphaLen = clen;
+        }
+        pos += 8 + size + (size & 1);
+    }
+    return (*outPayload != NULL) ? 1 : 0;
+}
+
+int webp_decode_argb(const uint8_t* data, size_t len, int maxW, int maxH,
+                     uint32_t*** outRows, int* outW, int* outH) {
+    const uint8_t* payload = NULL;
+    const uint8_t* alphaPay = NULL;
+    size_t plen = 0, alphaLen = 0;
+    int kind = WEBP_CHUNK_NONE;
+    uint32_t* flat = NULL;
     uint32_t** grid = NULL;
-    int y;
+    int w = 0, h = 0, y;
 
     (void)maxW;
     (void)maxH;
@@ -1236,65 +3704,59 @@ int webp_decode_argb(const uint8_t* data, size_t len, int maxW, int maxH,
     *outRows = NULL;
     *outW = 0;
     *outH = 0;
-    if (!parse_webp(data, len, &payload, &plen)) return -1;
-    if (plen < 5 || payload[0] != VP8L_MAGIC_BYTE) return -1;
+    if (!parse_webp(data, len, &payload, &plen, &alphaPay, &alphaLen,
+                    &kind))
+        return -1;
 
-    bits = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8) |
-           ((uint32_t)payload[3] << 16);
-    w = (int)(bits & 0x3FFF) + 1;
-    h = (int)((bits >> 14) & 0x3FFF) + 1;
-    if (((bits >> 22) & 7) != 0) return -1; /* unknown version */
-    if (w < 1 || h < 1 || (long long)w * h > WEBP_MAX_PIXELS) return -1;
-
-    memset(&ctx, 0, sizeof(ctx));
-    br.data = payload;
-    br.len = plen;
-    br.pos = 5;
-    br.window = 0;
-    br.nbits = 0;
-    br.eos = 0;
-
-    if (!decode_image_stream(w, h, 1, &br, &ctx, NULL)) goto fail;
-
-    {
-        int tw = ctx.transformXsize;
-        int th = ctx.transformYsize;
-        if (tw < 1 || th < 1 || tw * th > WEBP_MAX_PIXELS) goto fail;
-        flat = (uint32_t*)pluto_calloc((size_t)tw * (size_t)th,
-                                       sizeof(uint32_t));
-        if (!flat) goto fail;
-        if (!decode_image_data(&br, &ctx, flat, tw, th)) goto fail;
-        if (br.eos) goto fail;
-
-        finalPix = apply_inverse_transforms(&ctx, flat, th);
-        flat = NULL; /* consumed (freed or returned) */
-        if (!finalPix) goto fail;
-
-        grid = (uint32_t**)pluto_malloc(sizeof(uint32_t*) * (size_t)th);
-        if (!grid) goto fail;
-        memset(grid, 0, sizeof(uint32_t*) * (size_t)th);
-        for (y = 0; y < th; y++) {
-            grid[y] = (uint32_t*)pluto_malloc(sizeof(uint32_t) * (size_t)w);
-            if (!grid[y]) goto fail;
-            memcpy(grid[y], finalPix + (size_t)y * (size_t)w,
-                   sizeof(uint32_t) * (size_t)w);
+    tasks_yield_check();
+    if (kind == WEBP_CHUNK_VP8L) {
+        if (!vp8l_decode_payload(payload, plen, &flat, &w, &h)) return -1;
+    } else {
+        uint8_t* rgb = NULL;
+        uint8_t* alpha = NULL;
+        size_t i, npix;
+        if (!vp8_decode_payload(payload, plen, alphaPay, alphaLen,
+                                &rgb, &alpha, &w, &h)) {
+            return -1;
         }
-        pluto_free(finalPix);
-        ctx_free(&ctx);
-        *outRows = grid;
-        *outW = w;
-        *outH = th;
-        return 0;
+        npix = (size_t)w * (size_t)h;
+        flat = (uint32_t*)pluto_malloc(npix * sizeof(uint32_t));
+        if (!flat) {
+            pluto_free(rgb);
+            pluto_free(alpha);
+            return -1;
+        }
+        for (i = 0; i < npix; i++) {
+            unsigned int a = alpha ? alpha[i] : 0xFFu;
+            flat[i] = (a << 24) | ((uint32_t)rgb[i * 3] << 16) |
+                      ((uint32_t)rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2];
+        }
+        pluto_free(rgb);
+        pluto_free(alpha);
     }
+
+    grid = (uint32_t**)pluto_malloc(sizeof(uint32_t*) * (size_t)h);
+    if (!grid) {
+        pluto_free(flat);
+        return -1;
+    }
+    memset(grid, 0, sizeof(uint32_t*) * (size_t)h);
+    for (y = 0; y < h; y++) {
+        grid[y] = (uint32_t*)pluto_malloc(sizeof(uint32_t) * (size_t)w);
+        if (!grid[y]) goto fail;
+        memcpy(grid[y], flat + (size_t)y * (size_t)w,
+               sizeof(uint32_t) * (size_t)w);
+    }
+    pluto_free(flat);
+    *outRows = grid;
+    *outW = w;
+    *outH = h;
+    return 0;
 
 fail:
-    if (grid) {
-        for (y = 0; y < h && grid[y]; y++) pluto_free(grid[y]);
-        pluto_free(grid);
-    }
-    pluto_free(finalPix);
+    for (y = 0; y < h && grid[y]; y++) pluto_free(grid[y]);
+    pluto_free(grid);
     pluto_free(flat);
-    ctx_free(&ctx);
     return -1;
 }
 

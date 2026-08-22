@@ -12,6 +12,9 @@ static const WebpProbePt wp_predictor[] = {{0,0,0xFF8FB964u}, {63,0,0xFF95B368u}
 static const WebpProbePt wp_cache[] = {{0,0,0x80DC94DCu}, {95,0,0xFF5D765Du}, {0,71,0xFF693BB0u}, {95,71,0xFFA54EECu}, {48,36,0x808ACEAEu}, {24,18,0x80D69AE8u}, {72,18,0xFFF42406u}, {24,54,0xFF30A866u}, {72,54,0x807098A6u}, {24,24,0xFF623E7Au}, {48,71,0x807183B8u}, {72,71,0xFFA028E7u}};
 static const WebpProbePt wp_meta[] = {{0,0,0xFF002800u}, {299,0,0xFF5A1EC8u}, {0,199,0xFFFAFAF5u}, {299,199,0xFF56288Eu}, {150,100,0xFF5A1EC8u}, {75,50,0xFFFAFAF5u}, {225,50,0xFF5A1EC8u}, {75,150,0xC814E1B4u}, {225,150,0xFFC2282Cu}, {75,66,0xFFFAFAF5u}, {150,199,0xFF5A1EC8u}, {225,199,0xFFC2288Eu}};
 static const WebpProbePt wp_pil_bench[] = {{0,0,0xFF000000u}, {265,0,0xFFE5093Fu}, {0,199,0xFF557D71u}, {265,199,0xFF3A86A2u}, {133,100,0xFF9D1127u}, {66,50,0xFFD08810u}, {199,50,0xFF410DB3u}, {66,150,0xFFFC14CCu}, {199,150,0xFF6D9937u}, {66,66,0xFF003800u}, {133,199,0xFFC602CEu}, {199,199,0xFF004400u}};
+static const WebpProbePt wp_lossy_flat[] = {{0,0,0xFFC51F59u}, {31,0,0xFFC71E59u}, {0,23,0xFFC71E59u}, {31,23,0xFFC71E59u}, {16,12,0xFFC71E59u}, {8,6,0xFFC71E59u}, {24,6,0xFFC71E59u}, {8,18,0xFFC71E59u}, {24,18,0xFFC71E59u}, {8,8,0xFFC71E59u}, {16,23,0xFFC71E59u}, {24,23,0xFFC71E59u}};
+static const WebpProbePt wp_lossy_grad[] = {{0,0,0xFF010101u}, {47,0,0xFF4000BEu}, {0,31,0xFF088FD5u}, {47,31,0xFF57719Fu}, {24,16,0xFF37C0D6u}, {12,8,0xFF866977u}, {36,8,0xFF8E66EAu}, {12,24,0xFF873BE8u}, {36,24,0xFF8C395Cu}, {12,10,0xFF888184u}, {24,31,0xFF387A3Du}, {36,31,0xFF948F90u}};
+static const WebpProbePt wp_lossy_alpha[] = {{0,0,0x002909CEu}, {23,0,0x111EA0C8u}, {0,15,0x87190456u}, {23,15,0x981F9D52u}, {12,8,0x5C1F5788u}, {6,4,0xAE1E28A4u}, {18,4,0xC21F7FA5u}, {6,12,0xF61D2B66u}, {18,12,0x0A207E6Au}, {6,5,0xB71E299Cu}, {12,15,0x9B1A5652u}, {18,15,0x251E7D56u}};
 
 const WebpProbe webp_probes[] = {
         {0, 12, wp_flat},
@@ -22,6 +25,22 @@ const WebpProbe webp_probes[] = {
         {5, 12, wp_cache},
         {6, 12, wp_meta},
         {7, 12, wp_pil_bench},
+        {8, 12, wp_lossy_flat},
+        {9, 12, wp_lossy_grad},
+        {10, 12, wp_lossy_alpha},
 };
 
-const int webp_probes_len = 8;
+const int webp_probes_len = 11;
+
+const WebpProbePt wp_anim_f0[] = {{0,0,0xFF000011u}, {23,0,0xFF537311u}, {0,15,0xFFA5B311u}, {23,15,0xFFF8261Cu}, {12,8,0xFF142431u}, {6,4,0xFF0A9259u}, {18,10,0xFF087C2Du}, {9,13,0xFFDCA670u}, {20,2,0xFFFA9E89u}, {3,6,0xFFB1BD47u}, {14,12,0xFF8AA209u}, {11,8,0xFFEF1F19u}};
+const int wp_anim_f0_len = 12;
+
+const WebpProbePt wp_anim_f1[] = {{0,0,0xFF000011u}, {23,0,0xFF537311u}, {0,15,0xFFA5B311u}, {23,15,0xFFF8261Cu}, {12,8,0xFF87262Cu}, {6,4,0xFF825C40u}, {18,10,0xFF087C2Du}, {9,13,0xFFEB664Bu}, {20,2,0xFFFA9E89u}, {3,6,0xFFB1BD47u}, {14,12,0xFFC26418u}, {11,8,0xFFF42320u}};
+const int wp_anim_f1_len = 12;
+
+const WebpProbePt wp_anim_f2[] = {{0,0,0xFF000011u}, {23,0,0xFF537311u}, {0,15,0xFFA5B311u}, {23,15,0xFFF8261Cu}, {12,8,0xFF87262Cu}, {6,4,0xFF825C40u}, {18,10,0xFF087C2Du}, {9,13,0xFF5A489Cu}, {20,2,0xFFFA9E89u}, {3,6,0xFF49619Au}, {14,12,0xFFC26418u}, {11,8,0xFFF42320u}};
+const int wp_anim_f2_len = 12;
+
+const WebpProbePt wp_anim_f3[] = {{0,0,0xFF000011u}, {23,0,0xFF537311u}, {0,15,0xFFA5B311u}, {23,15,0xFFF8261Cu}, {12,8,0xFF3E7829u}, {6,4,0xFF825C40u}, {18,10,0xFF087C2Du}, {9,13,0xA014AA28u}, {20,2,0xFFFA9E89u}, {3,6,0x00000000u}, {14,12,0xFF548F22u}, {11,8,0xFF677725u}};
+const int wp_anim_f3_len = 12;
+

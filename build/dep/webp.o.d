@@ -26,7 +26,8 @@ build/src/render/decoders/webp.o: src/render/decoders/webp.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
  src/core/tasks.h src/render/decoders/dither.h \
- src/render/decoders/scale.h src/util/mem.h
+ src/render/decoders/scale.h src/render/decoders/webp_vp8_data.h \
+ src/util/mem.h
 
 src/render/decoders/webp.h:
 
@@ -85,5 +86,7 @@ src/core/tasks.h:
 src/render/decoders/dither.h:
 
 src/render/decoders/scale.h:
+
+src/render/decoders/webp_vp8_data.h:
 
 src/util/mem.h:
