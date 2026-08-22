@@ -619,12 +619,25 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       Phase log exported with parity map.
 
 ### PHASE P15 — render/decoders/dither.c + scale.c
-- [ ] rgbToGray ((306*r+601*g+117*b)>>10), 4×4 Bayer ordered dithering, toImage building
+- [x] rgbToGray ((306*r+601*g+117*b)>>10), 4×4 Bayer ordered dithering, toImage building
       LCDBitmap via framebuffer write (max 380x240 guard), run-length fillRect batching
       option preserved or improved with identical output pixels.
-- [ ] Scale.boxSizes + newAccum streaming box filter (addRow/finish) bit-exact.
-- [ ] Golden-pixel tests logged (small synthetic images).
-- [ ] Verify; STOP.
+- [x] Scale.boxSizes + newAccum streaming box filter (addRow/finish) bit-exact.
+- [x] Golden-pixel tests logged (small synthetic images).
+- [x] Verify; STOP.
+
+      DONE (2026-08-21). toImage PRESERVED as pushContext + run-length
+      fillRect batching (identical pixels by construction) — proven on
+      simulator by rendering a real LCDBitmap from a synthetic gradient and
+      cross-checking its getBitmapData bits against the pure Bayer logic:
+      expected_black=42803 == actual_black=42803 on a 400x500 source clamped
+      to 380x240. Quirks pinned: gray==threshold paints WHITE; trailing
+      partial scale block emits an EXTRA row so count can exceed targetH;
+      rounding floor(sum/div+0.5) via doubles exactly like Lua numbers.
+      C API fixes: no setColor() member (color per fillRect call);
+      getBitmapData takes (w,h,rowbytes,mask,data). Selftests: 19 passed,
+      0 failed + 3 device checks (host + ASAN clean + this phase's sim log).
+      Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P16 — render/decoders/inflate.c
 - [ ] createBitStream (LSB-first), canonical Huffman buildHuffmanTable, decodeSymbol,

@@ -54,6 +54,9 @@ SRC = \
 	src/render/selftest_style.c \
 	src/render/link_manager.c \
 	src/render/selftest_link_manager.c \
+	src/render/decoders/dither.c \
+	src/render/decoders/scale.c \
+	src/render/decoders/selftest_decoders.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
