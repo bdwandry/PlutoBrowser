@@ -193,6 +193,9 @@ static int s_spFail = -1;
 /* P32 browser engine: selftest counts */
 static int s_brPass = -1;
 static int s_brFail = -1;
+/* P33 app shell: 1 once boot diagnostics finish; update() then drives the
+ * real browser engine instead of the phase showcases. */
+static int s_appMode = 0;
 
 // Vendored keyboard lib (vendor/keyboard) resolves the SDK handle through
 // this global symbol; every PlutoBrowser module keeps its own s_pd static.
@@ -768,6 +771,19 @@ static int update(void* userdata)
     (void)userdata;
     s_frame++;
 
+    /* [P33] Real application shell: br_frame() pumps the cooperative
+     * schedulers itself (tasks/http/image inside browser.c) and composes
+     * content + chrome + overlays, mirroring Lua playdate.update ->
+     * browser.updateFrame(). Input/crank come from the engine's default
+     * hardware provider. */
+    if (s_appMode) {
+        br_frame();
+        if (s_frame % 300 == 0)
+            PLUTO_LOG("app frame=%u st=%d url='%s'", s_frame, br_state(),
+                      br_current_normalized());
+        return 1;
+    }
+
     // Cooperative scheduler pump (main.lua Tasks.update() parity).
     tasks_update();
 
@@ -1229,12 +1245,31 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             }
             PLUTO_LOG("[P32] browser engine ready");
 
+            // P33 app shell: hand control to the real browser. br_boot()
+            // re-runs the Lua init tail (STATE_HOME, callbacks, menu) on a
+            // clean slate after the selftest suites churned engine state;
+            // real networking/clock were restored by the suite teardown.
+            br_set_update_trampoline(update);   // vendored keyboard pump
+            br_boot();
+            s_appMode = 1;
+            PLUTO_LOG("[P33] app shell engaged");
+
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");
             break;
 
         case kEventTerminate:
             PLUTO_LOG("terminate event, frames=%u", s_frame);
+            break;
+
+        case kEventPause:
+            /* Hardware Menu button: custom pause overlay (C_API has no
+             * system-menu-items API; browser.c mirrors the entries). */
+            br_on_pause();
+            break;
+
+        case kEventResume:
+            br_on_resume();
             break;
 
         default:
