@@ -585,6 +585,11 @@ void br_on_pause(void)  { menu_rebuild(); s_br.menuSel = 0;
 void br_on_resume(void) { s_br.menuOpen = 0; }
 int  br_menu_open(void) { return s_br.menuOpen; }
 int  br_menu_sel(void)  { return s_br.menuSel; }
+int  br_mouse_x(void)   { return s_br.mouseX; }
+int  br_mouse_y(void)   { return s_br.mouseY; }
+void br_set_mouse_for_tests(int x, int y) {
+    s_br.mouseX = x; s_br.mouseY = y;
+}
 
 /* ── Native system menu (Lua main.lua parity) ──────────────────────────
  * The C_API DOES expose playdate->system menu items (the old custom
@@ -1510,16 +1515,30 @@ compose:
     }
 
     if (s_br.menuOpen) menu_draw();
+
+    /* HTML-mode virtual cursor: white triangle + black outline, drawn as
+     * the very last thing so nothing can draw over it (Lua 1008-1021) */
+    if (s_br.state == PLUTO_STATE_PAGE &&
+        s_br.browseMode == PLUTO_MODE_RAW_HTML &&
+        !s_br.keyboardOpen && !ab_is_open()) {
+        s_pd->graphics->pushContext(NULL);
+        s_pd->graphics->clearClipRect();
+        int mx = s_br.mouseX, my = s_br.mouseY;
+        s_pd->graphics->fillTriangle(mx, my, mx + 10, my + 4,
+                                     mx + 4, my + 10, kColorWhite);
+        s_pd->graphics->drawLine(mx, my, mx + 10, my + 4, 1, kColorBlack);
+        s_pd->graphics->drawLine(mx + 10, my + 4, mx + 4, my + 10,
+                                 1, kColorBlack);
+        s_pd->graphics->drawLine(mx + 4, my + 10, mx, my, 1, kColorBlack);
+        s_pd->graphics->drawLine(mx, my, mx + 4, my + 10, 1, kColorBlack);
+        s_pd->graphics->popContext();
+    }
 }
 
 /* reader/html scroll step extracted for clarity (Lua 694-809) */
 static void target_scroll_step(const BrInput* in, int isHtmlMode,
                                float crankChange) {
-    (void)isHtmlMode; (void)crankChange;
-    /* both modes: crank velocity drives the target */
-    s_br.targetScrollY += s_br.crankVelocity;
-
-    /* A + Left/Right history jumps */
+    /* A + Left/Right history jumps (both modes) */
     if (in->held & BR_BTN_A) {
         char u[PLUTO_URL_NORMALIZED_MAX];
         if (in->justPressed & BR_BTN_LEFT) {
@@ -1529,8 +1548,12 @@ static void target_scroll_step(const BrInput* in, int isHtmlMode,
         } else if (in->justPressed & BR_BTN_RIGHT) {
             if (go_forward_url(u, sizeof(u))) navigate_to(u);
         }
-    } else if (!isHtmlMode) {
-        /* READER: D-pad walks links with scroll follow */
+        return;
+    }
+
+    if (!isHtmlMode) {
+        /* READER: crank velocity drives scroll; D-pad walks links */
+        s_br.targetScrollY += s_br.crankVelocity;
         if (in->justPressed & BR_BTN_DOWN) {
             LmLink* nx = lm_select_next((int)s_br.scrollY);
             if (nx != NULL) {
@@ -1557,6 +1580,59 @@ static void target_scroll_step(const BrInput* in, int isHtmlMode,
                 s_br.targetScrollY -= 40;
             }
         }
+        return;
+    }
+
+    /* ── HTML MODE: virtual mouse cursor (Lua main.lua 768-808) ── */
+    if (s_br.bHoldActive) return;      /* B-hold suppresses movement */
+    int dpadHeld = 0;
+    if (in->held & BR_BTN_LEFT) {
+        s_br.mouseX -= 4;
+        if (s_br.mouseX < 2) s_br.mouseX = 2;
+        dpadHeld = 1;
+    }
+    if (in->held & BR_BTN_RIGHT) {
+        s_br.mouseX += 4;
+        if (s_br.mouseX > PLUTO_SCREEN_WIDTH - 2)
+            s_br.mouseX = PLUTO_SCREEN_WIDTH - 2;
+        dpadHeld = 1;
+    }
+    if (in->held & BR_BTN_UP) {
+        s_br.mouseY -= 4;
+        if (s_br.mouseY < PLUTO_CONTENT_Y + 2)
+            s_br.mouseY = PLUTO_CONTENT_Y + 2;
+        dpadHeld = 1;
+    }
+    if (in->held & BR_BTN_DOWN) {
+        s_br.mouseY += 4;
+        if (s_br.mouseY > PLUTO_SCREEN_HEIGHT - 2)
+            s_br.mouseY = PLUTO_SCREEN_HEIGHT - 2;
+        dpadHeld = 1;
+    }
+
+    if (dpadHeld) {
+        if (crankChange != 0.0f) {
+            s_br.mouseY += (int)(crankChange * 0.5f);
+            if (s_br.mouseY < PLUTO_CONTENT_Y + 2)
+                s_br.mouseY = PLUTO_CONTENT_Y + 2;
+            if (s_br.mouseY > PLUTO_SCREEN_HEIGHT - 2)
+                s_br.mouseY = PLUTO_SCREEN_HEIGHT - 2;
+        }
+        /* edge zones nudge scroll toward the cursor (Lua 796-803) */
+        const int SCROLL_ZONE = 20;
+        if (s_br.mouseY <= PLUTO_CONTENT_Y + SCROLL_ZONE) {
+            double strength =
+                (double)(SCROLL_ZONE -
+                         (s_br.mouseY - PLUTO_CONTENT_Y)) / SCROLL_ZONE;
+            s_br.targetScrollY -= 3.0 * (1.0 + strength * 3.0);
+        } else if (s_br.mouseY >= PLUTO_SCREEN_HEIGHT - SCROLL_ZONE) {
+            double strength =
+                (double)(SCROLL_ZONE -
+                         (PLUTO_SCREEN_HEIGHT - s_br.mouseY)) / SCROLL_ZONE;
+            s_br.targetScrollY += 3.0 * (1.0 + strength * 3.0);
+        }
+    } else {
+        s_br.targetScrollY += s_br.crankVelocity;
     }
 }
 
