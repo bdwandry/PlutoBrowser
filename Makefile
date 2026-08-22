@@ -52,6 +52,8 @@ SRC = \
 	src/html/selftest_readability.c \
 	src/render/style.c \
 	src/render/selftest_style.c \
+	src/render/link_manager.c \
+	src/render/selftest_link_manager.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
