@@ -75,6 +75,9 @@ SRC = \
 	src/render/decoders/ico.c \
 	src/render/decoders/selftest_ico.c \
 	src/render/decoders/selftest_ico_fixtures.c \
+	src/render/decoders/svg.c \
+	src/render/decoders/selftest_svg.c \
+	src/render/decoders/selftest_svg_fixtures.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
