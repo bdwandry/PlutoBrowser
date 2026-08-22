@@ -25,6 +25,8 @@
 #include "html/selftest_readability.h"
 #include "render/style.h"
 #include "render/selftest_style.h"
+#include "render/link_manager.h"
+#include "render/selftest_link_manager.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -59,6 +61,8 @@ static int s_rzFail = -1;
 static int s_rzPass = -1;
 static int s_syFail = -1;
 static int s_syPass = -1;
+static int s_lmFail = -1;
+static int s_lmPass = -1;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -220,8 +224,19 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_lmPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P14 linkmgr: %d passed, %d failed",
+                     s_lmPass, s_lmFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 245);
+        }
+    }
+
     const char* hint = "Phase P07 raw TCP HTTP client";
-    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 245);
+    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 260);
 }
 
 static int update(void* userdata)
@@ -347,10 +362,16 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("style fonts unavailable (no body font)");
             }
             style_set_system_font((PlutoFont*)s_fontBody);
+            lm_init(pd);
 
             selftest_style_run(&s_syPass, &s_syFail);
             if (s_syFail > 0) {
                 PLUTO_ERROR("P13 SELFTEST FAILURES: %d", s_syFail);
+            }
+
+            selftest_link_manager_run(&s_lmPass, &s_lmFail);
+            if (s_lmFail > 0) {
+                PLUTO_ERROR("P14 SELFTEST FAILURES: %d", s_lmFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);

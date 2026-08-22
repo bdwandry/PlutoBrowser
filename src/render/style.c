@@ -41,6 +41,9 @@ static PlutoFont* load_or_null(const char* path) {
 
 void style_init(struct PlaydateAPI* pd) {
     memset(&st, 0, sizeof(st));
+#ifndef PLUTO_STYLE_PD
+    (void)pd;
+#endif
 #ifdef PLUTO_STYLE_PD
     if (pd == NULL || pd->graphics == NULL) return;
     s_pd = pd;

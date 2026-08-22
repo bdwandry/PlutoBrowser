@@ -602,11 +602,21 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       phase). Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P14 — render/link_manager.c
-- [ ] Full port: addLinkRect merging consecutive rects per anchorIndex, getCount,
+- [x] Full port: addLinkRect merging consecutive rects per anchorIndex, getCount,
       findInitialSelection (viewport-distance rule), selectNext/selectPrev (skip logic +
       scroll-follow amounts), getSelectedLink, drawSelectedHighlight (inversion rect),
       isHighlighted, addLink, getHoveredLink hit-test, clear/clearSelection.
-- [ ] Verify with synthetic rects logged; STOP.
+- [x] Verify with synthetic rects logged; STOP.
+
+      DONE (2026-08-21). Full port of the 181-line source. Quirks pinned by
+      tests: nil `text` arg can never merge (stored text defaults to href at
+      insert); nil anchorIndex merges across any stored anchor; tie-breaking in
+      both initial-selection passes keeps the FIRST link; hovered hit-test uses
+      60/14 w/h defaults for unset rect fields; selection wrap-around only —
+      current Lua contains no skip logic. drawRoundRect/fillRect take explicit
+      color/lineWidth in the C API (same pixels). Selftests: 28 passed,
+      0 failed (host + ASAN clean + simulator log this phase). Build gate 0/0.
+      Phase log exported with parity map.
 
 ### PHASE P15 — render/decoders/dither.c + scale.c
 - [ ] rgbToGray ((306*r+601*g+117*b)>>10), 4×4 Bayer ordered dithering, toImage building
