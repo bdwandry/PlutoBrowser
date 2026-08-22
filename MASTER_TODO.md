@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P26 DONE (verified in simulator). NEXT: P27.**
+**Status: PLANNING COMPLETE — PHASES P01–P27 DONE (verified in simulator). NEXT: P28.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ | P27–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ | P28–P36 ⬜
 
 ---
 
@@ -876,14 +876,36 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       Build gate clean. Log exported to logs/phase-P26.log.)
 - [x] Verify; STOP.
 
-### PHASE P27 — ui/chrome.c + ui/hud.c
-- [ ] Chrome.draw: black bar, separator, SSL lock/globe vector drawing, host display rules
+### PHASE P27 — ui/chrome.c + ui/hud.c  ✅ DONE (verified in simulator)
+- [x] Chrome.draw: black bar, separator, SSL lock/globe vector drawing, host display rules
       (about:, >28 chars ellipsis), [READ]/[WEB] badge, comet loading dots anim (12-phase),
-      progress bar (known total vs indeterminate sweep), clock HH:MM via playdate->system->
-      getTime; cometAnimFrame static.
-- [ ] Hud.draw scrollbar (track/thumb math exact) + active-link bottom HUD (56-char clip);
-      Hud.drawHoverStatus (halved bold font pill bottom-left, 50-char clip).
-- [ ] Visual check in sim; STOP.
+      progress bar (known total vs indeterminate sweep), clock HH:MM; cometAnimFrame static.
+      (chrome.c/h full port: bar 400x24 + white separator row 23; SSL roundrect r3 +
+        body rect + black keyhole dot / globe circle r6 + cross lines via
+        fillEllipse/drawEllipse wrappers (SDK has no circle API); displayHost default
+        "CometBrowser", about:home special-case, >28 -> 25+"..."; badge at
+        SCREEN_WIDTH-badgeW-62 only for non-about idle pages; comet groups frame%12 with
+        3/2+1/1+2+3 white dots; progress min(1,cur/tot) else ((frame*3)%100)/100 over the
+        separator row; pageTitle accepted-but-unused exactly as Lua. CLOCK DIVERGENCE
+        DOCUMENTED: SDK has no synchronous local-time read (playdate.getTime() equivalent)
+        — sim/host renders libc localtime_r (verified == wall clock); device falls back to
+        Lua's "--:--" pcall path. New additive Style.style_get_ui_small_font() mirrors
+        "fontSmall or fontMono or getFont()".)
+- [x] Hud.draw scrollbar (track/thumb math exact) + active-link bottom HUD (56-char clip);
+      Hud.drawHoverStatus halved bold font pill bottom-left, 50-char clip. (hud.c/h:
+      track 393/26/212 inset 2px, thumb max(12,floor(212*216/th)) + clamped ratio,
+      "-> " prefix clip 56->53+"...", bottom bar SCREEN_HEIGHT-20 with white top line;
+      hover pill loads fonts/Roobert-10-Bold-Halved once (shipped in bundle) w/ sys
+      fallback, barH=fontHeight+4, barW=min(400,tw+12), anchored to content bottom.)
+- [x] Visual check in sim; STOP. (Selftest: 28 passed / 0 failed pinning host-display
+      rules incl. 28/29 boundaries, comet 12-phase group mapping, progress known/indeterminate
+      values incl. wrap at frame 34, scrollbar geometry (432-page mid-scroll y79/h106,
+      min-thumb 12, both ratio clamps), link/hover clip boundaries. One test-expectation
+      bug found+fixed during verify (frame 24 wraps to group 0). Sim showcase rotates 5
+      scenarios every 60 frames (ssl-web/[READ]/loading-known/indeterminate/about) with
+      hud_draw long-href bar + hover pill; clock render logged and verified equal to host
+      wall time. All phases regression-green (1135 PASS / 0 FAIL). Build gate clean. Log
+      exported to logs/phase-P27.log.)
 
 ### PHASE P28 — ui/home_page.c
 - [ ] Speed dial: logo header (comet pixel art lines + circles), banner text, address-bar

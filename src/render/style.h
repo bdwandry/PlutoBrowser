@@ -35,6 +35,8 @@ PlutoFont* style_get_body_font(int isBold, int isCode, int* size);
 /* Style.fontSmall resolution: init assigns sysFont when the slot never
  * loaded (Lua: fontSmall = fontSmall or gfx.getFont()) */
 PlutoFont* style_get_small_font(void);
+/* Lua UI chain: Style.fontSmall or Style.fontMono or gfx.getFont(). */
+PlutoFont* style_get_ui_small_font(void);
 
 /* precedence: code > small/sub/sup > bold/big > regular */
 PlutoFont* style_get_inline_font(int isBold, int isCode, int isSmall,

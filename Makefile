@@ -82,6 +82,9 @@ SRC = \
 	src/render/selftest_image_decoder.c \
 	src/render/cloud_layout.c \
 	src/render/selftest_cloud_layout.c \
+	src/ui/chrome.c \
+	src/ui/hud.c \
+	src/ui/selftest_ui.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \

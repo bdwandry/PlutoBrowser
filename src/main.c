@@ -53,6 +53,9 @@
 #include "render/selftest_image_decoder.h"
 #include "render/cloud_layout.h"
 #include "render/selftest_cloud_layout.h"
+#include "ui/chrome.h"
+#include "ui/hud.h"
+#include "ui/selftest_ui.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -124,6 +127,10 @@ static int s_clPass = -1;
 static int s_clFail = -1;
 static int s_clBuilt = 0;
 static int s_clScroll = 0;
+/* P27 chrome/hud visual: rotate through showcase scenarios */
+static int s_uiPass = -1;
+static int s_uiFail = -1;
+static int s_p27Scenario = 0;
 /* Fixture mirroring the cloud payload shape served on MODE_OPERA_DS. */
 static const char* kClFixture =
     "{\"title\":\"Cloud Demo\",\"totalHeight\":500,\"elements\":["
@@ -446,6 +453,65 @@ static void draw_placeholder(void)
         }
     }
 
+    /* P27 chrome/hud showcase: rotates every 60 frames through
+     * ssl-web / reader-badge / loading-known-total / indeterminate /
+     * about-page states. */
+    {
+        static PlutoUrl demo;
+        memset(&demo, 0, sizeof(demo));
+        int loading = 0, reader = 0;
+        long cur = 0, tot = 0;
+
+        switch (s_p27Scenario % 5) {
+        case 0:
+            strcpy(demo.scheme, "https");
+            strcpy(demo.host, "example.com");
+            demo.isSsl = 1;
+            break;
+        case 1:
+            strcpy(demo.scheme, "https");
+            strcpy(demo.host, "news.example.com");
+            demo.isSsl = 1;
+            reader = 1;
+            break;
+        case 2:
+            strcpy(demo.scheme, "https");
+            strcpy(demo.host, "big.example.com");
+            loading = 1;
+            tot = 1000;
+            cur = (long)(s_frame * 7 % 1100);
+            break;
+        case 3:
+            strcpy(demo.scheme, "http");
+            strcpy(demo.host, "slow.example.net");
+            loading = 1;
+            break;
+        default:
+            strcpy(demo.scheme, "about");
+            strcpy(demo.host, "home");
+            break;
+        }
+
+        ch_draw(&demo, NULL, loading, cur, tot, reader);
+        hud_draw(120, 500,
+                 "https://very.long.example-domain.io/some/deep/path?q=1");
+        hud_draw_hover_status(
+            "https://hovered.example.org/a/really/long/target/link.html");
+
+        if (s_uiPass >= 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "P27 selftest: %d passed, %d failed",
+                         s_uiPass, s_uiFail);
+            if (n > 0) {
+                if ((size_t)n >= sizeof(buf)) {
+                    n = (int)sizeof(buf) - 1;
+                }
+                pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
+                                       70, 440);
+            }
+        }
+    }
+
     /* P25 pipeline visual: placeholder card (alt + selected border) while
      * downloading; scaled decoded bitmap once resolved */
     if (s_p25Stage == 1) {
@@ -560,6 +626,9 @@ static int update(void* userdata)
         s_clScroll += 4;
         if (maxScroll <= 0 || s_clScroll > (int)maxScroll) s_clScroll = 0;
     }
+
+    /* P27 showcase rotation */
+    if (s_frame % 60 == 0) s_p27Scenario++;
 
     if (s_frame == 1) {
         PLUTO_LOG("first frame rendered");
@@ -785,6 +854,15 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P26 SELFTEST FAILURES: %d", s_clFail);
             }
             PLUTO_LOG("[P26] cloud layout ready");
+
+            // P27 chrome + hud: top bar and floating overlays.
+            chrome_init(pd);
+            hud_init(pd);
+            selftest_ui_run(&s_uiPass, &s_uiFail);
+            if (s_uiFail > 0) {
+                PLUTO_ERROR("P27 SELFTEST FAILURES: %d", s_uiFail);
+            }
+            PLUTO_LOG("[P27] chrome/hud ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");
