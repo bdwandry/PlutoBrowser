@@ -140,6 +140,7 @@ void layout_free_items(void);
 
 int          layout_item_count(void);
 const LItem* layout_item_at(int i);      /* NULL out of range */
+LItem*       layout_item_mutable(int i); /* form-state mutation seam */
 double       layout_total_height(void);
 
 /* Lua Layout.selectedInputItem (borrowed pointer to a rendered item) */

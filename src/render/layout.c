@@ -101,6 +101,7 @@ void layout_free_items(void) {
 
 int          layout_item_count(void)      { return s_nItems; }
 const LItem* layout_item_at(int i)        { return (i >= 0 && i < s_nItems) ? &s_items[i] : NULL; }
+LItem*       layout_item_mutable(int i)   { return (i >= 0 && i < s_nItems) ? &s_items[i] : NULL; }
 double       layout_total_height(void)    { return s_totalHeight; }
 
 const LItem* layout_selected_input(void)            { return s_selectedInput; }
