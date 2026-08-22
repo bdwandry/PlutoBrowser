@@ -1,5 +1,5 @@
-build/src/render/decoders/scale.o: src/render/decoders/scale.c \
- src/render/decoders/scale.h \
+build/Source/render/decoders/scale.o: Source/render/decoders/scale.c \
+ Source/render/decoders/scale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -19,9 +19,9 @@ build/src/render/decoders/scale.o: src/render/decoders/scale.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/util/mem.h
+ Source/util/mem.h
 
-src/render/decoders/scale.h:
+Source/render/decoders/scale.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
 
@@ -61,4 +61,4 @@ src/render/decoders/scale.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/util/mem.h:
+Source/util/mem.h:

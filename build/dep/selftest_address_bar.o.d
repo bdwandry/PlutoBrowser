@@ -1,5 +1,5 @@
-build/src/ui/selftest_address_bar.o: src/ui/selftest_address_bar.c \
- src/ui/selftest_address_bar.h \
+build/Source/ui/selftest_address_bar.o: Source/ui/selftest_address_bar.c \
+ Source/ui/selftest_address_bar.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -18,8 +18,8 @@ build/src/ui/selftest_address_bar.o: src/ui/selftest_address_bar.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/logger.h src/core/url.h \
- src/core/../util/strbuf.h src/ui/address_bar.h \
+ Source/core/constants.h Source/core/logger.h Source/core/url.h \
+ Source/core/../util/strbuf.h Source/ui/address_bar.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -55,9 +55,9 @@ build/src/ui/selftest_address_bar.o: src/ui/selftest_address_bar.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- vendor/keyboard/keyboard.h src/util/strbuf.h
+ Source/vendor/keyboard/keyboard.h Source/util/strbuf.h
 
-src/ui/selftest_address_bar.h:
+Source/ui/selftest_address_bar.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -95,15 +95,15 @@ src/ui/selftest_address_bar.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/ui/address_bar.h:
+Source/ui/address_bar.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
@@ -175,6 +175,6 @@ src/ui/address_bar.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-vendor/keyboard/keyboard.h:
+Source/vendor/keyboard/keyboard.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:

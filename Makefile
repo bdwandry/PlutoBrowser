@@ -1,5 +1,6 @@
 # PlutoBrowser — 100% C port of CometBrowser for Playdate
-# C sources live in src/, pdc input (pdxinfo + assets + built binaries) in Source/.
+# All project content lives under Source/ (code, vendor, tools, logs, and
+# pdc input: pdxinfo + assets). Only build/ stays at the top level.
 # Build model follows the SDK convention (see $(SDK)/C_API/buildsupport/common.mk):
 #   device:    arm-none-eabi-gcc -> pdex.elf  -> Source/
 #   simulator: clang dylib       -> pdex.dylib -> Source/
@@ -22,96 +23,97 @@ endif
 ######
 # Source folders (must be in VPATH for make to find them)
 ######
-VPATH += src:src/core:src/util:src/html:src/render:src/render/decoders:src/ui
+VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/vendor/keyboard
 
 # List C source files here
 SRC = \
-	src/main.c \
-	src/core/constants.c \
-	src/core/logger.c \
-	src/core/url.c \
-	src/core/selftest_url.c \
-	src/core/storage.c \
-	src/core/cookie_jar.c \
-	src/core/selftest_storage.c \
-	src/core/tasks.c \
-	src/core/selftest_tasks.c \
-	src/core/encoding.c \
-	src/core/selftest_encoding.c \
-	src/core/internal_pages.c \
-	src/core/browser.c \
-	src/core/http_client.c \
- 	src/core/selftest_http.c \
- 	src/core/selftest_browser.c \
-	src/html/entities.c \
-	src/html/tokenizer.c \
-	src/html/dom.c \
-	src/html/document.c \
-	src/html/readability.c \
-	src/html/selftest_tokenizer.c \
-	src/html/selftest_dom.c \
-	src/html/selftest_document.c \
-	src/html/selftest_readability.c \
-	src/render/style.c \
-	src/render/selftest_style.c \
-	src/render/link_manager.c \
-	src/render/selftest_link_manager.c \
-	src/render/decoders/dither.c \
-	src/render/decoders/scale.c \
-	src/render/decoders/selftest_decoders.c \
-	src/render/decoders/inflate.c \
-	src/render/decoders/selftest_inflate.c \
-	src/render/decoders/png.c \
-	src/render/decoders/selftest_png.c \
-	src/render/decoders/bmp.c \
-	src/render/decoders/selftest_bmp.c \
-	src/render/decoders/gif.c \
-	src/render/decoders/selftest_gif.c \
-	src/render/decoders/jpeg.c \
-	src/render/decoders/selftest_jpeg.c \
-	src/render/decoders/selftest_jpeg_fixtures.c \
- 	src/render/decoders/webp_vp8_data.c \
- 	src/render/decoders/webp.c \
-	src/render/decoders/selftest_webp.c \
-	src/render/decoders/selftest_webp_fixtures.c \
-	src/render/decoders/ico.c \
-	src/render/decoders/selftest_ico.c \
-	src/render/decoders/selftest_ico_fixtures.c \
-	src/render/decoders/svg.c \
-	src/render/decoders/selftest_svg.c \
-	src/render/decoders/selftest_svg_fixtures.c \
-	src/render/image_decoder.c \
-	src/render/selftest_image_decoder.c \
-	src/render/cloud_layout.c \
-	src/render/layout.c \
-	src/render/selftest_layout.c \
-	src/render/selftest_cloud_layout.c \
-	src/ui/chrome.c \
-	src/ui/hud.c \
-	src/ui/selftest_ui.c \
-	src/ui/home_page.c \
-	src/ui/selftest_home_page.c \
-	src/ui/address_bar.c \
-	src/ui/selftest_address_bar.c \
-	src/ui/list_core.c \
-	src/ui/error_page.c \
-	src/ui/bookmarks_page.c \
-	src/ui/history_page.c \
-	src/ui/selftest_pages.c \
-	src/ui/settings_page.c \
-	src/ui/selftest_settings.c \
-	vendor/keyboard/keyboard.c \
-	src/util/mem.c \
-	src/util/strbuf.c \
-	src/util/dynarray.c \
-	src/util/strmap.c \
-	src/util/luapattern.c \
-	src/util/json.c \
-	src/util/luanum.c \
-	src/util/selftest_util.c \
+	Source/main.c \
+	Source/core/constants.c \
+	Source/core/logger.c \
+	Source/core/url.c \
+	Source/core/selftest_url.c \
+	Source/core/storage.c \
+	Source/core/cookie_jar.c \
+	Source/core/selftest_storage.c \
+	Source/core/tasks.c \
+	Source/core/selftest_tasks.c \
+	Source/core/encoding.c \
+	Source/core/selftest_encoding.c \
+	Source/core/internal_pages.c \
+	Source/core/browser.c \
+	Source/core/http_client.c \
+ 	Source/core/selftest_http.c \
+ 	Source/core/selftest_browser.c \
+	Source/html/entities.c \
+	Source/html/tokenizer.c \
+	Source/html/dom.c \
+	Source/html/document.c \
+	Source/html/readability.c \
+	Source/html/selftest_tokenizer.c \
+	Source/html/selftest_dom.c \
+	Source/html/selftest_document.c \
+	Source/html/selftest_readability.c \
+	Source/render/style.c \
+	Source/render/selftest_style.c \
+	Source/render/link_manager.c \
+	Source/render/selftest_link_manager.c \
+	Source/render/decoders/dither.c \
+	Source/render/decoders/scale.c \
+	Source/render/decoders/selftest_decoders.c \
+	Source/render/decoders/inflate.c \
+	Source/render/decoders/selftest_inflate.c \
+	Source/render/decoders/png.c \
+	Source/render/decoders/selftest_png.c \
+	Source/render/decoders/bmp.c \
+	Source/render/decoders/selftest_bmp.c \
+	Source/render/decoders/gif.c \
+	Source/render/decoders/selftest_gif.c \
+	Source/render/decoders/jpeg.c \
+	Source/render/decoders/selftest_jpeg.c \
+	Source/render/decoders/selftest_jpeg_fixtures.c \
+ 	Source/render/decoders/webp_vp8_data.c \
+ 	Source/render/decoders/webp.c \
+	Source/render/decoders/selftest_webp.c \
+	Source/render/decoders/selftest_webp_fixtures.c \
+	Source/render/decoders/ico.c \
+	Source/render/decoders/selftest_ico.c \
+	Source/render/decoders/selftest_ico_fixtures.c \
+	Source/render/decoders/svg.c \
+	Source/render/decoders/selftest_svg.c \
+	Source/render/decoders/selftest_svg_fixtures.c \
+	Source/render/image_decoder.c \
+	Source/render/selftest_image_decoder.c \
+	Source/render/cloud_layout.c \
+	Source/render/layout.c \
+	Source/render/selftest_layout.c \
+	Source/render/selftest_cloud_layout.c \
+	Source/ui/chrome.c \
+	Source/ui/hud.c \
+	Source/ui/selftest_ui.c \
+	Source/ui/home_page.c \
+	Source/ui/selftest_home_page.c \
+	Source/ui/address_bar.c \
+	Source/ui/selftest_address_bar.c \
+	Source/ui/list_core.c \
+	Source/ui/error_page.c \
+	Source/ui/bookmarks_page.c \
+	Source/ui/history_page.c \
+	Source/ui/selftest_pages.c \
+	Source/ui/settings_page.c \
+	Source/ui/selftest_settings.c \
+	Source/vendor/keyboard/keyboard.c \
+	Source/util/mem.c \
+	Source/util/strbuf.c \
+	Source/util/dynarray.c \
+	Source/util/strmap.c \
+	Source/util/luapattern.c \
+	Source/util/json.c \
+	Source/util/luanum.c \
+	Source/util/selftest_util.c \
 
 # All user directories (for #include resolution)
-UINCDIR = src vendor/keyboard
+# All user directories (for #include resolution)
+UINCDIR = Source Source/vendor/keyboard
 
 include $(SDK)/C_API/buildsupport/common.mk
 

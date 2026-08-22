@@ -1,5 +1,6 @@
-build/src/render/decoders/selftest_jpeg.o: \
- src/render/decoders/selftest_jpeg.c src/render/decoders/selftest_jpeg.h \
+build/Source/render/decoders/selftest_jpeg.o: \
+ Source/render/decoders/selftest_jpeg.c \
+ Source/render/decoders/selftest_jpeg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -55,10 +56,10 @@ build/src/render/decoders/selftest_jpeg.o: \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/logger.h src/render/decoders/jpeg.h \
- src/render/decoders/selftest_jpeg_fixtures.h src/util/mem.h
+ Source/core/logger.h Source/render/decoders/jpeg.h \
+ Source/render/decoders/selftest_jpeg_fixtures.h Source/util/mem.h
 
-src/render/decoders/selftest_jpeg.h:
+Source/render/decoders/selftest_jpeg.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -170,10 +171,10 @@ src/render/decoders/selftest_jpeg.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/decoders/jpeg.h:
+Source/render/decoders/jpeg.h:
 
-src/render/decoders/selftest_jpeg_fixtures.h:
+Source/render/decoders/selftest_jpeg_fixtures.h:
 
-src/util/mem.h:
+Source/util/mem.h:

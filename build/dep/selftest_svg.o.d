@@ -1,5 +1,6 @@
-build/src/render/decoders/selftest_svg.o: \
- src/render/decoders/selftest_svg.c src/render/decoders/selftest_svg.h \
+build/Source/render/decoders/selftest_svg.o: \
+ Source/render/decoders/selftest_svg.c \
+ Source/render/decoders/selftest_svg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -55,10 +56,10 @@ build/src/render/decoders/selftest_svg.o: \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/logger.h src/render/decoders/selftest_svg_fixtures.h \
- src/render/decoders/svg.h
+ Source/core/logger.h Source/render/decoders/selftest_svg_fixtures.h \
+ Source/render/decoders/svg.h
 
-src/render/decoders/selftest_svg.h:
+Source/render/decoders/selftest_svg.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -170,8 +171,8 @@ src/render/decoders/selftest_svg.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/decoders/selftest_svg_fixtures.h:
+Source/render/decoders/selftest_svg_fixtures.h:
 
-src/render/decoders/svg.h:
+Source/render/decoders/svg.h:

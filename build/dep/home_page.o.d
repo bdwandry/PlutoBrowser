@@ -1,4 +1,4 @@
-build/src/ui/home_page.o: src/ui/home_page.c src/ui/home_page.h \
+build/Source/ui/home_page.o: Source/ui/home_page.c Source/ui/home_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
@@ -33,10 +33,10 @@ build/src/ui/home_page.o: src/ui/home_page.c src/ui/home_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/ui/../core/constants.h src/ui/../core/logger.h \
- src/ui/../core/storage.h src/ui/../core/../util/dynarray.h \
- src/ui/../core/storage_data.h src/ui/../render/style.h \
- src/ui/../util/dynarray.h \
+ Source/ui/../core/constants.h Source/ui/../core/logger.h \
+ Source/ui/../core/storage.h Source/ui/../core/../util/dynarray.h \
+ Source/ui/../core/storage_data.h Source/ui/../render/style.h \
+ Source/ui/../util/dynarray.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -57,7 +57,7 @@ build/src/ui/home_page.o: src/ui/home_page.c src/ui/home_page.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
 
-src/ui/home_page.h:
+Source/ui/home_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -127,19 +127,19 @@ src/ui/home_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:
 
-src/ui/../core/logger.h:
+Source/ui/../core/logger.h:
 
-src/ui/../core/storage.h:
+Source/ui/../core/storage.h:
 
-src/ui/../core/../util/dynarray.h:
+Source/ui/../core/../util/dynarray.h:
 
-src/ui/../core/storage_data.h:
+Source/ui/../core/storage_data.h:
 
-src/ui/../render/style.h:
+Source/ui/../render/style.h:
 
-src/ui/../util/dynarray.h:
+Source/ui/../util/dynarray.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 

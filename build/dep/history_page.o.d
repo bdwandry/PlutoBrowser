@@ -1,4 +1,5 @@
-build/src/ui/history_page.o: src/ui/history_page.c src/ui/history_page.h \
+build/Source/ui/history_page.o: Source/ui/history_page.c \
+ Source/ui/history_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
@@ -52,12 +53,12 @@ build/src/ui/history_page.o: src/ui/history_page.c src/ui/history_page.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/ui/list_core.h src/ui/../core/constants.h src/ui/../core/logger.h \
- src/ui/../core/storage.h src/ui/../core/../util/dynarray.h \
- src/ui/../core/storage_data.h src/ui/../render/style.h \
- src/ui/../util/dynarray.h
+ Source/ui/list_core.h Source/ui/../core/constants.h \
+ Source/ui/../core/logger.h Source/ui/../core/storage.h \
+ Source/ui/../core/../util/dynarray.h Source/ui/../core/storage_data.h \
+ Source/ui/../render/style.h Source/ui/../util/dynarray.h
 
-src/ui/history_page.h:
+Source/ui/history_page.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -165,18 +166,18 @@ src/ui/history_page.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/ui/list_core.h:
+Source/ui/list_core.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:
 
-src/ui/../core/logger.h:
+Source/ui/../core/logger.h:
 
-src/ui/../core/storage.h:
+Source/ui/../core/storage.h:
 
-src/ui/../core/../util/dynarray.h:
+Source/ui/../core/../util/dynarray.h:
 
-src/ui/../core/storage_data.h:
+Source/ui/../core/storage_data.h:
 
-src/ui/../render/style.h:
+Source/ui/../render/style.h:
 
-src/ui/../util/dynarray.h:
+Source/ui/../util/dynarray.h:

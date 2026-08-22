@@ -1,6 +1,6 @@
-build/src/core/url.o: src/core/url.c src/core/url.h \
+build/Source/core/url.o: Source/core/url.c Source/core/url.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/core/../util/strbuf.h \
+ Source/core/../util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -22,15 +22,15 @@ build/src/core/url.o: src/core/url.c src/core/url.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/../util/dynarray.h src/core/../util/luanum.h \
- src/core/../util/luapattern.h src/core/../util/strbuf.h \
- src/core/logger.h
+ Source/core/../util/dynarray.h Source/core/../util/luanum.h \
+ Source/core/../util/luapattern.h Source/core/../util/strbuf.h \
+ Source/core/logger.h
 
-src/core/url.h:
+Source/core/url.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h:
 
@@ -74,12 +74,12 @@ src/core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/../util/luanum.h:
+Source/core/../util/luanum.h:
 
-src/core/../util/luapattern.h:
+Source/core/../util/luapattern.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/logger.h:
+Source/core/logger.h:

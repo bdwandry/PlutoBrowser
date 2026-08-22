@@ -1,4 +1,4 @@
-build/src/core/selftest_encoding.o: src/core/selftest_encoding.c \
+build/Source/core/selftest_encoding.o: Source/core/selftest_encoding.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -32,9 +32,9 @@ build/src/core/selftest_encoding.o: src/core/selftest_encoding.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/../core/logger.h src/core/../core/tasks.h \
- src/core/../html/entities.h src/core/encoding.h src/core/../util/mem.h \
- src/core/../util/strbuf.h
+ Source/core/../core/logger.h Source/core/../core/tasks.h \
+ Source/core/../html/entities.h Source/core/encoding.h \
+ Source/core/../util/mem.h Source/core/../util/strbuf.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -102,14 +102,14 @@ build/src/core/selftest_encoding.o: src/core/selftest_encoding.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/../core/logger.h:
+Source/core/../core/logger.h:
 
-src/core/../core/tasks.h:
+Source/core/../core/tasks.h:
 
-src/core/../html/entities.h:
+Source/core/../html/entities.h:
 
-src/core/encoding.h:
+Source/core/encoding.h:
 
-src/core/../util/mem.h:
+Source/core/../util/mem.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:

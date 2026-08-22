@@ -1,3 +1,4 @@
-build/src/core/constants.o: src/core/constants.c src/core/constants.h
+build/Source/core/constants.o: Source/core/constants.c \
+ Source/core/constants.h
 
-src/core/constants.h:
+Source/core/constants.h:

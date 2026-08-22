@@ -1,4 +1,4 @@
-build/src/html/entities.o: src/html/entities.c \
+build/Source/html/entities.o: Source/html/entities.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -32,8 +32,8 @@ build/src/html/entities.o: src/html/entities.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/html/../core/tasks.h src/html/../util/mem.h \
- src/html/../util/strbuf.h src/html/entities.h
+ Source/html/../core/tasks.h Source/html/../util/mem.h \
+ Source/html/../util/strbuf.h Source/html/entities.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -101,10 +101,10 @@ build/src/html/entities.o: src/html/entities.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/html/../core/tasks.h:
+Source/html/../core/tasks.h:
 
-src/html/../util/mem.h:
+Source/html/../util/mem.h:
 
-src/html/../util/strbuf.h:
+Source/html/../util/strbuf.h:
 
-src/html/entities.h:
+Source/html/entities.h:

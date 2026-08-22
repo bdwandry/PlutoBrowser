@@ -1,6 +1,6 @@
-build/src/render/decoders/selftest_inflate.o: \
- src/render/decoders/selftest_inflate.c \
- src/render/decoders/selftest_inflate.h \
+build/Source/render/decoders/selftest_inflate.o: \
+ Source/render/decoders/selftest_inflate.c \
+ Source/render/decoders/selftest_inflate.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -19,14 +19,14 @@ build/src/render/decoders/selftest_inflate.o: \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/render/decoders/inflate.h \
+ Source/core/logger.h Source/render/decoders/inflate.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h \
- src/render/decoders/selftest_inflate_fixtures.h src/util/mem.h
+ Source/render/decoders/selftest_inflate_fixtures.h Source/util/mem.h
 
-src/render/decoders/selftest_inflate.h:
+Source/render/decoders/selftest_inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -64,9 +64,9 @@ src/render/decoders/selftest_inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/decoders/inflate.h:
+Source/render/decoders/inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
@@ -76,6 +76,6 @@ src/render/decoders/inflate.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h:
 
-src/render/decoders/selftest_inflate_fixtures.h:
+Source/render/decoders/selftest_inflate_fixtures.h:
 
-src/util/mem.h:
+Source/util/mem.h:

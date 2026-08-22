@@ -1,4 +1,4 @@
-build/src/ui/list_core.o: src/ui/list_core.c src/ui/list_core.h \
+build/Source/ui/list_core.o: Source/ui/list_core.c Source/ui/list_core.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -32,9 +32,9 @@ build/src/ui/list_core.o: src/ui/list_core.c src/ui/list_core.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/ui/../core/constants.h
+ Source/ui/../core/constants.h
 
-src/ui/list_core.h:
+Source/ui/list_core.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -102,4 +102,4 @@ src/ui/list_core.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/ui/../core/constants.h:
+Source/ui/../core/constants.h:

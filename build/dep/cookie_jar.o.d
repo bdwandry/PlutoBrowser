@@ -1,6 +1,7 @@
-build/src/core/cookie_jar.o: src/core/cookie_jar.c src/core/cookie_jar.h \
+build/Source/core/cookie_jar.o: Source/core/cookie_jar.c \
+ Source/core/cookie_jar.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/core/../util/strbuf.h src/core/storage_data.h \
+ Source/core/../util/strbuf.h Source/core/storage_data.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -53,17 +54,17 @@ build/src/core/cookie_jar.o: src/core/cookie_jar.c src/core/cookie_jar.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/../util/dynarray.h src/core/../util/luanum.h \
- src/core/../util/luapattern.h src/core/../util/strbuf.h \
- src/core/logger.h src/core/storage.h
+ Source/core/../util/dynarray.h Source/core/../util/luanum.h \
+ Source/core/../util/luapattern.h Source/core/../util/strbuf.h \
+ Source/core/logger.h Source/core/storage.h
 
-src/core/cookie_jar.h:
+Source/core/cookie_jar.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
@@ -169,14 +170,14 @@ src/core/storage_data.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/../util/luanum.h:
+Source/core/../util/luanum.h:
 
-src/core/../util/luapattern.h:
+Source/core/../util/luapattern.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:

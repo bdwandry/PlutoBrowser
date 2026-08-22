@@ -1,5 +1,5 @@
-build/src/render/image_decoder.o: src/render/image_decoder.c \
- src/render/image_decoder.h \
+build/Source/render/image_decoder.o: Source/render/image_decoder.c \
+ Source/render/image_decoder.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -53,13 +53,14 @@ build/src/render/image_decoder.o: src/render/image_decoder.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/http_client.h src/core/../util/strmap.h src/core/logger.h \
- src/core/tasks.h src/render/decoders/bmp.h src/render/decoders/gif.h \
- src/render/decoders/ico.h src/render/decoders/jpeg.h \
- src/render/decoders/png.h src/render/decoders/svg.h \
- src/render/decoders/webp.h src/render/style.h src/util/mem.h
+ Source/core/http_client.h Source/core/../util/strmap.h \
+ Source/core/logger.h Source/core/tasks.h Source/render/decoders/bmp.h \
+ Source/render/decoders/gif.h Source/render/decoders/ico.h \
+ Source/render/decoders/jpeg.h Source/render/decoders/png.h \
+ Source/render/decoders/svg.h Source/render/decoders/webp.h \
+ Source/render/style.h Source/util/mem.h
 
-src/render/image_decoder.h:
+Source/render/image_decoder.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
@@ -167,28 +168,28 @@ src/render/image_decoder.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/http_client.h:
+Source/core/http_client.h:
 
-src/core/../util/strmap.h:
+Source/core/../util/strmap.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/render/decoders/bmp.h:
+Source/render/decoders/bmp.h:
 
-src/render/decoders/gif.h:
+Source/render/decoders/gif.h:
 
-src/render/decoders/ico.h:
+Source/render/decoders/ico.h:
 
-src/render/decoders/jpeg.h:
+Source/render/decoders/jpeg.h:
 
-src/render/decoders/png.h:
+Source/render/decoders/png.h:
 
-src/render/decoders/svg.h:
+Source/render/decoders/svg.h:
 
-src/render/decoders/webp.h:
+Source/render/decoders/webp.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/util/mem.h:
+Source/util/mem.h:

@@ -1,7 +1,8 @@
-build/src/html/selftest_tokenizer.o: src/html/selftest_tokenizer.c \
- src/html/selftest_tokenizer.h src/html/tokenizer.h \
+build/Source/html/selftest_tokenizer.o: Source/html/selftest_tokenizer.c \
+ Source/html/selftest_tokenizer.h Source/html/tokenizer.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/util/strmap.h src/core/logger.h src/core/tasks.h src/util/mem.h \
+ Source/util/strmap.h Source/core/logger.h Source/core/tasks.h \
+ Source/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -23,19 +24,19 @@ build/src/html/selftest_tokenizer.o: src/html/selftest_tokenizer.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h
 
-src/html/selftest_tokenizer.h:
+Source/html/selftest_tokenizer.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 

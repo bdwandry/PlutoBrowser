@@ -1,9 +1,9 @@
-build/src/html/selftest_readability.o: src/html/selftest_readability.c \
- src/html/selftest_readability.h src/html/readability.h \
- src/html/document.h \
+build/Source/html/selftest_readability.o: \
+ Source/html/selftest_readability.c Source/html/selftest_readability.h \
+ Source/html/readability.h Source/html/document.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/html/tokenizer.h src/util/strmap.h src/core/constants.h \
- src/core/logger.h src/util/mem.h src/util/strbuf.h \
+ Source/html/tokenizer.h Source/util/strmap.h Source/core/constants.h \
+ Source/core/logger.h Source/util/mem.h Source/util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -37,25 +37,25 @@ build/src/html/selftest_readability.o: src/html/selftest_readability.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h
 
-src/html/selftest_readability.h:
+Source/html/selftest_readability.h:
 
-src/html/readability.h:
+Source/html/readability.h:
 
-src/html/document.h:
+Source/html/document.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 

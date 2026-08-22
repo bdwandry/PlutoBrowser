@@ -1,5 +1,6 @@
-build/src/render/selftest_link_manager.o: \
- src/render/selftest_link_manager.c src/render/selftest_link_manager.h \
+build/Source/render/selftest_link_manager.o: \
+ Source/render/selftest_link_manager.c \
+ Source/render/selftest_link_manager.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -18,9 +19,9 @@ build/src/render/selftest_link_manager.o: \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/logger.h src/render/link_manager.h
+ Source/core/logger.h Source/render/link_manager.h
 
-src/render/selftest_link_manager.h:
+Source/render/selftest_link_manager.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
 
@@ -58,6 +59,6 @@ src/render/selftest_link_manager.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:

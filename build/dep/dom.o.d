@@ -1,6 +1,7 @@
-build/src/html/dom.o: src/html/dom.c src/html/dom.h \
+build/Source/html/dom.o: Source/html/dom.c Source/html/dom.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/util/strmap.h src/html/tokenizer.h src/core/tasks.h src/util/mem.h \
+ Source/util/strmap.h Source/html/tokenizer.h Source/core/tasks.h \
+ Source/util/mem.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -20,17 +21,17 @@ build/src/html/dom.o: src/html/dom.c src/html/dom.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h
 
-src/html/dom.h:
+Source/html/dom.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
 
-src/html/tokenizer.h:
+Source/html/tokenizer.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h:
 

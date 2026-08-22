@@ -1,6 +1,6 @@
-build/src/core/storage.o: src/core/storage.c src/core/storage.h \
+build/Source/core/storage.o: Source/core/storage.c Source/core/storage.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/core/../util/dynarray.h src/core/storage_data.h \
+ Source/core/../util/dynarray.h Source/core/storage_data.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -53,17 +53,18 @@ build/src/core/storage.o: src/core/storage.c src/core/storage.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/../util/json.h src/core/../util/strbuf.h \
- src/core/../util/luapattern.h src/core/../util/mem.h \
- src/core/../util/strbuf.h src/core/constants.h src/core/logger.h
+ Source/core/../util/json.h Source/core/../util/strbuf.h \
+ Source/core/../util/luapattern.h Source/core/../util/mem.h \
+ Source/core/../util/strbuf.h Source/core/constants.h \
+ Source/core/logger.h
 
-src/core/storage.h:
+Source/core/storage.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -169,16 +170,16 @@ src/core/storage_data.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/../util/json.h:
+Source/core/../util/json.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/../util/luapattern.h:
+Source/core/../util/luapattern.h:
 
-src/core/../util/mem.h:
+Source/core/../util/mem.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/logger.h:
+Source/core/logger.h:

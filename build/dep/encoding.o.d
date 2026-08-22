@@ -1,4 +1,4 @@
-build/src/core/encoding.o: src/core/encoding.c \
+build/Source/core/encoding.o: Source/core/encoding.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -53,7 +53,8 @@ build/src/core/encoding.o: src/core/encoding.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- src/core/../util/mem.h src/core/../util/strbuf.h src/core/encoding.h
+ Source/core/../util/mem.h Source/core/../util/strbuf.h \
+ Source/core/encoding.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/ctype.h:
 
@@ -163,8 +164,8 @@ build/src/core/encoding.o: src/core/encoding.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-src/core/../util/mem.h:
+Source/core/../util/mem.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
-src/core/encoding.h:
+Source/core/encoding.h:

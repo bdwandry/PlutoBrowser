@@ -1,6 +1,6 @@
-build/src/core/browser.o: src/core/browser.c src/core/browser.h \
+build/Source/core/browser.o: Source/core/browser.c Source/core/browser.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
- src/core/url.h src/core/../util/strbuf.h \
+ Source/core/url.h Source/core/../util/strbuf.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -37,15 +37,17 @@ build/src/core/browser.o: src/core/browser.c src/core/browser.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- src/core/constants.h src/core/cookie_jar.h src/core/storage_data.h \
- src/core/encoding.h src/core/http_client.h src/core/../util/strmap.h \
- src/core/logger.h src/core/storage.h src/core/../util/dynarray.h \
- src/core/tasks.h src/html/document.h src/render/image_decoder.h \
+ Source/core/constants.h Source/core/cookie_jar.h \
+ Source/core/storage_data.h Source/core/encoding.h \
+ Source/core/http_client.h Source/core/../util/strmap.h \
+ Source/core/logger.h Source/core/storage.h \
+ Source/core/../util/dynarray.h Source/core/tasks.h \
+ Source/html/document.h Source/render/image_decoder.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
- src/render/layout.h src/render/link_manager.h src/render/style.h \
- src/ui/address_bar.h \
+ Source/render/layout.h Source/render/link_manager.h \
+ Source/render/style.h Source/ui/address_bar.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
@@ -59,19 +61,19 @@ build/src/core/browser.o: src/core/browser.c src/core/browser.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- vendor/keyboard/keyboard.h src/ui/bookmarks_page.h src/ui/list_core.h \
- src/ui/chrome.h src/ui/../core/url.h src/ui/error_page.h \
- src/ui/history_page.h src/ui/home_page.h src/ui/hud.h \
- src/ui/settings_page.h src/util/mem.h src/util/strbuf.h \
- src/util/strmap.h
+ Source/vendor/keyboard/keyboard.h Source/ui/bookmarks_page.h \
+ Source/ui/list_core.h Source/ui/chrome.h Source/ui/../core/url.h \
+ Source/ui/error_page.h Source/ui/history_page.h Source/ui/home_page.h \
+ Source/ui/hud.h Source/ui/settings_page.h Source/util/mem.h \
+ Source/util/strbuf.h Source/util/strmap.h
 
-src/core/browser.h:
+Source/core/browser.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
-src/core/url.h:
+Source/core/url.h:
 
-src/core/../util/strbuf.h:
+Source/core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
 
@@ -145,29 +147,29 @@ src/core/../util/strbuf.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-src/core/constants.h:
+Source/core/constants.h:
 
-src/core/cookie_jar.h:
+Source/core/cookie_jar.h:
 
-src/core/storage_data.h:
+Source/core/storage_data.h:
 
-src/core/encoding.h:
+Source/core/encoding.h:
 
-src/core/http_client.h:
+Source/core/http_client.h:
 
-src/core/../util/strmap.h:
+Source/core/../util/strmap.h:
 
-src/core/logger.h:
+Source/core/logger.h:
 
-src/core/storage.h:
+Source/core/storage.h:
 
-src/core/../util/dynarray.h:
+Source/core/../util/dynarray.h:
 
-src/core/tasks.h:
+Source/core/tasks.h:
 
-src/html/document.h:
+Source/html/document.h:
 
-src/render/image_decoder.h:
+Source/render/image_decoder.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
@@ -175,13 +177,13 @@ src/render/image_decoder.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
 
-src/render/layout.h:
+Source/render/layout.h:
 
-src/render/link_manager.h:
+Source/render/link_manager.h:
 
-src/render/style.h:
+Source/render/style.h:
 
-src/ui/address_bar.h:
+Source/ui/address_bar.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
@@ -209,28 +211,28 @@ src/ui/address_bar.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-vendor/keyboard/keyboard.h:
+Source/vendor/keyboard/keyboard.h:
 
-src/ui/bookmarks_page.h:
+Source/ui/bookmarks_page.h:
 
-src/ui/list_core.h:
+Source/ui/list_core.h:
 
-src/ui/chrome.h:
+Source/ui/chrome.h:
 
-src/ui/../core/url.h:
+Source/ui/../core/url.h:
 
-src/ui/error_page.h:
+Source/ui/error_page.h:
 
-src/ui/history_page.h:
+Source/ui/history_page.h:
 
-src/ui/home_page.h:
+Source/ui/home_page.h:
 
-src/ui/hud.h:
+Source/ui/hud.h:
 
-src/ui/settings_page.h:
+Source/ui/settings_page.h:
 
-src/util/mem.h:
+Source/util/mem.h:
 
-src/util/strbuf.h:
+Source/util/strbuf.h:
 
-src/util/strmap.h:
+Source/util/strmap.h:
