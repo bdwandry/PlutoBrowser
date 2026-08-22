@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P27 DONE (verified in simulator). NEXT: P28.**
+**Status: PLANNING COMPLETE — PHASES P01–P28 DONE (verified in simulator). NEXT: P29.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ | P28–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ P28 ✅ | P29–P36 ⬜
 
 ---
 
@@ -908,13 +908,21 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       exported to logs/phase-P27.log.)
 
 ### PHASE P28 — ui/home_page.c
-- [ ] Speed dial: logo header (comet pixel art lines + circles), banner text, address-bar
+- [x] Speed dial: logo header (comet pixel art lines + circles), banner text, address-bar
       prompt pill, selectable Settings button, 2-col bookmark grid (172×46 cards, gaps),
       selection inversion, marquee oscillating clipped text (speed 50 px/s, dwell 1.0s,
       per-key state), crank scroll ×1.5 w/ invertCrank, auto-scroll-to-selection math,
       handleInput grid nav rules (settings↔first row, odd/even column moves), A→url /
       settingsCallback, footer hint line, reset().
-- [ ] Visual + input check; STOP.
+- [x] Visual + input check; STOP.
+
+      DONE (this session): hp_* pure nav/autoscroll/marquee/smooth-scroll helpers +
+      hp_draw (device) with host no-op; selftest_home_page 36/0 (nav matrix,
+      scroll bands, marquee phases, lerp, A-actions vs live Storage). Bug fixed:
+      DynArray elements are PlutoSavedBookmark (fixed buffers), NOT constants.h's
+      pointer-based PlutoBookmark — casting the wrong one produced garbage URLs.
+      Full suite 1171 PASS / 0 FAIL incl. e2e fetch; scripted input walk verified
+      row-jump/column/boundary rules in sim. Log: logs/phase-P28.log.
 
 ### PHASE P29 — ui/address_bar.c + VENDOR KEYBOARD (Raphcal C lib)
 - [ ] Vendor https://github.com/Raphcal/some-corelibs-port/tree/main/keyboard into
