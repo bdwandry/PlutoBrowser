@@ -586,6 +586,49 @@ void br_on_resume(void) { s_br.menuOpen = 0; }
 int  br_menu_open(void) { return s_br.menuOpen; }
 int  br_menu_sel(void)  { return s_br.menuSel; }
 
+/* ── Native system menu (Lua main.lua parity) ──────────────────────────
+ * The C_API DOES expose playdate->system menu items (the old custom
+ * overlay premise was wrong): Home-Page / View(Reader|HTML) / Settings /
+ * History / Clear Cookies, rebuilt whenever the View row's presence or
+ * the current mode changes. Callbacks only stage work; it executes in
+ * the next br_frame() after the system menu resumes the game. */
+
+static PDMenuItem* s_viewItem = NULL;
+
+static void mi_home_cb(void* ud)    { (void)ud; menu_action_home(); }
+static void mi_settings_cb(void* ud){ (void)ud; menu_action_settings();
+                                      br_system_menu_refresh(); }
+static void mi_history_cb(void* ud) { (void)ud; menu_action_history();
+                                      br_system_menu_refresh(); }
+static void mi_cookies_cb(void* ud) { (void)ud; cj_clear(); }
+
+static void mi_view_cb(void* ud) {
+    (void)ud;
+    int v = s_pd->system->getMenuItemValue(s_viewItem);
+    /* Lua: options are { "Reader", "HTML" } */
+    apply_view_mode(v == 0 ? PLUTO_MODE_READER : PLUTO_MODE_RAW_HTML);
+}
+
+void br_system_menu_refresh(void) {
+    if (s_pd == NULL) return;
+    s_pd->system->removeAllMenuItems();
+    s_pd->system->addMenuItem("Home-Page", mi_home_cb, NULL);
+    s_viewItem = NULL;
+    if (s_br.state == PLUTO_STATE_PAGE && s_br.hasUrl &&
+        strcmp(s_br.curUrl.scheme, "about") != 0) {
+        static const char* opts[2] = { "Reader", "HTML" };
+        s_viewItem = s_pd->system->addOptionsMenuItem(
+            "View", opts, 2, mi_view_cb, NULL);
+        /* Lua: initial selection reflects the active browse mode */
+        s_pd->system->setMenuItemValue(
+            s_viewItem,
+            s_br.browseMode == PLUTO_MODE_READER ? 0 : 1);
+    }
+    s_pd->system->addMenuItem("Settings", mi_settings_cb, NULL);
+    s_pd->system->addMenuItem("History", mi_history_cb, NULL);
+    s_pd->system->addMenuItem("Clear Cookies", mi_cookies_cb, NULL);
+}
+
 static void menu_draw(void) {
     if (!s_br.menuOpen) return;
     const char* viewLabel =
@@ -809,6 +852,7 @@ static void render_done(void* ctx, void* ud) {
     s_br.state = PLUTO_STATE_PAGE;
     if (c->addHist) storage_add_history(s_br.pageTitle, c->url);
     menu_rebuild();
+    br_system_menu_refresh();   /* View row tracks PAGE+hasUrl */
 
     /* enqueue images per image mode setting */
     if ((storage_settings()->imageMode) == PLUTO_IMAGE_MODE_ALL) {
@@ -1014,6 +1058,7 @@ void br_boot(void) {
     hp_set_settings_callback(home_settings_cb);
     sp_set_on_change(settings_changed_cb);
     menu_rebuild();
+    br_system_menu_refresh();
 }
 
 /* ── loading screen (mirrors main.lua STATE_LOADING branch) ───────────── */

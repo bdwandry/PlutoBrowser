@@ -726,6 +726,8 @@ void selftest_browser_run(struct PlaydateAPI* pd, int* pass, int* fail) {
 
     hc_set_clock_fn(NULL);         /* restore real clock */
     hc_set_tcp_for_tests(NULL);    /* restore real networking */
+    br_set_input_source(NULL, NULL);   /* restore hardware input */
+    br_set_clock_fn(NULL);             /* restore engine clock */
     br_reset_for_tests();
 
     PLUTO_LOG("[P32] ---- browser selftest end: %d pass / %d fail ----",

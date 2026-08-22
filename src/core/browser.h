@@ -67,6 +67,12 @@ void br_on_resume(void);
 int  br_menu_open(void);
 int  br_menu_sel(void);              /* test introspection: highlighted row */
 
+/* rebuild the NATIVE system menu items (Lua parity): Home-Page /
+ * View(Reader|HTML, pages only) / Settings / History / Clear Cookies.
+ * Called by br_boot(), after each page render and on state changes; safe
+ * to call anytime once br_init() has run. */
+void br_system_menu_refresh(void);
+
 /* introspection for tests + HUD debug */
 int         br_state(void);
 const char* br_page_title(void);
