@@ -582,12 +582,24 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       phase). Build gate 0/0. Phase log exported with full parity map.
 
 ### PHASE P13 — render/style.c + fonts
-- [ ] Load fonts: Roobert-20-Medium, Roobert-10-Bold, Roobert-11-Medium,
+- [x] Load fonts: Roobert-20-Medium, Roobert-10-Bold, Roobert-11-Medium,
       Roobert-11-Mono-Condensed (+ halved variants where source uses them, e.g.
       Roobert-10-Bold-Halved in hud.lua); Style.init/getTextWidth (fallback chain),
       getHeadingFont(h1..h6 mapping), getBodyFont(isBold,isCode), getInlineFont(...).
-- [ ] Log font load results + sample widths.
-- [ ] Verify; STOP.
+- [x] Log font load results + sample widths.
+- [x] Verify; STOP.
+
+      DONE (2026-08-21). style_init loads the six Style slots with per-slot
+      fallback logging; style_set_system_font mirrors gfx.getFont() (C API has
+      none — main.c registers its current body font). Width chain faithful:
+      nil/""->0, font||body||sys, real metrics on device, 8 px-per-char last
+      resort when built without the Playdate API (host harness). Heading map
+      24/18/16 (+lh 6/5/4), body code15/bold16/plain16, inline precedence
+      code > small/sub/sup > bold/big pinned by tests. Halved font belongs to
+      the hud phase. All six fonts load in simulator; sample 'Hello World'
+      widths body=95 mono=88 small=95 h1=150 logged.
+      Selftests: 15 passed, 0 failed (host + ASAN clean + simulator log this
+      phase). Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P14 — render/link_manager.c
 - [ ] Full port: addLinkRect merging consecutive rects per anchorIndex, getCount,
