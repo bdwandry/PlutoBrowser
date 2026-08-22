@@ -27,13 +27,17 @@ typedef struct {
 } LmRect;
 
 typedef struct {
-    char* href;       /* owned */
-    char* text;       /* owned (defaults to href) */
+    char* href;       /* owned; NULL for form-input links (Lua nil) */
+    char* text;       /* owned (defaults to href); NULL for form inputs */
     int   hasAnchor;
     long  anchorIndex;
     LmRect* rects;
     size_t nRects, capRects;
     LmRect primaryRect;
+    /* Lua links are plain tables, so CloudLayout form-input links carry
+     * two extra optional fields (both zero for regular links). */
+    int   isFormInput;
+    void* inputBlock;   /* borrowed; owned by CloudLayout render items */
 } LmLink;
 
 void   lm_clear(void);
@@ -43,6 +47,11 @@ void   lm_add_link_rect(const char* href, const char* text, LmRect rect,
                         long anchorIndex);
 /* convenience wrapper mirroring LinkManager.addLink(link) */
 void   lm_add_link(const char* href, int x, int y, int w, int h);
+
+/* CloudLayout parity: form-input links carry no href/text (Lua nil) but
+ * point back at their render item so later phases can activate forms
+ * from a selection. Rect uses -1 "unset" semantics like everywhere else. */
+void   lm_add_form_input(int x, int y, int w, int h, void* inputBlock);
 
 size_t lm_get_count(void);
 size_t lm_selected_index(void);      /* 0 == none; else 1-based */

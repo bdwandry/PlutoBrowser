@@ -112,6 +112,32 @@ void lm_add_link(const char* href, int x, int y, int w, int h) {
     lm_add_link_rect(href, NULL, r, -1);
 }
 
+void lm_add_form_input(int x, int y, int w, int h, void* inputBlock) {
+    if (s_nLinks == s_capLinks) {
+        size_t nc = s_capLinks ? s_capLinks * 2 : 8;
+        LmLink* ns = (LmLink*)pluto_realloc(s_links, nc * sizeof(LmLink));
+        if (ns == NULL) return;
+        s_links = ns;
+        s_capLinks = nc;
+    }
+    LmLink* l = &s_links[s_nLinks];
+    memset(l, 0, sizeof(*l));
+    /* Lua stores href=nil / text=nil for these links; hit-testing and
+     * selection work purely on the rect. */
+    l->isFormInput = 1;
+    l->inputBlock = inputBlock;
+    l->capRects = 4;
+    l->nRects = 1;
+    l->rects = (LmRect*)pluto_malloc(4 * sizeof(LmRect));
+    if (l->rects == NULL) return;
+    l->rects[0].x = x;
+    l->rects[0].y = y;
+    l->rects[0].w = w;
+    l->rects[0].h = h;
+    l->primaryRect = l->rects[0];
+    s_nLinks++;
+}
+
 size_t lm_get_count(void) { return s_nLinks; }
 
 size_t lm_selected_index(void) { return s_selected; }

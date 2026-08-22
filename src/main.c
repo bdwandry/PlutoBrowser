@@ -51,6 +51,8 @@
 #include "render/decoders/selftest_svg_fixtures.h"
 #include "render/image_decoder.h"
 #include "render/selftest_image_decoder.h"
+#include "render/cloud_layout.h"
+#include "render/selftest_cloud_layout.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -117,6 +119,30 @@ static int s_p25Stage = 0;          /* 0 idle, 1 downloading, 2 done */
 static unsigned s_p25T0Ms = 0;
 static unsigned s_p25WaitFrames = 0;
 static int s_p25Resolved = -1;      /* HUD: -1 pending, 0 fail, 1 ok */
+/* P26 cloud layout visual: parse/build a fixture once, then sweep scroll */
+static int s_clPass = -1;
+static int s_clFail = -1;
+static int s_clBuilt = 0;
+static int s_clScroll = 0;
+/* Fixture mirroring the cloud payload shape served on MODE_OPERA_DS. */
+static const char* kClFixture =
+    "{\"title\":\"Cloud Demo\",\"totalHeight\":500,\"elements\":["
+    "{\"type\":\"text\",\"x\":8,\"y\":4,\"w\":384,\"h\":20,"
+    "\"text\":\"Hello Cloud\",\"font\":\"large\"},"
+    "{\"type\":\"text\",\"x\":8,\"y\":30,\"w\":200,\"h\":14,"
+    "\"text\":\"bold line\",\"font\":\"bold\"},"
+    "{\"type\":\"text\",\"x\":8,\"y\":50,\"w\":200,\"h\":14,"
+    "\"text\":\"code line\",\"font\":\"mono\"},"
+    "{\"type\":\"image\",\"x\":8,\"y\":90,\"w\":64,\"h\":64,"
+    "\"src\":\"img/logo.png\"},"
+    "{\"type\":\"link\",\"x\":8,\"y\":160,\"w\":100,\"h\":14,"
+    "\"href\":\"https://example.com/a\"},"
+    "{\"type\":\"input\",\"x\":8,\"y\":180,\"w\":180,\"h\":22,"
+    "\"inputType\":\"email\",\"name\":\"email\","
+    "\"placeholder\":\"you@example.com\"},"
+    "{\"type\":\"submit\",\"x\":196,\"y\":180,\"w\":60,\"h\":22,"
+    "\"label\":\"Go\",\"formAction\":\"/search\"}"
+    "]}";
 static void* s_webpView = NULL;  /* temporary P21 debug viewer */
 static void* s_jpegView = NULL;  /* temporary P20 debug viewer */
 static void* s_icoView = NULL;   /* temporary P23 debug viewer */
@@ -395,6 +421,31 @@ static void draw_placeholder(void)
         }
     }
 
+    /* P26 cloud layout visual + HUD */
+    if (s_clBuilt) {
+        cl_draw(s_clScroll);
+        n = snprintf(buf, sizeof(buf),
+                     "P26 cloud: %d items, scroll=%d",
+                     cl_item_count(), s_clScroll);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 410);
+        }
+    }
+
+    if (s_clPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P26 selftest: %d passed, %d failed",
+                     s_clPass, s_clFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 425);
+        }
+    }
+
     /* P25 pipeline visual: placeholder card (alt + selected border) while
      * downloading; scaled decoded bitmap once resolved */
     if (s_p25Stage == 1) {
@@ -492,6 +543,22 @@ static int update(void* userdata)
             s_p25Resolved = 0;
             s_p25Stage = 2;
         }
+    }
+
+    /* P26 visual: build the cloud fixture once, then sweep scroll so
+     * clipping, item painters and the scrollbar all get exercised. */
+    if (s_frame == 180 && !s_clBuilt) {
+        ClDoc* doc = cl_parse(kClFixture, strlen(kClFixture), NULL);
+        cl_build(doc);
+        cl_doc_free(doc);
+        s_clBuilt = 1;
+        PLUTO_LOG("[P26] fixture built: items=%d totalH=%.0f",
+                  cl_item_count(), cl_total_height());
+    } else if (s_clBuilt) {
+        double maxScroll = cl_total_height() > 216.0
+                               ? cl_total_height() - 216.0 : 0.0;
+        s_clScroll += 4;
+        if (maxScroll <= 0 || s_clScroll > (int)maxScroll) s_clScroll = 0;
     }
 
     if (s_frame == 1) {
@@ -710,6 +777,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P25 SELFTEST FAILURES: %d", s_idFail);
             }
             PLUTO_LOG("[P25] image decoder ready");
+
+            // P26 cloud layout: parse/build/draw pipeline over JSON docs.
+            cl_init(pd);
+            selftest_cloud_layout_run(&s_clPass, &s_clFail);
+            if (s_clFail > 0) {
+                PLUTO_ERROR("P26 SELFTEST FAILURES: %d", s_clFail);
+            }
+            PLUTO_LOG("[P26] cloud layout ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");
