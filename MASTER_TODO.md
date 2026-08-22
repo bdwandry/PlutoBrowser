@@ -672,11 +672,13 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 - [x] Verify visually in sim (temporary debug viewer drawing decoded image); STOP.
 
 ### PHASE P18 — bmp.c
-- [ ] BMPDecoder.decode: BM header, pixelOffset/headerSize/width/rawHeight(top-down)/bpp/
-      compression checks, 1/4/8-bit palette indexed, 24/32bpp, bottom-up flip, scale-to-fit
+- [x] BMPDecoder.decode: BM header, pixelOffset/headerSize/width/rawHeight(top-down)/bpp/
+      compression checks (NOTE: source reads but never checks compression — preserved),
+      1/4/8-bit palette indexed, 24/32bpp, bottom-up flip, scale-to-fit
       (360x200), dither out.
-- [ ] Benchmark BMP sample from bitmaps site; log.
-- [ ] Verify; STOP.
+- [x] Benchmark BMP sample from bitmaps site; log. (offline generated 600x400
+      fixture: 300x200 in ~0.5 ms)
+- [x] Verify; STOP.
 
 ### PHASE P19 — gif.c
 - [ ] GIF87a/89a: header/screen descriptor, global/local palettes (grayscale shortcut),
