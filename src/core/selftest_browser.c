@@ -697,11 +697,52 @@ static void t_pause_menu(void) {
     /* Home-Page row navigates to about:home */
     br_on_pause();
     push_input(BR_BTN_A, BR_BTN_A, 0); frame();        /* first row */
-    pump(2);
-    st_check(br_state() == PLUTO_STATE_HOME, "R.home_row_navigates");
+     pump(2);
+     st_check(br_state() == PLUTO_STATE_HOME, "R.home_row_navigates");
+ }
+
+/* S: HTML-mode virtual mouse cursor (Lua 754-834, 1002-1021) */
+static void t_html_cursor(void) {
+    reset_all();
+    br_boot();                     /* RAW_HTML is the default mode */
+    Route rs[] = { { "/b.html", PAGE_B, 0 },
+                   { "/", PAGE_A, 0 } };   /* exact "/" last: prefix rule */
+    set_routes(rs, 2);
+
+    br_navigate_to("cur.test/");
+    pump_until_page(30);
+    br_set_mouse_for_tests(200, 120);
+
+    /* D-pad movement at 4 px/frame */
+    for (int i = 0; i < 5; i++) {
+        push_input(BR_BTN_RIGHT, BR_BTN_RIGHT, 0); frame();
+    }
+    st_check(br_mouse_x() == 220, "S.cursor_moves");
+
+    /* screen-edge clamps */
+    for (int i = 0; i < 60; i++) {
+        push_input(BR_BTN_RIGHT, BR_BTN_RIGHT, 0); frame();
+    }
+    st_check(br_mouse_x() == PLUTO_SCREEN_WIDTH - 2, "S.clamp_right");
+    for (int i = 0; i < 40; i++) {
+        push_input(BR_BTN_DOWN, BR_BTN_DOWN, 0); frame();
+    }
+    st_check(br_mouse_y() == PLUTO_SCREEN_HEIGHT - 2, "S.clamp_bottom");
+    for (int i = 0; i < 80; i++) {
+        push_input(BR_BTN_UP, BR_BTN_UP, 0); frame();
+    }
+    st_check(br_mouse_y() == PLUTO_CONTENT_Y + 2, "S.clamp_top");
+
+    /* A + Left = history back */
+    br_set_mouse_for_tests(200, 120);
+    br_navigate_to("cur.test/b.html");
+    pump_until_page(30);
+    push_input(BR_BTN_A | BR_BTN_LEFT, BR_BTN_A | BR_BTN_LEFT, 0); frame();
+    pump_until_page(30);
+    check_str("S.a_left_back", br_page_title(), "Page A");
 }
 
-/* ── entry point ──────────────────────────────────────────────────────── */
+ /* ── entry point ──────────────────────────────────────────────────────── */
 
 void selftest_browser_run(struct PlaydateAPI* pd, int* pass, int* fail) {
     st_pass = 0; st_fail = 0;
@@ -723,6 +764,7 @@ void selftest_browser_run(struct PlaydateAPI* pd, int* pass, int* fail) {
     t_crank_physics();
     t_details_toggle();
     t_pause_menu();
+    t_html_cursor();
 
     hc_set_clock_fn(NULL);         /* restore real clock */
     hc_set_tcp_for_tests(NULL);    /* restore real networking */

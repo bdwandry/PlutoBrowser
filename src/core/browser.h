@@ -66,6 +66,9 @@ void br_on_pause(void);
 void br_on_resume(void);
 int  br_menu_open(void);
 int  br_menu_sel(void);              /* test introspection: highlighted row */
+int  br_mouse_x(void);               /* HTML-mode cursor introspection */
+int  br_mouse_y(void);
+void br_set_mouse_for_tests(int x, int y);
 
 /* rebuild the NATIVE system menu items (Lua parity): Home-Page /
  * View(Reader|HTML, pages only) / Settings / History / Clear Cookies.
