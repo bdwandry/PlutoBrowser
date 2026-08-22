@@ -32,6 +32,9 @@
 #include "render/decoders/png.h"
 #include "render/decoders/selftest_png.h"
 #include "render/decoders/selftest_png_fixtures.h"
+#include "render/decoders/bmp.h"
+#include "render/decoders/selftest_bmp.h"
+#include "render/decoders/selftest_bmp_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -74,8 +77,10 @@ static int s_inFail = -1;
 static int s_inPass = -1;
 static int s_pngFail = -1;
 static int s_pngPass = -1;
+static int s_bmFail = -1;
+static int s_bmPass = -1;
 static void* s_pngView = NULL;   /* temporary P17 debug viewer bitmap */
-static int s_pngViewDrawn = 0;
+static void* s_bmpView = NULL;   /* temporary P18 debug viewer bitmap */
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -270,10 +275,25 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_bmPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P18 bmp: %d passed, %d failed",
+                     s_bmPass, s_bmFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 305);
+        }
+    }
+
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-    /* temporary P17 debug viewer: decoded bench PNG (266x200) */
+    /* temporary debug viewers: decoded bench PNG + BMP (266x200) */
     if (s_pngView != NULL) {
-        pd->graphics->drawBitmap((LCDBitmap*)s_pngView, 67, 20,
+        pd->graphics->drawBitmap((LCDBitmap*)s_pngView, 10, 20,
+                                 kBitmapUnflipped);
+    }
+    if (s_bmpView != NULL) {
+        pd->graphics->drawBitmap((LCDBitmap*)s_bmpView, 124, 20,
                                  kBitmapUnflipped);
     }
 #endif
@@ -439,6 +459,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 #endif
             if (s_pngFail > 0) {
                 PLUTO_ERROR("P17 SELFTEST FAILURES: %d", s_pngFail);
+            }
+
+            selftest_bmp_set_pd(pd);
+            selftest_bmp_run(&s_bmPass, &s_bmFail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            /* temporary P18 debug viewer: decoded bench BMP */
+            s_bmpView = bmp_decode(pd, fx_bmp_bench,
+                                   FX_BMP_BENCH_LEN);
+#endif
+            if (s_bmFail > 0) {
+                PLUTO_ERROR("P18 SELFTEST FAILURES: %d", s_bmFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);
