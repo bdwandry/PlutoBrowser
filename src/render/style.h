@@ -38,6 +38,9 @@ PlutoFont* style_get_small_font(void);
 /* Lua UI chain: Style.fontSmall or Style.fontMono or gfx.getFont(). */
 PlutoFont* style_get_ui_small_font(void);
 
+/* Style.fontMono (Roobert-11-Mono-Condensed), sys-font fallback. */
+PlutoFont* style_get_mono_font(void);
+
 /* precedence: code > small/sub/sup > bold/big > regular */
 PlutoFont* style_get_inline_font(int isBold, int isCode, int isSmall,
                                  int isSub, int isSup, int isBig,

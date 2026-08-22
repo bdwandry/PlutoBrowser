@@ -78,7 +78,8 @@ build/src/main.o: src/main.c \
  src/render/selftest_image_decoder.h src/render/cloud_layout.h \
  src/render/selftest_cloud_layout.h src/ui/chrome.h src/ui/../core/url.h \
  src/ui/../core/../util/strbuf.h src/ui/hud.h src/ui/selftest_ui.h \
- src/ui/home_page.h src/ui/selftest_home_page.h \
+ src/ui/home_page.h src/ui/selftest_home_page.h src/ui/address_bar.h \
+ vendor/keyboard/keyboard.h src/ui/selftest_address_bar.h \
  src/render/decoders/selftest_gif_fixtures.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
@@ -300,6 +301,12 @@ src/ui/selftest_ui.h:
 src/ui/home_page.h:
 
 src/ui/selftest_home_page.h:
+
+src/ui/address_bar.h:
+
+vendor/keyboard/keyboard.h:
+
+src/ui/selftest_address_bar.h:
 
 src/render/decoders/selftest_gif_fixtures.h:
 

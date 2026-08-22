@@ -144,3 +144,8 @@ PlutoFont* style_get_ui_small_font(void) {
     if (st.mono) return st.mono;
     return st.sys;
 }
+
+PlutoFont* style_get_mono_font(void) {
+    if (st.mono) return st.mono;
+    return st.sys;
+}
