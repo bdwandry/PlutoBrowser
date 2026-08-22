@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P22 DONE (verified in simulator). NEXT: P23.**
+**Status: PLANNING COMPLETE — PHASES P01–P23 DONE (verified in simulator). NEXT: P24.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ | P23–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ | P24–P36 ⬜
 
 ---
 
@@ -785,11 +785,30 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       3 stray zero bytes before the frame sub-chunk breaking sub-chunk scan; frame rects now
       use even x/y (ANMF stores x,y in units of 2 pixels).
 
-### PHASE P23 — ico.c
-- [ ] ICONDIR/Icondir entries sort (area desc, bpp desc), PNG-signature entries → PNGDecoder,
+### PHASE P23 — ico.c  ✅ DONE (verified in simulator)
+- [x] ICONDIR/Icondir entries sort (area desc, bpp desc), PNG-signature entries → PNGDecoder,
       else embedded DIB (height doubled, AND-mask transparency composited over white,
       1/4/8/24/32bpp, top-down flag), nearest-scale sampling, Dither out.
-- [ ] Verify with favicon fixture; log; STOP.
+- [x] Verify with favicon fixture; log; STOP.
+- **Implementation:** src/render/decoders/ico.{h,c} — ico_decode_gray (container parse +
+  qsort selection + PNG delegation via png_decode_gray + decodeDIB with doubled-height
+  convention, palette 1/4/8bpp, truecolor 24/32bpp, AND-mask → white composite,
+  negative-height top-down rows, nearest-neighbor scale cap) + ico_free_rows +
+  ico_decode device wrapper via dither_to_image.
+- **Fixtures:** tools/gen_ico_fixtures.py hand-builds containers and computes goldens
+  with an independent byte-level Python replica of the decoder: fx_i_i_32bpp,
+  i_24bpp_masked (AND-mask holes), i_8bpp_nomask (mask rows omitted), i_4bpp (odd width
+  nibbles), i_1bpp, i_topdown (negative height), i_scaled (400×300→266×200), i_png_entry
+  (real Pillow PNG beats DIB decoy), i_png_fallback (broken PNG → next entry), i_multi
+  (area tie → bpp desc), i_cursor (fileType=2); guards bad_reserved/bad_type/count_zero/
+  no_entries/all_fail_dib. Generator bug fixed en route: classic DIB entries store
+  DOUBLED height (rawHeight = 2*h); initial single-height fixtures decoded at h/2.
+- **Bug found by selftests:** ico_decode_gray dereferenced outRows/outW/outH before
+  null-checking → simulator crash at G.null_args_reject (log stopped after #1159);
+  added `if (outRows==NULL||outW==NULL||outH==NULL) return -1;` matching webp.c.
+- **Selftests:** [P23] ico selftests done: **41 passed, 0 failed** (simulator log this
+  phase; bench 266×200 = 0.858 ms/iter). Build gate 0 errors / 0 warnings (pre-existing
+  jpeg.c notes only). Phase log exported to logs/phase-P23.log.
 
 ### PHASE P24 — svg.c
 - [ ] SVGDecoder.decode: viewBox/width/height parse, scale cap ×2, min 20px, white canvas,
