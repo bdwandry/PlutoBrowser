@@ -94,6 +94,9 @@ void logger_log(const char* fmt, ...)
     }
 
     if (s_pd == NULL) {
+        // Host build (no Playdate API): mirror log lines to stderr so
+        // out-of-sim test harnesses can see them.
+        fputs(line, stderr);
         return;
     }
 
