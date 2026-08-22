@@ -49,6 +49,8 @@
 #include "render/decoders/svg.h"
 #include "render/decoders/selftest_svg.h"
 #include "render/decoders/selftest_svg_fixtures.h"
+#include "render/image_decoder.h"
+#include "render/selftest_image_decoder.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -104,6 +106,17 @@ static int s_icPass = -1;
 static int s_icFail = -1;
 static int s_svPass = -1;
 static int s_svFail = -1;
+static int s_idPass = -1;
+static int s_idFail = -1;
+/* P25 end-to-end: sequential image downloads from a localhost server */
+#define P25_BASE "http://127.0.0.1:8765"
+static const char* kP25Png = P25_BASE "/t.png";
+static const char* kP25Bmp = P25_BASE "/t.bmp";
+static const char* kP25Bad = P25_BASE "/nope.png";
+static int s_p25Stage = 0;          /* 0 idle, 1 downloading, 2 done */
+static unsigned s_p25T0Ms = 0;
+static unsigned s_p25WaitFrames = 0;
+static int s_p25Resolved = -1;      /* HUD: -1 pending, 0 fail, 1 ok */
 static void* s_webpView = NULL;  /* temporary P21 debug viewer */
 static void* s_jpegView = NULL;  /* temporary P20 debug viewer */
 static void* s_icoView = NULL;   /* temporary P23 debug viewer */
@@ -371,6 +384,25 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_p25Resolved >= 0) {
+        n = snprintf(buf, sizeof(buf), "P25 img: %s",
+                     s_p25Resolved ? "resolved" : "FAILED");
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 395);
+        }
+    }
+
+    /* P25 pipeline visual: placeholder card (alt + selected border) while
+     * downloading; scaled decoded bitmap once resolved */
+    if (s_p25Stage == 1) {
+        id_draw(238, 56, 90, 50, "Playdate camera!", NULL, 1, kP25Png);
+    } else if (s_p25Stage == 2 && s_p25Resolved == 1) {
+        id_draw(238, 110, 100, 70, NULL, NULL, 1, kP25Png);
+    }
+
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
     /* temporary debug viewers: decoded bench PNG + BMP (266x200) */
     if (s_pngView != NULL) {
@@ -421,6 +453,45 @@ static int update(void* userdata)
     if (s_frame == 120 && !s_benchDone && s_benchIdx < 0) {
         s_benchIdx = 0;
         bench_start_current();
+    }
+
+    // Image pipeline pump (main.lua ImageDecoder.update() parity).
+    id_update();
+
+    // P25 e2e: sequential image downloads from a localhost HTTP server.
+    if (s_p25Stage == 0 && s_frame == 150) {
+        PLUTO_LOG("[P25] e2e enqueue png/bmp/404");
+        s_p25T0Ms = pd->system->getCurrentTimeMilliseconds();
+        id_enqueue(kP25Png);
+        id_enqueue(kP25Bmp);
+        id_enqueue(kP25Bad);
+        s_p25Stage = 1;
+    } else if (s_p25Stage == 1) {
+        if (id_is_cached(kP25Png) && id_is_cached(kP25Bmp) &&
+            id_is_cached(kP25Bad)) {
+            unsigned ms =
+                pd->system->getCurrentTimeMilliseconds() - s_p25T0Ms;
+            LCDBitmap* b = (LCDBitmap*)id_get_image(kP25Png);
+            int iw = 0, ih = 0, rb = 0;
+            uint8_t* mk = NULL;
+            uint8_t* dt = NULL;
+            if (b)
+                pd->graphics->getBitmapData(b, &iw, &ih, &rb, &mk, &dt);
+            PLUTO_LOG("[P25] e2e resolved in %u ms (png %dx%d, "
+                      "bmp decoded=%d, 404 cached-as-failed=%d)",
+                      ms, iw, ih,
+                      id_is_decoded(kP25Bmp),
+                      id_is_cached(kP25Bad) && !id_is_decoded(kP25Bad));
+            s_p25Resolved = (b != NULL && id_is_decoded(kP25Bmp)) ? 1 : 0;
+            s_p25Stage = 2;
+        } else if (++s_p25WaitFrames > 900u) {
+            PLUTO_ERROR("[P25] e2e TIMEOUT: png=%d bmp=%d bad=%d "
+                        "(httpLoading=%d)",
+                        id_is_cached(kP25Png), id_is_cached(kP25Bmp),
+                        id_is_cached(kP25Bad), hc_is_loading());
+            s_p25Resolved = 0;
+            s_p25Stage = 2;
+        }
     }
 
     if (s_frame == 1) {
@@ -631,6 +702,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             if (s_svFail > 0) {
                 PLUTO_ERROR("P24 SELFTEST FAILURES: %d", s_svFail);
             }
+
+            id_init(pd);
+            selftest_image_decoder_set_pd(pd);
+            selftest_image_decoder_run(&s_idPass, &s_idFail);
+            if (s_idFail > 0) {
+                PLUTO_ERROR("P25 SELFTEST FAILURES: %d", s_idFail);
+            }
+            PLUTO_LOG("[P25] image decoder ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");

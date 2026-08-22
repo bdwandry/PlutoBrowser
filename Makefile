@@ -78,6 +78,8 @@ SRC = \
 	src/render/decoders/svg.c \
 	src/render/decoders/selftest_svg.c \
 	src/render/decoders/selftest_svg_fixtures.c \
+	src/render/image_decoder.c \
+	src/render/selftest_image_decoder.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \

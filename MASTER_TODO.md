@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P24 DONE (verified in simulator). NEXT: P25.**
+**Status: PLANNING COMPLETE — PHASES P01–P25 DONE (verified in simulator). NEXT: P26.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ | P25–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ | P26–P36 ⬜
 
 ---
 
@@ -827,15 +827,26 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       (pre-existing jpeg.c notes only). Phase log exported to logs/phase-P24.log.)
 - [x] Verify; STOP.
 
-### PHASE P25 — render/image_decoder.c
-- [ ] Cache (url→bitmap|PENDING|FAILED), downloadQueue FIFO, processNextImage via
+### PHASE P25 — render/image_decoder.c  ✅ DONE (verified in simulator)
+- [x] Cache (url→bitmap|PENDING|FAILED), downloadQueue FIFO, processNextImage via
       HttpClient, decodeRawImageData magic dispatch (JPEG FFD8 async via Tasks; GIF87a/89a;
       PNG sig; BM; RIFF/WEBP; ICO; svg sniff '<svg'/'<?xml'), failure→cached false,
       max-dims caps, ImageDecoder.draw placeholders ([Image Off]/[Hover]/on-demand card w/
       alt + A/B hints + selected inversion), enqueue/evict/isCached/isDecoded/getImage/
       clearCache/update, _testDecode.
-- [ ] End-to-end: load a page image through network in sim; log pipeline timings.
-- [ ] Verify; STOP.
+- [x] End-to-end: load a page image through network in sim; log pipeline timings.
+      (image_decoder.c/h full port: FIFO queue drained one-at-a-time while page not
+      loading, magic dispatch with JPEG/PNG/WebP/GIF through the task scheduler and
+      BMP/ICO/SVG inline, failed decodes AND <9-byte bodies AND transport errors cached
+      as false, stale-download/stale-decode watchdogs in update(), draw() placeholder
+      card + hatch + camera icon + clipped alt text + selected 2px border + centered
+      drawScaled fit. Lua's 16ms re-kick timer documented as redundant vs update()
+      polling. Selftests: 9 passed / 0 failed via the _testDecode seam reusing P17–P24
+      fixtures. E2E over real localhost HTTP in sim: png+bmp+404 sequential pipeline
+      resolved in 3318 ms — async PNG 32×24 decoded through the scheduler, BMP inline,
+      404 cached-as-failed; visual smoke of placeholder + scaled-draw branches. All
+      phases regression-green. Build gate clean. Log exported to logs/phase-P25.log.)
+- [x] Verify; STOP.
 
 ### PHASE P26 — render/cloud_layout.c (+json)
 - [ ] CloudLayout.parse(jsonString, baseUrl): element list (type/text/x/y/font/size...),

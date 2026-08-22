@@ -131,3 +131,10 @@ PlutoFont* style_get_inline_font(int isBold, int isCode, int isSmall,
     if (f == NULL) f = st.sys;
     return f;
 }
+
+/* Style.fontSmall or gfx.getFont(): init assigns sysFont when the slot
+ * never loaded (Lua: fontSmall = fontSmall or sysFont). */
+PlutoFont* style_get_small_font(void) {
+    if (st.small) return st.small;
+    return st.sys;
+}
