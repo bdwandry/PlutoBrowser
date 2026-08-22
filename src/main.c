@@ -35,6 +35,9 @@
 #include "render/decoders/bmp.h"
 #include "render/decoders/selftest_bmp.h"
 #include "render/decoders/selftest_bmp_fixtures.h"
+#include "render/decoders/gif.h"
+#include "render/decoders/selftest_gif.h"
+#include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -79,6 +82,9 @@ static int s_pngFail = -1;
 static int s_pngPass = -1;
 static int s_bmFail = -1;
 static int s_bmPass = -1;
+static int s_giFail = -1;
+static int s_giPass = -1;
+static void* s_gifView = NULL;   /* temporary P19 debug viewer */
 static void* s_pngView = NULL;   /* temporary P17 debug viewer bitmap */
 static void* s_bmpView = NULL;   /* temporary P18 debug viewer bitmap */
 static int s_dcFail = -1;
@@ -286,6 +292,17 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_giPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P19 gif: %d passed, %d failed",
+                     s_giPass, s_giFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 320);
+        }
+    }
+
 #if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
     /* temporary debug viewers: decoded bench PNG + BMP (266x200) */
     if (s_pngView != NULL) {
@@ -294,6 +311,10 @@ static void draw_placeholder(void)
     }
     if (s_bmpView != NULL) {
         pd->graphics->drawBitmap((LCDBitmap*)s_bmpView, 124, 20,
+                                 kBitmapUnflipped);
+    }
+    if (s_gifView != NULL) {
+        pd->graphics->drawBitmap((LCDBitmap*)s_gifView, 238, 20,
                                  kBitmapUnflipped);
     }
 #endif
@@ -470,6 +491,17 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 #endif
             if (s_bmFail > 0) {
                 PLUTO_ERROR("P18 SELFTEST FAILURES: %d", s_bmFail);
+            }
+
+            selftest_gif_set_pd(pd);
+            selftest_gif_run(&s_giPass, &s_giFail);
+#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
+            /* temporary P19 debug viewer: decoded bench GIF */
+            s_gifView = gif_decode(pd, fx_g_bench, FX_G_BENCH_LEN,
+                                   360, 200);
+#endif
+            if (s_giFail > 0) {
+                PLUTO_ERROR("P19 SELFTEST FAILURES: %d", s_giFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);
