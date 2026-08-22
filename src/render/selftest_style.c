@@ -13,16 +13,17 @@ static void ck(const char* name, int cond) {
 /* ── heading / body / inline mapping (environment-independent) ────────── */
 
 static void case_mapping(void) {
-    struct { int level, size, lh; } H[] = {
+    /* Lua Style.getHeadingFont -> font, lineH(24/18/16), marginB(6/5/4) */
+    struct { int level, lh, mb; } H[] = {
         {1, 24, 6}, {2, 18, 5}, {3, 16, 4},
         {4, 16, 4}, {5, 16, 4}, {6, 16, 4},
         {0, 16, 4}, {7, 16, 4}, {-3, 16, 4}
     };
     int ok = 1;
     for (size_t i = 0; i < sizeof(H) / sizeof(H[0]); i++) {
-        int sz = -1, lh = -1;
-        style_get_heading_font(H[i].level, &sz, &lh);
-        if (sz != H[i].size || lh != H[i].lh) ok = 0;
+        int lh = -1, mb = -1;
+        style_get_heading_font(H[i].level, &lh, &mb);
+        if (lh != H[i].lh || mb != H[i].mb) ok = 0;
     }
     ck("H.heading_map", ok);
 

@@ -81,6 +81,8 @@ SRC = \
 	src/render/image_decoder.c \
 	src/render/selftest_image_decoder.c \
 	src/render/cloud_layout.c \
+	src/render/layout.c \
+	src/render/selftest_layout.c \
 	src/render/selftest_cloud_layout.c \
 	src/ui/chrome.c \
 	src/ui/hud.c \

@@ -76,20 +76,20 @@ int style_get_text_width(PlutoFont* font, const char* text) {
     return (int)strlen(text) * 8;
 }
 
-PlutoFont* style_get_heading_font(int level, int* size, int* lineHeight) {
+PlutoFont* style_get_heading_font(int level, int* lineHeight, int* marginBottom) {
     PlutoFont* f;
     if (level == 1) {
         f = st.heading1;
-        if (size) *size = 24;
-        if (lineHeight) *lineHeight = 6;
+        if (lineHeight) *lineHeight = 24;
+        if (marginBottom) *marginBottom = 6;
     } else if (level == 2) {
         f = st.heading2;
-        if (size) *size = 18;
-        if (lineHeight) *lineHeight = 5;
+        if (lineHeight) *lineHeight = 18;
+        if (marginBottom) *marginBottom = 5;
     } else {
         f = st.heading3;
-        if (size) *size = 16;
-        if (lineHeight) *lineHeight = 4;
+        if (lineHeight) *lineHeight = 16;
+        if (marginBottom) *marginBottom = 4;
     }
     if (f == NULL) f = st.sys;
     return f;

@@ -25,9 +25,10 @@ void style_set_system_font(PlutoFont* f);
  * final fallback = 8 px per char */
 int  style_get_text_width(PlutoFont* font, const char* text);
 
-/* returns font, fills lineHeight (+size for headings):
- * level 1 -> h1 24, level 2 -> h2 18, else h3 16 */
-PlutoFont* style_get_heading_font(int level, int* size, int* lineHeight);
+/* returns font, fills lineHeight + marginBottom:
+ * Lua Style.getHeadingFont -> font, lineH, marginB
+ *   level 1 -> 24, 6; level 2 -> 18, 5; else 16, 4 */
+PlutoFont* style_get_heading_font(int level, int* lineHeight, int* marginBottom);
 
 /* code -> mono 15; bold -> bold 16; else body 16 */
 PlutoFont* style_get_body_font(int isBold, int isCode, int* size);

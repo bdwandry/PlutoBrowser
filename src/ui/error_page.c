@@ -75,8 +75,7 @@ static void clip_ellipsis(char* out, size_t cap, const char* s,
 void ep_draw(void) {
     if (s_pd == NULL) return;
 
-    int hsz = 0, hlh = 0;
-    PlutoFont* fontH = style_get_heading_font(1, &hsz, &hlh);
+        PlutoFont* fontH = style_get_heading_font(1, NULL, NULL);
     int bsz = 0;
     PlutoFont* fontB = style_get_body_font(0, 0, &bsz);
     PlutoFont* fontBold = style_get_body_font(1, 0, &bsz);

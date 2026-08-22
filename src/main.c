@@ -54,6 +54,8 @@
 #include "render/selftest_image_decoder.h"
 #include "render/cloud_layout.h"
 #include "render/selftest_cloud_layout.h"
+#include "render/layout.h"
+#include "render/selftest_layout.h"
 #include "ui/chrome.h"
 #include "ui/hud.h"
 #include "ui/selftest_ui.h"
@@ -135,9 +137,40 @@ static unsigned s_p25WaitFrames = 0;
 static int s_p25Resolved = -1;      /* HUD: -1 pending, 0 fail, 1 ok */
 /* P26 cloud layout visual: parse/build a fixture once, then sweep scroll */
 static int s_clPass = -1;
+static int s_lyPass = -1, s_lyFail = -1;   /* P26B layout */
 static int s_clFail = -1;
 static int s_clBuilt = 0;
 static int s_clScroll = 0;
+/* P26B layout visual: parse/build an HTML fixture once, sweep scroll */
+static int s_lyBuilt = 0;
+static int s_lyScroll = 0;
+static struct DocDocument* s_lyDoc = NULL;
+/* Fixture exercising most Layout block types end to end. */
+static const char* kLyFixture =
+    "<html><head><title>Layout Demo</title></head><body>"
+    "<h1>P26B Block Layout</h1>"
+    "<h2>Text flow</h2>"
+    "<p>This paragraph wraps across the column and carries an "
+    "<a href=\"p2.html\">inline link</a> plus <b>bold</b>, "
+    "<i>italic</i>, <code>code</code> and mark runs.</p>"
+    "<blockquote>A quoted thought with its left bar.</blockquote>"
+    "<ul><li>unordered one</li><li>unordered two</li></ul>"
+    "<ol type=\"i\"><li>ordered ix-style marker</li>"
+    "<li>second numbered entry</li></ol>"
+    "<h3>Preformatted</h3>"
+    "<pre>local ok = pcall(function()\n\treturn math.huge\nend)</pre>"
+    "<hr>"
+    "<table border=\"1\"><caption>Grid</caption>"
+    "<tr><th>H1</th><th>H2</th></tr>"
+    "<tr><td>a</td><td>b</td></tr></table>"
+    "<p align=\"center\">centered text run</p>"
+    "<img src=\"img/logo.png\" width=\"120\" height=\"60\" alt=\"Logo\">"
+    "<form action=\"/find\"><input type=\"text\" name=\"q\" value=\"go\">"
+    "<label><input type=\"checkbox\" name=\"c1\" checked> opt</label>"
+    "<select name=\"s\"><option selected>first</option>"
+    "<option>second</option></select>"
+    "<input type=\"submit\" name=\"do\" value=\"Search\"></form>"
+    "</body></html>";
 /* P27 chrome/hud visual: rotate through showcase scenarios */
 static int s_uiPass = -1;
 static int s_uiFail = -1;
@@ -481,6 +514,33 @@ static void draw_placeholder(void)
         }
     }
 
+    /* P26B layout visual + HUD */
+    if (s_lyBuilt && s_lyDoc) {
+        layout_draw(s_lyScroll);
+        layout_evict_offscreen(s_lyScroll);
+        n = snprintf(buf, sizeof(buf),
+                     "P26B layout: %d items, scroll=%d",
+                     layout_item_count(), s_lyScroll);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 440);
+        }
+    }
+
+    if (s_lyPass >= 0) {
+        n = snprintf(buf, sizeof(buf),
+                     "P26B selftest: %d passed, %d failed",
+                     s_lyPass, s_lyFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 455);
+        }
+    }
+
     /* P27 chrome/hud showcase: rotates every 60 frames through
      * ssl-web / reader-badge / loading-known-total / indeterminate /
      * about-page states. */
@@ -746,6 +806,23 @@ static int update(void* userdata)
                                ? cl_total_height() - 216.0 : 0.0;
         s_clScroll += 4;
         if (maxScroll <= 0 || s_clScroll > (int)maxScroll) s_clScroll = 0;
+    }
+
+    /* P26B visual: parse + build the HTML fixture once, then sweep scroll
+     * so text painters, table/form/box painters and the scrollbar run. */
+    if (s_frame == 200 && !s_lyBuilt) {
+        if (s_lyDoc) doc_free(s_lyDoc);
+        s_lyDoc = doc_parse(kLyFixture, "http://demo.local/", 1);
+        layout_build(s_lyDoc);
+        s_lyBuilt = 1;
+        PLUTO_LOG("[P26B] fixture built: items=%d totalH=%.0f links=%zu",
+                  layout_item_count(), layout_total_height(),
+                  lm_get_count());
+    } else if (s_lyBuilt && s_frame % 2 == 0) {
+        double maxScroll = layout_total_height() > 216.0
+                               ? layout_total_height() - 216.0 : 0.0;
+        s_lyScroll += 3;
+        if (maxScroll <= 0 || s_lyScroll > (int)maxScroll) s_lyScroll = 0;
     }
 
     /* P27 showcase rotation */
@@ -1065,6 +1142,14 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P26 SELFTEST FAILURES: %d", s_clFail);
             }
             PLUTO_LOG("[P26] cloud layout ready");
+
+            // P26B block layout: parse/build pipeline over HTML docs.
+            layout_init(pd);
+            selftest_layout_run(&s_lyPass, &s_lyFail);
+            if (s_lyFail > 0) {
+                PLUTO_ERROR("P26B SELFTEST FAILURES: %d", s_lyFail);
+            }
+            PLUTO_LOG("[P26B] layout ready (%d/%d)", s_lyPass, s_lyFail);
 
             // P27 chrome + hud: top bar and floating overlays.
             chrome_init(pd);

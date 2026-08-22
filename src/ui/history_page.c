@@ -67,8 +67,7 @@ void hi_draw(double crankChange) {
     DynArray* hist = storage_history();
     int count = hist ? (int)hist->count : 0;
 
-    int hsz = 0, hlh = 0;
-    PlutoFont* fontH = style_get_heading_font(2, &hsz, &hlh);
+        PlutoFont* fontH = style_get_heading_font(2, NULL, NULL);
     int bsz = 0;
     PlutoFont* fontB = style_get_body_font(1, 0, &bsz);
     PlutoFont* fontS = style_get_ui_small_font();

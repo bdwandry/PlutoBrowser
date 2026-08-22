@@ -183,7 +183,7 @@ static PlutoFont* font_for_text_item(const JsonValue* el) {
         (f != NULL && f->type == JSON_STRING) ? f->str : NULL;
     int sz, lh;
     if (fname != NULL && strcmp(fname, "large") == 0)
-        return style_get_heading_font(1, &sz, &lh);
+        return style_get_heading_font(1, NULL, NULL);
     if (fname != NULL && strcmp(fname, "bold") == 0)
         return style_get_body_font(1, 0, &sz);
     if (fname != NULL && strcmp(fname, "mono") == 0)
