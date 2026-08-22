@@ -57,6 +57,8 @@ SRC = \
 	src/render/decoders/dither.c \
 	src/render/decoders/scale.c \
 	src/render/decoders/selftest_decoders.c \
+	src/render/decoders/inflate.c \
+	src/render/decoders/selftest_inflate.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
