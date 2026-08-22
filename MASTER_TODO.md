@@ -1,11 +1,12 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P29 DONE (verified in simulator). NEXT: P30.**
+**Status: PLANNING COMPLETE — PHASES P01–P30 DONE (verified in simulator). NEXT: P31.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ P28 ✅ | P29–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ P27 ✅ P28 ✅
+P29 ✅ P30 ✅ | P31–P36 ⬜
 
 ---
 
@@ -948,11 +949,20 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       B+Left/Right gating covered by G.b_held_blocks unit test.
 
 ### PHASE P30 — ui/error_page.c + bookmarks_page.c + history_page.c
-- [ ] ErrorPage: show/handleInput (left/up, right/down clamp 1..3, A→retry/search/home,
+- [x] ErrorPage: show/handleInput (left/up, right/down clamp 1..3, A→retry/search/home,
       draw roundrect dialog, msg/url 48/50-char clips, 3 buttons 100×28 sel inversion).
-- [ ] Bookmarks/History pages: open/handleInput (A open url, B close), draw list rows
+- [x] Bookmarks/History pages: open/handleInput (A open url, B close), draw list rows
       34px, title 34/url 46-char clips, crank scroll ×2, culling, empty-state texts.
-- [ ] Visual + input check; STOP.
+- [x] Visual + input check; STOP.
+
+      DONE (this session): shared pure core ui/list_core.{h,c} (nav clamp, crank
+      scroll ×2 ≥0 clamp, row-culling band, 34/31 & 46/43 "..." clips) reused by
+      bookmarks_page/history_page; error_page with dialog draw + inverted buttons
+      (setDrawMode kDrawModeFillWhite — SDK name differs from Lua's
+      setImageDrawMode). Selftest 36/0 incl. one test-sequence fix (A pressed on
+      row 2 vs entry[0] comparison). Sim: rotating slots every 120 frames with
+      scripted inputs logged (error actions, bm/hi OPEN urls); full suite
+      1230 PASS / 0 FAIL. Log: logs/phase-P30.log.
 
 ### PHASE P31 — ui/settings_page.c
 - [ ] Staged-settings overlay: open(prevState) snapshot, options Search Engine (cycle),

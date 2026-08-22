@@ -89,6 +89,11 @@ SRC = \
 	src/ui/selftest_home_page.c \
 	src/ui/address_bar.c \
 	src/ui/selftest_address_bar.c \
+	src/ui/list_core.c \
+	src/ui/error_page.c \
+	src/ui/bookmarks_page.c \
+	src/ui/history_page.c \
+	src/ui/selftest_pages.c \
 	vendor/keyboard/keyboard.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
