@@ -62,7 +62,9 @@ build/src/main.o: src/main.c \
  src/render/selftest_style.h src/render/link_manager.h \
  src/render/selftest_link_manager.h \
  src/render/decoders/selftest_decoders.h \
- src/render/decoders/selftest_inflate.h src/html/document.h \
+ src/render/decoders/selftest_inflate.h src/render/decoders/png.h \
+ src/render/decoders/selftest_png.h \
+ src/render/decoders/selftest_png_fixtures.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
  src/core/tasks.h src/html/entities.h src/util/mem.h \
@@ -221,6 +223,12 @@ src/render/selftest_link_manager.h:
 src/render/decoders/selftest_decoders.h:
 
 src/render/decoders/selftest_inflate.h:
+
+src/render/decoders/png.h:
+
+src/render/decoders/selftest_png.h:
+
+src/render/decoders/selftest_png_fixtures.h:
 
 src/html/document.h:
 

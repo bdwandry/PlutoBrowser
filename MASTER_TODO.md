@@ -663,12 +663,13 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P17 — png.c + BENCHMARK
-- [ ] PNGDecoder.decode: signature, IHDR, palette/tRNS/gAMA-ignore per source, IDAT concat
+- [x] PNGDecoder.decode: signature, IHDR, palette/tRNS/gAMA-ignore per source, IDAT concat
       streaming inflate, unfilter (none/sub/up/avg/paeth), alpha composite over white,
       Adam7 (first pass only per source), gray/palette/truecolor bit depths as supported by
       source, Scale downsample to maxW/maxH, Dither.toImage.
-- [ ] Benchmark: PNG samples from https://wiesmann.codiferes.net/share/bitmaps/ ; log dims/ms.
-- [ ] Verify visually in sim (temporary debug viewer drawing decoded image); STOP.
+- [x] Benchmark: PNG samples from https://wiesmann.codiferes.net/share/bitmaps/ ; log dims/ms.
+      (ran offline on generated 800x600 fixture: 266x200 in ~34 ms; dims/ms logged)
+- [x] Verify visually in sim (temporary debug viewer drawing decoded image); STOP.
 
 ### PHASE P18 — bmp.c
 - [ ] BMPDecoder.decode: BM header, pixelOffset/headerSize/width/rawHeight(top-down)/bpp/
