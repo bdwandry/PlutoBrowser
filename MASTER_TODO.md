@@ -1,11 +1,11 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P25 DONE (verified in simulator). NEXT: P26.**
+**Status: PLANNING COMPLETE — PHASES P01–P26 DONE (verified in simulator). NEXT: P27.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
 **Phase progress:** P01–P09 ✅ P10 ✅ P11 ✅ P12 ✅ P13 ✅ P14 ✅ P15 ✅ P16 ✅ P17 ✅
-P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ | P26–P36 ⬜
+P18 ✅ P19 ✅ P20 ✅ P21 ✅ P22 ✅ P23 ✅ P24 ✅ P25 ✅ P26 ✅ | P27–P36 ⬜
 
 ---
 
@@ -848,12 +848,33 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       phases regression-green. Build gate clean. Log exported to logs/phase-P25.log.)
 - [x] Verify; STOP.
 
-### PHASE P26 — render/cloud_layout.c (+json)
-- [ ] CloudLayout.parse(jsonString, baseUrl): element list (type/text/x/y/font/size...),
-      resolve relative URLs; build(doc) wiring; draw(scrollY) painters identical fonts/
-      offsets; MODE_OPERA_DS path ready.
-- [ ] Fixture cloud JSON rendered; log.
-- [ ] Verify; STOP.
+### PHASE P26 — render/cloud_layout.c (+json)  ✅ DONE (verified in simulator)
+- [x] CloudLayout.parse(jsonString, baseUrl): element list (type/text/x/y/font/size...),
+      build(doc) wiring; draw(scrollY) painters identical fonts/offsets; MODE_OPERA_DS
+      path ready. (cloud_layout.c/h full port: parse wraps json_parse in a pcall-equivalent —
+      malformed JSON or non-object payload → title="Parse Error"/elements={}/totalHeight=240;
+      missing fields default "Cloud Page"/{}/240; baseUrl accepted but UNUSED exactly as in
+      the Lua source. build() clears items + LinkManager, skips el.y<0, offsets by
+      CONTENT_Y+el.y, maps text fonts large→heading1/bold→bodyBold/mono→mono/body→body with
+      sys-font fallbacks, images default alt="Image", links via lm_add_link, and
+      input/submit ALSO register selectable form-input links carrying their item pointer
+      (new additive lm_add_form_input + LmLink.isFormInput/inputBlock fields mirroring the
+      Lua table's optional keys). draw(scrollY): white content fill, clip rect, per-item
+      painters (drawTextInRect w+10/h+10; ImageDecoder.draw; input box white roundrect r3
+      + 1px border + value-or-placeholder text inset 4px; submit black roundrect r3 +
+      FillWhite centered bold label), self-drawn selected-link outline (black lw3 r3,
+      inflated 2px — distinct from LinkManager.drawSelectedHighlight, matching Lua),
+      exact visibility gate vs SCREEN_HEIGHT, scrollbar thumb math identical.)
+- [x] Fixture cloud JSON rendered; log. (Selftest: 33 passed / 0 failed — valid payload
+      all-types incl. negative-y skip + form-link wiring walk over LinkManager selection,
+      malformed → Parse Error fallback, defaults, NULL safety, rebuild idempotence.
+      Sim visual: fixture parsed/built once at frame 180 then scroll sweep exercises all
+      painters + clipping + scrollbar; HUD lines P26. All phases regression-green
+      (1107 PASS / 0 FAIL boot total). One harness bug found+fixed during verify:
+      selection-walk loop was unbounded since selectNext wraps around. P25 e2e re-verified
+      green after regenerating the ephemeral localhost png/bmp fixtures + test server.
+      Build gate clean. Log exported to logs/phase-P26.log.)
+- [x] Verify; STOP.
 
 ### PHASE P27 — ui/chrome.c + ui/hud.c
 - [ ] Chrome.draw: black bar, separator, SSL lock/globe vector drawing, host display rules
