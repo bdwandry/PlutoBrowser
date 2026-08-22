@@ -301,6 +301,58 @@ static void case_pil_bench(void) {
     ck("B.bench_ran", it == iters && ms >= 0.0);
 }
 
+static void case_lossy_bench(void) {
+    uint32_t** rows = NULL;
+    int w = 0, h = 0;
+    double ms = 0.0;
+    int it, iters = 200;
+    int ok = webp_decode_argb(fx_w_lossy_grad, FX_W_LOSSY_GRAD_LEN,
+                              FX_W_LOSSY_GRAD_W, FX_W_LOSSY_GRAD_H,
+                              &rows, &w, &h) == 0 && rows != NULL;
+    ck("B.lossy_smoke", ok && w == FX_W_LOSSY_GRAD_W &&
+                            h == FX_W_LOSSY_GRAD_H &&
+                            fnv_rows(rows, w, h) == FX_W_LOSSY_GRAD_CK);
+    if (rows) webp_free_rows_argb(rows, h);
+
+#if defined(TARGET_PLAYDATE)
+    if (s_pd != NULL) {
+        float t0 = s_pd->system->getElapsedTime();
+        for (it = 0; it < iters; it++) {
+            rows = NULL;
+            if (webp_decode_argb(fx_w_lossy_grad, FX_W_LOSSY_GRAD_LEN,
+                                 FX_W_LOSSY_GRAD_W, FX_W_LOSSY_GRAD_H,
+                                 &rows, &w, &h) == 0)
+                webp_free_rows_argb(rows, h);
+            else
+                break;
+        }
+        ms = (double)(s_pd->system->getElapsedTime() - t0) * 1000.0;
+    } else {
+        it = iters;
+    }
+#else
+    {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (it = 0; it < iters; it++) {
+            rows = NULL;
+            if (webp_decode_argb(fx_w_lossy_grad, FX_W_LOSSY_GRAD_LEN,
+                                 FX_W_LOSSY_GRAD_W, FX_W_LOSSY_GRAD_H,
+                                 &rows, &w, &h) == 0)
+                webp_free_rows_argb(rows, h);
+            else
+                break;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
+             (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    }
+#endif
+    PLUTO_LOG("[P22] bench lossy %dx%d: %d iters in %.2f ms (%.3f ms/iter)",
+              FX_W_LOSSY_GRAD_W, FX_W_LOSSY_GRAD_H, iters, ms, ms / iters);
+    ck("B.lossy_bench_ran", it == iters && ms >= 0.0);
+}
+
 int selftest_webp_run(int* passed, int* failed) {
     s_pass = 0;
     s_fail = 0;
@@ -309,6 +361,7 @@ int selftest_webp_run(int* passed, int* failed) {
     case_guards();
     case_anim();
     case_pil_bench();
+    case_lossy_bench();
     PLUTO_LOG("[P21] webp selftests done: %d passed, %d failed",
               s_pass, s_fail);
     if (passed) *passed = s_pass;

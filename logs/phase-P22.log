@@ -1,0 +1,1133 @@
+=== PlutoBrowser crash log ===
+gamePath: unknown
+[09:30:50 #1] PlutoBrowser boot (C port of CometBrowser)
+[09:30:50 #2] constants: screen=400x240 chrome=24 contentY=24 contentH=216
+[09:30:50 #3] [P02] util selftests begin
+[09:30:50 #4] [P02] PASS mem.malloc
+[09:30:50 #5] [P02] PASS mem.realloc_preserves
+[09:30:50 #6] [P02] PASS mem.strdup
+[09:30:50 #7] [P02] PASS mem.strndup
+[09:30:50 #8] [P02] PASS mem.free_null
+[09:30:50 #9] [P02] PASS strbuf.init
+[09:30:50 #10] [P02] PASS strbuf.append_str
+[09:30:50 #11] [P02] PASS strbuf.append_char
+[09:30:50 #12] [P02] PASS strbuf.embedded_nul
+[09:30:50 #13] [P02] PASS strbuf.clear_keeps_cap
+[09:30:50 #14] [P02] PASS strbuf.printf
+[09:30:50 #15] [P02] PASS strbuf.grow_500
+[09:30:50 #16] [P02] PASS strbuf.detach
+[09:30:50 #17] [P02] PASS strbuf.detach_resets
+[09:30:50 #18] [P02] PASS strbuf.free_idempotent
+[09:30:50 #19] [P02] PASS dynarray.init
+[09:30:50 #20] [P02] PASS dynarray.push_100_grow
+[09:30:50 #21] [P02] PASS dynarray.get_mid
+[09:30:50 #22] [P02] PASS dynarray.last
+[09:30:50 #23] [P02] PASS dynarray.pop
+[09:30:50 #24] [P02] PASS dynarray.get_oob_null
+[09:30:50 #25] [P02] PASS dynarray.free
+[09:30:50 #26] [P02] PASS strmap.create
+[09:30:50 #27] [P02] PASS strmap.put_get
+[09:30:50 #28] [P02] PASS strmap.replace_value
+[09:30:50 #29] [P02] PASS strmap.has_false
+[09:30:50 #30] [P02] PASS strmap.get_missing_null
+[09:30:50 #31] [P02] PASS strmap.200_keys_rehash
+[09:30:50 #32] [P02] PASS strmap.get_after_rehash
+[09:30:50 #33] [P02] PASS strmap.remove
+[09:30:50 #34] [P02] PASS strmap.remove_twice_false
+[09:30:50 #35] [P02] PASS strmap.survivor_intact
+[09:30:50 #36] [P02] PASS strmap.foreach_null_fn_safe
+[09:30:50 #37] [P02] PASS strmap.destroy
+[09:30:50 #38] [P02] PASS lpat.trim_spaces
+[09:30:50 #39] [P02] PASS lpat.trim_empty
+[09:30:50 #40] [P02] PASS lpat.trim_only_spaces
+[09:30:50 #41] [P02] PASS lpat.scheme_split
+[09:30:50 #42] [P02] PASS lpat.scheme_no_match
+[09:30:50 #43] [P02] PASS lpat.host_path_no_match_lua
+[09:30:50 #44] [P02] PASS lpat.host_bare_no_match_lua
+[09:30:50 #45] [P02] PASS lpat.host_reject_spaces
+[09:30:50 #46] [P02] PASS lpat.host_trailing_qmark_lua
+[09:30:50 #47] [P02] PASS lpat.attr_dquote_1
+[09:30:50 #48] [P02] PASS lpat.attr_dquote_2
+[09:30:50 #49] [P02] PASS lpat.attr_dquote_done
+[09:30:50 #50] [P02] PASS lpat.attr_squote_1
+[09:30:50 #51] [P02] PASS lpat.attr_squote_2
+[09:30:50 #52] [P02] PASS lpat.attr_squote_done
+[09:30:50 #53] [P02] PASS lpat.pathcmd_M
+[09:30:50 #54] [P02] PASS lpat.pathcmd_L
+[09:30:50 #55] [P02] PASS lpat.pathcmd_Z_empty_arg
+[09:30:50 #56] [P02] PASS lpat.pathcmd_done
+[09:30:50 #57] [P02] PASS lpat.entity_named_amp
+[09:30:50 #58] [P02] PASS lpat.entity_named_lt
+[09:30:50 #59] [P02] PASS lpat.entity_named_skips_dec
+[09:30:50 #60] [P02] PASS lpat.entity_decimal
+[09:30:50 #61] [P02] PASS lpat.entity_hex_lower_x
+[09:30:50 #62] [P02] PASS lpat.entity_hex_upper_X
+[09:30:50 #63] [P02] PASS lpat.entity_hex_done
+[09:30:50 #64] [P02] PASS lpat.charset_utf8
+[09:30:50 #65] [P02] PASS lpat.http_status
+[09:30:50 #66] [P02] PASS lpat.meta_refresh_url_upper
+[09:30:50 #67] [P02] PASS lpat.meta_refresh_frac
+[09:30:50 #68] [P02] PASS lpat.viewbox_four_caps
+[09:30:50 #69] [P02] PASS lpat.tag_div_attrs
+[09:30:50 #70] [P02] PASS lpat.tag_br_selfclose
+[09:30:50 #71] [P02] PASS lpat.tag_close_not_matched
+[09:30:50 #72] [P02] PASS lpat.css_prop_lua_truth
+[09:30:50 #73] [P02] PASS lpat.cookie_pair
+[09:30:50 #74] [P02] PASS lpat.tokens_a
+[09:30:50 #75] [P02] PASS lpat.tokens_bb
+[09:30:50 #76] [P02] PASS lpat.tokens_ccc
+[09:30:50 #77] [P02] PASS lpat.tokens_done
+[09:30:50 #78] [P02] PASS lpat.lazy_dash
+[09:30:50 #79] [P02] PASS lpat.greedy_star
+[09:30:50 #80] [P02] PASS lpat.endpunct_true
+[09:30:50 #81] [P02] PASS lpat.endpunct_false
+[09:30:50 #82] [P02] PASS lpat.escape_dot
+[09:30:50 #83] [P02] PASS lpat.escape_percent
+[09:30:50 #84] [P02] PASS lpat.escape_dash_outside_set
+[09:30:50 #85] [P02] PASS lpat.gsub_fn_hexdecode
+[09:30:50 #86] [P02] PASS lpat.gsub_fn_encode
+[09:30:50 #87] [P02] PASS lpat.find_init_offset
+[09:30:50 #88] [P02] PASS lpat.find_plain
+[09:30:50 #89] [P02] PASS lpat.find_plain_miss
+[09:30:50 #90] [P02] PASS lpat.gsub_template_trim
+[09:30:50 #91] [P02] PASS lpat.gsub_crlf
+[09:30:50 #92] [P02] PASS lpat.gsub_count3
+[09:30:50 #93] [P02] PASS lpat.gsub_empty_matches
+[09:30:50 #94] [P02] PASS lpat.negclass_A
+[09:30:50 #95] [P02] PASS lpat.negclass_done
+[09:30:50 #96] [P02] PASS lpat.set_leading_bracket
+[09:30:50 #97] [P02] PASS lpat.nul_subject_first
+[09:30:50 #98] [P02] PASS lpat.nul_subject_second
+[09:30:50 #99] [P02] PASS lpat.nul_subject_done
+[09:30:50 #100] [P02] PASS lpat.position_capture
+[09:30:50 #101] [P02] PASS lpat.balance
+[09:30:50 #102] [P02] PASS lpat.frontier_THE
+[09:30:50 #103] [P02] PASS lpat.frontier_quick
+[09:30:50 #104] [P02] PASS lpat.frontier_fox
+[09:30:50 #105] [P02] PASS lpat.frontier_done
+[09:30:50 #106] [P02] PASS lpat.opt_without_u
+[09:30:50 #107] [P02] PASS lpat.opt_with_u
+[09:30:50 #108] [P02] PASS lpat.ip_anchor_ok
+[09:30:50 #109] [P02] PASS lpat.ip_anchor_trailing_fail
+[09:30:50 #110] ERROR: luapattern: malformed pattern (missing ])  ||  stack: src/util/luapattern.c:79
+[09:30:50 #111] [P02] PASS lpat.malformed_set_err
+[09:30:50 #112] [P02] PASS json.parse_fixture
+[09:30:50 #113] [P02] PASS json.obj_string
+[09:30:50 #114] [P02] PASS json.negative_int
+[09:30:50 #115] [P02] PASS json.float
+[09:30:50 #116] [P02] PASS json.exponent
+[09:30:50 #117] [P02] PASS json.bool_true
+[09:30:50 #118] [P02] PASS json.null_value
+[09:30:50 #119] [P02] PASS json.absent_key
+[09:30:50 #120] [P02] PASS json.arr_count
+[09:30:50 #121] [P02] PASS json.arr_num
+[09:30:50 #122] [P02] PASS json.arr_null_elem
+[09:30:50 #123] [P02] PASS json.arr_nested_obj
+[09:30:50 #124] [P02] PASS json.escapes_unicode_surrogate
+[09:30:50 #125] [P02] PASS json.trailing_data_error
+[09:30:50 #126] [P02] PASS json.bad_value_error
+[09:30:50 #127] [P02] PASS json.unterminated_error
+[09:30:50 #128] [P02] PASS json.roundtrip_parse
+[09:30:50 #129] [P02] PASS json.roundtrip_stable
+[09:30:50 #130] [P02] PASS json.roundtrip_arr_value
+[09:30:50 #131] [P02] PASS json.roundtrip_nested_bool
+[09:30:50 #132] [P02] PASS json.obj_set_replace
+[09:30:50 #133] [P02] util selftests done: 128 passed, 0 failed
+[09:30:50 #134] [P03] url selftests begin
+[09:30:50 #135] [P03] PASS url.parse.empty
+[09:30:50 #136] [P03] PASS url.parse.https_host
+[09:30:50 #137] [P03] PASS url.parse.full
+[09:30:50 #138] [P03] PASS url.parse.no_scheme
+[09:30:50 #139] [P03] PASS url.parse.empty_host
+[09:30:50 #140] [P03] PASS url.parse.ftp_custom_port
+[09:30:50 #141] [P03] PASS url.parse.userinfo_quirk
+[09:30:50 #142] [P03] PASS url.parse.colon_empty_port
+[09:30:50 #143] [P03] PASS url.parse.port_zero
+[09:30:50 #144] [P03] PASS url.parse.spaces_trimmed
+[09:30:50 #145] [P03] PASS url.parse.about_blank
+[09:30:50 #146] [P03] PASS url.parse.about_home
+[09:30:50 #147] [P03] PASS url.parse.case_fold
+[09:30:50 #148] [P03] PASS url.parse.ip_host
+[09:30:50 #149] [P03] PASS url.parse.raw_trimmed
+[09:30:50 #150] [P03] PASS url.parse.junk_port_ignored
+[09:30:50 #151] [P03] PASS enc.plain
+[09:30:50 #152] [P03] PASS enc.specials
+[09:30:50 #153] [P03] PASS enc.unreserved_kept
+[09:30:50 #154] [P03] PASS enc.plus_encoded
+[09:30:50 #155] [P03] PASS enc.utf8
+[09:30:50 #156] [P03] PASS enc.percent_literal
+[09:30:50 #157] [P03] PASS enc.newline_crlf
+[09:30:50 #158] [P03] PASS enc.empty
+[09:30:50 #159] [P03] PASS dec.plus_space
+[09:30:50 #160] [P03] PASS dec.pct_utf8
+[09:30:50 #161] [P03] PASS dec.mixed
+[09:30:50 #162] [P03] PASS dec.invalid_pct_kept
+[09:30:50 #163] [P03] PASS dec.truncated_pct_kept
+[09:30:50 #164] [P03] PASS dec.empty
+[09:30:50 #165] [P03] PASS url.roundtrip
+[09:30:50 #166] [P03] PASS isq.null_false
+[09:30:50 #167] [P03] PASS isq.empty_false
+[09:30:50 #168] [P03] PASS isq.spaces_query
+[09:30:50 #169] [P03] PASS isq.dot_url
+[09:30:50 #170] [P03] PASS isq.bare_word_query
+[09:30:50 #171] [P03] PASS isq.leading_dot_query
+[09:30:50 #172] [P03] PASS isq.trailing_dot_query
+[09:30:50 #173] [P03] PASS isq.ip_url
+[09:30:50 #174] [P03] PASS isq.localhost_url
+[09:30:50 #175] [P03] PASS isq.localhost_suffix_url
+[09:30:50 #176] [P03] PASS isq.https_url
+[09:30:50 #177] [P03] PASS isq.about_url
+[09:30:50 #178] [P03] PASS isq.file_url
+[09:30:50 #179] [P03] PASS isq.spaces_only_is_query
+[09:30:50 #180] [P03] PASS isq.upper_scheme_via_dot_rule
+[09:30:50 #181] [P03] PASS isq.trimmed_before_dot_rule
+[09:30:50 #182] [P03] PASS unwrap.ddg_uddg
+[09:30:50 #183] [P03] PASS unwrap.non_ddg_false
+[09:30:50 #184] [P03] PASS wrap.missing_uddg_false
+[09:30:50 #185] [P03] PASS resolve.same_dir
+[09:30:50 #186] [P03] PASS resolve.subdir
+[09:30:50 #187] [P03] PASS resolve.root_rel
+[09:30:50 #188] [P03] PASS resolve.protocol_relative
+[09:30:50 #189] [P03] PASS resolve.anchor
+[09:30:50 #190] [P03] PASS resolve.query_only
+[09:30:50 #191] [P03] PASS resolve.custom_port_base
+[09:30:50 #192] [P03] PASS resolve.anchor_keeps_query
+[09:30:50 #193] [P03] PASS resolve.query_replaces
+[09:30:50 #194] [P03] PASS resolve.dot_slash
+[09:30:50 #195] [P03] PASS resolve.dotdot
+[09:30:50 #196] [P03] PASS resolve.dotdot_clamped_root
+[09:30:50 #197] [P03] PASS resolve.deep_beyond_root_dropped
+[09:30:50 #198] [P03] PASS resolve.about_passthrough
+[09:30:50 #199] [P03] PASS resolve.data_passthrough
+[09:30:50 #200] [P03] PASS resolve.js_passthrough
+[09:30:50 #201] [P03] PASS resolve.absolute_verbatim_case
+[09:30:50 #202] [P03] PASS resolve.mailto_not_special
+[09:30:50 #203] [P03] PASS resolve.empty_returns_base
+[09:30:50 #204] [P03] PASS searchurl.ddg
+[09:30:50 #205] [P03] url selftests done: 70 passed, 0 failed
+[09:30:50 #206] [P04] storage+cookiejar selftests begin
+[09:30:50 #207] [P04] PASS ts.epoch1970
+[09:30:50 #208] [P04] PASS ts.bttf2015
+[09:30:50 #209] [P04] PASS ts.leap2000feb29
+[09:30:50 #210] [P04] PASS ts.neg1969
+[09:30:50 #211] [P04] PASS ts.clamp_month0
+[09:30:50 #212] [P04] PASS ts.clamp_month13
+[09:30:50 #213] [P04] PASS ts.clamp_year_neg
+[09:30:50 #214] [P04] PASS ts.clamp_day0
+[09:30:50 #215] [P04] PASS ts.floor_frac
+[09:30:50 #216] [P04] PASS ts.frac_hour
+[09:30:50 #217] [P04] PASS ts.nil_hms_zeroed
+[09:30:50 #218] [P04] PASS date.imf_fixdate
+[09:30:50 #219] [P04] PASS date.rfc850_4digit
+[09:30:50 #220] [P04] PASS date.rfc850_2digit
+[09:30:50 #221] [P04] PASS date.rfc850_pivot69
+[09:30:50 #222] [P04] PASS date.asctime_dblspace_nil
+[09:30:50 #223] [P04] PASS date.asctime_single_space
+[09:30:50 #224] [P04] PASS date.lowercase_month_nil
+[09:30:50 #225] [P04] PASS date.garbage_nil
+[09:30:50 #226] [P04] PASS date.trailing_junk_ok
+[09:30:50 #227] [P04] PASS date.no_weekday_nil
+[09:30:50 #228] [P04] PASS date.empty_nil
+[09:30:50 #229] [P04] PASS sc01.basic
+[09:30:50 #230] [P04] PASS sc02.attrs
+[09:30:50 #231] [P04] PASS sc03.domain_dot
+[09:30:50 #232] [P04] PASS sc04.domain_exact
+[09:30:50 #233] [P04] PASS sc05.domain_suffix
+[09:30:50 #234] [P04] PASS sc06.domain_localhost
+[09:30:50 #235] [P04] PASS sc07.domain_foreign_reject
+[09:30:50 #236] [P04] PASS sc08.domain_undotted_reject
+[09:30:50 #237] [P04] PASS sc09.path_noslash
+[09:30:50 #238] [P04] PASS sc10.samesite_lax
+[09:30:50 #239] [P04] PASS sc11.samesite_weird_ignored
+[09:30:50 #240] [P04] PASS sc12.maxage_future
+[09:30:50 #241] [P04] PASS sc13.maxage_zero_del
+[09:30:50 #242] [P04] PASS sc14.maxage_negative_del
+[09:30:50 #243] [P04] PASS sc15.maxage_junk_ignored
+[09:30:50 #244] [P04] PASS sc16.expires_imf
+[09:30:50 #245] [P04] PASS sc17.expires_asctime
+[09:30:50 #246] [P04] PASS sc18.expires_garbage_ignored
+[09:30:50 #247] [P04] PASS sc19.expires_then_maxage_wins
+[09:30:50 #248] [P04] PASS sc20.maxage_then_expires_skipped
+[09:30:50 #249] [P04] PASS rej.space_in_pair
+[09:30:50 #250] [P04] PASS rej.bad_name
+[09:30:50 #251] [P04] PASS rej.no_name
+[09:30:50 #252] [P04] PASS rej.quote_in_value
+[09:30:50 #253] [P04] PASS rej.comma_in_value
+[09:30:50 #254] [P04] PASS rej.no_equals
+[09:30:50 #255] [P04] PASS sc27.empty_value_ok
+[09:30:50 #256] [P04] PASS sc32.dollar_name_ok
+[09:30:50 #257] [P04] PASS sc33.empty_attrs_skipped
+[09:30:50 #258] [P04] PASS rej.empty_host_raw
+[09:30:50 #259] [P04] PASS rej.null_host
+[09:30:50 #260] [P04] PASS rej.null_raw
+[09:30:50 #261] [P04] PASS rej.ws_only_raw
+[09:30:50 #262] [P04] PASS hdr.two_cookies
+[09:30:50 #263] [P04] PASS hdr.replace_moves_end
+[09:30:50 #264] [P04] PASS store.replace_count
+[09:30:50 #265] [P04] PASS hdr.after_delete
+[09:30:50 #266] [P04] PASS store.delete_count
+[09:30:50 #267] [P04] PASS hdr.domain_cookie
+[09:30:50 #268] [P04] PASS hdr.cross_host_isolated
+[09:30:50 #269] [P04] PASS store.domain_count
+[09:30:50 #270] [P04] PASS hdr.secure_blocked_http
+[09:30:50 #271] [P04] PASS hdr.secure_allowed_https
+[09:30:50 #272] [P04] PASS store.secure_count
+[09:30:50 #273] [P04] PASS hdr.path_prefix_no
+[09:30:50 #274] [P04] PASS hdr.path_exact_yes
+[09:30:50 #275] [P04] PASS hdr.path_subdir_yes
+[09:30:50 #276] [P04] PASS hdr.path_boundary_no
+[09:30:50 #277] [P04] PASS store.docs_count
+[09:30:50 #278] [P04] PASS cap.count300
+[09:30:50 #279] [P04] PASS cap.first_evicted_to_c6
+[09:30:50 #280] [P04] PASS cap.last_is_c305
+[09:30:50 #281] [P04] PASS cap.future_expires_stored_evicts
+[09:30:50 #282] [P04] PASS clear.zeroes
+[09:30:50 #283] [P04] PASS exp.stored
+[09:30:50 #284] [P04] PASS exp.alive_before
+[09:30:50 #285] [P04] PASS exp.pruned_after
+[09:30:50 #286] [P04] PASS exp.list_empty_after_prune
+[09:30:50 #287] [P04] PASS st.defaults_bm9
+[09:30:50 #288] [P04] PASS st.default_bm1_fields
+[09:30:50 #289] [P04] PASS st.default_bm8_title
+[09:30:50 #290] [P04] PASS st.default_settings
+[09:30:50 #291] [P04] PASS hist.about_and_empty_skipped
+[09:30:50 #292] [P04] PASS hist.two_added
+[09:30:50 #293] [P04] PASS hist.insert_front_order
+[09:30:50 #294] [P04] PASS hist.time_hhmm
+[09:30:50 #295] [P04] PASS hist.dedup_count
+[09:30:50 #296] [P04] PASS hist.dedup_moves_front_title_defaults_url
+[09:30:50 #297] [P04] PASS hist.cap50
+[09:30:50 #298] [P04] PASS hist.cap_newest_first
+[09:30:50 #299] [P04] PASS hist.cap_oldest_evicted_fill1to5_gone
+[09:30:50 #300] [P04] PASS bm.is_true
+[09:30:50 #301] [P04] PASS bm.is_false
+[09:30:50 #302] [P04] PASS bm.add_empty_rejected
+[09:30:50 #303] [P04] PASS bm.dup_returns_true
+[09:30:50 #304] [P04] PASS bm.dup_updates_title_only_keeps_desc
+[09:30:50 #305] [P04] PASS bm.append_true
+[09:30:50 #306] [P04] PASS bm.appended_last
+[09:30:50 #307] [P04] PASS bm.remove_valid
+[09:30:50 #308] [P04] PASS bm.remove_zero_invalid
+[09:30:50 #309] [P04] PASS bm.remove_big_invalid
+[09:30:50 #310] [P04] PASS st.save_ok
+[09:30:50 #311] [P04] PASS st.load_ok
+[09:30:50 #312] [P04] PASS st.roundtrip_bm9
+[09:30:50 #313] [P04] PASS st.roundtrip_bm1
+[09:30:50 #314] [P04] PASS st.roundtrip_hist_top
+[09:30:50 #315] [P04] PASS st.roundtrip_settings
+[09:30:50 #316] [P04] PASS st.save_empty_bm
+[09:30:50 #317] [P04] PASS st.load_empty_bm
+[09:30:50 #318] [P04] PASS st.empty_bm_falls_back_to_defaults
+[09:30:50 #319] [P04] PASS st.empty_bm_default_google
+[09:30:50 #320] [P04] PASS num.junk_fail
+[09:30:50 #321] [P04] PASS num.empty_fail
+[09:30:50 #322] [P04] PASS num.comma_fail
+[09:30:50 #323] [P04] PASS num.ws_trimmed
+[09:30:50 #324] [P04] PASS num.hex
+[09:30:50 #325] [P04] PASS num.exponent
+[09:30:50 #326] [P04] storage+cookiejar selftests done: 119 passed, 0 failed
+[09:30:50 #327] [P05] task queued (queue=1)
+[09:30:50 #328] [P05] PASS run.is_running_immediately
+[09:30:50 #329] [P05] PASS run.progress_reset_immediately
+[09:30:50 #330] [P05] PASS run.step_not_called_before_update
+[09:30:50 #331] [P05] task done
+[09:30:50 #332] [P05] gc drain (no-op in C)
+[09:30:50 #333] [P05] PASS done.no_callback_when_null_onComplete
+[09:30:50 #334] [P05] PASS done.queue_emptied_progress_forced_one
+[09:30:50 #335] [P05] task queued (queue=1)
+[09:30:50 #336] [P05] task done
+[09:30:50 #337] [P05] gc drain (no-op in C)
+[09:30:50 #338] [P05] PASS budget.first_yield_at_iter64
+[09:30:50 #339] [P05] PASS budget.frames16_for_1000iters_at20ms
+[09:30:50 #340] [P05] task queued (queue=1)
+[09:30:50 #341] [P05] task done
+[09:30:50 #342] [P05] gc drain (no-op in C)
+[09:30:50 #343] [P05] PASS budget.frozen_clock_single_frame
+[09:30:50 #344] [P05] PASS outside.never_yields
+[09:30:50 #345] [P05] task queued (queue=1)
+[09:30:50 #346] [P05] task error: Parse Error: boom
+[09:30:50 #347] [P05] gc drain (no-op in C)
+[09:30:50 #348] [P05] PASS err.onError_not_onComplete
+[09:30:50 #349] [P05] PASS err.message_delivered_verbatim
+[09:30:50 #350] [P05] PASS err.progress_keeps_task_report
+[09:30:50 #351] [P05] task queued (queue=1)
+[09:30:50 #352] [P05] task error: task error
+[09:30:50 #353] [P05] gc drain (no-op in C)
+[09:30:50 #354] [P05] PASS err.default_message
+[09:30:50 #355] [P05] task queued (queue=1)
+[09:30:50 #356] [P05] task queued (queue=2)
+[09:30:50 #357] [P05] PASS fifo.two_queued
+[09:30:50 #358] [P05] task done
+[09:30:50 #359] [P05] gc drain (no-op in C)
+[09:30:50 #360] [P05] PASS fifo.upd1_only_head_a
+[09:30:50 #361] [P05] task done
+[09:30:50 #362] [P05] gc drain (no-op in C)
+[09:30:50 #363] [P05] PASS fifo.upd2_then_b
+[09:30:50 #364] [P05] PASS fifo.upd3_idle
+[09:30:50 #365] [P05] task queued (queue=1)
+[09:30:50 #366] [P05] PASS prog.reset_by_run
+[09:30:50 #367] [P05] PASS prog.neg_clamped
+[09:30:50 #368] [P05] PASS prog.set03
+[09:30:50 #369] [P05] PASS prog.regression_ignored
+[09:30:50 #370] [P05] PASS prog.over_clamped
+[09:30:50 #371] [P05] task done
+[09:30:50 #372] [P05] gc drain (no-op in C)
+[09:30:50 #373] [P05] PASS cancel.empty_queue_noop
+[09:30:50 #374] [P05] task queued (queue=1)
+[09:30:50 #375] [P05] PASS cancel.job_started_yielded
+[09:30:50 #376] [P05] cancelAll dropped all tasks
+[09:30:50 #377] [P05] PASS cancel.queue_cleared_progress_zeroed
+[09:30:50 #378] [P05] PASS cancel.no_callbacks_fired
+[09:30:50 #379] [P05] PASS cancel.ctx_freed
+[09:30:50 #380] [P05] gc drain (no-op in C)
+[09:30:50 #381] [P05] PASS cancel.post_cancel_idle_safe
+[09:30:50 #382] [P05] task queued (queue=1)
+[09:30:50 #383] [P05] task queued (queue=2)
+[09:30:50 #384] [P05] PASS run.second_run_resets_progress
+[09:30:50 #385] [P05] cancelAll dropped all tasks
+[09:30:50 #386] [P05] task queued (queue=1)
+[09:30:50 #387] [P05] task done
+[09:30:50 #388] [P05] gc drain (no-op in C)
+[09:30:50 #389] [P05] PASS free.on_complete_path
+[09:30:50 #390] [P05] task queued (queue=1)
+[09:30:50 #391] [P05] task error: task error
+[09:30:50 #392] [P05] gc drain (no-op in C)
+[09:30:50 #393] [P05] PASS free.on_error_path
+[09:30:50 #394] [P05] task queued (queue=1)
+[09:30:50 #395] [P05] task done
+[09:30:50 #396] [P05] gc drain (no-op in C)
+[09:30:50 #397] [P05] PASS yieldn.four_frames_then_done
+[09:30:50 #398] [P05] gc drain (no-op in C)
+[09:30:50 #399] [P05] PASS gc.external_schedule_safe
+[09:30:50 #400] [P05] tasks selftests done: 33 passed, 0 failed
+[09:30:50 #401] [P06] PASS cp1252.A41_raw_ascii
+[09:30:50 #402] [P06] PASS cp1252.7f_stays_raw
+[09:30:50 #403] [P06] PASS cp1252.80_is_euro
+[09:30:50 #404] [P06] PASS cp1252.81_self_map_C281
+[09:30:50 #405] [P06] PASS cp1252.92_right_quote
+[09:30:50 #406] [P06] PASS cp1252.9c_oe_ligature
+[09:30:50 #407] [P06] PASS cp1252.9f_Y_dieresis
+[09:30:50 #408] [P06] PASS cp1252.a0_passthrough_C2A0
+[09:30:50 #409] [P06] PASS cp1252.no_header_verbatim
+[09:30:50 #410] [P06] PASS cp1252.e9_decodes_C3A9
+[09:30:50 #411] [P06] PASS cp1252.ff_decodes_C3BF
+[09:30:50 #412] [P06] PASS utf16le.bom_A
+[09:30:50 #413] [P06] PASS utf16le.surrogate_pair_U10037
+[09:30:50 #414] [P06] PASS utf16le.lone_high_consumes_next
+[09:30:50 #415] [P06] PASS utf16be.euro_check
+[09:30:50 #416] [P06] PASS utf8bom.stripped_hello
+[09:30:50 #417] [P06] PASS hdr.utf8_verbatim_E9
+[09:30:50 #418] [P06] PASS hdr.utf_8_alias_verbatim
+[09:30:50 #419] [P06] PASS hdr.utf8mb4_passthrough
+[09:30:50 #420] [P06] PASS hdr.ascii_verbatim
+[09:30:50 #421] [P06] PASS hdr.usascii_passthrough
+[09:30:50 #422] [P06] PASS hdr.quoted_value_fails_pattern
+[09:30:50 #423] [P06] PASS hdr.missing_value_fails
+[09:30:50 #424] [P06] PASS hdr.no_charset_verbatim
+[09:30:50 #425] [P06] PASS hdr.Windows1252_decodes
+[09:30:50 #426] [P06] PASS hdr.cp1252_decodes
+[09:30:50 #427] [P06] PASS hdr.latin1_decodes
+[09:30:50 #428] [P06] PASS hdr.iso88591_decodes
+[09:30:50 #429] [P06] PASS hdr.iso8859_decodes
+[09:30:50 #430] [P06] PASS hdr.shiftjis_besteffort
+[09:30:50 #431] [P06] PASS hdr.eucjp_besteffort
+[09:30:50 #432] [P06] PASS hdr.utf16le_nonbom_empty
+[09:30:50 #433] [P06] PASS hdr.bare_utf16_not_dispatched
+[09:30:50 #434] [P06] PASS meta.charset_simple_decodes
+[09:30:50 #435] [P06] PASS meta.http_equiv_content_pattern
+[09:30:50 #436] [P06] PASS meta.beyond1024_ignored
+[09:30:50 #437] [P06] PASS prec.header_cp1252_beats_meta
+[09:30:50 #438] [P06] PASS prec.header_utf8_allows_meta
+[09:30:50 #439] [P06] PASS ent.fastpath_control_verbatim
+[09:30:50 #440] [P06] PASS ent.named_basics
+[09:30:50 #441] [P06] PASS ent.copy_reg_trade
+[09:30:50 #442] [P06] PASS ent.deg_not_exact_spacing
+[09:30:50 #443] [P06] PASS ent.frac12_never_matches
+[09:30:50 #444] [P06] PASS ent.unknown_name_spaced
+[09:30:50 #445] [P06] PASS ent.case_sensitive
+[09:30:50 #446] [P06] PASS ent.missing_semicolon_raw
+[09:30:50 #447] [P06] PASS dec.basic_nbsp_dashes
+[09:30:50 #448] [P06] PASS dec.quote_family_ellipsis_bullet
+[09:30:50 #449] [P06] PASS dec.math_table
+[09:30:50 #450] [P06] PASS dec.range_edges
+[09:30:50 #451] [P06] PASS dec.huge_number_space
+[09:30:50 #452] [P06] PASS hex.basic_a0_dash
+[09:30:50 #453] [P06] PASS hex.thin_spaces
+[09:30:50 #454] [P06] PASS hex.lacks_201a_asymmetry
+[09:30:50 #455] [P06] PASS dec.has_201a_quote
+[09:30:50 #456] [P06] PASS clean.translit_accents
+[09:30:50 #457] [P06] PASS clean.OE_thorn
+[09:30:50 #458] [P06] PASS clean.caron_unmapped_space
+[09:30:50 #459] [P06] PASS clean.euro_3byte_single_space
+[09:30:50 #460] [P06] PASS clean.emoji_widens_per_byte
+[09:30:50 #461] [P06] PASS clean.truncated_tail_single_space
+[09:30:50 #462] [P06] PASS clean.nbsp_fixed_seq
+[09:30:50 #463] [P06] PASS clean.emdash_fixed_seq
+[09:30:50 #464] [P06] PASS clean.full_pipeline_mixed
+[09:30:50 #465] [P06] PASS clean.high_absent_keeps_control
+[09:30:50 #466] [P06] PASS encode.all_but_apostrophe
+[09:30:50 #467] [P06] PASS encode.null_empty
+[09:30:50 #468] [P05] task queued (queue=1)
+[09:30:50 #469] [P05] task done
+[09:30:50 #470] [P05] gc drain (no-op in C)
+[09:30:50 #471] [P06] PASS task.decode_completes_one_frame
+[09:30:50 #472] [P06] PASS task.decode_outlen
+[09:30:50 #473] [P06] PASS task.decode_output
+[09:30:50 #474] [P06] PASS norm.windows1252_alias
+[09:30:50 #475] [P06] PASS norm.utf8_alias
+[09:30:50 #476] [P06] PASS norm.null_safe
+[09:30:50 #477] [P06] PASS degen.null_body_empty
+[09:30:50 #478] [P06] PASS degen.decode_empty
+[09:30:50 #479] [P06] encoding selftests done: 75 passed, 0 failed
+[09:30:50 #480] [P07] PASS A.ret
+[09:30:50 #481] [P07] PASS A.loading_after_get
+[09:30:50 #482] [P07] PASS A.conn_args
+[09:30:50 #483] [P07] PASS A.timeouts_ms_and_bufsize
+[09:30:50 #484] [P07] PASS A.request_bytes_exact
+[09:30:50 #485] [P07] PASS A.loading_after_success
+[09:30:50 #486] [P07] PASS A2.conn_ssl_8443
+[09:30:50 #487] [P07] PASS A2.cookie_request_bytes
+[09:30:50 #488] [P07] PASS A3.default_port_suppressed
+[09:30:50 #489] [P07] PASS C.jar_count_2
+[09:30:50 #490] [P07] PASS C.cookie_header_roundtrip
+[09:30:50 #491] [P07] PASS D.ret
+[09:30:50 #492] [P07] PASS D.status
+[09:30:50 #493] [P07] PASS D.bodylen_beyond_cl
+[09:30:50 #494] [P07] PASS D.slice_to_end
+[09:30:50 #495] [P07] PASS D.url
+[09:30:50 #496] [P07] PASS E.no_success_midstream
+[09:30:50 #497] [P07] PASS E.status
+[09:30:50 #498] [P07] PASS E.decoded_body
+[09:30:50 #499] [P07] PASS F.first_hop_closed
+[09:30:50 #500] [P07] PASS F.hop2_conn
+[09:30:50 #501] [P07] PASS F.relative_resolution
+[09:30:50 #502] [P07] PASS F.final_status
+[09:30:50 #503] [P07] PASS F.final_url
+[09:30:50 #504] [P07] PASS F.sock_count
+[09:30:50 #505] [P07] PASS G.six_sockets
+[09:30:50 #506] [P07] PASS G.silent_drop_no_callbacks
+[09:30:50 #507] [P07] PASS G.not_loading_after
+[09:30:50 #508] [P07] PASS H.partial_over_512_done
+[09:30:50 #509] [P07] PASS H.bodylen_600
+[09:30:50 #510] [P07] PASS I.timeout_error
+[09:30:50 #511] [P07] PASS I.timeout_message
+[09:30:50 #512] [P07] PASS J.closed_no_data_error
+[09:30:50 #513] [P07] PASS J.closed_message
+[09:30:50 #514] [P07] PASS P.closed_midbody_done
+[09:30:50 #515] [P07] PASS P.partial_body
+[09:30:50 #516] [P07] PASS K.stale_socket_closed
+[09:30:50 #517] [P07] PASS K.silent
+[09:30:50 #518] [P07] PASS K.idle
+[09:30:50 #519] [P07] PASS L.get_about_loading
+[09:30:50 #520] [P07] PASS L.still_pending
+[09:30:50 #521] [P07] PASS L.progress_100
+[09:30:50 #522] [P07] PASS L.home_status
+[09:30:50 #523] [P07] PASS L.home_ct
+[09:30:50 #524] [P07] PASS L.home_len_100
+[09:30:50 #525] [P07] PASS L.home_url
+[09:30:50 #526] [P07] PASS L.done_not_loading
+[09:30:50 #527] [P07] PASS L.unknown_ret_true
+[09:30:50 #528] [P07] PASS L.unknown_error
+[09:30:50 #529] [P07] PASS L.unknown_message
+[09:30:50 #530] [P07] PASS L.unknown_idle
+[09:30:50 #531] [P07] PASS L.blank_len_26
+[09:30:50 #532] [P07] PASS L.acid_len_2984
+[09:30:50 #533] [P07] PASS L.acid_title_present
+[09:30:50 #534] [P07] PASS M.ret_false
+[09:30:50 #535] [P07] PASS M.sync_error
+[09:30:50 #536] [P07] PASS M.message
+[09:30:50 #537] [P07] PASS M.idle
+[09:30:50 #538] [P07] PASS N.send_error
+[09:30:50 #539] [P07] PASS N.send_failed_prefix
+[09:30:50 #540] [P07] PASS N.idle
+[09:30:50 #541] [P07] PASS O.three_progress_calls
+[09:30:50 #542] [P07] PASS O.first_0_0
+[09:30:50 #543] [P07] PASS O.second_body_bytes
+[09:30:50 #544] [P07] PASS O.clamped_final
+[09:30:50 #545] [P07] PASS O.delivered
+[09:30:50 #546] [P07] PASS Q.delivered_as_normal
+[09:30:50 #547] [P07] PASS Q.empty_body
+[09:30:50 #548] [P07] PASS R.deny_ret_false
+[09:30:50 #549] [P07] PASS R.deny_error
+[09:30:50 #550] [P07] PASS R.deny_message
+[09:30:50 #551] [P07] PASS R.purpose_string
+[09:30:50 #552] [P07] PASS S.ask_ret_true
+[09:30:50 #553] [P07] PASS S.waiting_no_socket_yet
+[09:30:50 #554] [P07] PASS S.one_access_call
+[09:30:50 #555] [P07] PASS S.callback_recorded
+[09:30:50 #556] [P07] PASS S.socket_after_grant
+[09:30:50 #557] [P07] PASS S.completed_after_grant
+[09:30:50 #558] [P07] PASS S.grant_cached_same_host
+[09:30:50 #559] [P07] PASS T.waiting
+[09:30:50 #560] [P07] PASS T.async_deny_error
+[09:30:50 #561] [P07] PASS T.async_deny_message
+[09:30:50 #562] [P07] PASS T.idle_after_deny
+[09:30:50 #563] [P07] PASS W.error_state_before_tick
+[09:30:50 #564] [P07] PASS W.open_failed_delivered
+[09:30:50 #565] [P07] PASS W.open_failed_message
+[09:30:50 #566] [P07] PASS W.idle
+[09:30:50 #567] [P07] PASS V.empty_parses_to_blank_host
+[09:30:50 #568] [P07] PASS V.host_blank_port0
+[09:30:50 #569] [P07] http selftests done: 89 passed, 0 failed
+[09:30:50 #570] [P08] tokenizer selftests start
+[09:30:50 #571] [P08] PASS A.nonnull
+[09:30:50 #572] [P08] PASS A.title_default
+[09:30:50 #573] [P08] PASS A.count_1
+[09:30:50 #574] [P08] PASS A.text
+[09:30:50 #575] [P08] PASS B.empty_count0
+[09:30:50 #576] [P08] PASS B.empty_title
+[09:30:50 #577] [P08] PASS C.entity_decode
+[09:30:50 #578] [P08] PASS D.count_3
+[09:30:50 #579] [P08] PASS D.tag_p_open
+[09:30:50 #580] [P08] PASS D.text_hi
+[09:30:50 #581] [P08] PASS D.tag_p_close_self
+[09:30:50 #582] [P08] PASS E.count_4
+[09:30:50 #583] [P08] PASS E.br_slash
+[09:30:50 #584] [P08] PASS E.br_space_slash
+[09:30:50 #585] [P08] PASS E.hr_plain
+[09:30:50 #586] [P08] PASS E.close_p_self
+[09:30:50 #587] [P08] PASS F.colon_names
+[09:30:50 #588] [P08] PASS F.attr_datax
+[09:30:50 #589] [P08] PASS G.lowered_names
+[09:30:50 #590] [P08] PASS G.attr_val_case_kept
+[09:30:50 #591] [P08] PASS G.text_Y
+[09:30:50 #592] [P08] PASS H.interleave
+[09:30:50 #593] [P08] PASS I.lt_space_gt_quirk
+[09:30:50 #594] [P08] PASS J.junk_dropped
+[09:30:50 #595] [P08] PASS K.doctype_vanishes
+[09:30:50 #596] [P08] PASS L.broken_tail_dropped
+[09:30:50 #597] [P08] PASS M.count_3
+[09:30:50 #598] [P08] PASS M.tag_a
+[09:30:50 #599] [P08] PASS M.href_decoded
+[09:30:50 #600] [P08] PASS M.id_single_quoted
+[09:30:50 #601] [P08] PASS M.unquoted
+[09:30:50 #602] [P08] PASS M.boolean_disabled
+[09:30:50 #603] [P08] PASS M.boolean_datax
+[09:30:50 #604] [P08] PASS M.attr_count_5
+[09:30:50 #605] [P08] PASS M.text_y
+[09:30:50 #606] [P08] PASS M.close_a
+[09:30:50 #607] [P08] PASS N.first_wins
+[09:30:50 #608] [P08] PASS N.src_first
+[09:30:50 #609] [P08] PASS N.alt_first_lowered_key
+[09:30:50 #610] [P08] PASS N.attr_count_2
+[09:30:50 #611] [P08] PASS O.key_dot_quirk
+[09:30:50 #612] [P08] PASS O.a_bool
+[09:30:50 #613] [P08] PASS O.b_c
+[09:30:50 #614] [P08] PASS O.d_e_f_g
+[09:30:50 #615] [P08] PASS O.attr_count_3
+[09:30:50 #616] [P08] PASS P.space_before_eq_quirk
+[09:30:50 #617] [P08] PASS P.href_empty
+[09:30:50 #618] [P08] PASS P.v_bool_lost_value
+[09:30:50 #619] [P08] PASS P.attr_count_2
+[09:30:50 #620] [P08] PASS Q.unterminated_quote_all_dropped
+[09:30:50 #621] [P08] PASS R.comment_full
+[09:30:50 #622] [P08] PASS S.comment_unclosed_tail_after_gt
+[09:30:50 #623] [P08] PASS T.script_skip
+[09:30:50 #624] [P08] PASS U.script_case_insensitive
+[09:30:50 #625] [P08] PASS V.script_unclosed_swallows_rest
+[09:30:50 #626] [P08] PASS W.style_skip
+[09:30:50 #627] [P08] PASS X.style_unclosed_swallows
+[09:30:50 #628] [P08] PASS Y.title_decoded_collapsed
+[09:30:50 #629] [P08] PASS Y.title_tags_not_emitted
+[09:30:50 #630] [P08] PASS Z.title_unclosed_default
+[09:30:50 #631] [P08] PASS AA.prefix_hijack_title
+[09:30:50 #632] [P08] PASS AB.alloc_big
+[09:30:50 #633] [P08] PASS AC.trunc_cut_at_gt_single
+[09:30:50 #634] [P08] PASS AC.text_len_262202
+[09:30:50 #635] [P08] PASS AD.alloc_flat
+[09:30:50 #636] [P08] PASS AE.no_gt_exact_max
+[09:30:50 #637] [P08] PASS AF.exact_max_untouched
+[09:30:50 #638] [P08] PASS AG.progress_reported
+[09:30:50 #639] [P08] tokenizer selftests done: 68 passed, 0 failed
+[09:30:50 #640] [P09] dom selftests start
+[09:30:50 #641] [P09] PASS A.root
+[09:30:50 #642] [P09] PASS A.diag
+[09:30:50 #643] [P09] PASS A.child_text
+[09:30:50 #644] [P09] PASS B.empty
+[09:30:50 #645] [P09] PASS C.nested_counts
+[09:30:50 #646] [P09] PASS C.structure
+[09:30:50 #647] [P09] PASS D.format_survives
+[09:30:50 #648] [P09] PASS D.b_nests_i
+[09:30:50 #649] [P09] PASS E.p_implied_by_div
+[09:30:50 #650] [P09] PASS F.stray_li_root_siblings
+[09:30:50 #651] [P09] PASS G.list_counts
+[09:30:50 #652] [P09] PASS G.list_shape
+[09:30:50 #653] [P09] PASS G.inner_list
+[09:30:50 #654] [P09] PASS H.dtdd
+[09:30:50 #655] [P09] PASS I.table_counts
+[09:30:50 #656] [P09] PASS I.table_shape
+[09:30:50 #657] [P09] PASS I.rows_cells
+[09:30:50 #658] [P09] PASS J.stray_tr_dropped
+[09:30:50 #659] [P09] PASS K.stray_td_dropped
+[09:30:50 #660] [P09] PASS L.option_outside_dropped
+[09:30:50 #661] [P09] PASS M.anchor_reopen
+[09:30:50 #662] [P09] PASS M.second_a_sibling
+[09:30:50 #663] [P09] PASS N.voids_flat
+[09:30:50 #664] [P09] PASS N.sequence
+[09:30:50 #665] [P09] PASS N.close_br_ignored
+[09:30:50 #666] [P09] PASS O.selfclose_not_pushed
+[09:30:50 #667] [P09] PASS P.head_skipped
+[09:30:50 #668] [P09] PASS P.body_p_vis
+[09:30:50 #669] [P09] PASS P.diag_skipped1_proc10
+[09:30:50 #670] [P09] PASS Q.template_hidden
+[09:30:50 #671] [P09] PASS Q.skipped3
+[09:30:50 #672] [P09] PASS R.close_through_counts
+[09:30:50 #673] [P09] PASS R.popped_through_span
+[09:30:50 #674] [P09] PASS R.deep_sibling_of_p
+[09:30:50 #675] [P09] PASS S.unknown_close_noop
+[09:30:50 #676] [P09] PASS S.b_inside_div
+[09:30:50 #677] [P09] PASS T.attrs_kept
+[09:30:50 #678] [P09] PASS T.attr_values
+[09:30:50 #679] [P09] PASS T.text
+[09:30:50 #680] [P09] PASS U.chain_depth_12
+[09:30:50 #681] [P09] PASS V.blockquote_ps
+[09:30:50 #682] [P09] PASS V.two_siblings
+[09:30:50 #683] [P09] PASS W.alloc
+[09:30:50 #684] [P09] PASS W.valve_diag
+[09:30:50 #685] [P09] PASS W.valve_kids
+[09:30:50 #686] [P09] PASS X.alloc
+[09:30:50 #687] [P09] PASS X.capped_at_6000
+[09:30:50 #688] [P09] PASS X.maxhit_dead_flag_false
+[09:30:50 #689] [P09] PASS Y.progress_in_dom_range
+[09:30:50 #690] [P09] dom selftests done: 49 passed, 0 failed
+[09:30:50 #691] [P11] PASS A.blank_title
+[09:30:50 #692] [P11] PASS A.blank_base
+[09:30:50 #693] [P11] PASS A.empty_no_blocks
+[09:30:50 #694] [P11] PASS A.raw_html
+[09:30:50 #695] [P11] PASS B.reader_doc
+[09:30:50 #696] [P11] PASS C.h2_meta
+[09:30:50 #697] [P11] PASS C.h6_align_attr
+[09:30:50 #698] [P11] PASS C.h3_align_style
+[09:30:50 #699] [P11] PASS D.div_para
+[09:30:50 #700] [P11] PASS D.section_para
+[09:30:50 #701] [P11] PASS D.margin_shorthand2
+[09:30:50 #702] [P11] PASS D.padding_left
+[09:30:50 #703] [P11] PASS D.invert_center
+[09:30:50 #704] [P11] PASS E.nest_bi
+[09:30:50 #705] [P11] PASS E.flags7
+[09:30:50 #706] [P11] PASS E.code_family
+[09:30:50 #707] [P11] PASS F.br_same_para
+[09:30:50 #708] [P11] PASS F.br_flags
+[09:30:50 #709] [P11] PASS F.wbr
+[09:30:50 #710] [P11] PASS F.hr_flushes
+[09:30:50 #711] [P11] PASS G.pre_raw
+[09:30:50 #712] [P11] PASS G.pre_blank_line
+[09:30:50 #713] [P11] PASS G.xmp
+[09:30:50 #714] [P11] PASS H.span_styles
+[09:30:50 #715] [P11] PASS H.font_size
+[09:30:50 #716] [P11] PASS H.time_fallback
+[09:30:50 #717] [P11] PASS H.data_children_win
+[09:30:50 #718] [P11] PASS H.time_text_no_fallback
+[09:30:50 #719] [P11] PASS I.quotes
+[09:30:50 #720] [P11] PASS J.resolve_target
+[09:30:50 #721] [P11] PASS J.inline_link
+[09:30:50 #722] [P11] PASS J.invalid_skipped
+[09:30:50 #723] [P11] PASS J.invalid_plain
+[09:30:50 #724] [P11] PASS J.title_fallback
+[09:30:50 #725] [P11] PASS J.href_fallback
+[09:30:50 #726] [P11] PASS J.text_accum
+[09:30:50 #727] [P11] PASS J.anchor_seq
+[09:30:50 #728] [P11] PASS K.ul_defaults
+[09:30:50 #729] [P11] PASS K.ol_start
+[09:30:50 #730] [P11] PASS K.ol_reversed
+[09:30:50 #731] [P11] PASS K.ol_typeA
+[09:30:50 #732] [P11] PASS K.ol_type_invalid
+[09:30:50 #733] [P11] PASS K.nested_depth
+[09:30:50 #734] [P11] PASS K.stray_li
+[09:30:50 #735] [P11] PASS K.value_renumber
+[09:30:50 #736] [P11] PASS L.dt_dd_flags
+[09:30:50 #737] [P11] PASS L.dl_nested_indent
+[09:30:50 #738] [P11] PASS N.caption_attached
+[09:30:50 #739] [P11] PASS N.no_image_no_block
+[09:30:50 #740] [P11] PASS O.clamps
+[09:30:50 #741] [P11] PASS O.defaults
+[09:30:50 #742] [P11] PASS O.alt_title
+[09:30:50 #743] [P11] PASS O.data_src
+[09:30:50 #744] [P11] PASS O.srcset_first
+[09:30:50 #745] [P11] PASS O.filters
+[09:30:50 #746] [P11] PASS O.usemap_strip
+[09:30:50 #747] [P11] PASS O.img_in_link
+[09:30:50 #748] [P11] PASS P.hidden_skip
+[09:30:50 #749] [P11] PASS P.display_none
+[09:30:50 #750] [P11] PASS P.inert_attr
+[09:30:50 #751] [P11] PASS Q.scan_pattern_a
+[09:30:50 #752] [P11] PASS Q.scan_pattern_b
+[09:30:50 #753] [P11] PASS Q.body_overrides
+[09:30:50 #754] [P11] PASS Q.invalid_ignored
+[09:30:50 #755] [P11] PASS R.base_override
+[09:30:50 #756] [P11] PASS R.first_nonempty_wins
+[09:30:50 #757] [P11] PASS R.https_base
+[09:30:50 #758] [P11] PASS S.block_cap_notice
+[09:30:50 #759] [P11] PASS S.inline_cap
+[09:30:50 #760] [P11] PASS T.basic_rows
+[09:30:50 #761] [P11] PASS T.implicit_tr_quirk
+[09:30:50 #762] [P11] PASS T.th_spans
+[09:30:50 #763] [P11] PASS T.caption_trim
+[09:30:50 #764] [P11] PASS T.border_width_align
+[09:30:50 #765] [P11] PASS T.border_zero_off
+[09:30:50 #766] [P11] PASS T.tbody_wrapper
+[09:30:50 #767] [P11] PASS T.nested_dropped
+[09:30:50 #768] [P11] PASS T.empty_cell_space
+[09:30:50 #769] [P11] PASS T.cell_flags_link
+[09:30:50 #770] [P11] PASS T.cell_first_ws_strip
+[09:30:50 #771] [P11] PASS T.stray_tr_text_leak
+[09:30:50 #772] [P11] PASS T.stray_td_text_leak
+[09:30:50 #773] [P11] PASS T.block_tags_plain_in_cell
+[09:30:50 #774] [P11] PASS U.hidden_block
+[09:30:50 #775] [P11] PASS U.text_defaults
+[09:30:50 #776] [P11] PASS U.text_attrs
+[09:30:50 #777] [P11] PASS U.checkbox_aria_fallback
+[09:30:50 #778] [P11] PASS U.checkbox_title_fallback
+[09:30:50 #779] [P11] PASS U.checkbox_label_attr
+[09:30:50 #780] [P11] PASS U.checkbox_radio_flags
+[09:30:50 #781] [P11] PASS U.submit_labels
+[09:30:50 #782] [P11] PASS U.button_blocks
+[09:30:50 #783] [P11] PASS U.form_context
+[09:30:50 #784] [P11] PASS U.textarea_capture
+[09:30:50 #785] [P11] PASS U.textarea_disabled
+[09:30:50 #786] [P11] PASS U.select_basic
+[09:30:50 #787] [P11] PASS U.select_optgroup
+[09:30:50 #788] [P11] PASS U.select_empty_skip
+[09:30:50 #789] [P11] PASS U.select_label_wins
+[09:30:50 #790] [P11] PASS V.fieldset_legend
+[09:30:50 #791] [P11] PASS V.fieldset_disables_inner
+[09:30:50 #792] [P11] PASS V.details_open
+[09:30:50 #793] [P11] PASS V.details_body_rendered
+[09:30:50 #794] [P11] PASS V.details_closed_default
+[09:30:50 #795] [P11] PASS V.details_counter_seq
+[09:30:50 #796] [P11] PASS V.details_override_open_close
+[09:30:50 #797] [P11] PASS V.dialog_closed_hidden
+[09:30:50 #798] [P11] PASS V.dialog_open_pair
+[09:30:50 #799] [P11] PASS V.fieldset_nests
+[09:30:50 #800] [P11] PASS W.video_placeholder
+[09:30:50 #801] [P11] PASS W.source_fallback
+[09:30:50 #802] [P11] PASS W.canvas_no_src
+[09:30:50 #803] [P11] PASS W.iframe_href_embed
+[09:30:50 #804] [P11] PASS W.progress_clamp
+[09:30:50 #805] [P11] PASS W.meter_fields
+[09:30:50 #806] [P11] PASS W.datalist_meta
+[09:30:50 #807] [P11] PASS W.map_areas
+[09:30:50 #808] [P11] PASS W.fencedframe
+[09:30:50 #809] [P11] PASS W.template_inert
+[09:30:50 #810] [P11] PASS W.voids_silent
+[09:30:50 #811] [P11] PASS X.svg_serialize
+[09:30:50 #812] [P11] PASS X.svg_viewbox_quirk
+[09:30:50 #813] [P11] PASS X.svg_defaults_clamp
+[09:30:50 #814] [P11] PASS X.svg_alt_rules
+[09:30:50 #815] [P11] PASS X.math_linearized
+[09:30:50 #816] [P11] PASS X.mfenced_seps
+[09:30:50 #817] [P11] PASS X.math_ws_collapse
+[09:30:50 #818] [P11] PASS X.math_empty_skipped
+[09:30:50 #819] [P11] PASS Y.address_hgroup_paragraphs
+[09:30:50 #820] [P11] PASS Y.figure_caption_only_para
+[09:30:50 #821] [P11] PASS Y.heading_css_spacing
+[09:30:50 #822] [P11] PASS Y.inert_scope_restored
+[09:30:50 #823] [P11] document selftests done: 132 passed, 0 failed
+[09:30:50 #824] [P12] PASS A.mode_flag
+[09:30:50 #825] [P12] PASS A.raw_html_kept
+[09:30:50 #826] [P12] PASS A.base_kept
+[09:30:50 #827] [P12] PASS A.block_count
+[09:30:50 #828] [P12] PASS A.header_host
+[09:30:50 #829] [P12] PASS A.header_title_fallback
+[09:30:50 #830] [P12] PASS A.reading_time_math
+[09:30:50 #831] [P12] PASS A.title_h1_bold
+[09:30:50 #832] [P12] PASS A.hr_third
+[09:30:50 #833] [P12] PASS A.paragraph_fourth
+[09:30:50 #834] [P12] PASS A.paragraph_text
+[09:30:50 #835] [P12] dump basics: 4 blocks
+[09:30:50 #836] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (3 words)
+[09:30:50 #837] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #838] [P12]    2 HR
+[09:30:50 #839] [P12]    3 type=0 [Hello brave world]
+[09:30:50 #840] [P12] PASS A.empty_blank_doc
+[09:30:50 #841] [P12] PASS A.fallback_title_host
+[09:30:50 #842] [P12] dump fallbacks: 4 blocks
+[09:30:50 #843] [P12]    0 READER_HEADER host=BLANK title=Untitled Article rt=1 min read (1 words)
+[09:30:50 #844] [P12]    1 HEADING h1 [Untitled Article]
+[09:30:50 #845] [P12]    2 HR
+[09:30:50 #846] [P12]    3 type=0 [x]
+[09:30:50 #847] [P12] PASS B.merged_count
+[09:30:50 #848] [P12] PASS B.merged_text
+[09:30:50 #849] [P12] PASS B.sentence_boundary
+[09:30:50 #850] [P12] dump merge: 5 blocks
+[09:30:50 #851] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (10 words)
+[09:30:50 #852] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #853] [P12]    2 HR
+[09:30:50 #854] [P12]    3 type=0 [Welcome to Wikipedia,the free encyclopediaEnds here.]
+[09:30:50 #855] [P12]    4 type=0 [new frag]
+[09:30:50 #856] [P12] PASS C.bare_dropped_kept
+[09:30:50 #857] [P12] dump bare_url: 4 blocks
+[09:30:50 #858] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (6 words)
+[09:30:50 #859] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #860] [P12]    2 HR
+[09:30:50 #861] [P12]    3 type=0 [real anchor texttwo words stay]
+[09:30:50 #862] [P12] PASS D.stripped_absent
+[09:30:50 #863] [P12] PASS D.kept_present
+[09:30:50 #864] [P12] dump strip: 4 blocks
+[09:30:50 #865] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (2 words)
+[09:30:50 #866] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #867] [P12]    2 HR
+[09:30:50 #868] [P12]    3 type=0 [kept paragraph]
+[09:30:50 #869] [P12] PASS E.heading_level
+[09:30:50 #870] [P12] PASS E.h3
+[09:30:50 #871] [P12] PASS E.list_numbers
+[09:30:50 #872] [P12] PASS E.pre_verbatim
+[09:30:50 #873] [P12] PASS E.blockquote_type
+[09:30:50 #874] [P12] dump structure: 9 blocks
+[09:30:50 #875] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (10 words)
+[09:30:50 #876] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #877] [P12]    2 HR
+[09:30:50 #878] [P12]    3 HEADING h3 [Title Three]
+[09:30:50 #879] [P12]    4 LI ordered=0 num=1 [Alpha item]
+[09:30:50 #880] [P12]    5 LI ordered=0 num=2 [Beta item]
+[09:30:50 #881] [P12]    6 LI ordered=1 num=1 [Num one]
+[09:30:50 #882] [P12]    7 CODE [a   b
+line2]
+[09:30:50 #883] [P12]    8 type=2 [quoted words]
+[09:30:50 #884] [P12] PASS F.clamp_resolve_alt
+[09:30:50 #885] [P12] PASS F.tracking_skipped
+[09:30:50 #886] [P12] PASS F.srcset_first
+[09:30:50 #887] [P12] PASS F.data_src_default_alt
+[09:30:50 #888] [P12] PASS F.empty_alt_becomes_image
+[09:30:50 #889] [P12] dump images: 7 blocks
+[09:30:50 #890] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (0 words)
+[09:30:50 #891] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #892] [P12]    2 HR
+[09:30:50 #893] [P12]    3 IMAGE 360x99 alt=Pic src=http://ex.com/pic.png
+[09:30:50 #894] [P12]    4 IMAGE 160x80 alt=ss src=http://ex.com/first.x
+[09:30:50 #895] [P12]    5 IMAGE 160x80 alt=Image src=http://ex.com/lazy.png
+[09:30:50 #896] [P12]    6 IMAGE 160x80 alt=Image src=http://ex.com/noalt.png
+[09:30:50 #897] [P12] PASS G.input_field
+[09:30:50 #898] [P12] PASS G.input_submit_value_label
+[09:30:50 #899] [P12] PASS G.textarea
+[09:30:50 #900] [P12] PASS G.button_label_trimmed
+[09:30:50 #901] [P12] PASS G.checkbox_ignored
+[09:30:50 #902] [P12] dump forms: 7 blocks
+[09:30:50 #903] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (0 words)
+[09:30:50 #904] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #905] [P12]    2 HR
+[09:30:50 #906] [P12]    3 INPUT type=text name=q ph=Search act=http://ex.com/search meth=post
+[09:30:50 #907] [P12]    4 SUBMIT label=Go act=http://ex.com/search meth=post
+[09:30:50 #908] [P12]    5 INPUT type=textarea name=ta ph= act= meth=post
+[09:30:50 #909] [P12]    6 SUBMIT label=Click  Me act= meth=post
+[09:30:50 #910] [P12] PASS H.sorted_order_walk
+[09:30:50 #911] [P12] PASS H.reader_words
+[09:30:50 #912] [P12] dump selection: 4 blocks
+[09:30:50 #913] [P12]    0 READER_HEADER host=EX.COM title=Web Page rt=1 min read (8 words)
+[09:30:50 #914] [P12]    1 HEADING h1 [Web Page]
+[09:30:50 #915] [P12]    2 HR
+[09:30:50 #916] [P12]    3 type=0 [alpha bravo charlie delta echoStray intro line.]
+[09:30:50 #917] [P12] readability selftests done: 36 passed, 0 failed
+[09:30:50 #918] [P13] font fonts/Roobert-20-Medium -> loaded
+[09:30:50 #919] [P13] font fonts/Roobert-10-Bold -> loaded
+[09:30:50 #920] [P13] font fonts/Roobert-10-Bold -> loaded
+[09:30:50 #921] [P13] font fonts/Roobert-11-Medium -> loaded
+[09:30:50 #922] [P13] font fonts/Roobert-10-Bold -> loaded
+[09:30:50 #923] [P13] font fonts/Roobert-11-Mono-Condensed -> loaded
+[09:30:50 #924] [P13] PASS H.heading_map
+[09:30:50 #925] [P13] PASS H.body_plain_16
+[09:30:50 #926] [P13] PASS H.body_bold_16
+[09:30:50 #927] [P13] PASS H.body_code_15
+[09:30:50 #928] [P13] PASS I.code_wins
+[09:30:50 #929] [P13] PASS I.small_over_bold
+[09:30:50 #930] [P13] PASS I.sub_14
+[09:30:50 #931] [P13] PASS I.sup_14
+[09:30:50 #932] [P13] PASS I.small_group_wins_over_big
+[09:30:50 #933] [P13] PASS I.bold_16
+[09:30:50 #934] [P13] PASS I.big_bold_slot_16
+[09:30:50 #935] [P13] PASS I.plain_16
+[09:30:50 #936] [P13] PASS W.empty_zero
+[09:30:50 #937] [P13] PASS W.real_fonts_positive
+[09:30:50 #938] [P13] sample 'Hello World' widths: body=95 mono=88 small=95 h1=150
+[09:30:50 #939] [P13] PASS W.explicit_font_empty_zero
+[09:30:50 #940] [P13] style selftests done: 15 passed, 0 failed
+[09:30:50 #941] [P14] PASS A.reject_empty_href
+[09:30:50 #942] [P14] PASS A.add_text_default
+[09:30:50 #943] [P14] PASS A.text_defaults_to_href
+[09:30:50 #944] [P14] PASS A.hover_default_w60_h14
+[09:30:50 #945] [P14] PASS M.same_anchor_merges
+[09:30:50 #946] [P14] PASS M.no_selection_yet
+[09:30:50 #947] [P14] PASS M.diff_anchor_splits
+[09:30:50 #948] [P14] PASS M.nil_anchor_merges_any
+[09:30:50 #949] [P14] PASS M.text_or_href_split
+[09:30:50 #950] [P14] PASS M.nil_text_never_merges
+[09:30:50 #951] [P14] PASS M.rect_list_and_primary
+[09:30:50 #952] [P14] PASS M.three_rects_stored
+[09:30:50 #953] [P14] PASS M.index_is_1_based
+[09:30:50 #954] [P14] PASS S.empty_page_none
+[09:30:50 #955] [P14] PASS S.pass1_closest_center
+[09:30:50 #956] [P14] PASS S.pass2_all_outside_tie_first
+[09:30:50 #957] [P14] PASS S.pass2_tie_keeps_first
+[09:30:50 #958] [P14] PASS S.selectNext_uses_viewport_rule
+[09:30:50 #959] [P14] PASS N.prev_initial_select
+[09:30:50 #960] [P14] PASS N.next_wraps_to_first
+[09:30:50 #961] [P14] PASS N.prev_wraps_to_last
+[09:30:50 #962] [P14] PASS N.clear_resets_selection
+[09:30:50 #963] [P14] PASS H.selected_bounds_ok
+[09:30:50 #964] [P14] PASS H.is_hit_on_selected_rect
+[09:30:50 #965] [P14] PASS H.miss_other_xy_of_same_href
+[09:30:50 #966] [P14] PASS H.other_href_false
+[09:30:50 #967] [P14] PASS H.null_href_false
+[09:30:50 #968] [P14] PASS H.addLink_wrapper
+[09:30:50 #969] [P14] synthetic layout dump: viewport rule verified against CONTENT_Y=24 CONTENT_H=216 SCREEN_H=240
+[09:30:50 #970] [P14] link_manager selftests done: 28 passed, 0 failed
+[09:30:50 #971] [P15] PASS G.black_white
+[09:30:50 #972] [P15] PASS G.channels
+[09:30:50 #973] [P15] PASS G.midpoint
+[09:30:50 #974] [P15] PASS G.monotonic
+[09:30:50 #975] [P15] PASS B.threshold_boundary_strict
+[09:30:50 #976] [P15] PASS B.gray0_corner_white
+[09:30:50 #977] [P15] PASS B.white_all_white
+[09:30:50 #978] [P15] PASS S.half
+[09:30:50 #979] [P15] PASS S.ceil_floors
+[09:30:50 #980] [P15] PASS S.upscale_clamps_to_1x1_boxes
+[09:30:50 #981] [P15] PASS S.max_zero_guard
+[09:30:50 #982] [P15] PASS S.src_zero
+[09:30:50 #983] [P15] PASS A.uniform_half
+[09:30:50 #984] [P15] PASS A.fast_path_identity
+[09:30:50 #985] [P15] PASS A.round_down_case
+[09:30:50 #986] [P15] PASS A.round_exact
+[09:30:50 #987] [P15] PASS A.round_half_up
+[09:30:50 #988] [P15] PASS A.partial_block_extra_row_quirk
+[09:30:50 #989] [P15] PASS A.null_row_ignored
+[09:30:50 #990] [P15] decoders selftests done: 19 passed, 0 failed
+[09:30:50 #991] [P15] dump toImage 380x240 (from 400x500) expected_black=42803 actual_black=42803
+[09:30:50 #992] [P15] PASS R.clamped_380x240
+[09:30:50 #993] [P15] PASS R.bitmap_pixels_match_bayer
+[09:30:50 #994] [P15] PASS R.degenerate_rejected
+[09:30:50 #995] [P15] decoders device checks done: 3 passed, 0 failed
+[09:30:50 #996] [P16] PASS O.A_dyn_roundtrip
+[09:30:50 #997] [P16] PASS O.B_raw_roundtrip
+[09:30:50 #998] [P16] PASS O.C_stored_roundtrip
+[09:30:50 #999] [P16] PASS O.D_flush_roundtrip
+[09:30:50 #1000] [P16] PASS O.short_input_rejected
+[09:30:50 #1001] [P16] PASS O.empty_input_rejected
+[09:30:50 #1002] [P16] PASS O.truncated_partial
+[09:30:50 #1003] [P16] PASS O.handmade_stored
+[09:30:50 #1004] [P16] PASS S.chunked_roundtrip
+[09:30:50 #1005] [P16] PASS S.big_read_then_eof
+[09:30:51 #1006] [P16] PASS S.raw_stream
+[09:30:51 #1007] [P16] PASS S.guards
+[09:30:51 #1008] [P16] fixtures: A=57B->360B B=84B->6621B C=311B->300B D=116B->6621B
+[09:30:51 #1009] [P16] inflate selftests done: 12 passed, 0 failed
+[09:30:51 #1010] [P17] PASS D.red_64x48
+[09:30:51 #1011] [P17] PASS D.rgba_40x30
+[09:30:51 #1012] [P17] PASS D.pal_32x16
+[09:30:51 #1013] [P17] PASS D.gray8_100x10
+[09:30:51 #1014] [P17] PASS D.gray1_32x8
+[09:30:51 #1015] [P17] PASS D.ga_24x12
+[09:30:51 #1016] [P17] PASS D.gray16_16x4
+[09:30:51 #1017] [P17] PASS D.adam7_5x3
+[09:30:51 #1018] [P17] PASS D.bench_266x200
+[09:30:51 #1019] [P17] PASS D.down_50x40
+[09:30:51 #1020] [P17] PASS G.short_input
+[09:30:51 #1021] [P17] PASS G.bad_signature
+[09:30:51 #1022] [P17] bench 800x600 -> 266x200 in 33.0 ms
+[09:30:51 #1023] [P17] PASS B.bench_grid_alive
+[09:30:51 #1024] [P17] png selftests done: 13 passed, 0 failed
+[09:30:51 #1025] [P18] PASS D.b24_64x48
+[09:30:51 #1026] [P18] PASS D.b32_20x10
+[09:30:51 #1027] [P18] PASS D.b8_16x16
+[09:30:51 #1028] [P18] PASS D.b4_12x8
+[09:30:51 #1029] [P18] PASS D.b1_24x6
+[09:30:51 #1030] [P18] PASS D.wide_360x90
+[09:30:51 #1031] [P18] PASS D.bench_300x200
+[09:30:51 #1032] [P18] PASS G.short_input
+[09:30:51 #1033] [P18] PASS G.bad_signature
+[09:30:51 #1034] [P18] bench 600x400 -> 300x200 in 0.5 ms
+[09:30:51 #1035] [P18] PASS B.bench_ran
+[09:30:51 #1036] [P18] bmp selftests done: 10 passed, 0 failed
+[09:30:51 #1037] [P19] PASS D.basic_40x30
+[09:30:51 #1038] [P19] PASS D.offset_30x8
+[09:30:51 #1039] [P19] PASS D.trans_20x10
+[09:30:51 #1040] [P19] PASS D.inter_16x16
+[09:30:51 #1041] [P19] PASS D.multi_24x12
+[09:30:51 #1042] [P19] PASS D.bench_300x200
+[09:30:51 #1043] [P19] PASS G.short_input
+[09:30:51 #1044] [P19] PASS G.bad_signature
+[09:30:51 #1045] [P19] PASS G.trailer_no_image
+[09:30:51 #1046] [P19] bench 600x400 -> 300x200 in 3.8 ms
+[09:30:51 #1047] [P19] PASS B.bench_ran
+[09:30:51 #1048] [P19] gif selftests done: 10 passed, 0 failed
+[09:30:51 #1049] [P20] PASS D.flat_64x48
+[09:30:51 #1050] [P20] PASS D.dcstripes_240x160
+[09:30:51 #1051] [P20] PASS D.acblocks_32x24
+[09:30:51 #1052] [P20] PASS D.restart_160x144
+[09:30:51 #1053] [P20] PASS D.sub420_128x96
+[09:30:51 #1054] [P20] PASS D.prog_dc_96x80
+[09:30:51 #1055] [P20] PASS D.prog_multi_96x80
+[09:30:51 #1056] [P20] PASS D.prog_refine_64x48
+[09:30:51 #1057] [P20] PASS G.short_input
+[09:30:51 #1058] [P20] PASS G.bad_signature
+[09:30:51 #1059] [P20] PASS G.eoi_only
+[09:30:51 #1060] [P20] PASS G.sof9_arithmetic
+[09:30:51 #1061] [P20] PASS G.trunc_sof
+[09:30:51 #1062] [P20] PASS D.pil_smoke_266x200
+[09:30:51 #1063] [P20] bench 800x600 -> 266x200 in 3.8 ms
+[09:30:51 #1064] [P20] PASS B.bench_ran
+[09:30:51 #1065] [P20] jpeg selftests done: 15 passed, 0 failed
+[09:30:51 #1066] [P21] PASS D.flat_dims
+[09:30:51 #1067] [P21] PASS D.flat_cksum
+[09:30:51 #1068] [P21] PASS D.flat_probes
+[09:30:51 #1069] [P21] PASS D.gradient_dims
+[09:30:51 #1070] [P21] PASS D.gradient_cksum
+[09:30:51 #1071] [P21] PASS D.gradient_probes
+[09:30:51 #1072] [P21] PASS D.palette_dims
+[09:30:51 #1073] [P21] PASS D.palette_cksum
+[09:30:51 #1074] [P21] PASS D.palette_probes
+[09:30:51 #1075] [P21] PASS D.alpha_dims
+[09:30:51 #1076] [P21] PASS D.alpha_cksum
+[09:30:51 #1077] [P21] PASS D.alpha_probes
+[09:30:51 #1078] [P21] PASS D.predictor_dims
+[09:30:51 #1079] [P21] PASS D.predictor_cksum
+[09:30:51 #1080] [P21] PASS D.predictor_probes
+[09:30:51 #1081] [P21] PASS D.cache_dims
+[09:30:51 #1082] [P21] PASS D.cache_cksum
+[09:30:51 #1083] [P21] PASS D.cache_probes
+[09:30:51 #1084] [P21] PASS D.meta_dims
+[09:30:51 #1085] [P21] PASS D.meta_cksum
+[09:30:51 #1086] [P21] PASS D.meta_probes
+[09:30:51 #1087] [P21] PASS D.lossy_flat_dims
+[09:30:51 #1088] [P21] PASS D.lossy_flat_cksum
+[09:30:51 #1089] [P21] PASS D.lossy_flat_probes
+[09:30:51 #1090] [P21] PASS D.lossy_grad_dims
+[09:30:51 #1091] [P21] PASS D.lossy_grad_cksum
+[09:30:51 #1092] [P21] PASS D.lossy_grad_probes
+[09:30:51 #1093] [P21] PASS D.lossy_alpha_dims
+[09:30:51 #1094] [P21] PASS D.lossy_alpha_cksum
+[09:30:51 #1095] [P21] PASS D.lossy_alpha_probes
+[09:30:51 #1096] [P21] PASS G.gradient_decode
+[09:30:51 #1097] [P21] PASS G.gradient_dims
+[09:30:51 #1098] [P21] PASS G.alpha_argb
+[09:30:51 #1099] [P21] PASS G.flat_dims
+[09:30:51 #1100] [P21] PASS X.badsig_reject
+[09:30:51 #1101] [P21] PASS X.riff_short_reject
+[09:30:51 #1102] [P21] PASS X.trunc_reject
+[09:30:51 #1103] [P21] PASS X.lossy_trunc_reject
+[09:30:51 #1104] [P21] PASS X.null_args_reject
+[09:30:51 #1105] [P21] PASS A.anim_badsig_reject
+[09:30:51 #1106] [P21] PASS A.decode
+[09:30:51 #1107] [P21] PASS A.dims
+[09:30:51 #1108] [P21] PASS A.meta
+[09:30:51 #1109] [P21] PASS A.durations
+[09:30:51 #1110] [P21] PASS A.f0_cksum
+[09:30:51 #1111] [P21] PASS A.f1_cksum
+[09:30:51 #1112] [P21] PASS A.f2_cksum
+[09:30:51 #1113] [P21] PASS A.f3_cksum
+[09:30:51 #1114] [P21] PASS A.probes
+[09:30:51 #1115] [P21] PASS pil_smoke_266x200
+[09:30:51 #1116] [P21] bench 266x200: 30 iters in 30.36 ms (1.012 ms/iter)
+[09:30:51 #1117] [P21] PASS B.bench_ran
+[09:30:51 #1118] [P21] PASS B.lossy_smoke
+[09:30:51 #1119] [P22] bench lossy 48x32: 200 iters in 17.44 ms (0.087 ms/iter)
+[09:30:51 #1120] [P21] PASS B.lossy_bench_ran
+[09:30:51 #1121] [P21] webp selftests done: 53 passed, 0 failed
+[09:30:51 #1122] update callback registered
+[09:30:51 #1123] first frame rendered
+[09:30:55 #1124] [P07] bench start https://wiesmann.codiferes.net/share/bitmaps/
+[09:30:58 #1125] [P07] bench OK https://wiesmann.codiferes.net/share/bitmaps/ status=200 bytes=5217 ms=3717 kbps=1
+[09:30:58 #1126] [P07] bench start http://wiesmann.codiferes.net/share/bitmaps/test_image_4c.png
+[09:30:59 #1127] [P07] bench OK http://wiesmann.codiferes.net/share/bitmaps/test_image_4c.png status=404 bytes=996 ms=366 kbps=2
+[09:30:59 #1128] [P07] benchmark done
+[09:31:01 #1129] heartbeat frame=300
+[09:31:11 #1130] heartbeat frame=600
