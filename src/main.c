@@ -23,6 +23,8 @@
 #include "html/selftest_dom.h"
 #include "html/selftest_document.h"
 #include "html/selftest_readability.h"
+#include "render/style.h"
+#include "render/selftest_style.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -55,6 +57,8 @@ static int s_dmFail = -1;
 static int s_dcPass = -1;
 static int s_rzFail = -1;
 static int s_rzPass = -1;
+static int s_syFail = -1;
+static int s_syPass = -1;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -205,8 +209,19 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_syPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P13 style: %d passed, %d failed",
+                     s_syPass, s_syFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 230);
+        }
+    }
+
     const char* hint = "Phase P07 raw TCP HTTP client";
-    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 230);
+    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 245);
 }
 
 static int update(void* userdata)
@@ -324,13 +339,18 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.
 
-            const char* fontErr = NULL;
-            s_fontBody = pd->graphics->loadFont("fonts/Roobert-11-Medium", &fontErr);
+            // P13 typography system loads every Style font (with
+            // system-font fallback per slot, mirroring Style.init).
+            style_init(pd);
+            s_fontBody = (LCDFont*)style_get_body_font(0, 0, NULL);
             if (s_fontBody == NULL) {
-                PLUTO_ERROR("loadFont Roobert-11-Medium failed: %s",
-                            fontErr ? fontErr : "unknown");
-            } else {
-                PLUTO_LOG("font loaded: fonts/Roobert-11-Medium");
+                PLUTO_ERROR("style fonts unavailable (no body font)");
+            }
+            style_set_system_font((PlutoFont*)s_fontBody);
+
+            selftest_style_run(&s_syPass, &s_syFail);
+            if (s_syFail > 0) {
+                PLUTO_ERROR("P13 SELFTEST FAILURES: %d", s_syFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);

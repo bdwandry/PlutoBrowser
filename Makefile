@@ -50,6 +50,8 @@ SRC = \
 	src/html/selftest_dom.c \
 	src/html/selftest_document.c \
 	src/html/selftest_readability.c \
+	src/render/style.c \
+	src/render/selftest_style.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
