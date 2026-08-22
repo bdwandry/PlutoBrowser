@@ -719,17 +719,25 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       logged on next simulator run ([P20] bench line).
 
 ### PHASE P21 — webp.c PART 1 (VP8L lossless)
-- [ ] BitReader (brPrefetch/brAdvance/brReadBits), huffman (replicateValue/getNextKey/
-      nextTableBitSize/buildHuffmanTable rootBits=8+7 readSymbol/readSymbol7),
-      readHuffmanCodeLengths/readHuffmanCode/readHuffmanCodes (5 metas, color cache),
-      decodeImageData (lz77 window, planeCodeToDistance, transforms):
-      predictorAdd/Inverse (26 modes incl. select/clampedAddSubtractFull/Half, average2/3/4),
-      colorTransformDelta/transformColorInverse/colorSpaceInverse, subtract-green
-      addGreenToBlueAndRed, colorIndexInverse + expandColorMap, applyInverseTransforms,
-      decodeVP8LPayload (ARGB out).
-- [ ] Test vector: known .webp lossless → ARGB checksum logged (compare vs dwebp reference
-      computed offline once, recorded in log).
-- [ ] Verify; STOP.
+- [x] BitReader (brPrefetch/brAdvance/brReadBits), huffman (replicateValue/getNextKey/
+      nextTableBitSize/buildHuffmanTable rootBits=8+7 readSymbol; readSymbol7 was dead
+      code upstream and is omitted),
+      readHuffmanCodeLengths/readHuffmanCode/readHuffmanCodes (5 metas, color cache,
+      group remap), decodeImageData (lz77 window, planeCodeToDistance, transforms):
+      predictorAdd/Inverse (modes 0..13 incl. select/clampedAddSubtractFull/Half,
+      average2/3/4), colorTransformDelta/transformColorInverse/colorSpaceInverse,
+      subtract-green addGreenToBlueAndRed, colorIndexInverse + expandColorMap,
+      applyInverseTransforms, decodeVP8LPayload (ARGB out). Public API:
+      webp_decode_argb (full-res ARGB rows) + webp_decode_gray (luma over white,
+      box-scaled via ScaleAccum) + device webp_decode.
+- [x] Test vector: 8 Pillow lossless files cross-validated offline vs dwebp -pam
+      (byte-exact except RGB under A=0, encoder non-exact mode); FNV-1a ARGB
+      checksums + probes logged ([P21] D.*_cksum lines).
+- [x] Verify; STOP. selftest_webp 31/31 on host ASan harness (p21asan), zero leaks
+      attributable to webp.c; TOTAL suite 178/0; make green, PlutoBrowser.pdx packaged.
+      Bugs fixed during verification: expandColorMap consumed raw sub-stream via
+      t.data (was passing NULL), single-transform stage leaked the input grid,
+      decode_image_stream sub-call result clobbered its own out-param.
 
 ### PHASE P22 — webp.c PART 2 (VP8 lossy + alpha + animation) + webp_vp8_data.c
 - [ ] Transcribe VP8Tables verbatim into webp_vp8_data.c (kDcTable…CoeffsUpdateProba).
