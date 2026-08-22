@@ -59,6 +59,8 @@
 #include "ui/selftest_ui.h"
 #include "ui/home_page.h"
 #include "ui/selftest_home_page.h"
+#include "ui/address_bar.h"
+#include "ui/selftest_address_bar.h"
 #include "render/decoders/selftest_gif_fixtures.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
@@ -137,6 +139,13 @@ static int s_p27Scenario = 0;
 /* P28 home page visual + scripted input walk */
 static int s_hpPass = -1;
 static int s_hpFail = -1;
+/* P29 address bar: selftest counts + armed-window demo state */
+static int s_abPass = -1;
+static int s_abFail = -1;
+
+// Vendored keyboard lib (vendor/keyboard) resolves the SDK handle through
+// this global symbol; every PlutoBrowser module keeps its own s_pd static.
+PlaydateAPI* playdate = NULL;
 /* Fixture mirroring the cloud payload shape served on MODE_OPERA_DS. */
 static const char* kClFixture =
     "{\"title\":\"Cloud Demo\",\"totalHeight\":500,\"elements\":["
@@ -512,6 +521,9 @@ static void draw_placeholder(void)
         hud_draw_hover_status(
             "https://hovered.example.org/a/really/long/target/link.html");
 
+        /* P29: address-bar overlay composes on top (Lua draws it last) */
+        ab_draw_overlay();
+
         if (s_uiPass >= 0) {
             n = snprintf(buf, sizeof(buf),
                          "P27 selftest: %d passed, %d failed",
@@ -536,6 +548,21 @@ static void draw_placeholder(void)
                 }
                 pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
                                        70, 455);
+            }
+        }
+
+        if (s_abPass >= 0) {
+            n = snprintf(buf, sizeof(buf),
+                         "P29 selftest: %d passed, %d failed%s",
+                         s_abPass, s_abFail,
+                         ab_keyboard_shown() ? " [kb]" :
+                             (ab_is_open() ? " [armed]" : ""));
+            if (n > 0) {
+                if ((size_t)n >= sizeof(buf)) {
+                    n = (int)sizeof(buf) - 1;
+                }
+                pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding,
+                                       70, 470);
             }
         }
     }
@@ -582,6 +609,12 @@ static void draw_placeholder(void)
 
     const char* hint = "Phase P07 raw TCP HTTP client";
     pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 260);
+}
+
+// P29 manual-test submit path: real navigation lands in a later phase.
+static void ab_submit_stub(const char* url, void* ud) {
+    (void)ud;
+    PLUTO_LOG("[P29] nav stub -> %s", url);
 }
 
 static int update(void* userdata)
@@ -672,6 +705,21 @@ static int update(void* userdata)
                   hp_selected_index());
     }
 
+    /* P29 address bar demo: armed pill at frame 300 (Left/Right + B-held
+     * gating testable), auto-launch at 600 unless already shown. */
+    if (s_frame == 300) {
+        ab_open("https://example.com/", ab_submit_stub, NULL);
+        PLUTO_LOG("[P29] open (armed, prefilled)");
+    }
+    if (s_frame >= 600 && ab_is_open() && !ab_keyboard_shown()) {
+        ab_launch_keyboard();
+        if (ab_keyboard_shown()) {
+            PLUTO_LOG("[P29] keyboard launched (type + submit to test)");
+        }
+    }
+    /* skipInputFrames global: consumed once per frame like Lua's handler */
+    (void)ab_pop_input_skip();
+
     if (s_frame == 1) {
         PLUTO_LOG("first frame rendered");
     } else if (s_frame % 300 == 0) {
@@ -682,13 +730,16 @@ static int update(void* userdata)
     return 1;
 }
 
-int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
+// param renamed from `playdate` so the vendored-keyboard global below is
+// reachable here (SDK header only fixes types, not names).
+int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
 {
     (void)arg;
 
     switch (event) {
         case kEventInit:
-            pd = playdate;
+            pd = pdApi;
+            playdate = pdApi; // vendor/keyboard reads this global
 
             // Boot logging first so any later failure is captured.
             logger_init(pd);
@@ -913,6 +964,14 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
                 PLUTO_ERROR("P28 SELFTEST FAILURES: %d", s_hpFail);
             }
             PLUTO_LOG("[P28] home page ready");
+
+            // P29 address bar + vendored C keyboard.
+            ab_init(pd, update, NULL);
+            selftest_address_bar_run(&s_abPass, &s_abFail);
+            if (s_abFail > 0) {
+                PLUTO_ERROR("P29 SELFTEST FAILURES: %d", s_abFail);
+            }
+            PLUTO_LOG("[P29] address bar ready");
 
             pd->system->setUpdateCallback(update, NULL);
             PLUTO_LOG("update callback registered");

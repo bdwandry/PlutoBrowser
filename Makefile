@@ -87,6 +87,9 @@ SRC = \
 	src/ui/selftest_ui.c \
 	src/ui/home_page.c \
 	src/ui/selftest_home_page.c \
+	src/ui/address_bar.c \
+	src/ui/selftest_address_bar.c \
+	vendor/keyboard/keyboard.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
@@ -97,7 +100,7 @@ SRC = \
 	src/util/selftest_util.c \
 
 # All user directories (for #include resolution)
-UINCDIR = src
+UINCDIR = src vendor/keyboard
 
 include $(SDK)/C_API/buildsupport/common.mk
 

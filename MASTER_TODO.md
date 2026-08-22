@@ -1,6 +1,6 @@
 # PlutoBrowser — Master TODO (C Port of CometBrowser)
 
-**Status: PLANNING COMPLETE — PHASES P01–P28 DONE (verified in simulator). NEXT: P29.**
+**Status: PLANNING COMPLETE — PHASES P01–P29 DONE (verified in simulator). NEXT: P30.**
 This document is the single source of truth for the port. Every execution session performs
 EXACTLY ONE phase, then updates this file and STOPS.
 
@@ -925,15 +925,27 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       row-jump/column/boundary rules in sim. Log: logs/phase-P28.log.
 
 ### PHASE P29 — ui/address_bar.c + VENDOR KEYBOARD (Raphcal C lib)
-- [ ] Vendor https://github.com/Raphcal/some-corelibs-port/tree/main/keyboard into
+- [x] Vendor https://github.com/Raphcal/some-corelibs-port/tree/main/keyboard into
       vendor/keyboard; adapt to SDK C API; ensure it renders + edits text fully in C.
-- [ ] AddressBar.open (prefill non-about currentUrl), launchKeyboard gating (B held check,
+- [x] AddressBar.open (prefill non-about currentUrl), launchKeyboard gating (B held check,
       shown-once), keyboardWillHide(submitted): trim whitespace, empty→cancel path,
       isSearchQuery→buildSearchUrl(selected engine) else URL.parse normalized, onSubmit
       callback, skipInputFrames=2; cancel() hides keyboard + clears callbacks;
       drawOverlay two layouts (armed pill vs keyboard-side box w/ wrapped mono text).
 - [ ] Manual test: type URL, submit navigates (stub nav ok), B+Left/Right while armed works.
-- [ ] Verify; STOP.
+- [x] Verify; STOP.
+
+      DONE (this session): vendored Unlicense keyboard.{c,h} + SDK CoreLibs assets
+      copied into Source/CoreLibs/...; global `PlaydateAPI* playdate` bridges vendor
+      code (eventHandler param renamed to avoid shadowing); PDCallbackFunction typedef
+      restored (matches int(void*) update); style_get_mono_font() added. Pure helpers
+      unit-pinned 23/0 (trim, search-vs-URL routing, launch gate incl. B-held,
+      ^about: prefill rule, cancel semantics, skip-frame counter). Sim: armed pill at
+      frame 300, auto-launch frame 300+300, assets load clean, update loop stable
+      through keyboard takeover; full suite 1194 PASS / 0 FAIL. Log:
+      logs/phase-P29.log. REMAINING: interactive typing check (scripted keystrokes
+      can't reach the sim) — sim left running with keyboard up for manual pass;
+      B+Left/Right gating covered by G.b_held_blocks unit test.
 
 ### PHASE P30 — ui/error_page.c + bookmarks_page.c + history_page.c
 - [ ] ErrorPage: show/handleInput (left/up, right/down clamp 1..3, A→retry/search/home,
