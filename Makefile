@@ -68,7 +68,8 @@ SRC = \
 	src/render/decoders/jpeg.c \
 	src/render/decoders/selftest_jpeg.c \
 	src/render/decoders/selftest_jpeg_fixtures.c \
-	src/render/decoders/webp.c \
+ 	src/render/decoders/webp_vp8_data.c \
+ 	src/render/decoders/webp.c \
 	src/render/decoders/selftest_webp.c \
 	src/render/decoders/selftest_webp_fixtures.c \
 	src/util/mem.c \

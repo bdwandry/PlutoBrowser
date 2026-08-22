@@ -62,6 +62,12 @@ static const Fixture kFixtures[] = {
      FX_W_CACHE_W, FX_W_CACHE_H, FX_W_CACHE_CK, 5},
     {"meta",      fx_w_meta,      FX_W_META_LEN,
      FX_W_META_W, FX_W_META_H, FX_W_META_CK, 6},
+    {"lossy_flat", fx_w_lossy_flat, FX_W_LOSSY_FLAT_LEN,
+     FX_W_LOSSY_FLAT_W, FX_W_LOSSY_FLAT_H, FX_W_LOSSY_FLAT_CK, 8},
+    {"lossy_grad", fx_w_lossy_grad, FX_W_LOSSY_GRAD_LEN,
+     FX_W_LOSSY_GRAD_W, FX_W_LOSSY_GRAD_H, FX_W_LOSSY_GRAD_CK, 9},
+    {"lossy_alpha", fx_w_lossy_alpha, FX_W_LOSSY_ALPHA_LEN,
+     FX_W_LOSSY_ALPHA_W, FX_W_LOSSY_ALPHA_H, FX_W_LOSSY_ALPHA_CK, 10},
 };
 #define NFIX (sizeof(kFixtures) / sizeof(kFixtures[0]))
 
@@ -76,6 +82,16 @@ static unsigned fnv_rows(uint32_t** rows, int w, int h) {
             hsh ^= rows[y][x];
             hsh *= FNV_PRIME;
         }
+    }
+    return hsh;
+}
+
+static unsigned fnv_flat(const uint32_t* pix, int w, int h) {
+    unsigned hsh = FNV_OFFSET;
+    size_t i, n = (size_t)w * (size_t)h;
+    for (i = 0; i < n; i++) {
+        hsh ^= pix[i];
+        hsh *= FNV_PRIME;
     }
     return hsh;
 }
@@ -157,6 +173,65 @@ static void case_gray_smoke(void) {
     if (rows) webp_free_rows(rows, gh);
 }
 
+static void case_anim(void) {
+    WebPAnim* anim = NULL;
+    const int durs[4] = {FX_W_ANIM_DUR0, FX_W_ANIM_DUR1,
+                         FX_W_ANIM_DUR2, FX_W_ANIM_DUR3};
+    const unsigned cks[4] = {FX_W_ANIM_F0_CK, FX_W_ANIM_F1_CK,
+                             FX_W_ANIM_F2_CK, FX_W_ANIM_F3_CK};
+    const WebpProbePt* pts[4] = {wp_anim_f0, wp_anim_f1,
+                                 wp_anim_f2, wp_anim_f3};
+    const int plens[4] = {wp_anim_f0_len, wp_anim_f1_len,
+                          wp_anim_f2_len, wp_anim_f3_len};
+    int i;
+
+    ck("A.anim_badsig_reject",
+       webp_decode_anim(fx_w_badsig, FX_W_BADSIG_LEN, &anim) != 0 &&
+       anim == NULL);
+    ck("A.decode",
+       webp_decode_anim(fx_w_anim, FX_W_ANIM_LEN, &anim) == 0 &&
+       anim != NULL);
+    if (!anim) return;
+    ck("A.dims",
+       anim->width == FX_W_ANIM_W && anim->height == FX_W_ANIM_H);
+    ck("A.meta",
+       anim->loopCount == FX_W_ANIM_LOOP &&
+       anim->numFrames == FX_W_ANIM_NFRAMES &&
+       anim->bgcolor == FX_W_ANIM_BG);
+
+    {
+        int ok = anim->numFrames <= 4;
+        for (i = 0; i < anim->numFrames && ok; i++)
+            if (anim->frames[i].durationMs != durs[i]) ok = 0;
+        ck("A.durations", ok);
+    }
+    {
+        int okCk = 1, okPr = 1;
+        for (i = 0; i < anim->numFrames && okCk && okPr; i++) {
+            int k;
+            char nm[64];
+            snprintf(nm, sizeof(nm), "A.f%d_cksum", i);
+            ck(nm, fnv_flat(anim->frames[i].pix, anim->width,
+                            anim->height) == cks[i]);
+            for (k = 0; k < plens[i]; k++) {
+                int x = pts[i][k].x, y = pts[i][k].y;
+                unsigned got = anim->frames[i]
+                    .pix[(size_t)y * anim->width + x];
+                if (got != pts[i][k].argb) {
+                    PLUTO_ERROR("[P21] anim f%d(%d,%d): got %08X want %08X",
+                                i, x, y, got, pts[i][k].argb);
+                    okPr = 0;
+                    break;
+                }
+            }
+            if (!okPr) break;
+        }
+        ck("A.probes", okPr);
+    }
+    webp_anim_free(anim);
+    webp_anim_free(NULL); /* must be a no-op */
+}
+
 static void case_guards(void) {
     uint32_t** rows = NULL;
     int w = 0, h = 0;
@@ -168,6 +243,9 @@ static void case_guards(void) {
                         &rows, &w, &h) != 0 && rows == NULL);
     ck("X.trunc_reject",
        webp_decode_argb(fx_w_trunc, FX_W_TRUNC_LEN, 64, 64,
+                        &rows, &w, &h) != 0 && rows == NULL);
+    ck("X.lossy_trunc_reject",
+       webp_decode_argb(fx_w_lossy_trunc, FX_W_LOSSY_TRUNC_LEN, 64, 64,
                         &rows, &w, &h) != 0 && rows == NULL);
     ck("X.null_args_reject",
        webp_decode_argb(fx_w_flat, FX_W_FLAT_LEN, 64, 64,
@@ -229,6 +307,7 @@ int selftest_webp_run(int* passed, int* failed) {
     case_decode_argb_all();
     case_gray_smoke();
     case_guards();
+    case_anim();
     case_pil_bench();
     PLUTO_LOG("[P21] webp selftests done: %d passed, %d failed",
               s_pass, s_fail);

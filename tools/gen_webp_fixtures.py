@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Generates selftest_webp_fixtures.{h,c} for [P21] webp.c selftests.
+"""Generates selftest_webp_fixtures.{h,c} for [P21]/[P22] webp.c selftests.
 
-Builds small lossless WebP images with Pillow, cross-validates every file
+Builds small WebP images with Pillow, cross-validates every still file
 against `dwebp -pam` (libwebp reference decoder), then emits byte arrays
 plus full-resolution ARGB goldens (FNV-1a checksums + probe points).
-Lossless roundtrip is exact, so goldens are bit-exact expectations.
+Lossless roundtrip is exact, so goldens are bit-exact expectations;
+for lossy fixtures the dwebp output IS the golden (quality 90).
+
+[P22] adds lossy stills (VP8 / VP8+ALPH) and an animated file built from
+lossless frames whose blended canvases are computed here using libwebp's
+documented integer blend algorithm.
 """
 
+import io
 import os
 import subprocess
 import sys
@@ -144,32 +150,66 @@ def build_images():
             px[x, y] = (r, g, b, 255)
     imgs.append(("pil_bench", im))
 
+    # ---- P22: lossy stills (goldens = dwebp output, not source pixels)
+    # lossy_flat: solid color
+    im = Image.new("RGBA", (32, 24), (200, 30, 90, 255))
+    imgs.append(("lossy_flat", im))
+
+    # lossy_grad: RGB gradient
+    im = Image.new("RGBA", (48, 32))
+    px = im.load()
+    for y in range(32):
+        for x in range(48):
+            px[x, y] = ((x * 11) % 256, (y * 13) % 256,
+                        (x * 5 + y * 7) % 256, 255)
+    imgs.append(("lossy_grad", im))
+
+    # lossy_alpha: alpha ramp -> VP8 + ALPH chunk territory
+    im = Image.new("RGBA", (24, 16))
+    px = im.load()
+    for y in range(16):
+        for x in range(24):
+            a = (x * 23 + y * 9) % 256
+            px[x, y] = (30, (x * 7) % 256, (200 - y * 8) % 256, a)
+    imgs.append(("lossy_alpha", im))
+
+    # Per-image encoder options: everything defaults to lossless.
+    save_kwargs = {
+        "lossy_flat": dict(lossless=False, quality=90),
+        "lossy_grad": dict(lossless=False, quality=90),
+        "lossy_alpha": dict(lossless=False, quality=90),
+    }
+
     encoded = []
     for name, im in imgs:
-        import io
         buf = io.BytesIO()
-        im.save(buf, format="WEBP", lossless=True)
+        kw = save_kwargs.get(name, dict(lossless=True))
+        im.save(buf, format="WEBP", **kw)
         data = buf.getvalue()
 
         # Pillow ground truth
         rgbaw, rgbah = im.size
         pil_bytes = im.tobytes()
 
-        # libwebp reference decode + cross-check. Lossless roundtrip is
-        # exact except RGB under A=0 (encoder non-exact mode zeroes it),
-        # so diffs are allowed only on fully-transparent pixels.
+        # libwebp reference decode. For lossless the roundtrip is exact
+        # except RGB under A=0 (encoder non-exact mode zeroes it), so
+        # diffs are allowed only on fully-transparent pixels. For lossy
+        # the dwebp output simply becomes the golden.
+        lossless = kw.get("lossless", True)
         dw, dh, draw = dwebp_rgba(data)
         if (dw, dh) != (rgbaw, rgbah):
             raise RuntimeError(f"{name}: dims differ PIL vs dwebp")
-        for i in range(0, len(draw), 4):
-            if draw[i + 3] != 0 or pil_bytes[i + 3] != 0:
-                if draw[i:i + 4] != pil_bytes[i:i + 4]:
-                    raise RuntimeError(
-                        f"{name}: opaque pixel {i // 4} differs "
-                        f"PIL={tuple(pil_bytes[i:i + 4])} "
-                        f"dwebp={tuple(draw[i:i + 4])}")
+        if lossless:
+            for i in range(0, len(draw), 4):
+                if draw[i + 3] != 0 or pil_bytes[i + 3] != 0:
+                    if draw[i:i + 4] != pil_bytes[i:i + 4]:
+                        raise RuntimeError(
+                            f"{name}: opaque pixel {i // 4} differs "
+                            f"PIL={tuple(pil_bytes[i:i + 4])} "
+                            f"dwebp={tuple(draw[i:i + 4])}")
 
-        print(f"fx_w_{name}: {len(data)} bytes, {dw}x{dh}")
+        print(f"fx_w_{name}: {len(data)} bytes, {dw}x{dh}"
+              f"{'' if lossless else ' (lossy)'}")
         encoded.append((name, data, dw, dh, draw))
 
     # guards
@@ -182,7 +222,206 @@ def build_images():
     trunc = trunc[: len(trunc) // 2]
     encoded.append(("trunc", bytes(trunc), 0, 0, None))
 
-    return encoded
+    # truncated lossy file -> VP8 payload rejection via public API
+    ldata = next(e[1] for e in encoded if e[0] == "lossy_grad")
+    ltrunc = bytearray(ldata)[: len(ldata) // 3]
+    encoded.append(("lossy_trunc", bytes(ltrunc), 0, 0, None))
+
+    anim_data, anim_meta = build_anim_fixture()
+    encoded.append(("anim", anim_data,
+                    anim_meta["w"], anim_meta["h"], None))
+
+    return encoded, anim_meta
+
+
+# ---------------------------------------------------------------- P22 ----
+
+def le24(v):
+    return bytes([v & 255, (v >> 8) & 255, (v >> 16) & 255])
+
+
+def le32(v):
+    return bytes([v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255])
+
+
+def riff_chunk(fourcc, payload):
+    pad = b"\x00" if len(payload) & 1 else b""
+    return fourcc + le32(len(payload)) + payload + pad
+
+
+def encode_webp(im, **opts):
+    buf = io.BytesIO()
+    im.save(buf, format="WEBP", **opts)
+    return buf.getvalue()
+
+
+def blend_px(src, dst):
+    """libwebp AnimDecoder integer blend (blend_func), ARGB words."""
+    src_a = (src >> 24) & 255
+    if src_a == 0:
+        return dst
+    dst_a = (dst >> 24) & 255
+    dst_factor_a = (dst_a * (256 - src_a)) >> 8
+    blend_a = src_a + dst_factor_a
+    scale = 16777216 // blend_a
+    out = [blend_a]
+    for shift in (16, 8, 0):
+        sc = (src >> shift) & 255
+        dc = (dst >> shift) & 255
+        c = ((sc * src_a + dc * dst_factor_a) * scale) >> 24
+        if c > 255:
+            c = 255
+        out.append(c)
+    return (out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3]
+
+
+def build_anim_fixture():
+    """Hand-builds VP8X+ANIM+ANMF wrapping four lossless frames and
+    computes the expected blended canvases with the documented integer
+    algorithm (independent reimplementation of libwebp semantics)."""
+    cw, chh = 24, 16
+    bgcolor = (0x1E, 0xC8, 0x0A, 0x00)  # stored byte order: b, g, r, a
+    loop_count = 3
+
+    # Frame sources: (rect x, y, w, h, rgba, duration, dispose, noblend).
+    # Spec stores x/y in units of 2 pixels, so both must be even.
+    specs = [
+        (0, 0, cw, chh, None, 100, 0, 0),      # full-canvas gradient
+        (6, 4, 10, 10, (250, 40, 40, 128), 70, 0, 0),
+        (2, 6, 8, 8, (30, 60, 190, 180), 50, 1, 0),
+        (6, 8, 9, 7, (20, 170, 40, 160), 80, 0, 0),
+    ]
+
+    frames = []
+    raw_frames = []
+    for fx, fy, fw, fh, color, dur, disp, nob in specs:
+        im = Image.new("RGBA", (fw, fh))
+        px = im.load()
+        for y in range(fh):
+            for x in range(fw):
+                if color is None:
+                    px[x, y] = ((x * 37 + y * 11) % 256,
+                                (y * 29 + x * 5) % 256,
+                                (x * y * 3 + 17) % 256, 255)
+                else:
+                    px[x, y] = color
+        data = encode_webp(im, lossless=True)
+        # Extract the inner VP8L chunk from Pillow's simple container.
+        pos = 12
+        vpl = None
+        while pos + 8 <= len(data):
+            sz = int.from_bytes(data[pos + 4:pos + 8], "little")
+            if data[pos:pos + 4] == b"VP8L":
+                vpl = data[pos + 8:pos + 8 + sz]
+                break
+            pos += 8 + sz + (sz & 1)
+        assert vpl is not None, "frame did not contain a VP8L chunk"
+        raw_frames.append(im.tobytes())
+        frames.append(dict(x=fx, y=fy, w=fw, h=fh, dur=dur, dispose=disp,
+                           noblend=nob, vpl=vpl))
+
+    body = b"WEBP"
+    # Flags byte first (animation bit set), 3 reserved, canvas-1 LE24s.
+    vp8x = bytes([0x02]) + b"\x00\x00\x00" + le24(cw - 1) + le24(chh - 1)
+    body += riff_chunk(b"VP8X", vp8x)
+    anim = bytes(bgcolor) + bytes([loop_count & 255,
+                                   (loop_count >> 8) & 255]) + b"\x00\x00"
+    body += riff_chunk(b"ANIM", anim)
+
+    def has_alpha_px(rgba):
+        return any(rgba[i + 3] != 255 for i in range(0, len(rgba), 4))
+
+    prev_disposed = [[0] * cw for _ in range(chh)]
+    prev_was_key = True
+    canvases = []
+    for i, fr in enumerate(frames):
+        rgba = raw_frames[i]
+        fa = has_alpha_px(rgba)
+        if i == 0:
+            key = True
+        elif (not fa or fr["noblend"]) and fr["w"] == cw and fr["h"] == chh:
+            key = True
+        else:
+            pf = frames[i - 1]
+            key = bool(pf["dispose"]) and (pf["w"] == cw or prev_was_key)
+        curr = ([[0] * cw for _ in range(chh)] if key
+                else [row[:] for row in prev_disposed])
+        for yy in range(fr["h"]):
+            row = curr[fr["y"] + yy]
+            base = (yy * fr["w"] + 0) * 4
+            for xx in range(fr["w"]):
+                j = base + xx * 4
+                argb = ((rgba[j + 3] << 24) | (rgba[j] << 16) |
+                        (rgba[j + 1] << 8) | rgba[j + 2])
+                row[fr["x"] + xx] = argb
+        if i > 0 and not fr["noblend"] and not key:
+            p = frames[i - 1]
+
+            def blend_range(y_, off, width_):
+                for k in range(width_):
+                    v = curr[y_][off + k]
+                    if ((v >> 24) & 255) != 255:
+                        curr[y_][off + k] = blend_px(v, prev_disposed[y_][off + k])
+
+            for yy in range(fr["h"]):
+                cy = fr["y"] + yy
+                if not p["dispose"]:
+                    blend_range(cy, fr["x"], fr["w"])
+                else:
+                    src_max_x = fr["x"] + fr["w"]
+                    dst_max_x = p["x"] + p["w"]
+                    dst_max_y = p["y"] + p["h"]
+                    if (cy < p["y"] or cy >= dst_max_y or
+                            fr["x"] >= dst_max_x or src_max_x <= p["x"]):
+                        blend_range(cy, fr["x"], fr["w"])
+                    else:
+                        if fr["x"] < p["x"]:
+                            blend_range(cy, fr["x"], p["x"] - fr["x"])
+                        if src_max_x > dst_max_x:
+                            blend_range(cy, dst_max_x, src_max_x - dst_max_x)
+        canvases.append(curr)
+        prev_disposed = [row[:] for row in curr]
+        if fr["dispose"]:
+            for yy in range(fr["h"]):
+                for k in range(fr["w"]):
+                    prev_disposed[fr["y"] + yy][fr["x"] + k] = 0
+        prev_was_key = key
+
+    anmf_blobs = []
+    for fr in frames:
+        flags = (1 if fr["dispose"] else 0) | \
+                ((1 if fr["noblend"] else 0) << 1)
+        head = (le24(fr["x"] // 2) + le24(fr["y"] // 2) +
+                le24(fr["w"] - 1) + le24(fr["h"] - 1) +
+                le24(fr["dur"]))
+        anmf_payload = head + bytes([flags]) + \
+            riff_chunk(b"VP8L", fr["vpl"])
+        anmf_blobs.append(riff_chunk(b"ANMF", anmf_payload))
+
+    body += b"".join(anmf_blobs)
+    data = b"RIFF" + le32(len(body)) + body
+
+    meta = {
+        "w": cw, "h": chh,
+        "loop": loop_count,
+        "bg": (bgcolor[3] << 24) | (bgcolor[2] << 16) | \
+              (bgcolor[1] << 8) | bgcolor[0],
+        "nframes": len(frames),
+        "durs": [f["dur"] for f in frames],
+        "canvases": canvases,
+    }
+    print(f"fx_w_anim: {len(data)} bytes, {cw}x{chh}, "
+          f"{len(frames)} frames (hand-built)")
+    return data, meta
+
+
+def frame_fnv(canvas):
+    h = FNV_OFFSET
+    for row in canvas:
+        for w_ in row:
+            h ^= w_
+            h = (h * FNV_PRIME) & 0xFFFFFFFF
+    return h
 
 
 def argb_pixels(w, h, rgba):
@@ -215,7 +454,7 @@ def gen_probes(idx, w, h, pixels):
     return pts
 
 
-def emit(fixtures):
+def emit(fixtures, anim_meta):
     decodable = []
     for idx, (name, data, w, h, rgba) in enumerate(fixtures):
         if rgba is not None:
@@ -262,7 +501,6 @@ def emit(fixtures):
 
     h_parts.append("extern const WebpProbe webp_probes[];\n")
     h_parts.append("extern const int webp_probes_len;\n\n")
-    h_parts.append("#endif\n")
 
     c_parts.append("// Generated by tools/gen_webp_fixtures.py — do not edit.\n\n")
     c_parts.append('#include "render/decoders/selftest_webp_fixtures.h"\n\n')
@@ -274,6 +512,39 @@ def emit(fixtures):
         c_parts.append("    " + line + "\n")
     c_parts.append("};\n\n")
     c_parts.append(f"const int webp_probes_len = {len(probe_tables)};\n")
+    c_parts.append("\n")
+
+    # ---- P22: animation metadata + per-frame probe tables ------------
+    am = anim_meta
+    h_parts.append(f"#define FX_W_ANIM_LOOP {am['loop']}\n")
+    h_parts.append(f"#define FX_W_ANIM_BG 0x{am['bg']:08X}u\n")
+    h_parts.append(f"#define FX_W_ANIM_NFRAMES {am['nframes']}\n")
+    for k, d in enumerate(am["durs"]):
+        h_parts.append(f"#define FX_W_ANIM_DUR{k} {d}\n")
+
+    cw_, chh_ = am["w"], am["h"]
+    anim_coords = [(0, 0), (cw_ - 1, 0), (0, chh_ - 1), (cw_ - 1, chh_ - 1),
+                   (cw_ // 2, chh_ // 2), (6, 4), (18, 10), (9, 13),
+                   (20, 2), (3, 6), (14, 12), (11, 8)]
+    for k, canvas in enumerate(am["canvases"]):
+        ckv = frame_fnv(canvas)
+        h_parts.append(f"#define FX_W_ANIM_F{k}_CK 0x{ckv:08X}u\n")
+        seen = set()
+        pts = []
+        for x, y in anim_coords:
+            if (x, y) in seen:
+                continue
+            seen.add((x, y))
+            pts.append((x, y, canvas[y][x]))
+        pname = f"wp_anim_f{k}"
+        pt_items = ", ".join(f"{{{x},{y},0x{argb:08X}u}}"
+                             for x, y, argb in pts)
+        c_parts.append(
+            f"const WebpProbePt {pname}[] = {{{pt_items}}};\n")
+        c_parts.append(f"const int wp_anim_f{k}_len = {len(pts)};\n\n")
+        h_parts.append(f"extern const WebpProbePt {pname}[];\n")
+        h_parts.append(f"extern const int wp_anim_f{k}_len;\n")
+    h_parts.append("\n#endif\n")
 
     with open(H_PATH, "w") as f:
         f.write("".join(h_parts))
@@ -284,8 +555,8 @@ def emit(fixtures):
 
 
 def main():
-    fixtures = build_images()
-    emit(fixtures)
+    fixtures, anim_meta = build_images()
+    emit(fixtures, anim_meta)
 
 
 if __name__ == "__main__":
