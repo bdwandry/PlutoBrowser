@@ -22,6 +22,7 @@
 #include "html/selftest_tokenizer.h"
 #include "html/selftest_dom.h"
 #include "html/selftest_document.h"
+#include "html/selftest_readability.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -52,6 +53,8 @@ static int s_ttFail = -1;
 static int s_dmPass = -1;
 static int s_dmFail = -1;
 static int s_dcPass = -1;
+static int s_rzFail = -1;
+static int s_rzPass = -1;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -191,8 +194,19 @@ static void draw_placeholder(void)
         }
     }
 
+    if (s_rzPass >= 0) {
+        n = snprintf(buf, sizeof(buf), "P12 readability: %d passed, %d failed",
+                     s_rzPass, s_rzFail);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(buf)) {
+                n = (int)sizeof(buf) - 1;
+            }
+            pd->graphics->drawText(buf, (size_t)n, kASCIIEncoding, 70, 215);
+        }
+    }
+
     const char* hint = "Phase P07 raw TCP HTTP client";
-    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 210);
+    pd->graphics->drawText(hint, strlen(hint), kASCIIEncoding, 100, 230);
 }
 
 static int update(void* userdata)
@@ -300,6 +314,12 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
             selftest_document_run(&s_dcPass, &s_dcFail);
             if (s_dcFail > 0) {
                 PLUTO_ERROR("P11 SELFTEST FAILURES: %d", s_dcFail);
+            }
+
+            // P12 readability (reader-mode distiller) self-tests.
+            selftest_readability_run(&s_rzPass, &s_rzFail);
+            if (s_rzFail > 0) {
+                PLUTO_ERROR("P12 SELFTEST FAILURES: %d", s_rzFail);
             }
 
             // Lua main.lua did not call setRefreshRate -> keep SDK default.

@@ -1,6 +1,7 @@
 #include "html/document.h"
 #include "html/tokenizer.h"
 #include "html/dom.h"
+#include "html/readability.h"
 #include "html/entities.h"
 #include "core/url.h"
 #include "core/tasks.h"
@@ -569,6 +570,9 @@ static void db_free_fields(DocBlock* b) {
     pluto_free(b->toggleKey);
     pluto_free(b->phTag);
     pluto_free(b->phHref);
+    pluto_free(b->readerHost);
+    pluto_free(b->readerTitle);
+    pluto_free(b->readingTime);
 }
 
 static void db_free(DocBlock* b) {
@@ -2582,9 +2586,15 @@ DocDocument* doc_parse_opts(const char* html, const char* baseUrl, int mode,
     if (tokens == NULL) return NULL;
 
     if (mode == PLUTO_MODE_READER) {
-        PLUTO_LOG("Reader-mode parsing arrives in Phase 12");
+        /* Lua document.lua: pageTitle = extractedTitle or "Web Page";
+         * the reader branch uses the caller baseUrl (no <base> override) */
+        const char* pageTitle = (tokens->pageTitle != NULL)
+                                    ? tokens->pageTitle : "Web Page";
+        DocDocument* rd = readability_distill(tokens, pageTitle,
+                                              (baseUrl != NULL) ? baseUrl : "");
         htt_free(tokens);
-        return NULL;
+        if (rd != NULL) rd->rawHtml = pluto_strdup(html);
+        return rd;
     }
 
     /* token-level scans run BEFORE dom_build(): dom_build transfers
@@ -2684,6 +2694,8 @@ void doc_init(struct PlaydateAPI* pd) {
     (void)pd;
 }
 
+void doc_free_block_fields(DocBlock* b) { db_free_fields(b); }
+
 void doc_free(DocDocument* doc) {
     if (doc == NULL) return;
     pluto_free(doc->title);
@@ -2703,6 +2715,7 @@ void doc_free(DocDocument* doc) {
     for (size_t i = 0; i < doc->nDatalists; i++)
         d_datalist_free(&doc->datalists[i]);
     pluto_free(doc->datalists);
+    pluto_free(doc->readerTime);
     pluto_free(doc);
 }
 
