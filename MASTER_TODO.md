@@ -640,11 +640,27 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
       Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P16 — render/decoders/inflate.c
-- [ ] createBitStream (LSB-first), canonical Huffman buildHuffmanTable, decodeSymbol,
+- [x] createBitStream (LSB-first), canonical Huffman buildHuffmanTable, decodeSymbol,
       fixed tables, stored/fixed/dynamic blocks, Inflate.decompress + streaming
       Inflate.createStream (used by PNG row streaming).
-- [ ] Test vectors (zlib-produced fixtures) round-trip logged.
-- [ ] Verify; STOP.
+- [x] Test vectors (zlib-produced fixtures) round-trip logged.
+- [x] Verify; STOP.
+
+      DONE (2026-08-21). Full port of the 427-line source: LSB-first bit
+      reader, canonical Huffman with per-symbol bit reversal, cached fixed
+      tables, stored/fixed/dynamic blocks, one-shot decompress + streaming
+      reader (64KB window halved to 32KB, pending queue, chunked reads).
+      Quirks preserved: btype==3 silent fall-through in decompress; match
+      copies emit 0 for pre-output sources; truncated input returns partial;
+      zlib CMF/FLG + preset-dict skip. Stream path treats btype 3 as EOF to
+      avoid infinite pump. Fixtures embedded: dyn 57B->360B, raw-deflate
+      84B->6621B, stored 311B->300B, Z_FULL_FLUSH 116B->6621B, handmade
+      aligned stored block; streaming exercised at awkward chunk sizes (7B).
+      BUG fixed in bring-up: bo_copy_match double-skipped source offsets
+      (recomputed from grown len AND added i) — caught by fixture mismatch,
+      confirmed against an independent Python reference inflater.
+      Selftests: 12 passed, 0 failed (host + ASAN clean + this sim log).
+      Build gate 0/0. Phase log exported with parity map.
 
 ### PHASE P17 — png.c + BENCHMARK
 - [ ] PNGDecoder.decode: signature, IHDR, palette/tRNS/gAMA-ignore per source, IDAT concat

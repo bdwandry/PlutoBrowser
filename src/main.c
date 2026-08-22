@@ -28,6 +28,7 @@
 #include "render/link_manager.h"
 #include "render/selftest_link_manager.h"
 #include "render/decoders/selftest_decoders.h"
+#include "render/decoders/selftest_inflate.h"
 #include "html/document.h"
 #include "core/selftest_storage.h"
 #include "core/selftest_tasks.h"
@@ -66,6 +67,8 @@ static int s_lmFail = -1;
 static int s_lmPass = -1;
 static int s_dc15Fail = -1;
 static int s_dc15Pass = -1;
+static int s_inFail = -1;
+static int s_inPass = -1;
 static int s_dcFail = -1;
 
 // ── P07 benchmark (MASTER_TODO §4.10): fetch assets from the bitmaps host
@@ -394,6 +397,11 @@ int eventHandler(PlaydateAPI* playdate, PDSystemEvent event, uint32_t arg)
 #endif
             if (s_dc15Fail > 0) {
                 PLUTO_ERROR("P15 SELFTEST FAILURES: %d", s_dc15Fail);
+            }
+
+            selftest_inflate_run(&s_inPass, &s_inFail);
+            if (s_inFail > 0) {
+                PLUTO_ERROR("P16 SELFTEST FAILURES: %d", s_inFail);
             }
 
             pd->system->setUpdateCallback(update, NULL);
