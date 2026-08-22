@@ -65,6 +65,9 @@ SRC = \
 	src/render/decoders/selftest_bmp.c \
 	src/render/decoders/gif.c \
 	src/render/decoders/selftest_gif.c \
+	src/render/decoders/jpeg.c \
+	src/render/decoders/selftest_jpeg.c \
+	src/render/decoders/selftest_jpeg_fixtures.c \
 	src/util/mem.c \
 	src/util/strbuf.c \
 	src/util/dynarray.c \
@@ -78,6 +81,10 @@ SRC = \
 UINCDIR = src
 
 include $(SDK)/C_API/buildsupport/common.mk
+
+# Bare-metal: satisfy newlib syscall refs pulled in by stdio (logger's
+# vsnprintf etc.) with empty stubs — device code never touches host I/O.
+LDFLAGS += --specs=nosys.specs
 
 # Launch the freshly built .pdx in the Playdate Simulator
 sim: all

@@ -67,7 +67,8 @@ build/src/main.o: src/main.c \
  src/render/decoders/selftest_png_fixtures.h src/render/decoders/bmp.h \
  src/render/decoders/selftest_bmp.h \
  src/render/decoders/selftest_bmp_fixtures.h src/render/decoders/gif.h \
- src/render/decoders/selftest_gif.h \
+ src/render/decoders/selftest_gif.h src/render/decoders/selftest_jpeg.h \
+ src/render/decoders/jpeg.h src/render/decoders/selftest_jpeg_fixtures.h \
  src/render/decoders/selftest_gif_fixtures.h src/html/document.h \
  src/core/selftest_storage.h src/core/selftest_tasks.h \
  src/core/selftest_url.h src/core/storage.h src/core/../util/dynarray.h \
@@ -243,6 +244,12 @@ src/render/decoders/selftest_bmp_fixtures.h:
 src/render/decoders/gif.h:
 
 src/render/decoders/selftest_gif.h:
+
+src/render/decoders/selftest_jpeg.h:
+
+src/render/decoders/jpeg.h:
+
+src/render/decoders/selftest_jpeg_fixtures.h:
 
 src/render/decoders/selftest_gif_fixtures.h:
 

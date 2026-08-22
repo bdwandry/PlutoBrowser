@@ -28,6 +28,16 @@ void* pluto_malloc(size_t size)
     return malloc(size);
 }
 
+void* pluto_calloc(size_t nmemb, size_t size)
+{
+    size_t total = nmemb * size;
+    void* p = pluto_malloc(total);
+    if (p != NULL) {
+        memset(p, 0, total);
+    }
+    return p;
+}
+
 void* pluto_realloc(void* ptr, size_t newSize)
 {
     if (g_pd != NULL && g_pd->system != NULL && g_pd->system->realloc != NULL) {

@@ -689,15 +689,34 @@ Each phase ends with: clean `make`, simulator run, logs exported, TODO updated, 
 - [x] Benchmark GIF sample; log. (generated 600x400 fixture: 300x200 in ~4 ms)
 - [x] Verify; STOP.
 
-### PHASE P20 — jpeg.c
-- [ ] Baseline SOF0: markers, quant tables, Huffman buildHuff/decodeSymbol/extend,
-      decodeDC/decodeAC, restart intervals, idct2d fixed-point (4096 basis) EXACT math,
-      luma-only rendering (chroma consumed for sync), coarse DC-only box when downscaled
-      hard, YCbCr→gray path as source does, progressive SOF2 DC-scan-only path
-      (decodeProgressiveDC/renderProgressiveDC), reject arithmetic SOF9/10/11, yield per
-      MCU row, scale+dither out.
-- [ ] Benchmark JPEG samples; log dims/ms.
-- [ ] Verify; STOP.
+### PHASE P20 — jpeg.c  ✅ DONE (this session)
+- [x] jpeg.h/jpeg.c ported from CometBrowser Source/lib/jpeg.lua: baseline SOF0 +
+      progressive SOF2 DC/refine paths, quant tables, canonical build_huff, restart
+      intervals, fixed-point idct2d (IDCT_SCALE basis), DC-only shortcut when box>=4 or
+      area>200k, chroma consumed for sync only, YCbCr→gray, arithmetic SOF9/10/11
+      rejected, tasks_yield_check per MCU row, scale_accum + dither_to_image device
+      wrapper (jpeg_decode → LCDBitmap; jpeg_decode_gray for tests).
+- [x] tools/gen_jpeg_fixtures.py generates 13 fixtures with shadow-math goldens
+      (full-IDCT + DC-only + box scale) and Pillow cross-validation:
+      flat / dcstripes / acblocks / restart / sub420 / prog_dc / prog_multi /
+      prog_refine + guards (bad_sig, eoi_only, sof9, trunc_sof) + PIL bench file.
+- [x] selftest_jpeg.c [P20]: 8 fixture decodes with golden probes+dims, 5 guards,
+      PIL smoke 266x200, bench 800x600. Host harness p20asan: **15 passed, 0 failed**
+      under ASan; TOTAL 147/0 across all phases.
+- [x] Bugs found & fixed during verification:
+      - jpeg.c j_u16 read little-endian; JPEG lengths are big-endian (desynced every segment).
+      - JPState cap[9]/blkIdx[9] overflowed (arrays keyed to 256); state now heap-allocated.
+      - rowbuf_put/fill_block never clipped y against image height — MCU padding rows
+        (4:2:0 800x600) wrote OOB heap; now clip like the Lua sparse canvas did.
+      - Generator: Huffman tables redesigned legal per T.81 C.2 (no all-ones code;
+        libjpeg ERREXITs otherwise); DC prediction added to build_baseline;
+        BitWriter.bytes() pads TO byte boundary (was dropping final partial byte);
+        zero-amplitude AC entries no longer emit spurious EOB symbols.
+      - util/mem gained pluto_calloc; logger mirrors lines to stderr on host builds;
+        Makefile links --specs=nosys.specs so the device ELF links again.
+- [x] Full make (device pdex.elf/bin + simulator pdylib) green; PlutoBrowser.pdx packaged.
+- [x] Bench: 800x600 q85 PIL JPEG -> 266x200 in ~1.7 ms host (ASan -O1). Device timing
+      logged on next simulator run ([P20] bench line).
 
 ### PHASE P21 — webp.c PART 1 (VP8L lossless)
 - [ ] BitReader (brPrefetch/brAdvance/brReadBits), huffman (replicateValue/getNextKey/

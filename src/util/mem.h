@@ -20,6 +20,7 @@ struct PlaydateAPI;
 void mem_init(struct PlaydateAPI* playdate);
 
 void* pluto_malloc(size_t size);
+void* pluto_calloc(size_t nmemb, size_t size);
 void* pluto_realloc(void* ptr, size_t newSize);
 void  pluto_free(void* ptr);
 
