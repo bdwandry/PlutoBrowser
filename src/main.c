@@ -417,7 +417,10 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             // P33 app shell: hand control to the real browser. br_boot()
             // re-runs the Lua init tail (STATE_HOME, callbacks, menu) on a
             // clean slate after the selftest suites churned engine state;
-            // real networking/clock were restored by the suite teardown.
+            // seams are force-restored so the app polls real hardware even
+            // if a future suite forgets its teardown.
+            br_set_input_source(NULL, NULL);
+            br_set_clock_fn(NULL);
             br_set_update_trampoline(update);   // vendored keyboard pump
             br_boot();
             PLUTO_LOG("[P33] app shell engaged");
@@ -430,15 +433,8 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             PLUTO_LOG("terminate event, frames=%u", s_frame);
             break;
 
-        case kEventPause:
-            /* Hardware Menu button: custom pause overlay (C_API has no
-             * system-menu-items API; browser.c mirrors the entries). */
-            br_on_pause();
-            break;
-
-        case kEventResume:
-            br_on_resume();
-            break;
+        /* Menu button: handled by the NATIVE system menu items built in
+         * browser.c (br_system_menu_refresh) — no kEventPause hooks needed. */
 
         default:
             break;
