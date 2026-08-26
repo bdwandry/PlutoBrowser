@@ -28,6 +28,7 @@ void sb_free(StrBuf* sb)
 void sb_clear(StrBuf* sb)
 {
     sb->len = 0; // keep capacity for reuse
+    if (sb->data != NULL) sb->data[0] = '\0';
 }
 
 int sb_reserve(StrBuf* sb, size_t extra)
@@ -60,11 +61,12 @@ int sb_append(StrBuf* sb, const void* bytes, size_t n)
     if (n == 0) {
         return 1;
     }
-    if (!sb_reserve(sb, n)) {
+    if (!sb_reserve(sb, n + 1)) {
         return 0;
     }
     memcpy(sb->data + sb->len, bytes, n);
     sb->len += n;
+    sb->data[sb->len] = '\0';
     return 1;
 }
 

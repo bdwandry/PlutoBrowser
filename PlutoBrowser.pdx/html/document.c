@@ -410,8 +410,90 @@ static int d_parse_meta_content(const char* content, double* delayOut,
 /* ── forward declarations (mutually recursive walker) ─────────────────── */
 
 typedef struct DocState DocState;
+/* Retained recursive walker — used only by d_handle_row for cell content.
+   Cell content is bounded depth so recursion is safe. The main tree
+   traversal uses the iterative d_walk_iterative below. */
 static void d_walk(DocState* st, DomNode* node);
 static void d_walk_children(DocState* st, DomNode* node);
+
+/* ── iterative walker infrastructure ──────────────────────────────────── */
+
+enum {
+    WPOST_NONE = 0,
+    WPOST_FLUSH,
+    WPOST_FLAGS,
+    WPOST_FLAG_DEC,
+    WPOST_A,
+    WPOST_FORM,
+    WPOST_FIGURE,
+    WPOST_MATH,
+    WPOST_TEXTAREA,
+    WPOST_UL,
+    WPOST_PRE,
+    WPOST_FIELDSET,
+    WPOST_Q,
+    WPOST_MSQRT,
+    WPOST_SPAN,
+    WPOST_FIGURE_CAPTION,
+    WPOST_DETAILS,
+    WPOST_DIALOG
+};
+
+typedef struct {
+    enum { WENTRY_NODE, WENTRY_ENTER, WENTRY_EXIT, WENTRY_MATHTEXT } kind;
+    DomNode* node;
+    int postType;
+    int clientX, clientY, lmStyle;
+    int baseline;
+    float fx;
+    void* savedPtr;
+} WalkEntry;
+
+static WalkEntry* g_walkStack = NULL;
+static int g_walkSp = 0;
+static int g_walkCap = 0;
+
+#define WALK_STACK_INIT_CAP 64
+
+static void walk_init(void) {
+    g_walkStack = (WalkEntry*)pluto_malloc(WALK_STACK_INIT_CAP * sizeof(WalkEntry));
+    g_walkCap = WALK_STACK_INIT_CAP;
+    g_walkSp = 0;
+}
+
+static void walk_shutdown(void) {
+    pluto_free(g_walkStack);
+    g_walkStack = NULL;
+    g_walkSp = 0;
+    g_walkCap = 0;
+}
+
+static void walk_push(void) {
+    if (g_walkSp >= g_walkCap) {
+        g_walkCap *= 2;
+        g_walkStack = (WalkEntry*)pluto_realloc(g_walkStack, g_walkCap * sizeof(WalkEntry));
+    }
+    g_walkSp++;
+}
+
+static WalkEntry* walk_pop(void) {
+    if (g_walkSp > 0) return &g_walkStack[--g_walkSp];
+    return NULL;
+}
+
+static WalkEntry* walk_peek(void) {
+    if (g_walkSp > 0) return &g_walkStack[g_walkSp - 1];
+    return NULL;
+}
+
+enum {
+    FLAG_BOLD = 0, FLAG_ITALIC, FLAG_UNDERLINE, FLAG_STRIKE,
+    FLAG_MARK, FLAG_SMALL, FLAG_BIG, FLAG_SUB, FLAG_SUP, FLAG_CODE,
+    FLAG_INVERT, FLAG_COUNT
+};
+
+static unsigned char* d_flag_by_index(DocState* st, int idx);
+/* forward decl — defined after DocState */
 
 /* ── inline / block plumbing ──────────────────────────────────────────── */
 
@@ -419,6 +501,49 @@ typedef struct {
     unsigned char bold, italic, underline, code, small, big;
     unsigned char sub, sup, mark, strike, invert;
 } DFlags;
+
+typedef struct {
+    DFlags savedFlags;
+    long countBefore;
+    int tagKind; /* 0=span/font, 1=time, 2=data */
+} SpanSave;
+
+typedef struct {
+    StrBuf savedPreBuffer;
+    int savedInPre;
+} PreSave;
+
+typedef struct {
+    StrBuf savedFigCaption;
+    DocBlock* savedFigureImage;
+    int savedFigureCaptionDone;
+    int savedFigureActive;
+} FigureSave;
+
+typedef struct {
+    char* savedFormAction;
+    char* savedFormMethod;
+} FormSave;
+
+typedef struct {
+    int savedInTextarea;
+    char* savedTextareaName;
+    StrBuf savedTextareaBuffer;
+} TextareaSave;
+
+typedef struct {
+    int savedDisabledDepth;
+} FieldsetSave;
+
+typedef struct {
+    char dkey[24];
+    int isOpen;
+} DetailsSave;
+
+typedef struct {
+    int savedInMath;
+    StrBuf savedMathParts;
+} MathSave;
 
 typedef struct {
     int ordered;
@@ -495,6 +620,39 @@ struct DocState {
     double metaDelay;
     char* metaUrl;             /* owned */
 };
+
+static unsigned char* d_flag_by_index(DocState* st, int idx) {
+    switch (idx) {
+        case FLAG_BOLD:     return &st->f.bold;
+        case FLAG_ITALIC:   return &st->f.italic;
+        case FLAG_UNDERLINE:return &st->f.underline;
+        case FLAG_STRIKE:   return &st->f.strike;
+        case FLAG_MARK:     return &st->f.mark;
+        case FLAG_SMALL:    return &st->f.small;
+        case FLAG_BIG:      return &st->f.big;
+        case FLAG_SUB:      return &st->f.sub;
+        case FLAG_SUP:      return &st->f.sup;
+        case FLAG_CODE:     return &st->f.code;
+        case FLAG_INVERT:   return &st->f.invert;
+    }
+    return NULL;
+}
+
+static int d_flag_index_for_tag(const char* tag) {
+    if (!strcmp(tag, "b") || !strcmp(tag, "strong")) return FLAG_BOLD;
+    if (!strcmp(tag, "i") || !strcmp(tag, "em"))     return FLAG_ITALIC;
+    if (!strcmp(tag, "u"))                            return FLAG_UNDERLINE;
+    if (!strcmp(tag, "s") || !strcmp(tag, "strike") ||
+        !strcmp(tag, "del"))                          return FLAG_STRIKE;
+    if (!strcmp(tag, "mark"))                         return FLAG_MARK;
+    if (!strcmp(tag, "small"))                        return FLAG_SMALL;
+    if (!strcmp(tag, "big"))                          return FLAG_BIG;
+    if (!strcmp(tag, "sub"))                          return FLAG_SUB;
+    if (!strcmp(tag, "sup"))                          return FLAG_SUP;
+    if (!strcmp(tag, "tt") || !strcmp(tag, "code") ||
+        !strcmp(tag, "kbd") || !strcmp(tag, "samp"))  return FLAG_CODE;
+    return -1;
+}
 
 static void di_free(DocInline* in) {
     pluto_free(in->text);
@@ -1360,6 +1518,9 @@ static void d_datalist_free(DocDatalist* dl) {
     }
     pluto_free(dl->opts);
 }
+
+
+/* ── old recursive walker (retained for cell content only) ──────────────── */
 
 static void d_handle_element(DocState* st, DomNode* n) {
     const char* tag = n->tag;
@@ -2465,7 +2626,1515 @@ static void d_handle_element(DocState* st, DomNode* n) {
     d_walk_children(st, n);
 }
 
-/* ── walker ───────────────────────────────────────────────────────────── */
+/* ── iterative walker ────────────────────────────────────────────────── */
+
+static void d_walk_iterative(DocState* st, DomNode* root) {
+    walk_init();
+    g_walkSp = 0;
+    walk_push();
+    g_walkStack[0].kind = WENTRY_NODE;
+    g_walkStack[0].node = root;
+
+    while (g_walkSp > 0) {
+        WalkEntry* e = walk_pop();
+
+        if (e->kind == WENTRY_MATHTEXT) {
+            if (e->savedPtr != NULL) {
+                sb_append_str(&st->mathParts, (const char*)e->savedPtr);
+                pluto_free(e->savedPtr);
+            }
+            continue;
+        }
+        if (e->kind == WENTRY_NODE) {
+            DomNode* n = e->node;
+            if (n == NULL) continue;
+            tasks_yield_check();
+            if (n->kind == DOM_TEXT) {
+                d_handle_text_node(st, n);
+                continue;
+            }
+            if (n->kind != DOM_ELEMENT) continue;
+            if (d_is_display_none(n->attrs)) continue;
+            int inertHere = da_has(n->attrs, "inert");
+            if (inertHere) st->inert++;
+
+            const char* tag = n->tag;
+            StrMap* attrs = n->attrs;
+
+            /* ── leaf tags: no children ─────────────────────────── */
+
+            if (!strcmp(tag, "script") || !strcmp(tag, "style") ||
+                !strcmp(tag, "title"))
+                { if (inertHere) st->inert--; continue; }
+
+            if (!strcmp(tag, "template") || !strcmp(tag, "menuitem") ||
+                !strcmp(tag, "content") || !strcmp(tag, "shadow") ||
+                !strcmp(tag, "geolocation"))
+                { if (inertHere) st->inert--; continue; }
+
+            if (!strcmp(tag, "base") || !strcmp(tag, "link") ||
+                !strcmp(tag, "col") || !strcmp(tag, "colgroup") ||
+                !strcmp(tag, "source") || !strcmp(tag, "track") ||
+                !strcmp(tag, "param") || !strcmp(tag, "frameset") ||
+                !strcmp(tag, "frame"))
+                { if (inertHere) st->inert--; continue; }
+
+            if (!strcmp(tag, "img")) {
+                d_handle_image(st, attrs);
+                if (inertHere) st->inert--;
+                continue;
+            }
+            if (!strcmp(tag, "br")) {
+                d_break_inline(st, DIT_BR);
+                if (inertHere) st->inert--;
+                continue;
+            }
+            if (!strcmp(tag, "wbr")) {
+                d_break_inline(st, DIT_WBR);
+                if (inertHere) st->inert--;
+                continue;
+            }
+            if (!strcmp(tag, "hr")) {
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_HR);
+                if (b != NULL) { b->spacingTop = 6; b->spacingBottom = 6; doc_add_block(st, b); }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            if (!strcmp(tag, "video") || !strcmp(tag, "audio") ||
+                !strcmp(tag, "iframe") || !strcmp(tag, "canvas") ||
+                !strcmp(tag, "object") || !strcmp(tag, "embed") ||
+                !strcmp(tag, "portal")) {
+                d_handle_media_placeholder(st, tag, n, attrs);
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            if (!strcmp(tag, "progress") || !strcmp(tag, "meter")) {
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_METER);
+                if (b != NULL) {
+                    int ok = 0; double v;
+                    v = d_tonum(da_get(attrs, "value"), &ok); b->mValue = ok ? v : 0;
+                    v = d_tonum(da_get(attrs, "max"), &ok); b->mMax = ok ? v : 1;
+                    if (b->mMax <= 0) b->mMax = 1;
+                    v = d_tonum(da_get(attrs, "min"), &ok); b->mMin = ok ? v : 0;
+                    v = d_tonum(da_get(attrs, "low"), &ok); b->mLow = ok ? v : 0;
+                    v = d_tonum(da_get(attrs, "high"), &ok); b->mHigh = ok ? v : b->mMax;
+                    v = d_tonum(da_get(attrs, "optimum"), &ok); b->mOptimum = ok ? v : 0;
+                    const char* lb = da_get(attrs, "title");
+                    b->boxLabel = pluto_strdup((lb != NULL) ? lb : "");
+                    doc_add_block(st, b);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            if (!strcmp(tag, "fencedframe")) {
+                doc_flush_block(st);
+                int okw = 0, okh = 0;
+                double wv = d_tonum(da_get(attrs, "width"), &okw);
+                double hv = d_tonum(da_get(attrs, "height"), &okh);
+                int w = okw ? (int)wv : 160;
+                int h = okh ? (int)hv : 60;
+                if (w > 360) w = 360;
+                if (h > 120) h = 120;
+                DocBlock* b = d_new_block(DB_PLACEHOLDER);
+                if (b != NULL) {
+                    b->phTag = pluto_strdup("fencedframe");
+                    b->boxLabel = pluto_strdup("[fencedframe]");
+                    b->width = w; b->height = h;
+                    doc_add_block(st, b);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            if (!strcmp(tag, "meta")) {
+                const char* he = da_get(attrs, "http-equiv");
+                const char* ct = da_get(attrs, "content");
+                if (he != NULL && ct != NULL && strcasecmp(he, "refresh") == 0) {
+                    double delay = 0; char* u = NULL;
+                    if (d_parse_meta_content(ct, &delay, &u)) {
+                        st->hasMetaRefresh = 1; st->metaDelay = delay;
+                        pluto_free(st->metaUrl); st->metaUrl = u;
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            if (!strcmp(tag, "td") || !strcmp(tag, "th"))
+                { if (inertHere) st->inert--; continue; }
+
+            if (!strcmp(tag, "tr")) {
+                if (st->tbl != NULL && st->cell == NULL)
+                    d_handle_row(st, n, st->tbl);
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* ── inline formatting tags: increment flag, push EXIT + children ── */
+            {
+                int flagIdx = d_flag_index_for_tag(tag);
+                if (flagIdx >= 0) {
+                    unsigned char* fld = d_flag_by_index(st, flagIdx);
+                    if (fld) (*fld)++;
+                    /* push EXIT first so it runs after children */
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].node = NULL;
+                    g_walkStack[g_walkSp - 1].postType = flagIdx;
+                    /* push children in reverse */
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+            }
+
+            /* ── simple block tags: ENTER creates block + pushes EXIT, EXIT flushes ── */
+
+            /* h1-h6 */
+            if (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6' && tag[2] == '\0') {
+                doc_flush_block(st);
+                if (st->cell != NULL) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                DBox sp;
+                d_parse_box_spacing(attrs, &sp);
+                DocBlock* b = d_new_block(DB_HEADING);
+                if (b != NULL) {
+                    b->level = tag[1] - '0';
+                    b->spacingTop = sp.top;
+                    b->spacingBottom = sp.bottom;
+                    b->align = d_parse_align(attrs);
+                    b->indent = sp.left;
+                    if (d_is_inverted_style(attrs)) b->invert = 1;
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* p/div/section/article/header/footer/main/nav/aside/address/hgroup/noindex/search */
+            if (!strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
+                !strcmp(tag, "article") || !strcmp(tag, "header") ||
+                !strcmp(tag, "footer") || !strcmp(tag, "main") ||
+                !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
+                !strcmp(tag, "address") || !strcmp(tag, "hgroup") ||
+                !strcmp(tag, "noindex") || !strcmp(tag, "search")) {
+                if (st->cell != NULL) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                doc_flush_block(st);
+                DBox sp;
+                d_parse_box_spacing(attrs, &sp);
+                DocBlock* b = d_new_block(DB_PARAGRAPH);
+                if (b != NULL) {
+                    b->align = d_parse_align(attrs);
+                    if (d_is_inverted_style(attrs)) b->invert = 1;
+                    b->spacingTop = sp.top;
+                    b->spacingBottom = sp.bottom;
+                    b->indent = sp.left;
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* center/marquee */
+            if (!strcmp(tag, "center") || !strcmp(tag, "marquee")) {
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_PARAGRAPH);
+                if (b != NULL) {
+                    b->align = "center";
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* blockquote */
+            if (!strcmp(tag, "blockquote")) {
+                doc_flush_block(st);
+                DBox sp;
+                d_parse_box_spacing(attrs, &sp);
+                DocBlock* b = d_new_block(DB_BLOCKQUOTE);
+                if (b != NULL) {
+                    b->align = d_parse_align(attrs);
+                    if (d_is_inverted_style(attrs)) b->invert = 1;
+                    b->indent = sp.left + 12;
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* ── list tags ──────────────────────────────────────────────── */
+
+            /* ul/ol/menu/dir */
+            if (!strcmp(tag, "ul") || !strcmp(tag, "ol") || !strcmp(tag, "menu") ||
+                !strcmp(tag, "dir")) {
+                DListCtx* nc = (DListCtx*)pluto_malloc(sizeof(DListCtx));
+                if (nc != NULL) {
+                    memset(nc, 0, sizeof(*nc));
+                    nc->depth = (st->listCtx != NULL) ? st->listCtx->depth + 1 : 1;
+                    nc->count = 0;
+                    nc->start = 1;
+                    nc->markerType = "1";
+                    nc->ordered = !strcmp(tag, "ol");
+                    if (nc->ordered) {
+                        int ok = 0;
+                        double sv = d_tonum(da_get(attrs, "start"), &ok);
+                        if (ok) nc->start = (int)sv;
+                        nc->reversed = da_has(attrs, "reversed");
+                        const char* ty = da_get(attrs, "type");
+                        if (ty != NULL && (!strcmp(ty, "1") || !strcmp(ty, "a") ||
+                                           !strcmp(ty, "A") || !strcmp(ty, "i") ||
+                                           !strcmp(ty, "I")))
+                            nc->markerType = ty;
+                    }
+                    DListCtx* old = st->listCtx;
+                    st->listCtx = nc;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_UL;
+                    g_walkStack[g_walkSp - 1].savedPtr = old;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* li */
+            if (!strcmp(tag, "li")) {
+                static const char* const MARKERS[5] = {"1", "a", "A", "i", "I"};
+                DListCtx def;
+                memset(&def, 0, sizeof(def));
+                def.ordered = 0; def.start = 1; def.count = 0;
+                def.depth = 1; def.markerType = "1";
+                DListCtx* cx = (st->listCtx != NULL) ? st->listCtx : &def;
+                long number;
+                int vok = 0;
+                double vv = d_tonum(da_get(attrs, "value"), &vok);
+                if (vok) {
+                    number = (long)vv;
+                    cx->start = cx->reversed ? number - 1 : number + 1;
+                    cx->count = 0;
+                } else {
+                    cx->count++;
+                    number = cx->reversed
+                        ? (long)cx->start - ((long)cx->count - 1)
+                        : (long)cx->start + ((long)cx->count - 1);
+                }
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_LIST_ITEM);
+                if (b != NULL) {
+                    b->isOrdered = cx->ordered;
+                    b->number = number;
+                    for (int mi = 0; mi < 5; mi++)
+                        if (cx->markerType != NULL && strcmp(cx->markerType, MARKERS[mi]) == 0) {
+                            b->markerType = MARKERS[mi]; break;
+                        }
+                    if (b->markerType == NULL) b->markerType = "1";
+                    b->depth = cx->depth;
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* dl */
+            if (!strcmp(tag, "dl")) {
+                st->dlDepth++;
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_NONE;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* dt/dd */
+            if (!strcmp(tag, "dt") || !strcmp(tag, "dd")) {
+                int isDt = !strcmp(tag, "dt");
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_PARAGRAPH);
+                if (b != NULL) {
+                    if (isDt) b->dtFlag = 1;
+                    else { b->ddFlag = 1; b->indent = 20 * st->dlDepth; }
+                    st->currentBlock = b;
+                }
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* q */
+            if (!strcmp(tag, "q")) {
+                d_quote_char(st);
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_Q;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* span/font/time/data */
+            if (!strcmp(tag, "span") || !strcmp(tag, "font") ||
+                !strcmp(tag, "time") || !strcmp(tag, "data")) {
+                SpanSave* sv = (SpanSave*)pluto_malloc(sizeof(SpanSave));
+                if (sv != NULL) {
+                    sv->savedFlags = st->f;
+                    sv->tagKind = !strcmp(tag, "time") ? 1 : (!strcmp(tag, "data") ? 2 : 0);
+                    DStyle styl;
+                    d_parse_style(&styl, da_get(attrs, "style"));
+                    const char* fw = d_style_get(&styl, "font-weight");
+                    if (fw != NULL && strstr(fw, "bold") != NULL) st->f.bold++;
+                    const char* fsy = d_style_get(&styl, "font-style");
+                    if (fsy != NULL && strstr(fsy, "italic") != NULL) st->f.italic++;
+                    const char* td = d_style_get(&styl, "text-decoration");
+                    if (td != NULL) {
+                        if (strstr(td, "underline") != NULL) st->f.underline++;
+                        if (strstr(td, "line-through") != NULL) st->f.strike++;
+                    }
+                    const char* col = d_style_get(&styl, "color");
+                    if (col != NULL && (strstr(col, "#FFFF") != NULL || strstr(col, "#fff") != NULL))
+                        st->f.invert++;
+                    const char* fsz = d_style_get(&styl, "font-size");
+                    if (fsz != NULL) {
+                        if (strstr(fsz, "large") != NULL) st->f.big++;
+                        else if (strstr(fsz, "small") != NULL) st->f.small++;
+                    }
+                    const char* va = d_style_get(&styl, "vertical-align");
+                    if (va != NULL && strcmp(va, "super") == 0) st->f.sup++;
+                    else if (va != NULL && strcmp(va, "sub") == 0) st->f.sub++;
+                    const char* bgc = d_style_get(&styl, "background-color");
+                    if (bgc != NULL && bgc[0] != '\0') st->f.mark++;
+                    if (!strcmp(tag, "font")) {
+                        int ok = 0;
+                        double szv = d_tonum(da_get(attrs, "size"), &ok);
+                        if (ok) {
+                            if (szv >= 5) st->f.big++;
+                            else if (szv <= 2) st->f.small++;
+                        }
+                    }
+                    sv->countBefore = (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_SPAN;
+                    g_walkStack[g_walkSp - 1].savedPtr = sv;
+                    g_walkStack[g_walkSp - 1].node = n;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* a */
+            if (!strcmp(tag, "a")) {
+                const char* rawHref = da_get(attrs, "href");
+                int haveResolved = 0;
+                if (d_valid_href(rawHref)) {
+                    StrBuf rb;
+                    sb_init(&rb);
+                    url_resolve(st->baseUrl, rawHref, &rb);
+                    st->currentHref = sb_detach(&rb);
+                    st->currentAnchorIndex = st->anchorCounter++;
+                    haveResolved = 1;
+                }
+                sb_clear(&st->linkText);
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].postType = WPOST_A;
+                g_walkStack[g_walkSp - 1].node = n;
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* pre/xmp/listing/plaintext */
+            if (!strcmp(tag, "pre") || !strcmp(tag, "xmp") || !strcmp(tag, "listing") ||
+                !strcmp(tag, "plaintext")) {
+                doc_flush_block(st);
+                PreSave* sv = (PreSave*)pluto_malloc(sizeof(PreSave));
+                if (sv != NULL) {
+                    sv->savedPreBuffer = st->preBuffer;
+                    sv->savedInPre = st->inPre;
+                    sb_init(&st->preBuffer);
+                    st->inPre = 1;
+                    if (!strcmp(tag, "pre")) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                        g_walkStack[g_walkSp - 1].postType = WPOST_PRE;
+                        g_walkStack[g_walkSp - 1].savedPtr = sv;
+                        for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                            g_walkStack[g_walkSp - 1].node = n->children[i];
+                        }
+                    } else {
+                        char* codeText = d_concat_node_text(n);
+                        DocBlock* b = d_new_block(DB_CODE_BLOCK);
+                        if (b == NULL) {
+                            pluto_free(codeText);
+                        } else {
+                            b->codeText = codeText;
+                            d_split_code_lines(b);
+                            doc_add_block(st, b);
+                        }
+                        sb_clear(&st->preBuffer);
+                        st->preBuffer = sv->savedPreBuffer;
+                        st->inPre = sv->savedInPre;
+                    }
+                    pluto_free(sv);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* figure */
+            if (!strcmp(tag, "figure")) {
+                doc_flush_block(st);
+                FigureSave* sv = (FigureSave*)pluto_malloc(sizeof(FigureSave));
+                if (sv != NULL) {
+                    sv->savedFigCaption = st->figCaption;
+                    sv->savedFigureImage = st->figureImage;
+                    sv->savedFigureCaptionDone = st->figureCaptionDone;
+                    sv->savedFigureActive = st->figureActive;
+                    sb_init(&st->figCaption);
+                    st->figureImage = NULL;
+                    st->figureCaptionDone = 0;
+                    st->figureActive = 1;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_FIGURE;
+                    g_walkStack[g_walkSp - 1].savedPtr = sv;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* figcaption */
+            if (!strcmp(tag, "figcaption")) {
+                int* savedDone = (int*)pluto_malloc(sizeof(int));
+                if (savedDone != NULL) {
+                    *savedDone = st->figureCaptionDone;
+                    st->figureCaptionDone = 0;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_FIGURE_CAPTION;
+                    g_walkStack[g_walkSp - 1].savedPtr = savedDone;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* form */
+            if (!strcmp(tag, "form")) {
+                FormSave* sv = (FormSave*)pluto_malloc(sizeof(FormSave));
+                if (sv != NULL) {
+                    sv->savedFormAction = st->formAction;
+                    sv->savedFormMethod = st->formMethod;
+                    StrBuf rb;
+                    sb_init(&rb);
+                    url_resolve(st->baseUrl, da_get(attrs, "action"), &rb);
+                    st->formAction = sb_detach(&rb);
+                    const char* m = da_get(attrs, "method");
+                    st->formMethod = (m != NULL && m[0] != '\0') ? d_lower_dup(m)
+                                                                 : pluto_strdup("get");
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_FORM;
+                    g_walkStack[g_walkSp - 1].savedPtr = sv;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* textarea */
+            if (!strcmp(tag, "textarea")) {
+                doc_flush_block(st);
+                TextareaSave* sv = (TextareaSave*)pluto_malloc(sizeof(TextareaSave));
+                if (sv != NULL) {
+                    sv->savedInTextarea = st->inTextarea;
+                    sv->savedTextareaName = st->textareaName;
+                    sv->savedTextareaBuffer = st->textareaBuffer;
+                    sb_init(&st->textareaBuffer);
+                    const char* nm = da_get(attrs, "name");
+                    st->textareaName =
+                        pluto_strdup((nm != NULL && nm[0] != '\0') ? nm : "q");
+                    st->inTextarea = 1;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_TEXTAREA;
+                    g_walkStack[g_walkSp - 1].savedPtr = sv;
+                    g_walkStack[g_walkSp - 1].node = n;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* button */
+            if (!strcmp(tag, "button")) {
+                char* bt = d_lower_dup(da_get(attrs, "type"));
+                const char* btype = (bt != NULL) ? bt : "submit";
+                if (!strcmp(btype, "submit") || !strcmp(btype, "button")) {
+                    char* raw = d_concat_node_text(n);
+                    d_collapse_trim(raw);
+                    int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup(btype);
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        if (raw[0] != '\0')
+                            b->submitLabel = pluto_strdup(raw);
+                        else
+                            b->submitLabel = pluto_strdup(
+                                !strcmp(btype, "button") ? "Button" : "Submit");
+                        const char* fa = da_get(attrs, "formaction");
+                        if (fa != NULL && fa[0] != '\0') {
+                            StrBuf fb;
+                            sb_init(&fb);
+                            url_resolve(st->baseUrl, fa, &fb);
+                            pluto_free(b->formAction);
+                            b->formAction = sb_detach(&fb);
+                        }
+                        const char* fm = da_get(attrs, "formmethod");
+                        if (fm != NULL && fm[0] != '\0') {
+                            pluto_free(b->formMethod);
+                            b->formMethod = d_lower_dup(fm);
+                        }
+                        b->disabledFlag = (unsigned char)dis;
+                        b->blockInert = (unsigned char)((st->inert > 0) || dis);
+                        doc_add_block(st, b);
+                    }
+                    pluto_free(raw);
+                }
+                pluto_free(bt);
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* table */
+            if (!strcmp(tag, "table")) {
+                if (st->cell != NULL) {
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                doc_flush_block(st);
+                DTableBuild tbl;
+                memset(&tbl, 0, sizeof(tbl));
+                st->tbl = &tbl;
+                StrBuf caption;
+                sb_init(&caption);
+                for (size_t i = 0; i < n->nChildren; i++) {
+                    DomNode* c = n->children[i];
+                    if (c->kind != DOM_ELEMENT) continue;
+                    if (!strcmp(c->tag, "caption")) {
+                        char* t = d_concat_node_text(c);
+                        d_collapse_trim(t);
+                        if (t[0] != '\0') sb_append_str(&caption, t);
+                        pluto_free(t);
+                    } else if (!strcmp(c->tag, "tr")) {
+                        d_handle_row(st, c, &tbl);
+                    } else if (!strcmp(c->tag, "thead") || !strcmp(c->tag, "tbody") ||
+                               !strcmp(c->tag, "tfoot")) {
+                        for (size_t j = 0; j < c->nChildren; j++) {
+                            DomNode* r = c->children[j];
+                            if (r->kind == DOM_ELEMENT && !strcmp(r->tag, "tr"))
+                                d_handle_row(st, r, &tbl);
+                        }
+                    }
+                }
+                st->tbl = NULL;
+                int border = da_has(attrs, "border");
+                const char* bw = da_get(attrs, "border");
+                if (bw != NULL && strcmp(bw, "0") == 0) border = 0;
+                if (tbl.nRows > 0) {
+                    DocBlock* b = d_new_block(DB_TABLE);
+                    if (b != NULL) {
+                        b->rows = tbl.rows;
+                        b->nRows = tbl.nRows;
+                        b->capRows = tbl.capRows;
+                        b->tableCaption = (caption.len > 0) ? sb_detach(&caption) : NULL;
+                        if (caption.len == 0) sb_clear(&caption);
+                        b->tableBorder = border;
+                        const char* tw = da_get(attrs, "width");
+                        if (tw != NULL && tw[0] != '\0')
+                            b->tableWidth = pluto_strdup(tw);
+                        b->align = d_parse_align(attrs);
+                        doc_add_block(st, b);
+                    } else {
+                        for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
+                        pluto_free(tbl.rows);
+                        sb_clear(&caption);
+                    }
+                } else {
+                    for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
+                    pluto_free(tbl.rows);
+                    sb_clear(&caption);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* fieldset */
+            if (!strcmp(tag, "fieldset")) {
+                if (st->cell != NULL) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                } else {
+                    doc_flush_block(st);
+                    char* label = NULL;
+                    for (size_t i = 0; i < n->nChildren; i++) {
+                        DomNode* c = n->children[i];
+                        if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")) {
+                            label = d_concat_node_text(c);
+                            d_collapse_trim(label);
+                            break;
+                        }
+                    }
+                    DocBlock* b = d_new_block(DB_BOX_OPEN);
+                    if (b != NULL) {
+                        b->boxLabel = (label != NULL && label[0] != '\0')
+                                          ? pluto_strdup(label) : NULL;
+                        doc_add_block(st, b);
+                    }
+                    pluto_free(label);
+                    FieldsetSave* sv = (FieldsetSave*)pluto_malloc(sizeof(FieldsetSave));
+                    if (sv != NULL) {
+                        sv->savedDisabledDepth = st->disabledDepth;
+                        if (da_has(attrs, "disabled")) st->disabledDepth++;
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                        g_walkStack[g_walkSp - 1].postType = WPOST_FIELDSET;
+                        g_walkStack[g_walkSp - 1].savedPtr = sv;
+                    }
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        DomNode* c = n->children[i];
+                        if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend"))) {
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                            g_walkStack[g_walkSp - 1].node = c;
+                        }
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* details */
+            if (!strcmp(tag, "details")) {
+                if (st->cell != NULL) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                } else {
+                    doc_flush_block(st);
+                    st->detailsIndex++;
+                    DetailsSave* sv = (DetailsSave*)pluto_malloc(sizeof(DetailsSave));
+                    if (sv != NULL) {
+                        snprintf(sv->dkey, sizeof(sv->dkey), "d%d", st->detailsIndex);
+                        char* label = NULL;
+                        for (size_t i = 0; i < n->nChildren; i++) {
+                            DomNode* c = n->children[i];
+                            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")) {
+                                label = d_concat_node_text(c);
+                                d_collapse_trim(label);
+                                break;
+                            }
+                        }
+                        sv->isOpen = da_has(attrs, "open");
+                        sv->isOpen = d_details_override(st, sv->dkey, sv->isOpen);
+                        DocBlock* b = d_new_block(DB_BOX_OPEN);
+                        if (b != NULL) {
+                            if (label != NULL && label[0] != '\0') {
+                                StrBuf bl;
+                                sb_init(&bl);
+                                sb_append_str(&bl, "> ");
+                                sb_append_str(&bl, label);
+                                b->boxLabel = sb_detach(&bl);
+                            }
+                            b->toggleKey = pluto_strdup(sv->dkey);
+                            b->toggleOpen = sv->isOpen;
+                            doc_add_block(st, b);
+                        }
+                        pluto_free(label);
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                        g_walkStack[g_walkSp - 1].postType = WPOST_DETAILS;
+                        g_walkStack[g_walkSp - 1].savedPtr = sv;
+                        if (sv->isOpen) {
+                            for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                                DomNode* c = n->children[i];
+                                if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary"))) {
+                                    walk_push();
+                                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                                    g_walkStack[g_walkSp - 1].node = c;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* dialog */
+            if (!strcmp(tag, "dialog")) {
+                if (st->cell != NULL) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                } else if (!da_has(attrs, "open")) {
+                    /* closed dialog: not rendered */
+                } else {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_BOX_OPEN);
+                    if (b != NULL) doc_add_block(st, b);
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_DIALOG;
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* math */
+            if (!strcmp(tag, "math")) {
+                doc_flush_block(st);
+                MathSave* sv = (MathSave*)pluto_malloc(sizeof(MathSave));
+                if (sv != NULL) {
+                    sv->savedInMath = st->inMath;
+                    sv->savedMathParts = st->mathParts;
+                    sb_init(&st->mathParts);
+                    st->inMath = 1;
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                    g_walkStack[g_walkSp - 1].postType = WPOST_MATH;
+                    g_walkStack[g_walkSp - 1].savedPtr = sv;
+                }
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* math sub-tags (only when inMath) */
+            if (st->inMath) {
+                if (!strcmp(tag, "mfrac") || !strcmp(tag, "msup") || !strcmp(tag, "msub")) {
+                    const char* sep = !strcmp(tag, "mfrac") ? " / "
+                                    : !strcmp(tag, "msup") ? "^" : "_";
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        if (i > 0) {
+                            char* sp = pluto_strdup(sep);
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                            g_walkStack[g_walkSp - 1].savedPtr = sp;
+                        }
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                if (!strcmp(tag, "msubsup")) {
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        if (i == 2) {
+                            char* sp = pluto_strdup("^");
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                            g_walkStack[g_walkSp - 1].savedPtr = sp;
+                        }
+                        if (i == 1) {
+                            char* sp = pluto_strdup("_");
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                            g_walkStack[g_walkSp - 1].savedPtr = sp;
+                        }
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                if (!strcmp(tag, "msqrt")) {
+                    sb_append_str(&st->mathParts, "sqrt(");
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    char* close = pluto_strdup(")");
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                    g_walkStack[g_walkSp - 1].savedPtr = close;
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                if (!strcmp(tag, "mroot")) {
+                    sb_append_str(&st->mathParts, "sqrt(");
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        if (i > 0) {
+                            char* sp = pluto_strdup("^(1/");
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                            g_walkStack[g_walkSp - 1].savedPtr = sp;
+                        }
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    char* close = pluto_strdup("))");
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                    g_walkStack[g_walkSp - 1].savedPtr = close;
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                if (!strcmp(tag, "mfenced")) {
+                    char* openCh = d_mfenced_attr(attrs, "open", "(");
+                    char* closeCh = d_mfenced_attr(attrs, "close", ")");
+                    char* sepStr = d_mfenced_attr(attrs, "separators", ",");
+                    sb_append_str(&st->mathParts, openCh);
+                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        if (i > 0) {
+                            char* sp = pluto_strdup(sepStr);
+                            walk_push();
+                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                            g_walkStack[g_walkSp - 1].savedPtr = sp;
+                        }
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
+                    }
+                    char* cl = pluto_strdup(closeCh);
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                    g_walkStack[g_walkSp - 1].savedPtr = cl;
+                    pluto_free(openCh);
+                    pluto_free(closeCh);
+                    pluto_free(sepStr);
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+                if (!strcmp(tag, "mspace")) {
+                    char* sp = pluto_strdup(" ");
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                    g_walkStack[g_walkSp - 1].savedPtr = sp;
+                    if (inertHere) st->inert--;
+                    continue;
+                }
+            }
+
+            /* input */
+            if (!strcmp(tag, "input")) {
+                char* ty = d_lower_dup(da_get(attrs, "type"));
+                const char* inputType = (ty != NULL) ? ty : "text";
+                const char* ph = da_get(attrs, "placeholder");
+                if (ph == NULL || ph[0] == '\0') ph = da_get(attrs, "aria-label");
+
+                if (!strcmp(inputType, "hidden")) {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup("hidden");
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        d_form_overrides(st, attrs, b);
+                        doc_add_block(st, b);
+                    }
+                } else if (!strcmp(inputType, "checkbox") ||
+                           !strcmp(inputType, "radio")) {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_CHECKBOX_FIELD);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup(inputType);
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        d_form_overrides(st, attrs, b);
+                        b->radioFlag = !strcmp(inputType, "radio");
+                        b->checkedFlag = (unsigned char)da_has(attrs, "checked");
+                        const char* lb = da_get(attrs, "label");
+                        if (lb == NULL || lb[0] == '\0') lb = da_get(attrs, "title");
+                        if (lb == NULL || lb[0] == '\0') lb = ph;
+                        if (lb == NULL || lb[0] == '\0') {
+                            const char* nm = da_get(attrs, "name");
+                            lb = (nm != NULL) ? nm : "";
+                        }
+                        b->checkboxLabel = pluto_strdup(lb);
+                        doc_add_block(st, b);
+                    }
+                } else if (!strcmp(inputType, "text") ||
+                           !strcmp(inputType, "search") ||
+                           !strcmp(inputType, "email") ||
+                           !strcmp(inputType, "url") ||
+                           !strcmp(inputType, "number") ||
+                           !strcmp(inputType, "password") ||
+                           !strcmp(inputType, "tel") ||
+                           !strcmp(inputType, "date") ||
+                           !strcmp(inputType, "time") ||
+                           !strcmp(inputType, "month") ||
+                           !strcmp(inputType, "week") ||
+                           !strcmp(inputType, "datetime-local") ||
+                           !strcmp(inputType, "color")) {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup(inputType);
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        d_form_overrides(st, attrs, b);
+                        b->placeholder = pluto_strdup((ph != NULL) ? ph : "");
+                        int ok = 0;
+                        double sv = d_tonum(da_get(attrs, "size"), &ok);
+                        b->fieldWidth = ok ? (int)sv : -1;
+                        doc_add_block(st, b);
+                    }
+                } else if (!strcmp(inputType, "submit") ||
+                           !strcmp(inputType, "button")) {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup(inputType);
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        d_form_overrides(st, attrs, b);
+                        const char* val = da_get(attrs, "value");
+                        if (val != NULL && val[0] != '\0')
+                            b->submitLabel = pluto_strdup(val);
+                        else
+                            b->submitLabel = pluto_strdup(
+                                !strcmp(inputType, "button") ? "Button" : "Submit");
+                        doc_add_block(st, b);
+                    }
+                } else if (!strcmp(inputType, "file") ||
+                           !strcmp(inputType, "reset") ||
+                           !strcmp(inputType, "image")) {
+                    doc_flush_block(st);
+                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup(inputType);
+                        DInputCommon c;
+                        d_input_common(st, attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        d_form_overrides(st, attrs, b);
+                        const char* val = da_get(attrs, "value");
+                        if (val != NULL && val[0] != '\0')
+                            b->submitLabel = pluto_strdup(val);
+                        else
+                            b->submitLabel = pluto_strdup(
+                                !strcmp(inputType, "file")     ? "Choose File"
+                                : !strcmp(inputType, "reset")  ? "Reset"
+                                                               : "Submit");
+                        doc_add_block(st, b);
+                    }
+                }
+                pluto_free(ty);
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* select */
+            if (!strcmp(tag, "select")) {
+                doc_flush_block(st);
+                DocBlock* b = d_new_block(DB_SELECT_FIELD);
+                if (b != NULL) {
+                    DInputCommon c;
+                    d_input_common(st, attrs, &c);
+                    d_collect_select_options(st, n, b);
+                    long sel = 1;
+                    for (size_t i = 0; i < b->nOptions; i++)
+                        if (b->options[i].selected && !b->options[i].disabled)
+                            sel = (long)i + 1;
+                    b->selectedIndex = (int)sel;
+                    b->multipleFlag = (unsigned char)da_has(attrs, "multiple");
+                    d_block_set_common(b, &c, st);
+                    if (b->nOptions > 0)
+                        doc_add_block(st, b);
+                    else
+                        db_free(b);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* map */
+            if (!strcmp(tag, "map")) {
+                const char* nameAttr = da_get(attrs, "name");
+                const char* name = nameAttr;
+                if (name != NULL && name[0] == '#') name++;
+                if (name != NULL && name[0] != '\0') {
+                    DocMap m;
+                    memset(&m, 0, sizeof(m));
+                    m.name = pluto_strdup(name);
+                    d_collect_areas(st, n, &m);
+                    if (m.name != NULL) {
+                        DocDocument* doc = st->doc;
+                        DocMap* arr = pluto_realloc(
+                            doc->maps, (doc->nMaps + 1) * sizeof(DocMap));
+                        if (arr != NULL) {
+                            doc->maps = arr;
+                            doc->capMaps = doc->nMaps + 1;
+                            doc->maps[doc->nMaps++] = m;
+                        } else {
+                            d_map_free(&m);
+                        }
+                    } else {
+                        d_map_free(&m);
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* datalist */
+            if (!strcmp(tag, "datalist")) {
+                const char* id = da_get(attrs, "id");
+                if (id != NULL && id[0] != '\0') {
+                    DocDatalist dl;
+                    memset(&dl, 0, sizeof(dl));
+                    dl.id = pluto_strdup(id);
+                    for (size_t i = 0; i < n->nChildren; i++) {
+                        DomNode* c = n->children[i];
+                        if (c->kind != DOM_ELEMENT || strcmp(c->tag, "option") != 0)
+                            continue;
+                        char* text = d_concat_node_text(c);
+                        d_collapse_trim(text);
+                        const char* val = da_get(c->attrs, "value");
+                        DocDatalistOpt* arr = pluto_realloc(
+                            dl.opts, (dl.nOpts + 1) * sizeof(DocDatalistOpt));
+                        if (arr == NULL) {
+                            pluto_free(text);
+                            break;
+                        }
+                        dl.opts = arr;
+                        dl.capOpts = dl.nOpts + 1;
+                        dl.opts[dl.nOpts].text = text;
+                        dl.opts[dl.nOpts].value = pluto_strdup(
+                            (val != NULL) ? val : text);
+                        dl.nOpts++;
+                    }
+                    if (dl.id != NULL) {
+                        DocDocument* doc = st->doc;
+                        DocDatalist* arr = pluto_realloc(
+                            doc->datalists,
+                            (doc->nDatalists + 1) * sizeof(DocDatalist));
+                        if (arr != NULL) {
+                            doc->datalists = arr;
+                            doc->capDatalists = doc->nDatalists + 1;
+                            doc->datalists[doc->nDatalists++] = dl;
+                        } else {
+                            d_datalist_free(&dl);
+                        }
+                    } else {
+                        d_datalist_free(&dl);
+                    }
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* svg */
+            if (!strcmp(tag, "svg")) {
+                doc_flush_block(st);
+                char* xml = d_serialize_svg_node(n);
+                int okw = 0, okh = 0;
+                double wv = d_tonum(da_get(attrs, "width"), &okw);
+                double hv = d_tonum(da_get(attrs, "height"), &okh);
+                int w = (okw && wv > 0) ? (int)wv : 0;
+                int h = (okh && hv > 0) ? (int)hv : 0;
+                if (w <= 0 || h <= 0) {
+                    double vbW = 0, vbH = 0;
+                    d_parse_viewbox(da_get(attrs, "viewBox"), &vbW, &vbH);
+                    if (w <= 0 && vbW > 0) w = (int)vbW;
+                    if (h <= 0 && vbH > 0) h = (int)vbH;
+                }
+                if (w <= 0) w = 120;
+                if (h <= 0) h = 40;
+                if (w > 360) w = 360;
+                if (h > 180) h = 180;
+                const char* alt = "";
+                if (d_str_eq_ci(da_get(attrs, "role"), "img")) {
+                    const char* al = da_get(attrs, "aria-label");
+                    if (al == NULL || al[0] == '\0') al = da_get(attrs, "title");
+                    alt = (al != NULL) ? al : "";
+                }
+                DocBlock* b = d_new_block(DB_IMAGE);
+                if (b != NULL) {
+                    b->imgIsSvg = 1;
+                    b->svgXml = xml;
+                    b->width = w;
+                    b->height = h;
+                    b->alt = pluto_strdup(alt);
+                    b->imgHref = (st->currentHref != NULL)
+                                     ? pluto_strdup(st->currentHref) : NULL;
+                    b->align = d_parse_align(attrs);
+                    b->imgInert = st->inert > 0;
+                    doc_add_block(st, b);
+                } else {
+                    pluto_free(xml);
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* ── passthrough tags: just push children, no pre/post work ── */
+            if (!strcmp(tag, "abbr") || !strcmp(tag, "acronym") ||
+                !strcmp(tag, "noscript") || !strcmp(tag, "noembed") ||
+                !strcmp(tag, "noframes") || !strcmp(tag, "ruby") ||
+                !strcmp(tag, "rt") || !strcmp(tag, "rp") ||
+                !strcmp(tag, "rb") || !strcmp(tag, "rtc") ||
+                !strcmp(tag, "picture") || !strcmp(tag, "slot")) {
+                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                    walk_push();
+                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                    g_walkStack[g_walkSp - 1].node = n->children[i];
+                }
+                if (inertHere) st->inert--;
+                continue;
+            }
+
+            /* ── fall through: push children for remaining tags ──── */
+            for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                g_walkStack[g_walkSp - 1].node = n->children[i];
+            }
+
+            if (inertHere) st->inert--;
+        } else if (e->kind == WENTRY_ENTER) {
+            /* ENTER dispatch — tag-specific pre-work */
+        } else if (e->kind == WENTRY_EXIT) {
+            /* EXIT dispatch — tag-specific post-work */
+            if (e->postType >= 0 && e->postType < FLAG_COUNT) {
+                unsigned char* fld = d_flag_by_index(st, e->postType);
+                if (fld && *fld > 0) (*fld)--;
+            } else if (e->postType == WPOST_FLUSH) {
+                doc_flush_block(st);
+            } else if (e->postType == WPOST_UL) {
+                DListCtx* nc = (DListCtx*)st->listCtx;
+                st->listCtx = (DListCtx*)e->savedPtr;
+                pluto_free(nc);
+            } else if (e->postType == WPOST_NONE) {
+                st->dlDepth--;
+            } else if (e->postType == WPOST_Q) {
+                d_quote_char(st);
+            } else if (e->postType == WPOST_SPAN) {
+                SpanSave* sv = (SpanSave*)e->savedPtr;
+                if (sv != NULL) {
+                    if (sv->tagKind != 0) {
+                        long countAfter = (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
+                        if (sv->countBefore == countAfter && e->node != NULL) {
+                            const char* fb = sv->tagKind == 1
+                                ? da_get(e->node->attrs, "datetime")
+                                : da_get(e->node->attrs, "value");
+                            if (fb != NULL && fb[0] != '\0')
+                                doc_add_inline_text(st, fb);
+                        }
+                    }
+                    st->f = sv->savedFlags;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_A) {
+                if (st->currentHref != NULL) {
+                    char* lt = (st->linkText.len > 0) ? sb_detach(&st->linkText) : NULL;
+                    const char* rawHref = da_get(e->node->attrs, "href");
+                    const char* title = da_get(e->node->attrs, "title");
+                    const char* txt =
+                        (lt != NULL) ? lt : ((title != NULL && title[0]) ? title : rawHref);
+                    doc_push_link(st->doc, st->currentHref, txt, da_get(e->node->attrs, "target"));
+                    pluto_free(lt);
+                } else {
+                    sb_clear(&st->linkText);
+                }
+                pluto_free(st->currentHref);
+                st->currentHref = NULL;
+                st->currentAnchorIndex = -1;
+            } else if (e->postType == WPOST_PRE) {
+                PreSave* sv = (PreSave*)e->savedPtr;
+                if (sv != NULL) {
+                    char* codeText = sb_detach(&st->preBuffer);
+                    DocBlock* b = d_new_block(DB_CODE_BLOCK);
+                    if (b == NULL) {
+                        pluto_free(codeText);
+                    } else {
+                        b->codeText = codeText;
+                        d_split_code_lines(b);
+                        doc_add_block(st, b);
+                    }
+                    sb_clear(&st->preBuffer);
+                    st->preBuffer = sv->savedPreBuffer;
+                    st->inPre = sv->savedInPre;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_FIGURE) {
+                FigureSave* sv = (FigureSave*)e->savedPtr;
+                if (sv != NULL) {
+                    DocBlock* img = st->figureImage;
+                    st->figureImage = sv->savedFigureImage;
+                    st->figureActive = sv->savedFigureActive;
+                    st->figureCaptionDone = sv->savedFigureCaptionDone;
+                    if (img != NULL) {
+                        if (st->figCaption.len > 0)
+                            img->caption = sb_detach(&st->figCaption);
+                        else
+                            sb_clear(&st->figCaption);
+                        doc_add_block(st, img);
+                    } else if (st->figCaption.len > 0) {
+                        char* capText = sb_detach(&st->figCaption);
+                        DocBlock* b = d_new_block(DB_PARAGRAPH);
+                        if (b != NULL) {
+                            b->align = "center";
+                            DocInline in;
+                            memset(&in, 0, sizeof(in));
+                            in.type = DIT_TEXT;
+                            in.text = capText;
+                            in.textLen = strlen(capText);
+                            in.italic = 1;
+                            db_push_inline(b, in);
+                            doc_add_block(st, b);
+                        } else {
+                            pluto_free(capText);
+                        }
+                    } else {
+                        sb_clear(&st->figCaption);
+                    }
+                    st->figCaption = sv->savedFigCaption;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_FIGURE_CAPTION) {
+                int* savedDone = (int*)e->savedPtr;
+                if (savedDone != NULL) {
+                    st->figureCaptionDone = 1;
+                    pluto_free(savedDone);
+                }
+            } else if (e->postType == WPOST_FORM) {
+                FormSave* sv = (FormSave*)e->savedPtr;
+                if (sv != NULL) {
+                    pluto_free(st->formAction);
+                    pluto_free(st->formMethod);
+                    st->formAction = sv->savedFormAction;
+                    st->formMethod = sv->savedFormMethod;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_TEXTAREA) {
+                TextareaSave* sv = (TextareaSave*)e->savedPtr;
+                if (sv != NULL) {
+                    st->inTextarea = 0;
+                    int dis = da_has(e->node->attrs, "disabled") || st->disabledDepth > 0;
+                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
+                    if (b != NULL) {
+                        b->inputType = pluto_strdup("textarea");
+                        DInputCommon c;
+                        d_input_common(st, e->node->attrs, &c);
+                        d_block_set_common(b, &c, st);
+                        b->inName = st->textareaName;
+                        st->textareaName = NULL;
+                        b->inValue = sb_detach(&st->textareaBuffer);
+                        const char* ph2 = da_get(e->node->attrs, "placeholder");
+                        b->placeholder = pluto_strdup((ph2 != NULL) ? ph2 : "");
+                        int ok = 0;
+                        double cv = d_tonum(da_get(e->node->attrs, "cols"), &ok);
+                        b->fieldWidth = ok ? (int)cv : -1;
+                        double rv = d_tonum(da_get(e->node->attrs, "rows"), &ok);
+                        b->fieldRows = ok ? (int)rv : -1;
+                        b->readonlyFlag =
+                            (unsigned char)(da_has(e->node->attrs, "readonly") || dis);
+                        b->blockInert = (unsigned char)((st->inert > 0) || dis);
+                        doc_add_block(st, b);
+                    }
+                    sb_clear(&st->textareaBuffer);
+                    st->textareaBuffer = sv->savedTextareaBuffer;
+                    pluto_free(st->textareaName);
+                    st->textareaName = sv->savedTextareaName;
+                    st->inTextarea = sv->savedInTextarea;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_FIELDSET) {
+                FieldsetSave* sv = (FieldsetSave*)e->savedPtr;
+                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+                if (cb != NULL) doc_add_block(st, cb);
+                if (sv != NULL) {
+                    st->disabledDepth = sv->savedDisabledDepth;
+                    pluto_free(sv);
+                }
+            } else if (e->postType == WPOST_DETAILS) {
+                DetailsSave* sv = (DetailsSave*)e->savedPtr;
+                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+                if (cb != NULL) {
+                    if (sv != NULL) {
+                        cb->toggleKey = pluto_strdup(sv->dkey);
+                        cb->toggleOpen = sv->isOpen;
+                    }
+                    doc_add_block(st, cb);
+                }
+                if (sv != NULL) pluto_free(sv);
+            } else if (e->postType == WPOST_DIALOG) {
+                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
+                if (cb != NULL) doc_add_block(st, cb);
+            } else if (e->postType == WPOST_MATH) {
+                MathSave* sv = (MathSave*)e->savedPtr;
+                st->inMath = (sv != NULL) ? sv->savedInMath : 0;
+                if (st->mathParts.len > 0 && st->mathParts.data != NULL) {
+                    if (sb_reserve(&st->mathParts, 1))
+                        st->mathParts.data[st->mathParts.len] = '\0';
+                    d_collapse_trim(st->mathParts.data);
+                }
+                if (st->mathParts.len > 0 && st->mathParts.data != NULL &&
+                    st->mathParts.data[0] != '\0') {
+                    DocBlock* b = d_new_block(DB_MATH);
+                    if (b != NULL) {
+                        b->codeText = sb_detach(&st->mathParts);
+                        doc_add_block(st, b);
+                    } else {
+                        sb_clear(&st->mathParts);
+                    }
+                } else {
+                    sb_clear(&st->mathParts);
+                }
+                if (sv != NULL) {
+                    st->mathParts = sv->savedMathParts;
+                    pluto_free(sv);
+                }
+            }
+        }
+    }
+    walk_shutdown();
+}
+
+/* ── walker (old recursive) ──────────────────────────────────────────── */
 
 static void d_walk_children(DocState* st, DomNode* node) {
     for (size_t i = 0; i < node->nChildren; i++)
@@ -2674,7 +4343,7 @@ DocDocument* doc_parse_opts(const char* html, const char* baseUrl, int mode,
     sb_init(&st.mathParts);
     sb_init(&st.textareaBuffer);
 
-    if (root != NULL) d_walk_children(&st, root);
+    if (root != NULL) d_walk_iterative(&st, root);
 
     d_finalize(&st, scannedHas, scannedDelay, scannedUrl);
 
