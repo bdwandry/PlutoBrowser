@@ -419,7 +419,15 @@ static void d_walk_children(DocState* st, DomNode* node);
 /* ── iterative walker infrastructure ──────────────────────────────────── */
 
 enum {
-    WPOST_NONE = 0,
+    FLAG_BOLD = 0, FLAG_ITALIC, FLAG_UNDERLINE, FLAG_STRIKE,
+    FLAG_MARK, FLAG_SMALL, FLAG_BIG, FLAG_SUB, FLAG_SUP, FLAG_CODE,
+    FLAG_INVERT, FLAG_COUNT
+};
+
+/* WPOST values MUST stay at or above FLAG_COUNT so the EXIT dispatcher can
+   distinguish a WPOST* handler from a flag-index decrement. */
+enum {
+    WPOST_NONE = FLAG_COUNT,
     WPOST_FLUSH,
     WPOST_FLAGS,
     WPOST_FLAG_DEC,
@@ -436,7 +444,8 @@ enum {
     WPOST_SPAN,
     WPOST_FIGURE_CAPTION,
     WPOST_DETAILS,
-    WPOST_DIALOG
+    WPOST_DIALOG,
+    WPOST_INERT_DEC
 };
 
 typedef struct {
@@ -485,12 +494,6 @@ static WalkEntry* walk_peek(void) {
     if (g_walkSp > 0) return &g_walkStack[g_walkSp - 1];
     return NULL;
 }
-
-enum {
-    FLAG_BOLD = 0, FLAG_ITALIC, FLAG_UNDERLINE, FLAG_STRIKE,
-    FLAG_MARK, FLAG_SMALL, FLAG_BIG, FLAG_SUB, FLAG_SUP, FLAG_CODE,
-    FLAG_INVERT, FLAG_COUNT
-};
 
 static unsigned char* d_flag_by_index(DocState* st, int idx);
 /* forward decl — defined after DocState */
@@ -2656,7 +2659,23 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
             if (n->kind != DOM_ELEMENT) continue;
             if (d_is_display_none(n->attrs)) continue;
             int inertHere = da_has(n->attrs, "inert");
-            if (inertHere) st->inert++;
+            if (inertHere) {
+                st->inert++;
+                /* Push inert-decrement EXIT FIRST so it pops LAST, after this
+                   element's children and its own tag EXIT. The inline
+                   `` sites were removed: they ran
+                   before children were walked, so inert never applied below. */
+                walk_push();
+                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
+                g_walkStack[g_walkSp - 1].node = NULL;
+                g_walkStack[g_walkSp - 1].postType = WPOST_INERT_DEC;
+                g_walkStack[g_walkSp - 1].clientX = 0;
+                g_walkStack[g_walkSp - 1].clientY = 0;
+                g_walkStack[g_walkSp - 1].lmStyle = 0;
+                g_walkStack[g_walkSp - 1].baseline = 0;
+                g_walkStack[g_walkSp - 1].fx = 0.f;
+                g_walkStack[g_walkSp - 1].savedPtr = NULL;
+            }
 
             const char* tag = n->tag;
             StrMap* attrs = n->attrs;
@@ -2665,40 +2684,40 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
 
             if (!strcmp(tag, "script") || !strcmp(tag, "style") ||
                 !strcmp(tag, "title"))
-                { if (inertHere) st->inert--; continue; }
+                {  continue; }
 
             if (!strcmp(tag, "template") || !strcmp(tag, "menuitem") ||
                 !strcmp(tag, "content") || !strcmp(tag, "shadow") ||
                 !strcmp(tag, "geolocation"))
-                { if (inertHere) st->inert--; continue; }
+                {  continue; }
 
             if (!strcmp(tag, "base") || !strcmp(tag, "link") ||
                 !strcmp(tag, "col") || !strcmp(tag, "colgroup") ||
                 !strcmp(tag, "source") || !strcmp(tag, "track") ||
                 !strcmp(tag, "param") || !strcmp(tag, "frameset") ||
                 !strcmp(tag, "frame"))
-                { if (inertHere) st->inert--; continue; }
+                {  continue; }
 
             if (!strcmp(tag, "img")) {
                 d_handle_image(st, attrs);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
             if (!strcmp(tag, "br")) {
                 d_break_inline(st, DIT_BR);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
             if (!strcmp(tag, "wbr")) {
                 d_break_inline(st, DIT_WBR);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
             if (!strcmp(tag, "hr")) {
                 doc_flush_block(st);
                 DocBlock* b = d_new_block(DB_HR);
                 if (b != NULL) { b->spacingTop = 6; b->spacingBottom = 6; doc_add_block(st, b); }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2707,7 +2726,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                 !strcmp(tag, "object") || !strcmp(tag, "embed") ||
                 !strcmp(tag, "portal")) {
                 d_handle_media_placeholder(st, tag, n, attrs);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2727,7 +2746,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     b->boxLabel = pluto_strdup((lb != NULL) ? lb : "");
                     doc_add_block(st, b);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2747,7 +2766,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     b->width = w; b->height = h;
                     doc_add_block(st, b);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2761,17 +2780,17 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         pluto_free(st->metaUrl); st->metaUrl = u;
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
             if (!strcmp(tag, "td") || !strcmp(tag, "th"))
-                { if (inertHere) st->inert--; continue; }
+                {  continue; }
 
             if (!strcmp(tag, "tr")) {
                 if (st->tbl != NULL && st->cell == NULL)
                     d_handle_row(st, n, st->tbl);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2792,7 +2811,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
             }
@@ -2808,7 +2827,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 DBox sp;
@@ -2831,7 +2850,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2848,7 +2867,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 doc_flush_block(st);
@@ -2871,7 +2890,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2891,7 +2910,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2915,7 +2934,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -2955,7 +2974,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3001,7 +3020,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3016,7 +3035,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3038,7 +3057,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3053,7 +3072,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3108,7 +3127,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3134,7 +3153,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3171,10 +3190,10 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         sb_clear(&st->preBuffer);
                         st->preBuffer = sv->savedPreBuffer;
                         st->inPre = sv->savedInPre;
+                        pluto_free(sv);
                     }
-                    pluto_free(sv);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3201,7 +3220,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3221,7 +3240,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3248,7 +3267,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3276,7 +3295,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3320,14 +3339,14 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     pluto_free(raw);
                 }
                 pluto_free(bt);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
             /* table */
             if (!strcmp(tag, "table")) {
                 if (st->cell != NULL) {
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 doc_flush_block(st);
@@ -3383,7 +3402,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     pluto_free(tbl.rows);
                     sb_clear(&caption);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3431,7 +3450,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         }
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3490,7 +3509,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         }
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3517,7 +3536,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3540,7 +3559,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3550,21 +3569,24 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     const char* sep = !strcmp(tag, "mfrac") ? " / "
                                     : !strcmp(tag, "msup") ? "^" : "_";
                     for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
                         if (i > 0) {
                             char* sp = pluto_strdup(sep);
                             walk_push();
                             g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
                             g_walkStack[g_walkSp - 1].savedPtr = sp;
                         }
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 if (!strcmp(tag, "msubsup")) {
                     for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
                         if (i == 2) {
                             char* sp = pluto_strdup("^");
                             walk_push();
@@ -3577,45 +3599,55 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                             g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
                             g_walkStack[g_walkSp - 1].savedPtr = sp;
                         }
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 if (!strcmp(tag, "msqrt")) {
                     sb_append_str(&st->mathParts, "sqrt(");
+                    {
+                        char* close = pluto_strdup(")");
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                        g_walkStack[g_walkSp - 1].savedPtr = close;
+                    }
                     for (int i = (int)n->nChildren - 1; i >= 0; i--) {
                         walk_push();
                         g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    char* close = pluto_strdup(")");
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                    g_walkStack[g_walkSp - 1].savedPtr = close;
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 if (!strcmp(tag, "mroot")) {
                     sb_append_str(&st->mathParts, "sqrt(");
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        if (i > 0) {
-                            char* sp = pluto_strdup("^(1/");
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                            g_walkStack[g_walkSp - 1].savedPtr = sp;
-                        }
+                    {
+                        char* close = pluto_strdup(")");
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                        g_walkStack[g_walkSp - 1].savedPtr = close;
+                    }
+                    {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[n->nChildren - 1];
+                    }
+                    {
+                        char* cp = pluto_strdup(")");
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                        g_walkStack[g_walkSp - 1].savedPtr = cp;
+                    }
+                    for (int i = (int)n->nChildren - 2; i >= 0; i--) {
+                        char* ip = pluto_strdup("^(1/");
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                        g_walkStack[g_walkSp - 1].savedPtr = ip;
                         walk_push();
                         g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                         g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    char* close = pluto_strdup("))");
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                    g_walkStack[g_walkSp - 1].savedPtr = close;
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 if (!strcmp(tag, "mfenced")) {
@@ -3623,25 +3655,27 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     char* closeCh = d_mfenced_attr(attrs, "close", ")");
                     char* sepStr = d_mfenced_attr(attrs, "separators", ",");
                     sb_append_str(&st->mathParts, openCh);
+                    {
+                        char* cl = pluto_strdup(closeCh);
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
+                        g_walkStack[g_walkSp - 1].savedPtr = cl;
+                    }
                     for (int i = (int)n->nChildren - 1; i >= 0; i--) {
+                        walk_push();
+                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
+                        g_walkStack[g_walkSp - 1].node = n->children[i];
                         if (i > 0) {
                             char* sp = pluto_strdup(sepStr);
                             walk_push();
                             g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
                             g_walkStack[g_walkSp - 1].savedPtr = sp;
                         }
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
                     }
-                    char* cl = pluto_strdup(closeCh);
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                    g_walkStack[g_walkSp - 1].savedPtr = cl;
                     pluto_free(openCh);
                     pluto_free(closeCh);
                     pluto_free(sepStr);
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
                 if (!strcmp(tag, "mspace")) {
@@ -3649,7 +3683,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     walk_push();
                     g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
                     g_walkStack[g_walkSp - 1].savedPtr = sp;
-                    if (inertHere) st->inert--;
+                    
                     continue;
                 }
             }
@@ -3762,7 +3796,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     }
                 }
                 pluto_free(ty);
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3786,7 +3820,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     else
                         db_free(b);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3815,7 +3849,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         d_map_free(&m);
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3862,7 +3896,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                         d_datalist_free(&dl);
                     }
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3906,7 +3940,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                 } else {
                     pluto_free(xml);
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3922,7 +3956,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                     g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
                     g_walkStack[g_walkSp - 1].node = n->children[i];
                 }
-                if (inertHere) st->inert--;
+                
                 continue;
             }
 
@@ -3933,7 +3967,7 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                 g_walkStack[g_walkSp - 1].node = n->children[i];
             }
 
-            if (inertHere) st->inert--;
+            
         } else if (e->kind == WENTRY_ENTER) {
             /* ENTER dispatch — tag-specific pre-work */
         } else if (e->kind == WENTRY_EXIT) {
@@ -3949,6 +3983,8 @@ static void d_walk_iterative(DocState* st, DomNode* root) {
                 pluto_free(nc);
             } else if (e->postType == WPOST_NONE) {
                 st->dlDepth--;
+            } else if (e->postType == WPOST_INERT_DEC) {
+                if (st->inert > 0) st->inert--;
             } else if (e->postType == WPOST_Q) {
                 d_quote_char(st);
             } else if (e->postType == WPOST_SPAN) {
