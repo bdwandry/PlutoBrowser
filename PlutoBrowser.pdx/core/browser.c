@@ -1064,6 +1064,8 @@ void br_boot(void) {
     sp_set_on_change(settings_changed_cb);
     menu_rebuild();
     br_system_menu_refresh();
+    /* Auto-launch google.com on boot for device crash testing. */
+    br_navigate_to("https://google.com");
 }
 
 /* ── loading screen (mirrors main.lua STATE_LOADING branch) ───────────── */
@@ -1502,7 +1504,8 @@ compose:
     ch_draw(s_br.hasUrl ? &s_br.curUrl : NULL, s_br.pageTitle,
             s_br.state == PLUTO_STATE_LOADING,
             s_br.progressCur, s_br.progressTot,
-            s_br.browseMode == PLUTO_MODE_READER);
+            s_br.browseMode == PLUTO_MODE_READER,
+            hc_backend_label());
     ab_draw_overlay();
 
     /* HTML-mode hover status bar (cursor itself arrives in P33) */

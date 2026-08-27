@@ -753,6 +753,7 @@ void selftest_browser_run(struct PlaydateAPI* pd, int* pass, int* fail) {
     br_set_keyboard_enabled(0);
     br_set_clock_fn(browser_fake_clock);
     br_set_input_source(provider, NULL);
+    hc_set_http_for_tests(NULL);   /* disable HTTP API for fake-TCP tests */
     hc_set_tcp_for_tests(&FAKE_TCP);
     hc_set_clock_fn(browser_fake_clock);
 
@@ -768,6 +769,7 @@ void selftest_browser_run(struct PlaydateAPI* pd, int* pass, int* fail) {
 
     hc_set_clock_fn(NULL);         /* restore real clock */
     hc_set_tcp_for_tests(NULL);    /* restore real networking */
+    hc_restore_http_api();         /* restore real HTTP API */
     br_set_input_source(NULL, NULL);   /* restore hardware input */
     br_set_clock_fn(NULL);             /* restore engine clock */
     br_reset_for_tests();
