@@ -504,6 +504,9 @@ static void apply_view_mode(int newMode) {
 static void menu_activate(int row);
 
 static void menu_rebuild(void) {
+    /* rows are frozen while the popup is open: a page landing underneath
+     * (br_boot's auto-launch, background loads) must not shift indices */
+    if (s_br.menuOpen) return;
     memset(s_menu.present, 0, sizeof(s_menu.present));
     s_menu.count = 0;
     s_menu.present[BR_MI_HOME]     = 1;
