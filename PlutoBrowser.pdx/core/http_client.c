@@ -62,6 +62,11 @@ static unsigned (*s_clockfn)(void);
 // Which networking backend is active for the current request.
 enum HcBackend s_backend;
 
+// User-selected preference (from Settings): HTTP API or raw TCP. Defaults to
+// HTTP for fresh installs. do_get() falls back to the other backend when the
+// preferred one is unavailable.
+static enum HcBackend s_backendPref = HC_BACKEND_HTTP;
+
 static TCPConnection* s_conn;
 static HTTPConnection* s_http_conn;
 static int s_state;
@@ -553,10 +558,18 @@ static int do_get(const char* urlString, const PlutoHttpCallbacks* cbs)
         return 0;
     }
 
-    // Select backend: prefer HTTP API for HTTP/HTTPS; TCP for everything else.
-    s_backend = has_http ? HC_BACKEND_HTTP : HC_BACKEND_TCP;
-    PLUTO_LOG("[HC] Backend selected: %s (http=%d, tcp=%d)",
+    // Select backend: honor the Settings preference, falling back to the
+    // other backend when the preferred one isn't available.
+    if (s_backendPref == HC_BACKEND_TCP) {
+        s_backend = has_tcp ? HC_BACKEND_TCP
+                            : (has_http ? HC_BACKEND_HTTP : HC_BACKEND_TCP);
+    } else {
+        s_backend = has_http ? HC_BACKEND_HTTP
+                             : (has_tcp ? HC_BACKEND_TCP : HC_BACKEND_HTTP);
+    }
+    PLUTO_LOG("[HC] Backend selected: %s (pref=%s, http=%d, tcp=%d)",
               s_backend == HC_BACKEND_HTTP ? "HTTP_API" : "TCP",
+              s_backendPref == HC_BACKEND_HTTP ? "HTTP" : "TCP",
               has_http, has_tcp);
 
     // ── Access gating (C-only; the Lua SDK did this inside tcp.new) ──────
@@ -1117,6 +1130,15 @@ void hc_set_http_for_tests(struct playdate_http* fake)
 {
     // NULL explicitly disables HTTP API (forces TCP); non-NULL installs fake.
     s_http = fake;
+}
+
+enum HcBackend hc_backend_pref(void) { return s_backendPref; }
+
+void hc_set_backend_pref(enum HcBackend pref)
+{
+    if (pref == HC_BACKEND_HTTP || pref == HC_BACKEND_TCP) {
+        s_backendPref = pref;
+    }
 }
 
 void hc_restore_http_api(void)

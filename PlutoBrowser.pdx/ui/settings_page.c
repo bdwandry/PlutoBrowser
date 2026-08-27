@@ -1,9 +1,10 @@
 // settings_page.c — P31: C port of CometBrowser Source/ui/settings_page.lua.
 //
-// Five rows: Search Engine (cycle NAMES), Browse Mode (toggle), Invert
+// Six rows: Search Engine (cycle NAMES), Browse Mode (toggle), Invert
 // Crank (toggle), Image Mode (cycle NAMES order), Clear Cookies (action,
-// runs immediately). Save writes staged -> Storage.settings + save() +
-// onChange; Cancel discards. Box animates from center, ease-out-cubic.
+// runs immediately), Protocol (cycle HTTP/TCP). Save writes staged ->
+// Storage.settings + save() + onChange; Cancel discards. Box animates from
+// center, ease-out-cubic.
 
 #include "ui/settings_page.h"
 
@@ -38,6 +39,7 @@ static struct {
     int mode;
     int invertCrank;
     int imageMode; // PlutoImageMode
+    int protocol;  // PlutoProtocol
 } s_staged;
 
 void sp_init_pd(PlaydateAPI* pd) { s_pd = pd; }
@@ -69,6 +71,13 @@ const char* sp_staged_image_label(void) {
     return (label != NULL) ? label : "Render All";
 }
 
+const char* sp_staged_protocol_label(void) {
+    /* Lua: PROTOCOL_LABELS[protocol] or "HTTP" */
+    const char* label =
+        pluto_protocol_label((PlutoProtocol)s_staged.protocol);
+    return (label != NULL) ? label : "HTTP";
+}
+
 void sp_open(const char* prevState) {
     s_isOpen = 1;
     s_selectedIndex = 1;
@@ -92,6 +101,11 @@ void sp_open(const char* prevState) {
     s_staged.mode = st ? st->mode : (int)PLUTO_MODE_READER;
     s_staged.invertCrank = st ? st->invertCrank : 0;
     s_staged.imageMode = st ? st->imageMode : (int)PLUTO_IMAGE_MODE_ALL;
+    s_staged.protocol = st ? st->protocol : (int)PLUTO_PROTOCOL_HTTP;
+    if (s_staged.protocol < PLUTO_PROTOCOL_HTTP ||
+        s_staged.protocol > PLUTO_PROTOCOL_TCP) {
+        s_staged.protocol = (int)PLUTO_PROTOCOL_HTTP;
+    }
 
     PLUTO_LOG("[P31] SettingsPage.open() previousState=%s", s_prevState);
 }
@@ -141,6 +155,13 @@ static void clear_cookies(void) {
     PLUTO_LOG("[P31] cookies cleared");
 }
 
+/* Row 6: Protocol cycle (http <-> tcp), both directions identical */
+static void cycle_protocol(void) {
+    s_staged.protocol = (s_staged.protocol == (int)PLUTO_PROTOCOL_HTTP)
+                            ? (int)PLUTO_PROTOCOL_TCP
+                            : (int)PLUTO_PROTOCOL_HTTP;
+}
+
 static SpAction save_and_close(void) {
     PlutoSettings* st = storage_settings();
     if (st != NULL) {
@@ -148,13 +169,14 @@ static SpAction save_and_close(void) {
         st->mode = s_staged.mode;
         st->invertCrank = s_staged.invertCrank;
         st->imageMode = s_staged.imageMode;
+        st->protocol = s_staged.protocol;
     }
     storage_save();
     if (s_onChange != NULL) {
         s_onChange();
     }
-    PLUTO_LOG("[P31] saveAndClose: mode=%d imageMode=%d", s_staged.mode,
-              s_staged.imageMode);
+    PLUTO_LOG("[P31] saveAndClose: mode=%d imageMode=%d protocol=%d",
+              s_staged.mode, s_staged.imageMode, s_staged.protocol);
     sp_close();
     return SP_ACT_SAVED;
 }
@@ -180,6 +202,7 @@ SpAction sp_handle_input(SpButton btn) {
                 case 3: toggle_invert(); break;
                 case 4: cycle_image_mode(-1); break;
                 case 5: clear_cookies(); break;
+                case 6: cycle_protocol(); break;
                 default: break;
             }
             break;
@@ -190,6 +213,7 @@ SpAction sp_handle_input(SpButton btn) {
                 case 3: toggle_invert(); break;
                 case 4: cycle_image_mode(1); break;
                 case 5: clear_cookies(); break;
+                case 6: cycle_protocol(); break;
                 default: break;
             }
             break;
@@ -266,14 +290,15 @@ void sp_draw(void) {
 
     static const char* const labels[SP_OPTION_COUNT] = {
         "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-        "Clear Cookies"
+        "Clear Cookies", "Protocol"
     };
 
     int itemY = innerY + 24;
-    const int itemH = 26;
+    const int itemH = 24;  // 6 rows must fit alongside the footer
+    const int rowStep = itemH + 2;
 
     for (int i = 1; i <= SP_OPTION_COUNT; i++) {
-        int iy = itemY + (i - 1) * (itemH + 4);
+        int iy = itemY + (i - 1) * rowStep;
         int isSel = (i == s_selectedIndex);
 
         if (isSel) {
@@ -300,6 +325,7 @@ void sp_draw(void) {
             case 2: val = sp_staged_mode_label(); break;
             case 3: val = sp_staged_invert_label(); break;
             case 4: val = sp_staged_image_label(); break;
+            case 6: val = sp_staged_protocol_label(); break;
             default: val = ""; break; // Clear Cookies renders ""
         }
         int isAction = (i == 5);
@@ -328,7 +354,7 @@ void sp_draw(void) {
         s_pd->graphics->setDrawMode(kDrawModeCopy);
     }
 
-    int footerY = itemY + SP_OPTION_COUNT * (itemH + 4) + 8;
+    int footerY = itemY + SP_OPTION_COUNT * rowStep + 8;
     s_pd->graphics->setFont(fontSmall);
     s_pd->graphics->drawText("(B) Cancel  *  (A) Save & Close", 30,
                              kASCIIEncoding, innerX, footerY);

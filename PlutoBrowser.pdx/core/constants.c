@@ -91,3 +91,25 @@ const char* pluto_image_mode_label(PlutoImageMode mode)
     }
     return "Render All";
 }
+
+// ---------------------------------------------------------------------------
+// Network Protocol
+// ---------------------------------------------------------------------------
+
+const char* pluto_protocol_name(PlutoProtocol mode)
+{
+    switch (mode) {
+        case PLUTO_PROTOCOL_HTTP: return "http";
+        case PLUTO_PROTOCOL_TCP:  return "tcp";
+    }
+    return "http";
+}
+
+const char* pluto_protocol_label(PlutoProtocol mode)
+{
+    switch (mode) {
+        case PLUTO_PROTOCOL_HTTP: return "HTTP";
+        case PLUTO_PROTOCOL_TCP:  return "TCP";
+    }
+    return "HTTP";
+}

@@ -100,6 +100,19 @@ typedef enum PlutoImageMode {
 const char* pluto_image_mode_name(PlutoImageMode mode);   // IMAGE_MODE_NAMES order
 const char* pluto_image_mode_label(PlutoImageMode mode);  // IMAGE_MODE_LABELS map
 
+// ---------------------------------------------------------------------------
+// Network Protocol  (Constants.PROTOCOL_*)
+// ---------------------------------------------------------------------------
+
+typedef enum PlutoProtocol {
+    PLUTO_PROTOCOL_HTTP = 0,  // "http"
+    PLUTO_PROTOCOL_TCP  = 1,  // "tcp"
+} PlutoProtocol;
+
+#define PLUTO_PROTOCOL_COUNT 2
+const char* pluto_protocol_name(PlutoProtocol mode);      // "http"/"tcp"
+const char* pluto_protocol_label(PlutoProtocol mode);     // "HTTP"/"TCP"
+
 #ifdef __cplusplus
 }
 #endif
