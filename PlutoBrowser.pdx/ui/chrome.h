@@ -34,6 +34,6 @@ int    ch_comet_group(int animFrame);   /* 0 (<4), 1 (<8), 2 (else) */
 /* device/sim only: paints the top bar; host builds no-op */
 void ch_draw(const PlutoUrl* urlObj, const char* pageTitle,
              int isLoading, long progressCur, long progressTot,
-             int isReaderMode);
+             int isReaderMode, const char* backendLabel);
 
 #endif

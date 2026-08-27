@@ -57,7 +57,7 @@ build/Source/core/http_client.o: Source/core/http_client.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
  Source/core/../util/mem.h Source/core/cookie_jar.h \
  Source/core/../util/strbuf.h Source/core/storage_data.h \
- Source/core/internal_pages.h Source/core/url.h
+ Source/core/internal_pages.h Source/core/logger.h Source/core/url.h
 
 Source/core/http_client.h:
 
@@ -180,5 +180,7 @@ Source/core/../util/strbuf.h:
 Source/core/storage_data.h:
 
 Source/core/internal_pages.h:
+
+Source/core/logger.h:
 
 Source/core/url.h:

@@ -755,6 +755,7 @@ void selftest_http_run(int* outPass, int* outFail)
     st_pass = 0;
     st_fail = 0;
 
+    hc_set_http_for_tests(NULL); // force TCP backend for selftests
     hc_set_tcp_for_tests(&FAKE_TCP);
     hc_set_clock_fn(fake_clock);
 
@@ -780,6 +781,7 @@ void selftest_http_run(int* outPass, int* outFail)
     hc_cancel();
     hc_set_clock_fn(NULL);
     hc_set_tcp_for_tests(NULL); // restore real networking for benchmarks
+    hc_restore_http_api(); // restore real HTTP API for benchmarks
 
     PLUTO_LOG("[P07] http selftests done: %d passed, %d failed", st_pass,
               st_fail);
