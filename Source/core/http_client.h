@@ -80,6 +80,12 @@ void hc_set_tcp_for_tests(struct playdate_tcp* fake);
 void hc_set_clock_fn(unsigned (*fn)(void)); // milliseconds like getCurrentTimeMilliseconds
 void hc_restore_http_api(void); // restores real HTTP API after selftests
 
+// Backend preference (Settings "Protocol"): HTTP API by default. do_get()
+// honors the preference when the backend is available and falls back to the
+// other one otherwise. Values match the enum HcBackend above.
+enum HcBackend hc_backend_pref(void);
+void hc_set_backend_pref(enum HcBackend pref);
+
 #ifdef __cplusplus
 }
 #endif

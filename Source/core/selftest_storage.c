@@ -412,7 +412,8 @@ static void test_storage_logic(void)
                      set->autoReader == 0 &&
                      strcmp(set->fontSize, "medium") == 0 &&
                      set->imageMode == PLUTO_IMAGE_MODE_VIEWPORT &&
-                     set->invertCrank == 0,
+                     set->invertCrank == 0 &&
+                     set->protocol == PLUTO_PROTOCOL_HTTP,
                  "st.default_settings");
     }
 
