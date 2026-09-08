@@ -7,7 +7,7 @@
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
 > **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
-> **CURRENT TASK:** Beta Bug Fix #10 — COMPLETE (Simulator + device verified). Home-page header layout: whole content moved up 8px so the banner sits flush under the chrome (white strip gone, content moved — not painted over); banner height 54->62 giving 9px black pad below "The Web on Playdate" (12px top pad, measured); "Press (B)..." pill moved +12px creating a 10px white gap below the banner, Settings and lower sections shifted to keep spacing.
+> **CURRENT TASK:** Beta Bug Fix #11 — COMPLETE (Simulator + device verified). Home-page footer hints reworked: underlined "Buttons to Press:" header with extra space below the underline, then bulleted list — (A) Open / (B) Search/URL / Menu: Settings, one per line. No more right-edge cut-off.
 > (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
@@ -1857,3 +1857,34 @@ exactly at the subtitle's glyph bottoms (0px bottom pad).
 - TC4 no layout regressions below: EXPECT settings/bookmark sections shifted
   uniformly, spacing intact. ACT: flow positions derived from settingsBtnY,
   verified in dump bands. PASS
+
+## Beta Bug Fix #11 — Footer hints cut off; listed + bulleted
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** Footer "(A) Open  -  (B) Search/URL  -  Menu: Settings" was cut
+off at the right edge. User then requested: each option on its own line, an
+underlined "Buttons to Press:" header above them, bullet points on the three
+options, and extra space between the header underline and the list.
+
+**Fix (Source/ui/home_page.c, footer block only):**
+- Underlined header "Buttons to Press:" (underline drawn from measured text
+  width, 2px below glyph bottoms)
+- 20px clearance under the underline (per user follow-up), then three list
+  rows 20px apart at x=34 with 4x4 square bullets at x=24 vertically centered
+- Header top unchanged (bottomY), so the footer block grows downward only
+
+**Verification:**
+- Simulator: clean boot, stable heartbeats (flaky-sim launch required a retry,
+  a known Simulator quirk — not app-related)
+- Device: MD5-verified deploy (715c6fe34751fb68…), clean 1,299-frame run,
+  errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 no cut-off: EXPECT all three hints fully on screen. ACT: each line ≤
+  14 chars starting at x=34 — fits 400px width. PASS
+- TC2 header underline: EXPECT line under "Buttons to Press:" matching text
+  width. ACT: drawn from style_get_text_width measurement. PASS
+- TC3 bullets: EXPECT a bullet per option, aligned. ACT: 4x4 squares at each
+  row's vertical center. PASS
+- TC4 spacing: EXPECT extra space under underline before first item. ACT:
+  first item 32px below header top (~20px below underline). PASS

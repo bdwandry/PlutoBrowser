@@ -410,6 +410,27 @@ void home_page_draw(float crankChange)
 
     int bottomY = cardsStartY + (count + 1) / 2 * (cardH + gapY) + 12;
     pd->graphics->setFont(fontSmall);
-    const char *footer = "(A) Open  -  (B) Search/URL  -  Menu: Settings";
-    pd->graphics->drawText(footer, strlen(footer), kUTF8Encoding, 24, bottomY);
+    /* BF11: one long line was cut off at the right edge — hints now listed
+     * under an underlined "Buttons to Press:" header, each bulleted. */
+    pd->graphics->setFont(fontSmall);
+    const char *footerHdr = "Buttons to Press:";
+    pd->graphics->drawText(footerHdr, strlen(footerHdr), kUTF8Encoding, 24,
+                           bottomY);
+    int hdrW = style_get_text_width(PLUTO_FONT_SMALL, footerHdr);
+    int hdrH = pd->graphics->getFontHeight(fontSmall);
+    pd->graphics->drawLine(24, bottomY + hdrH + 2, 24 + hdrW,
+                           bottomY + hdrH + 2, 1, kColorBlack);
+    const char *footerA = "(A) Open";
+    const char *footerB = "(B) Search/URL";
+    const char *footerC = "Menu: Settings";
+    pd->graphics->drawText(footerA, strlen(footerA), kUTF8Encoding, 34,
+                           bottomY + 32);
+    pd->graphics->drawText(footerB, strlen(footerB), kUTF8Encoding, 34,
+                           bottomY + 52);
+    pd->graphics->drawText(footerC, strlen(footerC), kUTF8Encoding, 34,
+                           bottomY + 72);
+    /* square bullets aligned with each line's vertical center */
+    pd->graphics->fillRect(24, bottomY + 36, 4, 4, kColorBlack);
+    pd->graphics->fillRect(24, bottomY + 56, 4, 4, kColorBlack);
+    pd->graphics->fillRect(24, bottomY + 76, 4, 4, kColorBlack);
 }
