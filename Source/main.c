@@ -1169,7 +1169,9 @@ static int updateFrame(void *userdata)
     (void)userdata;
     frameCount++;
 
-    /* Phase 0: paint a blank page and confirm the run loop is alive. */
+    /* Clear the full framebuffer every frame (was dropped accidentally during
+     * the BTEST scaffolding removal — without it, home-page scrolling smears
+     * previous frames' content across the screen). */
     pd->graphics->clear((LCDColor)kColorWhite);
 
     /* ── button state (current/pushed/released) ── */
@@ -1285,7 +1287,10 @@ static int updateFrame(void *userdata)
         }
         if (bHoldActive && bNotPressedFrames >= 4)
         {
-            if (!bHoldUsedDir && !address_bar_is_open())
+            /* Lua parity (main.lua): `not bHoldUsedDir and not AddressBar.isOpen
+             * and not keyboardOpen` — a B press while a keyboard is open belongs
+             * to the keyboard (backspace), never opens the address bar. */
+            if (!bHoldUsedDir && !address_bar_is_open() && !formKeyboardOpen)
             {
                 /* Lua: open(""|curUrl, navigateTo) then launchKeyboard(). */
                 if (currentState == STATE_HOME)
