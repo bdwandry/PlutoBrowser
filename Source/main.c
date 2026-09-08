@@ -115,6 +115,7 @@ static int updateFrame(void *userdata);
 
 
 
+
 /* Shared keyboard instance (address bar + page form inputs use it). */
 static PDKeyboard *g_kb = NULL;
 
@@ -1924,6 +1925,7 @@ static int updateFrame(void *userdata)
     {
         logger_log("updateFrame: heartbeat frame=%u", frameCount);
     }
+
 
     /* Phase 4: pump timers each frame. */
     pdtimer_update();
