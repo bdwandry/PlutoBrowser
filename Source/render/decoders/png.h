@@ -1,40 +1,39 @@
-#ifndef PLUTO_RENDER_DECODERS_PNG_H
-#define PLUTO_RENDER_DECODERS_PNG_H
+/*
+ * PlutoBrowser — png.h
+ * Port of Source/render/decoders/png.lua (reference, 270 lines).
+ *
+ * Lua → C function map:
+ *   readUInt32BE (local)                 → rd32be (static)
+ *   paethPredictor                       → paeth_predictor (static)
+ *   composite                            → png_composite (static, exact int form)
+ *   PNGDecoder.decode(data, maxW, maxH)  → png_decode()
+ *   per-row closures (unpack/composite)  → static row loops
+ *
+ * Preserved semantics:
+ *   - Signature check (0x89 "PNG"), chunk scan WITHOUT CRC validation
+ *     (Lua parity), IHDR/PLTE/tRNS/IDAT/IEND handling, `pos > #data + 12`
+     overrun break, zero-length-chunk termination.
+ *   - Color types 0/2/3/4/6; bit depths 1/2/4/8/16 (16-bit: high byte only);
+ *     sub-byte unpacking (perByte, MSB-first shift, grayScale = 255//mask).
+ *   - All 5 unfilters incl. Paeth; prev/cur row swap; missing raw bytes → 0
+ *     (Lua `string.byte(...) or 0`), missing pixel samples → 0/255 fallbacks.
+ *   - tRNS: palette alphas (colorType 3), gray key (colorType 0, byte 1),
+ *     RGB key (colorType 2, bytes 1/3/5). Alpha composites over white.
+ *   - Adam7 interlace: FIRST PASS ONLY (ceil(w/8) x ceil(h/8) samples).
+ *   - Streaming: inflate_stream_read feeds one row at a time into the box
+ *     downscaler — bounded memory (reference architecture).
+ *   - Tasks.yieldCheck() call sites are preserved as comments; the task
+ *     layer already budgets frames per step (see inflate.h note).
+ */
+#ifndef PLUTO_PNG_H
+#define PLUTO_PNG_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include "pd_api.h"
 
-/* C port of Source/render/decoders/png.lua (PNGDecoder).
- *
- * Streams zlib scanline data through Inflate.createStream, unfilters one
- * row at a time and box-filters down to ~screen size, so huge PNGs decode
- * in bounded memory. Adam7 interlaced images decode from their FIRST pass
- * only (every 8th pixel), per the source.
- *
- * Faithful quirks preserved:
- *  - chunk walk accepts a final chunk ending anywhere <= len+12 bytes
- *  - bitDepth<8 grayScale is INTEGER 255/mask division
- *  - tRNS keys are compared against RAW stored bytes (high byte of 16-bit
- *    samples), not scaled values
- *  - unknown filter types (>4) are treated as filter 0
- *  - out-of-range samples read as 0 (colors) / 255 (alpha)
- */
+/* Decode a PNG to a dithered 1-bit LCDBitmap (caller frees via
+ * pd->graphics->freeBitmap) or NULL. maxW/maxH <= 0 → 360/200. */
+LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH);
 
-/* Decodes into downscaled grayscale rows (the platform-independent core).
- * On success (*outRows)[y][x] holds gray 0..255 for y<*outH, x<*outW;
- * rows are pluto_malloc'd (caller frees rows, each row, via
- * png_free_rows). Returns 0 on success, -1 on reject/corruption. */
-int png_decode_gray(const uint8_t* data, size_t len,
-                    int maxW, int maxH,
-                    uint8_t*** outRows, int* outW, int* outH);
-
-void png_free_rows(uint8_t** rows, int h);
-
-/* Device/simulator wrapper: decodes + dithers into a 1-bit LCDBitmap.
- * Host builds return NULL. */
-struct PlaydateAPI;
-struct LCDBitmap;
-struct LCDBitmap* png_decode(struct PlaydateAPI* pd, const uint8_t* data,
-                             size_t len, int maxW, int maxH);
-
-#endif
+#endif /* PLUTO_PNG_H */

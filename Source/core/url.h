@@ -1,81 +1,66 @@
-// url.h — URL parser, normalizer, resolver (C port of core/url.lua).
-//
-// Behavior parity notes (verified against the Lua original):
-//  - parse("") yields the internal about:blank record; whitespace-only
-//    strings are NOT empty and parse to scheme=https, host="".
-//  - Hash (#) is split BEFORE query (?), each taking the first occurrence.
-//  - Custom ports go through Lua-strict numeric conversion ("8080x" -> nil),
-//    must be > 0, otherwise the 80/443 default stands. Micro-deviation:
-//    fractional ports ("8.5") are treated as invalid rather than accepted.
-//  - Userinfo ("user:pass@host") is not understood: the colon rule splits
-//    host at the first ':' — parity preserved, quirks included.
-//  - resolve() specials are exactly about:, data:, javascript:, scheme://,
-    // protocol-relative "//", "#...", "?...", "/..." and dot-segment paths.
-//    mailto:, tel:, etc. fall through as path-relative text.
-
+/*
+ * PlutoBrowser — url.h
+ * URL parser, normalizer and resolver (port of Source/core/url.lua).
+ */
 #ifndef PLUTO_URL_H
 #define PLUTO_URL_H
 
 #include <stddef.h>
 
-#include "../util/strbuf.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define PLUTO_URL_RAW_MAX        512
-#define PLUTO_URL_SCHEME_MAX     32
-#define PLUTO_URL_HOST_MAX       256
-#define PLUTO_URL_PATH_MAX       512
-#define PLUTO_URL_QUERY_MAX      512
-#define PLUTO_URL_HASH_MAX       256
-#define PLUTO_URL_FULLPATH_MAX   1024
-#define PLUTO_URL_NORMALIZED_MAX 1536
-#define PLUTO_URL_INPUT_MAX      512
+/* Parsed URL components (URL.parse result table in Lua).
+ * SIZED FOR THE PLAYDATE STACK: the game task stack is small — a prior
+ * revision used ~4KB here and overflowed the device stack when nested
+ * (device errorlog: "stack overflow in task gameTask"). Keep this struct
+ * lean; long URLs are truncated exactly as the Lua implementation's practical
+ * limits allowed. */
+typedef struct
+{
+    char raw[128];         /* trimmed input                      */
+    char normalized[512];  /* scheme://host[:port]fullPath       */
+    char scheme[12];       /* lowercased                         */
+    char host[128];        /* lowercased; "blank" for empty      */
+    int  port;             /* 80/443 default or explicit         */
+    char path[256];        /* pathPart, "/" if empty             */
+    char query[256];       /* after '?' (no '?')                 */
+    char hash[128];        /* after '#' (no '#')                 */
+    char fullPath[512];    /* path[?query][#hash]                */
+    int  isSsl;            /* scheme == https                    */
+} UrlParsed;  /* ~1.7KB — safe on the game task stack, one per frame */
 
-typedef struct {
-    char raw[PLUTO_URL_RAW_MAX];
-    char normalized[PLUTO_URL_NORMALIZED_MAX];
-    char scheme[PLUTO_URL_SCHEME_MAX];
-    char host[PLUTO_URL_HOST_MAX];
-    int  port;
-    char path[PLUTO_URL_PATH_MAX];
-    char query[PLUTO_URL_QUERY_MAX];
-    char hash[PLUTO_URL_HASH_MAX];
-    char fullPath[PLUTO_URL_FULLPATH_MAX];
-    int  isSsl;
-} PlutoUrl;
+/* URL.encode: application/x-www-form-urlencoded (' '→'+', percent-escape).
+ * Returns malloc'd (SDK) string; caller frees via pluto_free(). Never NULL. */
+char *url_encode(const char *str);
 
-// Form-encode: bytes outside [A-Za-z0-9 ' ' - _ . ~] become %XX (uppercase);
-// \n becomes %0D%0A; finally ' ' becomes '+'. Appends to out.
-void url_encode(const char* str, StrBuf* out);
+/* URL.decode: '+'→' ' and %XX unescaping. malloc'd; caller frees. */
+char *url_decode(const char *str);
 
-// Form-decode: '+' -> ' ', %XX pairs decoded (invalid escapes stay literal).
-void url_decode(const char* str, StrBuf* out);
+/* URL.isSearchQuery heuristic. 1 = treat as search query. */
+int url_is_search_query(const char *input);
 
-// Mirrors URL.isSearchQuery decision order exactly. Returns 1/0.
-int  url_is_search_query(const char* input);
+/* URL.parse into `out`. Returns 0 on success. Handles empty → about:blank,
+ * about: pages, scheme defaults, hash/query splitting, host[:port]. */
+int url_parse(const char *urlString, UrlParsed *out);
 
-// Always produces a valid record (empty input -> about:blank). Truncates
-// oversized components defensively.
-void url_parse(const char* urlString, PlutoUrl* out);
+/* URL.unwrapRedirect: DuckDuckGo /l/?uddg=... → real target.
+ * Returns malloc'd string (caller frees) or NULL when nothing to unwrap. */
+char *url_unwrap_redirect(const char *urlString);
 
-// DuckDuckGo /l/?uddg=... unwrapper. Returns 1 and fills out with the
-// decoded target when unwrapped; returns 0 leaving out untouched.
-int  url_unwrap_redirect(const char* urlString, StrBuf* out);
+/* URL.resolve: resolve `relative` against `baseUrlStr`.
+ * Returns malloc'd string; caller frees. NULL on allocation failure. */
+char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr);
 
-// Resolve relative against base; appends absolute result to out. Empty rel
-// yields baseUrlStr verbatim.
-void url_resolve(const char* baseUrlStr, const char* relativeUrlStr,
-                 StrBuf* out);
+/* URL.buildSearchUrl: engineUrl + encode(queryText). malloc'd; caller frees. */
+char *url_build_search_url(const char *searchEngineUrl, const char *queryText);
 
-// engineUrlTemplate .. formEncode(queryText)
-void url_build_search_url(const char* engineUrl, const char* queryText,
-                          StrBuf* out);
+/* Convenience: parse and return malloc'd normalized URL (or NULL). */
+char *url_normalize_dup(const char *urlString);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // PLUTO_URL_H
+#endif /* PLUTO_URL_H */

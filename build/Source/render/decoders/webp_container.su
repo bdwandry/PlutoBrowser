@@ -1,0 +1,10 @@
+webp_container.c:516:16:webp_out_pixel	0	static
+webp_container.c:242:6:webp_anim_free.part.0	8	static
+webp_container.c:31:5:webp_parse_container	48	static
+webp_container.c:103:5:webp_parse_animation	144	static
+webp_container.c:242:6:webp_anim_free	0	static
+webp_container.c:253:10:webp_blend_pixel_non_premult	24	static
+webp_container.c:275:5:webp_decode_animation	240	static
+webp_container.c:483:6:webp_anim_result_free	16	static
+webp_container.c:571:12:webp_decode	152	static
+webp_container.c:644:11:webp_decode_raw	112	static

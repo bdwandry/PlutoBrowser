@@ -1,24 +1,30 @@
-// json.h — minimal JSON parser, writer, and builders.
-//
-// Used by CloudLayout (P26) for server layout payloads and by Storage (P04)
-// for datastore serialization parity with CometBrowser's Lua tables.
-// Objects preserve insertion order; duplicate keys keep both entries and
-// lookups return the first match (Lua table semantics overwrite instead,
-// but no producer in this project emits duplicates).
-
+/*
+ * PlutoBrowser — json.h
+ * Minimal JSON decoder replacing the Playdate Lua SDK's built-in json.decode,
+ * which has no C-API equivalent. Port of Source/render/cloud_layout.lua's
+ * dependency (the reference consumes json.decode output only).
+ *
+ * Scope decision (documented in MASTER_TODO): the ONLY consumer in the
+ * reference is CloudLayout.parse, which reads doc.title (string),
+ * doc.totalHeight (number) and doc.elements (array of objects whose string
+ * / number fields are copied verbatim). The decoder therefore implements the
+ * full JSON grammar (objects, arrays, strings with escapes incl. \uXXXX,
+ * numbers, true/false/null) but exposes a Lua-table-like tree model:
+ *   JsonValue { JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING,
+ *               JSON_ARRAY, JSON_OBJECT }
+ * Errors are reported by returning NULL — CloudLayout.parse's pcall path.
+ *
+ * Memory: the tree is one contiguous arena owned by the returned root; free
+ * with json_free(). No allocation hooks — cloud layouts are tiny (a few KB).
+ */
 #ifndef PLUTO_JSON_H
 #define PLUTO_JSON_H
 
 #include <stddef.h>
 
-#include "strbuf.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef enum {
-    JSON_NULL,
+typedef enum
+{
+    JSON_NULL = 0,
     JSON_BOOL,
     JSON_NUMBER,
     JSON_STRING,
@@ -27,49 +33,36 @@ typedef enum {
 } JsonType;
 
 typedef struct JsonValue JsonValue;
-struct JsonValue {
+
+struct JsonValue
+{
     JsonType type;
-    int boolean;         // JSON_BOOL
-    double number;       // JSON_NUMBER
-    char* str;           // JSON_STRING (owned, decoded UTF-8)
-    size_t strLen;
-    JsonValue** items;   // JSON_ARRAY / JSON_OBJECT values (owned)
-    char** keys;         // JSON_OBJECT keys parallel to items (owned)
+    /* bool / number / string */
+    int boolean;
+    double number;
+    char *string; /* NULL for non-strings */
+    /* array / object */
+    JsonValue **items;   /* array elements or object values */
+    char **keys;         /* object keys (NULL entries for arrays) */
     size_t count;
     size_t cap;
 };
 
-// Parse text[0..len). Returns NULL on failure and fills err (if non-NULL).
-JsonValue* json_parse(const char* text, size_t len, char err[128]);
-void       json_free(JsonValue* v);
+/* Parse `text` (NUL-terminated). Returns the root value or NULL on any
+ * syntax error (trailing garbage after the root value is an error, matching
+ * the Playdate decoder's strictness). */
+JsonValue *json_decode(const char *text);
 
-// Accessors (NULL/type-safe).
-const JsonValue* json_obj_get(const JsonValue* obj, const char* key);
-const JsonValue* json_arr_get(const JsonValue* arr, size_t i);
-size_t           json_arr_count(const JsonValue* v);
-int              json_is_null(const JsonValue* v);
-double           json_num(const JsonValue* v, double dflt);
-int              json_bool_val(const JsonValue* v, int dflt);
-// Strings only; returns NULL otherwise. *lenOut optional.
-const char*      json_str(const JsonValue* v, size_t* lenOut);
+/* Look up `key` in an object. Returns NULL when v is not an object or the
+ * key is absent. */
+JsonValue *json_get(const JsonValue *v, const char *key);
 
-// Serialize compactly. Returns 0 on OOM.
-int   json_write(const JsonValue* v, StrBuf* out);
+/* Convenience accessors: return 1 on success. A JSON null or a type mismatch
+ * leaves the out-param untouched and returns 0 (Lua's `x or default` reads
+ * absent/null identically for CloudLayout's purposes). */
+int json_as_string(const JsonValue *v, const char **out);
+int json_as_number(const JsonValue *v, double *out);
 
-// Builders. Constructors return NULL on OOM. obj_set/arr_append take
-// ownership of val (freeing it on failure).
-JsonValue* json_new_null(void);
-JsonValue* json_new_bool(int b);
-JsonValue* json_new_number(double n);
-JsonValue* json_new_string_len(const char* s, size_t n);
-JsonValue* json_new_string(const char* s);
-JsonValue* json_new_array(void);
-JsonValue* json_new_object(void);
-int json_obj_set(JsonValue* obj, const char* key, JsonValue* val);
-int json_arr_append(JsonValue* arr, JsonValue* val);
+void json_free(JsonValue *v);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif // PLUTO_JSON_H
+#endif /* PLUTO_JSON_H */

@@ -1,410 +1,466 @@
-// encoding.c — charset detection & conversion (C port of core/encoding.lua).
-//
-// Ground truth: host-Lua oracle p06_oracle.lua on the REAL encoding.lua.
-// Verified quirks preserved:
-//   - charset="utf-8" (QUOTED value in a Content-Type HEADER) fails the Lua
-//     pattern -> NULL (meta scan then applies per precedence)
-//   - normalizeCharset("euc-jp") strips to "eucjp"; shift_jis/eucjp/gbk/big5
-//     dispatch through single-byte best-effort
-//   - "utf16" (no endianness) normalizes but is NOT dispatched -> verbatim
-//   - UTF-16LE with one trailing stray byte decodes to ""
-//   - lone high surrogate CONSUMES the next unit before emitting "?"
-//   - bytes <0x80 pass through raw (incl. 0x00/0x7F); 0x80-0x9F CP1252 table;
-//     >=0xA0 Latin-1
-//   - meta scan: Lua pattern '<meta[^>]*charset...' uses GREEDY [^>]*, so a
-//     tag with duplicate charset= attributes resolves to the LAST one
-//     (occurrences tried right-to-left within the tag span).
-#include <ctype.h>
-#include <stdio.h>
+/*
+ * PlutoBrowser — encoding.c
+ * Charset detection & conversion to UTF-8 (port of Source/core/encoding.lua).
+ * See encoding.h. Reference values (CP1252 table, precedence order, charset
+ * aliases, 1024-byte meta scan window) are preserved exactly.
+ */
 #include <string.h>
 
-#include "pd_api.h"
+#include "core/encoding.h"
+#include "util/strbuf.h"
 
-#include "../util/mem.h"
-#include "../util/strbuf.h"
-#include "encoding.h"
+extern void pluto_free(void *p);
 
-static struct PlaydateAPI* s_pd = NULL;
+/* ── windows-1252 code points for bytes 0x80-0x9F ──────────────────────────── */
+/* (bytes outside this range decode as Latin-1: byte N -> U+00NN) */
+static const unsigned int CP1252[0x20] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, /* 80-83 */
+    0x201E, 0x2026, 0x2020, 0x2021, /* 84-87 */
+    0x02C6, 0x2030, 0x0160, 0x2039, /* 88-8B */
+    0x0152, 0x008D, 0x017D, 0x008F, /* 8C-8F */
+    0x0090, 0x2018, 0x2019, 0x201C, /* 90-93 */
+    0x201D, 0x2022, 0x2013, 0x2014, /* 94-97 */
+    0x02DC, 0x2122, 0x0161, 0x203A, /* 98-9B */
+    0x0153, 0x009D, 0x017E, 0x0178  /* 9C-9F */
+};
 
-void encoding_init(struct PlaydateAPI* pd) { s_pd = pd; }
-
-static int ascii_ws(unsigned char c)
+/* ── UTF-8 encoding of a single code point (mirrors Lua utf8Encode) ────────── */
+static void utf8_encode(StrBuf *out, unsigned int cp)
 {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
-           c == '\r';
-}
-
-static int ascii_alnum(unsigned char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9');
-}
-
-// ------------------------------------------------------- utf8Encode ----
-
-static void utf8_encode_cp(StrBuf* out, unsigned cp)
-{
-    if (cp < 0x80) {
-        sb_append_char(out, (char)cp);
-    } else if (cp < 0x800) {
-        sb_append_char(out, (char)(0xC0 + cp / 0x40));
-        sb_append_char(out, (char)(0x80 + (cp % 0x40)));
-    } else if (cp < 0x10000) {
-        sb_append_char(out, (char)(0xE0 + cp / 0x1000));
-        sb_append_char(out, (char)(0x80 + ((cp / 0x40) % 0x40)));
-        sb_append_char(out, (char)(0x80 + (cp % 0x40)));
-    } else if (cp < 0x110000) {
-        sb_append_char(out, (char)(0xF0 + cp / 0x40000));
-        sb_append_char(out, (char)(0x80 + ((cp / 0x1000) % 0x40)));
-        sb_append_char(out, (char)(0x80 + ((cp / 0x40) % 0x40)));
-        sb_append_char(out, (char)(0x80 + (cp % 0x40)));
-    } else {
-        sb_append_char(out, '?');
+    if (cp < 0x80)
+    {
+        strbuf_appendf(out, "%c", (char)cp);
+    }
+    else if (cp < 0x800)
+    {
+        strbuf_appendf(out, "%c%c",
+                       (char)(0xC0 + (cp / 0x40)),
+                       (char)(0x80 + (cp % 0x40)));
+    }
+    else if (cp < 0x10000)
+    {
+        strbuf_appendf(out, "%c%c%c",
+                       (char)(0xE0 + (cp / 0x1000)),
+                       (char)(0x80 + ((cp / 0x40) % 0x40)),
+                       (char)(0x80 + (cp % 0x40)));
+    }
+    else if (cp < 0x110000)
+    {
+        strbuf_appendf(out, "%c%c%c%c",
+                       (char)(0xF0 + (cp / 0x40000)),
+                       (char)(0x80 + ((cp / 0x1000) % 0x40)),
+                       (char)(0x80 + ((cp / 0x40) % 0x40)),
+                       (char)(0x80 + (cp % 0x40)));
+    }
+    else
+    {
+        strbuf_appendf(out, "?");
     }
 }
 
-// ---------------------------------------------------- CP1252 table ----
-
-static unsigned cp1252_codepoint(unsigned char b)
+/* windows-1252 / iso-8859-1 / ascii byte string -> UTF-8 */
+static char *from_single_byte(const unsigned char *data, size_t len)
 {
-    switch (b) {
-    case 0x80: return 0x20AC; case 0x81: return 0x0081;
-    case 0x82: return 0x201A; case 0x83: return 0x0192;
-    case 0x84: return 0x201E; case 0x85: return 0x2026;
-    case 0x86: return 0x2020; case 0x87: return 0x2021;
-    case 0x88: return 0x02C6; case 0x89: return 0x2030;
-    case 0x8A: return 0x0160; case 0x8B: return 0x2039;
-    case 0x8C: return 0x0152; case 0x8D: return 0x008D;
-    case 0x8E: return 0x017D; case 0x8F: return 0x008F;
-    case 0x90: return 0x0090; case 0x91: return 0x2018;
-    case 0x92: return 0x2019; case 0x93: return 0x201C;
-    case 0x94: return 0x201D; case 0x95: return 0x2022;
-    case 0x96: return 0x2013; case 0x97: return 0x2014;
-    case 0x98: return 0x02DC; case 0x99: return 0x2122;
-    case 0x9A: return 0x0161; case 0x9B: return 0x203A;
-    case 0x9C: return 0x0153; case 0x9D: return 0x009D;
-    case 0x9E: return 0x017E; case 0x9F: return 0x0178;
-    default: return b;
-    }
-}
-
-static void from_single_byte(const char* data, size_t len, StrBuf* out)
-{
-    size_t i;
-    for (i = 0; i < len; i++) {
-        unsigned char b = (unsigned char)data[i];
-        unsigned cp;
-        if (b < 0x80 || b >= 0xA0) {
+    StrBuf sb;
+    strbuf_init(&sb);
+    for (size_t i = 0; i < len; i++)
+    {
+        unsigned int cp;
+        unsigned char b = data[i];
+        if (b < 0x80)
+        {
             cp = b;
-        } else {
-            cp = cp1252_codepoint(b);
         }
-        utf8_encode_cp(out, cp);
+        else if (b >= 0xA0)
+        {
+            cp = b; /* Latin-1 range */
+        }
+        else
+        {
+            cp = CP1252[b - 0x80];
+        }
+        utf8_encode(&sb, cp);
     }
+    return sb.data; /* ownership transfers to caller */
 }
 
-// --------------------------------------------------------- UTF-16 ----
-
-static void from_utf16(const char* data, size_t len, int littleEndian,
-                       StrBuf* out)
+/* UTF-16 (big or little endian) byte string -> UTF-8 */
+static char *from_utf16(const unsigned char *data, size_t len, int littleEndian)
 {
+    StrBuf sb;
+    strbuf_init(&sb);
     size_t i = 0;
-    while (len >= 2 && i + 1 < len) {
-        unsigned lo = (unsigned char)data[i];
-        unsigned hi = (unsigned char)data[i + 1];
-        unsigned u;
-        i += 2;
-        u = littleEndian ? (lo + hi * 256) : (hi + lo * 256);
-
-        if (u >= 0xD800 && u <= 0xDBFF) {
-            unsigned llo, lhi, lo2;
-            if (i + 1 >= len) {
-                break; // readUnit() nil -> loop exits
-            }
-            llo = (unsigned char)data[i];
-            lhi = (unsigned char)data[i + 1];
-            i += 2;
-            lo2 = littleEndian ? (llo + lhi * 256) : (lhi + llo * 256);
-            if (lo2 >= 0xDC00 && lo2 <= 0xDFFF) {
-                unsigned cp =
-                    0x10000 + ((u - 0xD800) * 0x400) + (lo2 - 0xDC00);
-                utf8_encode_cp(out, cp);
-            } else {
-                sb_append_char(out, '?'); // low unit already consumed!
-            }
-        } else if (u >= 0xDC00 && u <= 0xDFFF) {
-            sb_append_char(out, '?');
-        } else {
-            utf8_encode_cp(out, u);
-        }
-    }
-}
-
-// ------------------------------------------------- charset naming ----
-
-char* encoding_normalize_charset(const char* name)
-{
-    StrBuf out;
-    const char* p;
-    char* s;
-
-    if (name == NULL) {
-        return NULL;
-    }
-    sb_init(&out);
-    for (p = name; *p != '\0'; p++) {
-        if (ascii_alnum((unsigned char)*p)) {
-            sb_append_char(&out, (char)tolower((unsigned char)*p));
-        }
-    }
-    s = sb_detach(&out);
-    if (strcmp(s, "utf8") == 0 || strcmp(s, "utf8mb4") == 0) {
-        pluto_free(s);
-        return pluto_strdup("utf-8");
-    }
-    if (strcmp(s, "cp1252") == 0 || strcmp(s, "windows1252") == 0 ||
-        strcmp(s, "latin1") == 0 || strcmp(s, "iso88591") == 0 ||
-        strcmp(s, "iso8859") == 0) {
-        pluto_free(s);
-        return pluto_strdup("cp1252");
-    }
-    // utf16 / utf16le / utf16be pass through unchanged
-    if (strcmp(s, "ascii") == 0 || strcmp(s, "usascii") == 0) {
-        pluto_free(s);
-        return pluto_strdup("ascii");
-    }
-    if (strcmp(s, "shiftjis") == 0 || strcmp(s, "sjis") == 0) {
-        pluto_free(s);
-        return pluto_strdup("shift_jis");
-    }
-    return s;
-}
-
-// Tries to read an unquoted token value after "charset" starting at j.
-// Pattern piece: charset%s*=%s*["']?([%w%+%-_%.]+)
-// Returns malloc'd token and sets *next, or NULL (no side effects).
-// NOTE: a '"'/'\'' immediately before the token KILLS this alignment
-// (only ONE optional quote is consumed pre-capture) — quoted header
-// values therefore fail, exactly like the Lua pattern.
-static char* take_charset_value(const char* s, size_t slen, size_t j,
-                                size_t* next)
-{
-    size_t k = j;
-    StrBuf tok;
-
-    while (k < slen && ascii_ws((unsigned char)s[k])) {
-        k++;
-    }
-    if (k >= slen || s[k] != '=') {
-        return NULL;
-    }
-    k++;
-    while (k < slen && ascii_ws((unsigned char)s[k])) {
-        k++;
-    }
-    if (k < slen && (s[k] == '"' || s[k] == '\'')) {
-        k++;
-    }
-    sb_init(&tok);
-    while (k < slen) {
-        unsigned char c = (unsigned char)s[k];
-        if (!ascii_alnum(c) && c != '+' && c != '-' && c != '_' && c != '.') {
+    for (;;)
+    {
+        if (i + 2 > len)
+        {
             break;
         }
-        sb_append_char(&tok, (char)c);
-        k++;
-    }
-    if (tok.len == 0) {
-        sb_free(&tok);
-        return NULL;
-    }
-    *next = k;
-    return sb_detach(&tok);
-}
+        unsigned int lo = data[i];
+        unsigned int hi = data[i + 1];
+        i += 2;
+        unsigned int u = littleEndian ? (lo + hi * 256) : (hi + lo * 256);
 
-char* encoding_charset_from_header(const char* contentType)
-{
-    size_t n, i, pos;
-    char* lower;
-    char* tok = NULL;
-
-    if (contentType == NULL) {
-        return NULL;
-    }
-    n = strlen(contentType);
-    lower = pluto_malloc(n + 1);
-    if (lower == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < n; i++) {
-        lower[i] = (char)tolower((unsigned char)contentType[i]);
-    }
-    lower[n] = '\0';
-
-    // Unanchored Lua match: FIRST "charset" occurrence wins.
-    for (i = 0; i + 7 <= n; i++) {
-        if (memcmp(lower + i, "charset", 7) == 0) {
-            tok = take_charset_value(lower, n, i + 7, &pos);
-            if (tok != NULL) {
-                break;
+        if (u >= 0xD800 && u <= 0xDBFF)
+        {
+            /* high surrogate: try to pair */
+            if (i + 2 <= len)
+            {
+                unsigned int l2 = data[i];
+                unsigned int h2 = data[i + 1];
+                unsigned int u2 = littleEndian ? (l2 + h2 * 256) : (h2 + l2 * 256);
+                if (u2 >= 0xDC00 && u2 <= 0xDFFF)
+                {
+                    i += 2;
+                    unsigned int cp = 0x10000 + ((u - 0xD800) * 0x400) + (u2 - 0xDC00);
+                    utf8_encode(&sb, cp);
+                }
+                else
+                {
+                    strbuf_appendf(&sb, "?");
+                }
+            }
+            else
+            {
+                strbuf_appendf(&sb, "?");
             }
         }
+        else if (u >= 0xDC00 && u <= 0xDFFF)
+        {
+            strbuf_appendf(&sb, "?");
+        }
+        else
+        {
+            utf8_encode(&sb, u);
+        }
     }
-    pluto_free(lower);
-    if (tok == NULL) {
-        return NULL;
-    }
+    return sb.data;
+}
+
+/* Normalize a charset name to a lower-cased canonical token.
+ * Writes into `out` (capacity >= 64). Returns 0 when `name` is NULL. */
+static int normalize_charset(const char *name, char *out, size_t outCap)
+{
+    if (!name)
     {
-        char* norm = encoding_normalize_charset(tok);
-        pluto_free(tok);
-        return norm;
+        return 0;
     }
+    /* Lua: gsub(name, "[^%w]", "") then lower — strip non-alphanumerics. */
+    size_t o = 0;
+    for (const char *p = name; *p && o + 1 < outCap; p++)
+    {
+        char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        {
+            out[o++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        }
+    }
+    out[o] = '\0';
+
+    if (strcmp(out, "utf8") == 0 || strcmp(out, "utf8mb4") == 0)
+    {
+        strcpy(out, "utf-8");
+    }
+    else if (strcmp(out, "cp1252") == 0 || strcmp(out, "windows1252") == 0 ||
+             strcmp(out, "latin1") == 0 || strcmp(out, "iso88591") == 0 ||
+             strcmp(out, "iso8859") == 0)
+    {
+        strcpy(out, "cp1252");
+    }
+    /* utf16 / utf16le / utf16be / ascii / usascii pass through as-is;
+     * shiftjis / sjis → shift_jis. */
+    else if (strcmp(out, "shiftjis") == 0 || strcmp(out, "sjis") == 0)
+    {
+        strcpy(out, "shift_jis");
+    }
+    return 1;
 }
 
-char* encoding_scan_meta_charset(const char* data, size_t len)
+/* Case-insensitive substring find (haystack, needle both NUL-terminated). */
+static const char *ci_strstr(const char *haystack, const char *needle)
 {
-    size_t limit = len < 1024 ? len : 1024;
-    const char* head = data;
-    size_t i;
-
-    if (limit == 0) {
+    if (!haystack || !needle)
+    {
         return NULL;
     }
-
-    for (i = 0; i + 5 <= limit; i++) {
-        size_t spanStart, spanEnd, occ[64];
-        size_t nOcc = 0, k;
-
-        if (memcmp(head + i, "<meta", 5) != 0) {
-            continue;
-        }
-        spanStart = i + 5;
-        spanEnd = limit;
-        for (k = spanStart; k < limit; k++) {
-            if (head[k] == '>') { // [^>]* cannot cross '>'
-                spanEnd = k;
+    size_t nlen = strlen(needle);
+    if (nlen == 0)
+    {
+        return haystack;
+    }
+    for (const char *h = haystack; *h; h++)
+    {
+        size_t i = 0;
+        while (i < nlen && h[i])
+        {
+            char a = h[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z')
+            {
+                a = (char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z')
+            {
+                b = (char)(b - 'A' + 'a');
+            }
+            if (a != b)
+            {
                 break;
             }
+            i++;
         }
-
-        // Collect "charset" occurrences, try RIGHT-to-LEFT (greedy backtrack).
-        for (k = spanStart; k + 7 <= spanEnd && nOcc < 64; k++) {
-            if (memcmp(head + k, "charset", 7) == 0) {
-                occ[nOcc++] = k;
-            }
-        }
-        while (nOcc > 0) {
-            size_t next;
-            char* tok =
-                take_charset_value(head, spanEnd, occ[--nOcc] + 7, &next);
-            if (tok != NULL) {
-                char* norm = encoding_normalize_charset(tok);
-                pluto_free(tok);
-                return norm;
-            }
+        if (i == nlen)
+        {
+            return h;
         }
     }
     return NULL;
 }
 
-// ------------------------------------------------------------ main ----
-
-static char* copy_bytes(const char* data, size_t len, size_t* outLen)
+/* Scan the first `limit` bytes of an HTML document for a charset declaration.
+ * Lua used two patterns:
+ *   '<meta[^>]*charset%s*=%s*["\']?([%w%+%-_%.]+)'
+ *   '<meta[^>]*content%s*=%s*["\']?[^"\'>]*charset%s*=%s*["\']?([%w%+%-_%.]+)'
+ * The second is subsumed by the first for our purposes (both end in the same
+ * "charset = token" capture); we scan case-insensitively for "charset",
+ * optional spaces, '=', optional spaces, optional quote, then the token. */
+static int scan_meta_charset(const unsigned char *data, size_t len, size_t limit,
+                             char *out, size_t outCap)
 {
-    char* copy = (char*)pluto_malloc(len + 1);
-    if (copy == NULL) {
-        if (outLen != NULL) {
-            *outLen = 0;
+    size_t n = (limit && limit < len) ? limit : len;
+    /* Copy into a NUL-terminated scratch buffer, lowercased, for ci_strstr. */
+    static char head[1025];
+    if (n >= sizeof(head))
+    {
+        n = sizeof(head) - 1;
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        char c = (char)data[i];
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c - 'A' + 'a');
         }
-        return NULL;
+        head[i] = c;
     }
-    memcpy(copy, data, len);
-    copy[len] = '\0';
-    if (outLen != NULL) {
-        *outLen = len;
+    head[n] = '\0';
+
+    const char *p = head;
+    while ((p = ci_strstr(p, "charset")) != NULL)
+    {
+        const char *q = p + 7;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+        {
+            q++;
+        }
+        if (*q == '=')
+        {
+            q++;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            {
+                q++;
+            }
+            if (*q == '"' || *q == '\'')
+            {
+                q++;
+            }
+            /* extract token [A-Za-z0-9+-.] (plus _ per Lua class) */
+            char tok[64];
+            size_t t = 0;
+            while (*q && t + 1 < sizeof(tok))
+            {
+                char c = *q;
+                int ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                         (c >= 'A' && c <= 'Z') || c == '+' || c == '-' ||
+                         c == '_' || c == '.';
+                if (!ok)
+                {
+                    break;
+                }
+                tok[t++] = c;
+                q++;
+            }
+            tok[t] = '\0';
+            if (t > 0 && normalize_charset(tok, out, outCap))
+            {
+                return 1;
+            }
+        }
+        p += 7;
     }
-    return copy;
+    return 0;
 }
 
-static char* finish_sb(StrBuf* sb, size_t* outLen)
+/* Extract charset from an HTTP Content-Type header value. */
+static int charset_from_header(const char *contentType, char *out, size_t outCap)
 {
-    size_t n = sb->len;
-    char* s = sb_detach(sb);
-    if (outLen != NULL) {
-        *outLen = n;
+    if (!contentType)
+    {
+        return 0;
     }
-    return s;
+    const char *p = ci_strstr(contentType, "charset");
+    if (!p)
+    {
+        return 0;
+    }
+    p += 7;
+    while (*p == ' ' || *p == '\t')
+    {
+        p++;
+    }
+    if (*p != '=')
+    {
+        return 0;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t')
+    {
+        p++;
+    }
+    if (*p == '"' || *p == '\'')
+    {
+        p++;
+    }
+    char tok[64];
+    size_t t = 0;
+    while (*p && t + 1 < sizeof(tok))
+    {
+        char c = *p;
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '_' || c == '.';
+        if (!ok)
+        {
+            break;
+        }
+        tok[t++] = c;
+        p++;
+    }
+    tok[t] = '\0';
+    if (t == 0)
+    {
+        return 0;
+    }
+    return normalize_charset(tok, out, outCap);
 }
 
-char* encoding_to_utf8(const char* data, size_t len,
-                       const char* contentType, size_t* outLen)
+int encoding_is_utf8(const unsigned char *data, size_t len)
 {
-    char* cs = NULL;
-    StrBuf out;
+    size_t i = 0;
+    while (i < len)
+    {
+        unsigned char b = data[i];
+        if (b < 0x80)
+        {
+            i++;
+        }
+        else if ((b & 0xE0) == 0xC0 && i + 1 < len)
+        {
+            if ((data[i + 1] & 0xC0) != 0x80) return 0;
+            i += 2;
+        }
+        else if ((b & 0xF0) == 0xE0 && i + 2 < len)
+        {
+            if ((data[i + 1] & 0xC0) != 0x80 || (data[i + 2] & 0xC0) != 0x80) return 0;
+            i += 3;
+        }
+        else if ((b & 0xF8) == 0xF0 && i + 3 < len)
+        {
+            if ((data[i + 1] & 0xC0) != 0x80 || (data[i + 2] & 0xC0) != 0x80 ||
+                (data[i + 3] & 0xC0) != 0x80)
+            {
+                return 0;
+            }
+            i += 4;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
 
-    if (data == NULL || len == 0) {
-        return copy_bytes("", 0, outLen);
+char *encoding_to_utf8(const unsigned char *data, size_t len, const char *contentType)
+{
+    if (!data || len == 0)
+    {
+        /* Lua returned the (nil/empty) input unchanged; return an empty heap
+         * string so the caller always owns a freeable buffer. */
+        StrBuf sb;
+        strbuf_init(&sb);
+        return sb.data;
     }
 
-    // 1. BOM
-    if (len >= 3 && (unsigned char)data[0] == 0xEF &&
-        (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) {
-        return copy_bytes(data + 3, len - 3, outLen);
+    /* 1. Byte order mark. */
+    if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF)
+    {
+    /* UTF-8 BOM: strip it, copy the rest byte-identical. */
+    StrBuf sb;
+    strbuf_init(&sb);
+    strbuf_append_n(&sb, (const char *)(data + 3), len - 3);
+    return sb.data;
     }
-    if (len >= 2 && (unsigned char)data[0] == 0xFF &&
-        (unsigned char)data[1] == 0xFE) {
-        sb_init(&out);
-        from_utf16(data + 2, len - 2, 1, &out);
-        return finish_sb(&out, outLen);
+    if (len >= 2 && data[0] == 0xFF && data[1] == 0xFE)
+    {
+        return from_utf16(data + 2, len - 2, 1);
     }
-    if (len >= 2 && (unsigned char)data[0] == 0xFE &&
-        (unsigned char)data[1] == 0xFF) {
-        sb_init(&out);
-        from_utf16(data + 2, len - 2, 0, &out);
-        return finish_sb(&out, outLen);
+    if (len >= 2 && data[0] == 0xFE && data[1] == 0xFF)
+    {
+        return from_utf16(data + 2, len - 2, 0);
     }
 
-    // 2. transport charset
-    cs = encoding_charset_from_header(contentType);
+    /* 2. Transport charset. */
+    char cs[64];
+    int have = charset_from_header(contentType, cs, sizeof(cs));
 
-    // 3/4. in-document meta (only when header missing or utf-8)
-    if (cs == NULL || strcmp(cs, "utf-8") == 0) {
-        char* meta = encoding_scan_meta_charset(data, len);
-        if (meta != NULL) {
-            pluto_free(cs);
-            cs = meta;
+    /* 3/4. In-document <meta> declarations. */
+    if (!have || strcmp(cs, "utf-8") == 0)
+    {
+        char meta[64];
+        if (scan_meta_charset(data, len, 1024, meta, sizeof(meta)))
+        {
+            strcpy(cs, meta);
+            have = 1;
         }
     }
 
-    if (cs == NULL) {
-        return copy_bytes(data, len, outLen); // assumed UTF-8
+    /* Anything we can't decode stays as-is (assumed UTF-8). */
+    if (!have)
+    {
+        StrBuf sb;
+        strbuf_init(&sb);
+        strbuf_append_n(&sb, (const char *)data, len);
+        return sb.data;
     }
-    if (strcmp(cs, "cp1252") == 0) {
-        sb_init(&out);
-        from_single_byte(data, len, &out);
-        pluto_free(cs);
-        return finish_sb(&out, outLen);
+    if (strcmp(cs, "utf-8") == 0 || strcmp(cs, "ascii") == 0)
+    {
+        StrBuf sb;
+        strbuf_init(&sb);
+        strbuf_append_n(&sb, (const char *)data, len);
+        return sb.data;
     }
-    if (strcmp(cs, "utf16le") == 0) {
-        sb_init(&out);
-        from_utf16(data, len, 1, &out);
-        pluto_free(cs);
-        return finish_sb(&out, outLen);
+    if (strcmp(cs, "cp1252") == 0)
+    {
+        return from_single_byte(data, len);
     }
-    if (strcmp(cs, "utf16be") == 0) {
-        sb_init(&out);
-        from_utf16(data, len, 0, &out);
-        pluto_free(cs);
-        return finish_sb(&out, outLen);
+    if (strcmp(cs, "utf16le") == 0)
+    {
+        return from_utf16(data, len, 1);
     }
+    if (strcmp(cs, "utf16be") == 0)
+    {
+        return from_utf16(data, len, 0);
+    }
+
+    /* Fallback for exotic encodings we cannot handle: best-effort
+     * single-byte decode so non-ASCII text still shows something readable. */
     if (strcmp(cs, "shift_jis") == 0 || strcmp(cs, "eucjp") == 0 ||
-        strcmp(cs, "gbk") == 0 || strcmp(cs, "big5") == 0) {
-        sb_init(&out);
-        from_single_byte(data, len, &out);
-        pluto_free(cs);
-        return finish_sb(&out, outLen);
+        strcmp(cs, "gbk") == 0 || strcmp(cs, "big5") == 0)
+    {
+        return from_single_byte(data, len);
     }
-    // utf-8 / ascii / unknown -> verbatim
-    pluto_free(cs);
-    return copy_bytes(data, len, outLen);
+
+    StrBuf sb;
+    strbuf_init(&sb);
+    strbuf_append_n(&sb, (const char *)data, len);
+    return sb.data;
 }

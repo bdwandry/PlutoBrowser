@@ -1,0 +1,49 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[16:15:32 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[16:15:32 #2] P1 fmt: [str][X][%][-42]
+[16:15:32 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:237
+[16:15:32 #4] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[16:15:32 #5] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[16:15:32 #6] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[16:15:32 #7] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[16:15:32 #8] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[16:15:32 #9] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[16:15:32 #10] === PlutoBrowser boot (Phase 0 scaffold) ===
+[16:15:32 #11] eventHandler: kEventInit, osversion=30101
+[16:15:32 #12] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[16:15:32 #13] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[16:15:32 #14] P5 about: host=home norm=about:home
+[16:15:32 #15] P5 noscheme: norm=https://example.com/path ssl=1
+[16:15:32 #16] P5 defport: norm=http://x.com/
+[16:15:32 #17] P5 unwrap=https://example.org/page
+[16:15:32 #18] P5 resolve1=https://x.com/a/b/c.png
+[16:15:32 #19] P5 resolve2=https://x.com/root.png
+[16:15:32 #20] P5 resolve3=https://cdn.y.com/i.png
+[16:15:32 #21] P5 resolve4=https://x.com/a/page.html#top
+[16:15:32 #22] P5 search: hw=1 dotcom=0 ip=0 about=0
+[16:15:32 #23] P5 encode=%s val=a+b%26clank
+[16:15:32 #24] P5 decode=a b&clank
+[16:15:32 #25] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[16:15:32 #26] P7 utf16le=Aé😀
+[16:15:32 #27] P7 cp1252 len=10(first=E2:want) first=E2
+[16:15:32 #28] P7 meta=<html><head><meta charset="iso-8859-1"><title>t</title></head><body>café</body></html>
+[16:15:32 #29] P7 hdr-passthrough=identical
+[16:15:32 #30] P7 utf8 passthrough=café
+[16:15:32 #31] P4 scheduled: pending=2
+[16:15:32 #32] updateFrame: first frame executed
+[16:15:32 #33] P4 chain complete (5 iterations)
+[16:15:32 #34] P6 cancel_all after t1 done + t2 error (cancelledFired must stay 0)
+[16:15:32 #35] P6 RESULT: done=1 (want 1) error=1 (want 1) cancelledCompleted=0 (want 0) progress=0.00 running=0 maxTicksPerFrame=1
+[16:15:33 #36] P4 oneshot fired (count=1)
+[16:15:33 #37] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[16:15:42 #38] updateFrame: heartbeat frame=300
+[16:15:52 #39] updateFrame: heartbeat frame=600
+[16:16:01 #40] updateFrame: heartbeat frame=900
+[16:16:11 #41] updateFrame: heartbeat frame=1200
+[16:16:21 #42] updateFrame: heartbeat frame=1500
+[16:16:31 #43] updateFrame: heartbeat frame=1800
+[16:16:41 #44] updateFrame: heartbeat frame=2100
+[16:16:51 #45] updateFrame: heartbeat frame=2400
+[16:17:01 #46] updateFrame: heartbeat frame=2700
+[16:17:06 #47] eventHandler: kEventTerminate, frames=2860

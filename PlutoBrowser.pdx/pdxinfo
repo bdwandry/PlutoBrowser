@@ -1,9 +1,9 @@
 name=PlutoBrowser
 author=Bryan Wandrych
-description=Fast, general-purpose web browser for Playdate with HTML & image rendering (100% C port of CometBrowser)
+description=Fast, general-purpose web browser for Playdate with HTML & image rendering (native C)
 bundleID=com.bryanwandrych.plutobrowser
 version=1.0.0
 buildNumber=1
 imagePath=assets/launcher
 pdxversion=30101
-buildtime=841155439
+buildtime=842147092

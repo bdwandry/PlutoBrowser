@@ -1,0 +1,3 @@
+logger.c:36:6:logger_init	16	static
+logger.c:50:6:logger_log	568	static
+logger.c:78:6:logger_error_at	536	static

@@ -1,0 +1,11 @@
+inflate.c:22:12:bs_read_bits	16	static
+inflate.c:71:13:inf_build_table	184	static
+inflate.c:141:12:inf_decode_symbol.part.0	40	static
+inflate.c:220:12:inf_read_dynamic	4360	static
+inflate.c:174:13:inf_fixed_tables.part.0	328	static
+inflate.c:305:13:out_push	16	static
+inflate.c:505:13:st_emit	24	static
+inflate.c:326:10:inflate_decompress	7016	static
+inflate.c:664:16:inflate_stream_new	24	static
+inflate.c:714:16:inflate_stream_read	64	static
+inflate.c:743:6:inflate_stream_free	8	static

@@ -1,199 +1,206 @@
-#ifndef PLUTO_RENDER_LAYOUT_H
-#define PLUTO_RENDER_LAYOUT_H
-
-#include <stddef.h>
-
-struct PlaydateAPI;
-struct DocDocument;
-struct LmRect;
-
-/* C port of Source/render/layout.lua (Layout) -- P26B.
+/*
+ * PlutoBrowser — layout.h
+ * Port of Source/render/layout.lua (reference, 1472 lines).
  *
- * Block layout engine: walks DocDocument blocks and flattens them into
- * positioned render items (text runs with per-word wrapping, code boxes,
- * tables, form controls, images, boxes/meters/placeholders), registers
- * link hitboxes in LinkManager, then paints them scrolled (draw()).
+ * Lua → C function map (one-to-one):
+ *   (local) normalizeAlign            → layout_normalize_align()   (test seam)
+ *   (local) toRoman                   → layout_to_roman()          (test seam)
+ *   (local) toAlpha                   → layout_to_alpha()          (test seam)
+ *   (local) orderedMarker             → layout_ordered_marker()    (test seam)
+ *   (local) tabAdvance                → layout_tab_advance()       (internal)
+ *   (local) expandTabColumns          → layout_expand_tab_columns() (test seam)
+ *   (local) breakLines                → layout_break_lines()       (internal)
+ *   (local) emitFlow                  → layout_emit_flow()         (internal)
+ *   Layout.build(doc)                 → layout_build(doc)
+ *   Layout.draw(scrollY)              → layout_draw(scrollY)
+ *   Layout.evictOffscreen(scrollY)    → layout_evict_offscreen(scrollY)
+ *   Layout.evictHoveredImage(cur)     → layout_evict_hovered_image(cur)
+ *   Layout.showOnDemandOverlay(...)   → layout_show_on_demand_overlay(...)
+ *   Layout.clearOnDemandOverlay()     → layout_clear_on_demand_overlay()
+ *   Layout.drawOnDemandOverlay()      → layout_draw_on_demand_overlay()
+ *   Layout.handleOnDemandInput()      → layout_handle_on_demand_input()
+ *   Layout.renderItems/totalHeight    → layout_item_at()/layout_get_total_height()
  *
- * Faithful parity notes:
- *  - build(): currentY starts CONTENT_Y+8; marginX = CONTENT_MARGIN+2;
- *    maxWidth = CONTENT_TEXT_WIDTH-4; totalHeight = max(currentY+20,
- *    CONTENT_HEIGHT). Empty/absent blocks -> totalHeight = CONTENT_HEIGHT.
- *  - Word wrap drops leading whitespace, collapses whitespace runs to one
- *    space width, tab-containing runs advance to the next 8-column tab
- *    stop measured from the running line width.
- *  - emitFlow merges consecutive words sharing href+anchorIndex into ONE
- *    LinkManager rect spanning the gap spaces; sub/sup shift y by +3/-4.
- *  - Headings level<=2 append an underline "line" item (+6 y).
- *  - Table cell links register on FIRST draw that paints a table box
- *    (Layout.cellLinksRegistered); their rect y is rowY+scrollY (page
- *    space). The Lua source reads `inl.inert` after its inline loop has
- *    ended -- a nil global lookup -- so inert is ALWAYS false there; the
- *    port replicates that exactly.
- *  - draw() honors imageMode for image items: DISABLED box "[Image Off]",
- *    ONDEMAND tap-prompt/hatching states, HOVER only when hovered,
- *    VIEWPORT enqueue-when-visible, ALL always via ImageDecoder.draw or
- *    pre-decoded bitmap scaled to fit.
- *  - On-demand overlay input returns view/unload/link/cancel actions and
- *    raises the one-frame onDemandConsumed flag.
+ * Render items are a tagged struct (Lua used open tables). Strings are
+ * BORROWED from the parsed document (arena) — layout_clear() frees only
+ * layout-owned memory, so free the document first, then the layout, or call
+ * layout_clear() before document_free().
  *
- * Lifetime contract: items BORROW strings from the document they were
- * built from (and own a few synthesized ones like bullets/truncated
- * labels). Call layout_free_items() before freeing that document; the
- * next layout_build() does this implicitly.
+ * Link rects: the reference attached per-rect metadata (isImage/src/alt,
+ * isFormInput/inputBlock, isToggle/toggleKey/toggleOpen, inert) to the rect
+ * tables passed to LinkManager.addLinkRect. The C port passes an equivalent
+ * LayoutRectAux blob through lm_add_link_rect_ex(); main.c (navigation) reads
+ * it back with lm_rect_aux().
  */
+#ifndef PLUTO_LAYOUT_H
+#define PLUTO_LAYOUT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "pd_api.h"
+#include "html/document.h"
+#include "render/link_manager.h"
 
-typedef void PlutoFont;
+/* ── Render item types (Lua item.type strings) ───────────────────────────── */
+typedef enum
+{
+    LRI_TEXT = 0,
+    LRI_READER_BADGE,
+    LRI_LINE,
+    LRI_QUOTE_BAR,
+    LRI_CODE_BOX,
+    LRI_TABLE_BOX,
+    LRI_IMAGE,
+    LRI_INPUT_FIELD,
+    LRI_INPUT_SUBMIT,
+    LRI_CHECKBOX_FIELD,
+    LRI_SELECT_FIELD,
+    LRI_HIDDEN_FIELD,
+    LRI_PLACEHOLDER,
+    LRI_METER,
+    LRI_BOX_FRAME
+} LayoutItemType;
 
-enum {
-    LIT_TEXT = 0,
-    LIT_READER_BADGE,
-    LIT_LINE,
-    LIT_QUOTE_BAR,
-    LIT_CODE_BOX,
-    LIT_TABLE_BOX,
-    LIT_IMAGE,
-    LIT_INPUT_FIELD,
-    LIT_INPUT_SUBMIT,
-    LIT_CHECKBOX_FIELD,
-    LIT_SELECT_FIELD,
-    LIT_PLACEHOLDER,
-    LIT_METER,
-    LIT_BOX_FRAME,
-    LIT_HIDDEN_FIELD
-};
+/* Per-rect metadata the reference attached to LinkManager rect tables
+ * (LMRectAux — defined in link_manager.h). inputItem points at the
+ * LayoutItem owned by the layout (inputBlock). */
+typedef LMRectAux LayoutRectAux;
 
-/* rows/caption of table items borrow the document's DocTableRow array
- * (declared in html/document.h; kept opaque here via void* accessors) */
-struct DocTableRow;
-
-typedef struct LItem {
-    int type;
+/* ── Render item (union-style tagged struct) ─────────────────────────────── */
+typedef struct LayoutItem
+{
+    LayoutItemType type;
     int x, y, w, h;
 
-    /* text / generic label */
-    char* text;              /* owned */
-    PlutoFont* font;
-    unsigned char bold, italic, underline, code, smallFlag, bigFlag;
-    unsigned char mark, strike, invert;
-    char* href;              /* owned or NULL */
-    long anchorIndex;        /* -1 when none */
+    /* LRI_TEXT */
+    const char *text;    /* borrowed (word text / bullet / label) */
+    LCDFont *font;       /* NULL → body font at draw time (Lua gfx.getFont) */
+    unsigned flags;      /* DOC_INF_* copied from the inline */
+    int sub, sup;        /* baseline shift flags (dy = 3 / -4) */
+    int bold, italic, underline, code, small, big, mark, strike;
+    int invert;          /* opts.invert from the block */
+    const char *href;    /* borrowed or NULL */
+    int anchorIndex;     /* 0 = none */
 
-    /* reader_badge */
-    char* host;              /* owned */
-    char* readingTime;       /* owned */
-
-    /* line / quote_bar / box_frame */
+    /* LRI_LINE */
     int x1, y1, x2, y2;
 
-    /* code_box */
-    char** lines;            /* owned array of owned strings */
-    size_t nLines;
+    /* LRI_QUOTE_BAR: x, y1, y2 (h unused) */
 
-    /* table_box */
-    struct DocTableRow* rows;   /* borrowed from doc */
-    size_t nRows;
-    char* caption;           /* owned copy or NULL */
-    int border;
+    /* LRI_READER_BADGE */
+    const char *host;    /* borrowed */
+    const char *readingTime;
 
-    /* image */
-    char* alt;               /* owned or NULL */
-    char* src;               /* owned or NULL */
-    void* img;               /* borrowed LCDBitmap* or NULL */
+    /* LRI_CODE_BOX */
+    char **lines;        /* borrowed from block */
+    int lineCount;
 
-    /* form controls */
-    char* inputType;         /* owned ("text"/"textarea"/"password"...) */
-    char* name;              /* owned (input default "q", checkbox "") */
-    char* value;             /* owned ("" allowed) */
-    char* placeholder;       /* owned ("" allowed) */
-    char* formAction;        /* owned ("" allowed) */
-    char* formMethod;        /* owned ("get") */
-    char* label;             /* owned (submit/checkbox/placeholder) */
+    /* LRI_TABLE_BOX */
+    const DocTable *table;
+    const char *caption; /* borrowed */
+    int border;          /* 1 = draw border (Lua border ~= false) */
+
+    /* LRI_IMAGE */
+    const char *alt, *src; /* borrowed */
+    const char *imgHref;   /* block.href */
+    LCDBitmap *img;        /* usually NULL (decoded images come from cache) */
+
+    /* LRI_INPUT_FIELD / LRI_INPUT_SUBMIT / LRI_CHECKBOX_FIELD / LRI_SELECT_FIELD /
+     * LRI_HIDDEN_FIELD (shared string fields, all borrowed from the block) */
+    const char *name, *value, *placeholder, *label;
+    const char *formAction, *formMethod;
+    const char *inputType;
     int disabled, readonly, required;
-    int maxlength;           /* -1 unset */
+    int maxlength;      /* -1 = Lua nil */
     int radio, checked;
-    int fieldWidth, fieldRows; /* -1 unset (mirrored at build time only) */
+    int selectedIndex;  /* 1-based */
+    DocOption **options; /* borrowed */
+    int optionCount;
 
-    /* select_field */
-    void* options;           /* borrowed DocSelectOpt* */
-    size_t nOptions;
-    int selectedIndex;
+    /* LRI_METER */
+    double mValue, mMin, mMax, mLow, mHigh, mOptimum;
 
-    /* meter */
-    double mValue, mMax, mMin, mLow, mHigh, mOptimum;
-
-    char* toggleKey;         /* owned or NULL */
+    /* LRI_BOX_FRAME (uses x1..y2 above) */
+    const char *toggleKey; /* borrowed or NULL */
     int toggleOpen;
-} LItem;
 
-void layout_init(struct PlaydateAPI* pd);
+    /* Back-pointer to the source DocBlock for input items (Lua items alias
+     * the block table; form interaction mutates block.value/checked/
+     * selectedIndex through it). Borrowed; NULL for non-input items. */
+    void *block;
+} LayoutItem;
 
-/* Lua Layout.build(doc): resets state, clears LinkManager, flattens
- * blocks into render items. NULL doc / zero blocks -> empty page height. */
-void layout_build(const struct DocDocument* doc);
+/* ── Lifecycle ───────────────────────────────────────────────────────────── */
+void layout_init(PlaydateAPI *pd);
+void layout_clear(void); /* frees item array + overlay/requested state */
 
-/* free all items + reset derived state (called by next build too) */
-void layout_free_items(void);
+/* ── Build (port of Layout.build) ────────────────────────────────────────── */
+void layout_build(DocParseResult *doc);
 
-int          layout_item_count(void);
-const LItem* layout_item_at(int i);      /* NULL out of range */
-LItem*       layout_item_mutable(int i); /* form-state mutation seam */
-double       layout_total_height(void);
-
-/* Lua Layout.selectedInputItem (borrowed pointer to a rendered item) */
-const LItem* layout_selected_input(void);
-void         layout_set_selected_input(const LItem* it);
-
-/* on-demand overlay state (Lua Layout.onDemandOverlay / onDemandConsumed /
- * onDemandRequested) */
-int layout_has_on_demand_overlay(void);
-void layout_show_on_demand_overlay(const char* src, const char* href,
-                                   const char* alt);
-void layout_clear_on_demand_overlay(void);
-const char* layout_od_src(void);
-const char* layout_od_href(void);
-const char* layout_od_alt(void);
-int  layout_on_demand_consumed(void);
-void layout_clear_on_demand_consumed(void);
-int  layout_on_demand_requested(const char* src);
-
-/* handleOnDemandInput(pressed): pass the just-pressed button bitmask
- * (playdate kButtonA/kButtonB values). Consumes overlay on action and
- * raises onDemandConsumed for one frame. */
-enum {
-    PLUTO_KBUTTON_A = 0x1,
-    PLUTO_KBUTTON_B = 0x2
-};
-
-typedef enum {
-    OD_NONE = 0,
-    OD_VIEW,
-    OD_UNLOAD,
-    OD_LINK,
-    OD_CANCEL
-} PlutoOdAction;
-
-PlutoOdAction layout_handle_on_demand_input(unsigned int pressed);
-
-/* device/sim painters; no-ops on host builds (pd == NULL) */
+/* ── Draw (port of Layout.draw) ──────────────────────────────────────────── */
 void layout_draw(int scrollY);
+
+/* ── State accessors ─────────────────────────────────────────────────────── */
+int layout_get_total_height(void);
+
+/* Battery probe: breakLines structure summary (device build has no printf
+ * diffing, so the battery asserts on counts/widths instead of full dumps). */
+typedef struct
+{
+    int lineCount; /* capped at 16 */
+    int lineWordCount[16];
+    int lineWidth[16];
+} LayoutBreakProbe;
+int layout_test_break_lines_probe(const DocInline **inlines, int inlineCount,
+                                  int maxW, LCDFont *font, int bold, int lineH,
+                                  LayoutBreakProbe *out);
+/* 1 when the last layout_build() hit the reference's Layout Error path
+ * (percent-width tables raise in the reference's table branch). */
+int layout_build_failed(void);
+int layout_get_item_count(void);
+const LayoutItem *layout_item_at(int index); /* 0-based; NULL if out of range */
+const LayoutItem *layout_get_selected_input(void);
+void layout_set_selected_input(const LayoutItem *item);
+int layout_get_on_demand_consumed(void);
+void layout_clear_on_demand_consumed(void);
+const char *layout_get_hovered_image_src(void);
+
+/* ── Eviction (viewport/hover image modes) ───────────────────────────────── */
 void layout_evict_offscreen(int scrollY);
-void layout_evict_hovered_image(const char* currentHoveredSrc);
+void layout_evict_hovered_image(const char *currentHoveredSrc);
+
+/* ── On-demand overlay ───────────────────────────────────────────────────── */
+void layout_show_on_demand_overlay(const char *src, const char *href, const char *alt);
+void layout_clear_on_demand_overlay(void);
 void layout_draw_on_demand_overlay(void);
+/* Returns "view"/"unload"/"link"/"cancel" or NULL; btnPushed = PDButtons bits. */
+const char *layout_handle_on_demand_input(unsigned int btnPushed);
+int layout_has_on_demand_overlay(void);
+/* The overlay's link href (Lua: Layout.onDemandOverlay.href). "" when none. */
+const char *layout_on_demand_href(void);
 
-/* hover tracking used by hover image mode (main loop owns the value) */
-const char* layout_hovered_image_src(void);
-void        layout_set_hovered_image_src(const char* src);
+/* ── Test seams (vector parity vs the Lua reference harness) ─────────────── */
+/* Measure function: Lua Style.getTextWidth(font, text). Swappable so the
+ * host battery can pin deterministic metrics; NULL restores the default
+ * (pd getTextWidth, NULL font → body font, empty → 0). */
+typedef int (*LayoutMeasureFn)(LCDFont *font, const char *text);
+void layout_set_measure(LayoutMeasureFn fn);
 
-/* test hooks: ordered-list marker helpers */
-char* layout_ordered_marker(int number, const char* markerType); /* owned */
-char* layout_expand_tab_columns(const char* line);               /* owned */
+/* (local) helpers exercised directly by the battery */
+const char *layout_normalize_align(const char *a); /* NULL/invalid → NULL */
+void layout_to_roman(int n, char *out, size_t cap);
+void layout_to_alpha(int n, char *out, size_t cap);
+/* Writes "<marker>" (no dot) for type '1','a','A','i','I' (0/other → '1'). */
+void layout_ordered_marker(int number, char markerType, char *out, size_t cap);
+/* Tab expansion for code lines: out holds ≤ cap-1 chars. */
+void layout_expand_tab_columns(const char *line, char *out, size_t cap);
 
-#ifdef __cplusplus
-}
-#endif
+/* Host-battery hooks (no-ops in the app; used by tests/lua_reference/p31). */
+void layout_test_dump_break_lines(const DocInline **inlines, int inlineCount,
+                                  int maxW, LCDFont *font, int bold, int lineH,
+                                  void (*emitLine)(const char *s));
+void layout_test_run_emit(const DocInline **inlines, int inlineCount, int maxW,
+                          LCDFont *font, int bold, int lineH, int startX,
+                          int maxWX, const char *align, int startY);
+int layout_test_get_emit_line_h(void);
+int layout_test_get_emit_end_y(void);
 
-#endif // PLUTO_RENDER_LAYOUT_H
+#endif /* PLUTO_LAYOUT_H */

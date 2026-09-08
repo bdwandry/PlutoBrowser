@@ -1,0 +1,970 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[09:14:12 #1] === PlutoBrowser boot (Phase 0 scaffold) ===
+[09:14:12 #2] eventHandler: kEventInit, osversion=30101
+[09:14:12 #3] P4 scheduled: pending=2
+[09:14:12 #4] STORAGE: init enter
+[09:14:12 #5] STORAGE: load enter
+[09:14:12 #6] STORAGE: file opened, parsing
+[09:14:12 #7] STORAGE: init exit
+[09:14:13 #8] KB new: entering
+[09:14:13 #9] KB new: allocated
+[09:14:13 #10] KB load: font...
+[09:14:13 #11] KB load: font ok h=36
+[09:14:13 #12] KB load: menu-space ok
+[09:14:13 #13] KB load: menu-ok ok
+[09:14:13 #14] KB load: menu-del ok
+[09:14:13 #15] KB load: menu-cancel ok
+[09:14:13 #16] KB new: font+images loaded
+[09:14:13 #17] P13 newKeyboard returned
+[09:14:13 #18] P13 update-callback set
+[09:14:13 #19] updateFrame: first frame executed
+[09:14:13 #20] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[09:14:13 #21] P1 fmt: [str][X][%][-42]
+[09:14:13 #22] P1 checkpoint: before strbuf_free
+[09:14:13 #23] P1 checkpoint: after strbuf_free
+[09:14:13 #24] P1 boot battery complete
+[09:14:13 #25] P22 boot step 1 done
+[09:14:13 #26] P2 checkpoint: before logger_error
+[09:14:13 #27] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:2351
+[09:14:13 #28] P2 checkpoint: after logger_error
+[09:14:13 #29] P2 boot battery complete
+[09:14:13 #30] P22 boot step 2 done
+[09:14:13 #31] P3 checkpoint: begin engines
+[09:14:13 #32] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[09:14:13 #33] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[09:14:13 #34] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[09:14:13 #35] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[09:14:13 #36] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[09:14:13 #37] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[09:14:13 #38] P3 boot battery complete
+[09:14:13 #39] P22 boot step 3 done
+[09:14:13 #40] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[09:14:13 #41] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[09:14:13 #42] P5 about: host=home norm=about:home
+[09:14:13 #43] P5 noscheme: norm=https://example.com/path ssl=1
+[09:14:13 #44] P5 defport: norm=http://x.com/
+[09:14:13 #45] P5 unwrap=https://example.org/page
+[09:14:13 #46] P5 resolve1=https://x.com/a/b/c.png
+[09:14:13 #47] P5 resolve2=https://x.com/root.png
+[09:14:13 #48] P5 resolve3=https://cdn.y.com/i.png
+[09:14:13 #49] P5 resolve4=https://x.com/a/page.html#top
+[09:14:13 #50] P5 search: hw=1 dotcom=0 ip=0 about=0
+[09:14:13 #51] P5 encode=%s val=a+b%26clank
+[09:14:13 #52] P5 decode=a b&clank
+[09:14:13 #53] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[09:14:13 #54] P5 boot battery complete
+[09:14:13 #55] P22 boot step 4 done
+[09:14:13 #56] P4 chain complete (5 iterations)
+[09:14:13 #57] P7 utf16le=Aé😀
+[09:14:13 #58] P7 cp1252 len=10(first=E2:want) first=E2
+[09:14:13 #59] P7 meta=<html><head><meta charset="iso-8859-1"><title>t</title></head><body>café</body></html>
+[09:14:13 #60] P7 hdr-passthrough=identical
+[09:14:13 #61] P7 utf8 passthrough=café
+[09:14:13 #62] P7 boot battery complete
+[09:14:13 #63] P22 boot step 5 done
+[09:14:13 #64] P8 tc1a=sid=abc123; plain=1 (want sid=abc123; plain=1)
+[09:14:13 #65] P8 tc1b=plain=1 (want plain=1)
+[09:14:13 #66] P8 tc1c=[] (want empty)
+[09:14:13 #67] P8 tc4-http=plain=1 (want plain=1)
+[09:14:13 #68] P8 tc4-https=plain=1; sec=9 (want plain=1; sec=9)
+[09:14:13 #69] P8 tc2=sec=9 (want sec=9) count=2 (want 2)
+[09:14:13 #70] P8 tc5 count=5 (want 5)
+[09:14:13 #71] P8 tc5 d1.expires>1824103680 (want >0 name=a)
+[09:14:15 #72] P8 tc3 after-expiry count=5 (want 5, tmp pruned)
+[09:14:16 #73] P8 tc7 count=300 lo=cap10 hi=cap309 (want 300 cap10 cap309)
+[09:14:16 #74] P8 cleared count=0 (want 0)
+[09:14:16 #75] P8 boot battery complete
+[09:14:16 #76] P22 boot step 6 done
+[09:14:16 #77] P4 oneshot fired (count=1)
+[09:14:16 #78] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[09:14:16 #79] STORAGE: init enter
+[09:14:16 #80] STORAGE: load enter
+[09:14:16 #81] STORAGE: file opened, parsing
+[09:14:16 #82] STORAGE: init exit
+[09:14:16 #83] P9 init bookmarks=9 (want 9 defaults) history=0
+[09:14:16 #84] STORAGE: save open
+[09:14:16 #85] STORAGE: save writing (bm=9 hist=1)
+[09:14:16 #86] STORAGE: save close
+[09:14:16 #87] STORAGE: save exit
+[09:14:16 #88] STORAGE: save open
+[09:14:16 #89] STORAGE: save writing (bm=9 hist=2)
+[09:14:16 #90] STORAGE: save close
+[09:14:16 #91] STORAGE: save exit
+[09:14:16 #92] STORAGE: save open
+[09:14:16 #93] STORAGE: save writing (bm=9 hist=2)
+[09:14:16 #94] STORAGE: save close
+[09:14:16 #95] STORAGE: save exit
+[09:14:16 #96] P9 tc2 top=First Again url=https://a.example/1 time=09:14 (want top First Again a.example)
+[09:14:16 #97] P9 tc3 second=Second Page count=2 (want Second Page, 2)
+[09:14:16 #98] STORAGE: save open
+[09:14:16 #99] STORAGE: save writing (bm=9 hist=3)
+[09:14:16 #100] STORAGE: save close
+[09:14:16 #101] STORAGE: save exit
+[09:14:16 #102] STORAGE: save open
+[09:14:16 #103] STORAGE: save writing (bm=9 hist=4)
+[09:14:16 #104] STORAGE: save close
+[09:14:16 #105] STORAGE: save exit
+[09:14:16 #106] STORAGE: save open
+[09:14:16 #107] STORAGE: save writing (bm=9 hist=5)
+[09:14:16 #108] STORAGE: save close
+[09:14:16 #109] STORAGE: save exit
+[09:14:16 #110] STORAGE: save open
+[09:14:16 #111] STORAGE: save writing (bm=9 hist=6)
+[09:14:16 #112] STORAGE: save close
+[09:14:16 #113] STORAGE: save exit
+[09:14:16 #114] STORAGE: save open
+[09:14:16 #115] STORAGE: save writing (bm=9 hist=7)
+[09:14:16 #116] STORAGE: save close
+[09:14:16 #117] STORAGE: save exit
+[09:14:16 #118] STORAGE: save open
+[09:14:16 #119] STORAGE: save writing (bm=9 hist=8)
+[09:14:16 #120] STORAGE: save close
+[09:14:16 #121] STORAGE: save exit
+[09:14:16 #122] STORAGE: save open
+[09:14:16 #123] STORAGE: save writing (bm=9 hist=9)
+[09:14:16 #124] STORAGE: save close
+[09:14:16 #125] STORAGE: save exit
+[09:14:16 #126] STORAGE: save open
+[09:14:16 #127] STORAGE: save writing (bm=9 hist=10)
+[09:14:16 #128] STORAGE: save close
+[09:14:16 #129] STORAGE: save exit
+[09:14:16 #130] STORAGE: save open
+[09:14:16 #131] STORAGE: save writing (bm=9 hist=11)
+[09:14:16 #132] STORAGE: save close
+[09:14:16 #133] STORAGE: save exit
+[09:14:16 #134] STORAGE: save open
+[09:14:16 #135] STORAGE: save writing (bm=9 hist=12)
+[09:14:16 #136] STORAGE: save close
+[09:14:16 #137] STORAGE: save exit
+[09:14:16 #138] STORAGE: save open
+[09:14:16 #139] STORAGE: save writing (bm=9 hist=13)
+[09:14:16 #140] STORAGE: save close
+[09:14:16 #141] STORAGE: save exit
+[09:14:16 #142] STORAGE: save open
+[09:14:16 #143] STORAGE: save writing (bm=9 hist=14)
+[09:14:16 #144] STORAGE: save close
+[09:14:16 #145] STORAGE: save exit
+[09:14:16 #146] STORAGE: save open
+[09:14:16 #147] STORAGE: save writing (bm=9 hist=15)
+[09:14:16 #148] STORAGE: save close
+[09:14:16 #149] STORAGE: save exit
+[09:14:16 #150] STORAGE: save open
+[09:14:16 #151] STORAGE: save writing (bm=9 hist=16)
+[09:14:16 #152] STORAGE: save close
+[09:14:16 #153] STORAGE: save exit
+[09:14:16 #154] STORAGE: save open
+[09:14:16 #155] STORAGE: save writing (bm=9 hist=17)
+[09:14:16 #156] STORAGE: save close
+[09:14:16 #157] STORAGE: save exit
+[09:14:16 #158] STORAGE: save open
+[09:14:16 #159] STORAGE: save writing (bm=9 hist=18)
+[09:14:16 #160] STORAGE: save close
+[09:14:16 #161] STORAGE: save exit
+[09:14:16 #162] STORAGE: save open
+[09:14:16 #163] STORAGE: save writing (bm=9 hist=19)
+[09:14:16 #164] STORAGE: save close
+[09:14:16 #165] STORAGE: save exit
+[09:14:16 #166] STORAGE: save open
+[09:14:16 #167] STORAGE: save writing (bm=9 hist=20)
+[09:14:16 #168] STORAGE: save close
+[09:14:17 #169] STORAGE: save exit
+[09:14:17 #170] STORAGE: save open
+[09:14:17 #171] STORAGE: save writing (bm=9 hist=21)
+[09:14:17 #172] STORAGE: save close
+[09:14:17 #173] STORAGE: save exit
+[09:14:17 #174] STORAGE: save open
+[09:14:17 #175] STORAGE: save writing (bm=9 hist=22)
+[09:14:17 #176] STORAGE: save close
+[09:14:17 #177] STORAGE: save exit
+[09:14:17 #178] STORAGE: save open
+[09:14:17 #179] STORAGE: save writing (bm=9 hist=23)
+[09:14:17 #180] STORAGE: save close
+[09:14:17 #181] STORAGE: save exit
+[09:14:17 #182] STORAGE: save open
+[09:14:17 #183] STORAGE: save writing (bm=9 hist=24)
+[09:14:17 #184] STORAGE: save close
+[09:14:17 #185] STORAGE: save exit
+[09:14:17 #186] STORAGE: save open
+[09:14:17 #187] STORAGE: save writing (bm=9 hist=25)
+[09:14:17 #188] STORAGE: save close
+[09:14:17 #189] STORAGE: save exit
+[09:14:17 #190] STORAGE: save open
+[09:14:17 #191] STORAGE: save writing (bm=9 hist=26)
+[09:14:17 #192] STORAGE: save close
+[09:14:17 #193] STORAGE: save exit
+[09:14:17 #194] STORAGE: save open
+[09:14:17 #195] STORAGE: save writing (bm=9 hist=27)
+[09:14:17 #196] STORAGE: save close
+[09:14:17 #197] STORAGE: save exit
+[09:14:17 #198] STORAGE: save open
+[09:14:17 #199] STORAGE: save writing (bm=9 hist=28)
+[09:14:17 #200] STORAGE: save close
+[09:14:17 #201] STORAGE: save exit
+[09:14:17 #202] STORAGE: save open
+[09:14:17 #203] STORAGE: save writing (bm=9 hist=29)
+[09:14:17 #204] STORAGE: save close
+[09:14:17 #205] STORAGE: save exit
+[09:14:17 #206] STORAGE: save open
+[09:14:17 #207] STORAGE: save writing (bm=9 hist=30)
+[09:14:17 #208] STORAGE: save close
+[09:14:17 #209] STORAGE: save exit
+[09:14:17 #210] STORAGE: save open
+[09:14:17 #211] STORAGE: save writing (bm=9 hist=31)
+[09:14:17 #212] STORAGE: save close
+[09:14:17 #213] STORAGE: save exit
+[09:14:17 #214] STORAGE: save open
+[09:14:17 #215] STORAGE: save writing (bm=9 hist=32)
+[09:14:17 #216] STORAGE: save close
+[09:14:17 #217] STORAGE: save exit
+[09:14:17 #218] STORAGE: save open
+[09:14:17 #219] STORAGE: save writing (bm=9 hist=33)
+[09:14:17 #220] STORAGE: save close
+[09:14:17 #221] STORAGE: save exit
+[09:14:17 #222] STORAGE: save open
+[09:14:17 #223] STORAGE: save writing (bm=9 hist=34)
+[09:14:17 #224] STORAGE: save close
+[09:14:17 #225] STORAGE: save exit
+[09:14:17 #226] STORAGE: save open
+[09:14:17 #227] STORAGE: save writing (bm=9 hist=35)
+[09:14:17 #228] STORAGE: save close
+[09:14:17 #229] STORAGE: save exit
+[09:14:17 #230] STORAGE: save open
+[09:14:17 #231] STORAGE: save writing (bm=9 hist=36)
+[09:14:17 #232] STORAGE: save close
+[09:14:17 #233] STORAGE: save exit
+[09:14:17 #234] STORAGE: save open
+[09:14:17 #235] STORAGE: save writing (bm=9 hist=37)
+[09:14:17 #236] STORAGE: save close
+[09:14:17 #237] STORAGE: save exit
+[09:14:17 #238] STORAGE: save open
+[09:14:17 #239] STORAGE: save writing (bm=9 hist=38)
+[09:14:17 #240] STORAGE: save close
+[09:14:17 #241] STORAGE: save exit
+[09:14:17 #242] STORAGE: save open
+[09:14:17 #243] STORAGE: save writing (bm=9 hist=39)
+[09:14:17 #244] STORAGE: save close
+[09:14:17 #245] STORAGE: save exit
+[09:14:17 #246] STORAGE: save open
+[09:14:17 #247] STORAGE: save writing (bm=9 hist=40)
+[09:14:17 #248] STORAGE: save close
+[09:14:17 #249] STORAGE: save exit
+[09:14:17 #250] STORAGE: save open
+[09:14:17 #251] STORAGE: save writing (bm=9 hist=41)
+[09:14:17 #252] STORAGE: save close
+[09:14:17 #253] STORAGE: save exit
+[09:14:17 #254] STORAGE: save open
+[09:14:17 #255] STORAGE: save writing (bm=9 hist=42)
+[09:14:17 #256] STORAGE: save close
+[09:14:17 #257] STORAGE: save exit
+[09:14:17 #258] STORAGE: save open
+[09:14:17 #259] STORAGE: save writing (bm=9 hist=43)
+[09:14:17 #260] STORAGE: save close
+[09:14:17 #261] STORAGE: save exit
+[09:14:17 #262] STORAGE: save open
+[09:14:17 #263] STORAGE: save writing (bm=9 hist=44)
+[09:14:17 #264] STORAGE: save close
+[09:14:17 #265] STORAGE: save exit
+[09:14:17 #266] STORAGE: save open
+[09:14:17 #267] STORAGE: save writing (bm=9 hist=45)
+[09:14:17 #268] STORAGE: save close
+[09:14:17 #269] STORAGE: save exit
+[09:14:17 #270] STORAGE: save open
+[09:14:17 #271] STORAGE: save writing (bm=9 hist=46)
+[09:14:17 #272] STORAGE: save close
+[09:14:17 #273] STORAGE: save exit
+[09:14:17 #274] STORAGE: save open
+[09:14:17 #275] STORAGE: save writing (bm=9 hist=47)
+[09:14:17 #276] STORAGE: save close
+[09:14:17 #277] STORAGE: save exit
+[09:14:17 #278] STORAGE: save open
+[09:14:17 #279] STORAGE: save writing (bm=9 hist=48)
+[09:14:17 #280] STORAGE: save close
+[09:14:17 #281] STORAGE: save exit
+[09:14:17 #282] STORAGE: save open
+[09:14:17 #283] STORAGE: save writing (bm=9 hist=49)
+[09:14:17 #284] STORAGE: save close
+[09:14:17 #285] STORAGE: save exit
+[09:14:17 #286] STORAGE: save open
+[09:14:18 #287] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #288] STORAGE: save close
+[09:14:18 #289] STORAGE: save exit
+[09:14:18 #290] STORAGE: save open
+[09:14:18 #291] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #292] STORAGE: save close
+[09:14:18 #293] STORAGE: save exit
+[09:14:18 #294] STORAGE: save open
+[09:14:18 #295] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #296] STORAGE: save close
+[09:14:18 #297] STORAGE: save exit
+[09:14:18 #298] STORAGE: save open
+[09:14:18 #299] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #300] STORAGE: save close
+[09:14:18 #301] STORAGE: save exit
+[09:14:18 #302] STORAGE: save open
+[09:14:18 #303] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #304] STORAGE: save close
+[09:14:18 #305] STORAGE: save exit
+[09:14:18 #306] STORAGE: save open
+[09:14:18 #307] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #308] STORAGE: save close
+[09:14:18 #309] STORAGE: save exit
+[09:14:18 #310] STORAGE: save open
+[09:14:18 #311] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #312] STORAGE: save close
+[09:14:18 #313] STORAGE: save exit
+[09:14:18 #314] STORAGE: save open
+[09:14:18 #315] STORAGE: save writing (bm=9 hist=50)
+[09:14:18 #316] STORAGE: save close
+[09:14:18 #317] STORAGE: save exit
+[09:14:18 #318] P9 tc4 count=50 (want 50) top=https://cap.example/54 (want cap.example/54)
+[09:14:18 #319] STORAGE: save open
+[09:14:18 #320] STORAGE: save writing (bm=10 hist=50)
+[09:14:18 #321] STORAGE: save close
+[09:14:18 #322] STORAGE: save exit
+[09:14:18 #323] STORAGE: save open
+[09:14:18 #324] STORAGE: save writing (bm=10 hist=50)
+[09:14:18 #325] STORAGE: save close
+[09:14:18 #326] STORAGE: save exit
+[09:14:18 #327] P9 tc5 9->10->10 (want +1 then same) title=New Title (want New Title)
+[09:14:18 #328] STORAGE: save open
+[09:14:18 #329] STORAGE: save writing (bm=11 hist=50)
+[09:14:18 #330] STORAGE: save close
+[09:14:18 #331] STORAGE: save exit
+[09:14:18 #332] STORAGE: save open
+[09:14:18 #333] STORAGE: save writing (bm=10 hist=50)
+[09:14:18 #334] STORAGE: save close
+[09:14:18 #335] STORAGE: save exit
+[09:14:18 #336] P9 tc6 10->11 removed=1 (want +1, 1) now=10
+[09:14:18 #337] STORAGE: load enter
+[09:14:18 #338] STORAGE: file opened, parsing
+[09:14:18 #339] P9 tc7 reload bookmarks=10 (want 10) history=50 (want 50)
+[09:14:18 #340] STORAGE: load enter
+[09:14:18 #341] STORAGE: file opened, parsing
+[09:14:18 #342] STORAGE: save open
+[09:14:18 #343] STORAGE: save writing (bm=9 hist=0)
+[09:14:18 #344] STORAGE: save close
+[09:14:18 #345] STORAGE: save exit
+[09:14:18 #346] P9 tc8 corrupt-recovery bookmarks=9 (want 9)
+[09:14:18 #347] STORAGE: save open
+[09:14:18 #348] STORAGE: save writing (bm=9 hist=0)
+[09:14:18 #349] STORAGE: save close
+[09:14:18 #350] STORAGE: save exit
+[09:14:18 #351] STORAGE: load enter
+[09:14:18 #352] STORAGE: file opened, parsing
+[09:14:18 #353] P9 tc1b jar-after-reload=0 (cookie section persists; jar restore in P30)
+[09:14:18 #354] P9 about-filter 0==0 (want equal)
+[09:14:18 #355] P9 boot battery complete
+[09:14:18 #356] P22 boot step 7 done
+[09:14:18 #357] P10 tc1 fonts-ready=7 (want 7)
+[09:14:18 #358] P10 tc2 body(Hello)=41 h1(Hello)=62 empty=0 (want >0, >w_body? no: h1 wider, 0)
+[09:14:18 #359] P10 tc3 h1 lh=24 mt=6 (want 24, 6) ptr=1
+[09:14:18 #360] P10 tc3 h2 lh=18 mt=5 (want 18, 5)
+[09:14:18 #361] P10 tc3 h3 lh=16 mt=4 (want 16, 4)
+[09:14:18 #362] P10 tc3 body-bold lh=16 (want 16) ptr=1
+[09:14:18 #363] P10 tc3 mono lh=15 (want 15)
+[09:14:18 #364] P10 tc3 small lh=14 (want 14) ptr=1
+[09:14:18 #365] P10 tc3 sub lh=14 (want 14)
+[09:14:18 #366] P10 boot battery complete
+[09:14:18 #367] P22 boot step 8 done
+[09:14:18 #368] P15 tc1=[&<AB (c) -- A] (want [&<AB (c) -- A])
+[09:14:18 #369] P15 tc2=[cafe  --   x...] (want [cafe  --   x...])
+[09:14:18 #370] P15 tc3=[a&lt;b&gt;&amp;&quot;c] (want [a&lt;b&gt;&amp;&quot;c])
+[09:14:18 #371] P15 tc4=[x foobar y] (want [x foobar y])
+[09:14:18 #372] P15 tc5=[plain ascii 123!] (want identical)
+[09:14:18 #373] P15 tc6=[ --  ...pi ] (want [ --  ...pi ])
+[09:14:18 #374] P15 tc7=[ --  piA - ] (want [ --  piA - ])
+[09:14:18 #375] P15 tc8=[&] (want [&])
+[09:14:18 #376] P15 tc9=[AT&T] (want [AT&T])
+[09:14:18 #377] P15 tc10 empty ok=1
+[09:14:18 #378] P15 tc11 null ok=1
+[09:14:18 #379] P15 tc12=[not  not in   deg] (want [not  not in   deg])
+[09:14:18 #380] P15 tc13=[a&b&c&;a&#38Ab] (want [a&b&c&;a&#38Ab])
+[09:14:18 #381] P15 tc14=[CAFE a$c<>  &] (want [CAFE a$c<>  &])
+[09:14:18 #382] P15 init battery complete
+[09:14:18 #383] P15 boot battery complete
+[09:14:18 #384] P22 boot step 9 done
+[09:14:18 #385] P16 tc1 tokens=18 (want 18) title=[Home & More] (want [Home & More])
+[09:14:18 #386] P16 tc1 p-attrs=3 (want 3) class=[intro] data-x=[7] checked=true
+[09:14:18 #387] P16 tc1 img self=1 (want 1) src=[a.png]; br self=0 (want 0)
+[09:14:18 #388] P16 tc1 a href=[/next?page=1&x=2] (want [/next?page=1&x=2])
+[09:14:18 #389] P16 tc1 /a closing=1 self=1 (want 1 1)
+[09:14:18 #390] P16 tc2 tokens=3 (want 3) href=[a>b] (want [a>b]) data-x=[1]
+[09:14:18 #391] P16 tc3 tokens=1 (want 1) t0=[text ] (want [text ])
+[09:14:18 #392] P16 tc4 tokens=3 (want 3) title=[Hi & Bye] (want [Hi & Bye]) t0.name=p
+[09:14:18 #393] P16 tc5 tokens=1 (want 1) t0=[a ] (want [a ])
+[09:14:18 #394] P16 tc6 href=[a&b] (want [a&b]) title=[xA] (want [xA]) text=[e degt] (want [e degt])
+[09:14:18 #395] P16 tc7 nattrs=1 (want 1) href=[1] (want [1])
+[09:14:18 #396] P16 tc8 nattrs=3 (want 3) z=[] (want []) b=true (want true) w=[1] (want [1])
+[09:14:18 #397] P16 tc9 tokens=0 (want 0) title=[Web Page] (want [Web Page])
+[09:14:22 #398] P16 tc10 inlen=320000 (want 320000) tokens=98256 (want 98256) tags=65504 (want 65504) title=[Web Page]
+[09:14:22 #399] P16 init battery complete
+[09:14:22 #400] P16 boot battery complete
+[09:14:22 #401] P22 boot step 10 done
+[09:14:22 #402] P6 cancel_all after t1 done + t2 error (cancelledFired must stay 0)
+[09:14:22 #403] P6 RESULT: done=1 (want 1) error=1 (want 1) cancelledCompleted=0 (want 0) progress=0.00 running=0 maxTicksPerFrame=1
+[09:14:22 #404] P17 tc1 ser=PASS cnt=PASS tok=12 (want 12) text=4 (want 4) elem=6 (want 6) proc=12 (want 12) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #405] P17 tc2 ser=PASS cnt=PASS tok=19 (want 19) text=3 (want 3) elem=8 (want 8) proc=19 (want 19) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #406] P17 tc3 ser=PASS cnt=PASS tok=17 (want 17) text=5 (want 5) elem=4 (want 4) proc=17 (want 17) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #407] P17 tc4 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=3 (want 3) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #408] P17 tc5 ser=PASS cnt=PASS tok=11 (want 11) text=2 (want 2) elem=2 (want 2) proc=11 (want 11) max=0 (want 0) skip=3 (want 3)
+[09:14:22 #409] P17 tc7 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=2 (want 2) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #410] P17 tc8 ser=PASS cnt=PASS tok=6 (want 6) text=2 (want 2) elem=3 (want 3) proc=6 (want 6) max=0 (want 0) skip=0 (want 0)
+[09:14:22 #411] P17 tc5b ser=PASS cnt=PASS tok=1207 (want 1207) text=236 (want 236) elem=235 (want 235) proc=1207 (want 1207) max=0 (want 0) skip=500 (want 500)
+[09:14:23 #412] P17 tc6 ser=PASS cnt=PASS tok=12000 (want 12000) text=3000 (want 3000) elem=3000 (want 3000) proc=9000 (want 9000) max=0 (want 0) skip=0 (want 0)
+[09:14:23 #413] P17 init battery complete
+[09:14:23 #414] P17 boot battery complete
+[09:14:23 #415] P22 boot step 11 done
+[09:14:23 #416] P18 checkpoint: begin helpers (30 cases)
+[09:14:23 #417] P18 tc1a PASS
+[09:14:23 #418] P18 tc1b PASS
+[09:14:23 #419] P18 tc1c PASS
+[09:14:23 #420] P18 tc1d PASS
+[09:14:23 #421] P18 tc1e PASS
+[09:14:23 #422] P18 tc1f PASS
+[09:14:23 #423] P18 tc1g PASS
+[09:14:23 #424] P18 tc2a PASS
+[09:14:23 #425] P18 tc2b PASS
+[09:14:23 #426] P18 tc2c PASS
+[09:14:23 #427] P18 tc2d PASS
+[09:14:23 #428] P18 tc3a PASS
+[09:14:23 #429] P18 tc3b PASS
+[09:14:23 #430] P18 tc3c PASS
+[09:14:23 #431] P18 tc3d PASS
+[09:14:23 #432] P18 tc3e PASS
+[09:14:23 #433] P18 tc3f PASS
+[09:14:23 #434] P18 tc3g PASS
+[09:14:23 #435] P18 tc4a PASS
+[09:14:23 #436] P18 tc4b PASS
+[09:14:23 #437] P18 tc4c PASS
+[09:14:23 #438] P18 tc4d PASS
+[09:14:23 #439] P18 tc4e PASS
+[09:14:23 #440] P18 tc4f PASS
+[09:14:23 #441] P18 tc4g PASS
+[09:14:23 #442] P18 tc4h PASS
+[09:14:23 #443] P18 tc5a PASS
+[09:14:23 #444] P18 tc5b PASS
+[09:14:23 #445] P18 tc5c PASS
+[09:14:23 #446] P18 tc5d PASS
+[09:14:23 #447] P18 checkpoint: helpers done
+[09:14:23 #448] P18 checkpoint: begin parse skeleton (13 cases)
+[09:14:23 #449] P18 parse1 PASS
+[09:14:23 #450] P18 parse2 PASS
+[09:14:23 #451] P18 parse3 PASS
+[09:14:23 #452] P18 parse4 PASS
+[09:14:23 #453] P18 parse5 PASS
+[09:14:23 #454] P18 parse6 PASS
+[09:14:23 #455] P18 parse7 PASS
+[09:14:23 #456] P18 parse8 PASS
+[09:14:23 #457] P18 parse9 PASS
+[09:14:23 #458] P18 parse10 PASS
+[09:14:23 #459] P18 parse11 PASS
+[09:14:23 #460] P18 parse12 PASS
+[09:14:23 #461] P18 parse13 PASS
+[09:14:23 #462] P18 checkpoint: begin pipeline concat (4 cases)
+[09:14:23 #463] P18 tc6a PASS
+[09:14:23 #464] P18 tc6b PASS
+[09:14:23 #465] P18 tc6c PASS
+[09:14:23 #466] P18 tc6d PASS
+[09:14:23 #467] P18 checkpoint: begin validHref (8 cases)
+[09:14:23 #468] P18 tc7a PASS
+[09:14:23 #469] P18 tc7b PASS
+[09:14:23 #470] P18 tc7c PASS
+[09:14:23 #471] P18 tc7d PASS
+[09:14:23 #472] P18 tc7e PASS
+[09:14:23 #473] P18 tc7f PASS
+[09:14:23 #474] P18 tc7g PASS
+[09:14:23 #475] P18 tc7h PASS
+[09:14:23 #476] P18 checkpoint: begin svg serialize (3 cases)
+[09:14:23 #477] P18 tc8a PASS
+[09:14:23 #478] P18 tc8b PASS
+[09:14:23 #479] P18 tc8c PASS
+[09:14:23 #480] P18 checkpoint: battery complete
+[09:14:23 #481] P18 RESULT: 58/58 PASS
+[09:14:23 #482] P18 init battery complete
+[09:14:23 #483] P22 boot step 12 done
+[09:14:23 #484] P19 checkpoint: begin walker battery (49 cases)
+[09:14:23 #485] P19 case 0 begin (h1-headings)
+[09:14:23 #486] P19 case 1 begin (p-divs)
+[09:14:23 #487] P19 case 2 begin (blockquote)
+[09:14:23 #488] P19 case 3 begin (center-marquee)
+[09:14:23 #489] P19 case 4 begin (br-hr-wbr)
+[09:14:23 #490] P19 case 5 begin (pre-code)
+[09:14:23 #491] P19 case 6 begin (inline-styles)
+[09:14:23 #492] P19 case 7 begin (span-font)
+[09:14:23 #493] P19 case 8 begin (links)
+[09:14:23 #494] P19 case 9 begin (lists)
+[09:14:23 #495] P19 case 10 begin (dl)
+[09:14:23 #496] P19 case 11 begin (img-figure)
+[09:14:23 #497] P19 case 12 begin (img-in-link)
+[09:14:23 #498] P19 case 13 begin (image-data-src)
+[09:14:23 #499] P19 case 14 begin (map-area)
+[09:14:23 #500] P19 case 15 begin (table)
+[09:14:23 #501] P19 case 16 begin (tbody-th)
+[09:14:23 #502] P19 case 17 begin (forms)
+[09:14:23 #503] P19 case 18 begin (textarea)
+[09:14:23 #504] P19 case 19 begin (select)
+[09:14:23 #505] P19 case 20 begin (fieldset-details)
+[09:14:23 #506] P19 case 21 begin (media)
+[09:14:23 #507] P19 case 22 begin (math)
+[09:14:23 #508] P19 case 23 begin (svg)
+[09:14:23 #509] P19 case 24 begin (script-title)
+[09:14:23 #510] P19 case 25 begin (noscript)
+[09:14:23 #511] P19 case 26 begin (hidden-inert)
+[09:14:23 #512] P19 case 27 begin (nested-overflow)
+[09:14:23 #513] P19 case 28 begin (empty-page)
+[09:14:23 #514] P19 case 29 begin (empty-tree)
+[09:14:23 #515] P19 case 30 begin (in-table-link)
+[09:14:23 #516] P19 case 31 begin (figure-caption-only)
+[09:14:23 #517] P19 case 32 begin (br-in-pre)
+[09:14:23 #518] P19 case 33 begin (details-open-override)
+[09:14:23 #519] P19 case 34 begin (dl-nested)
+[09:14:23 #520] P19 case 35 begin (wbr-br-inline)
+[09:14:23 #521] P19 case 36 begin (pre-multiline)
+[09:14:23 #522] P19 case 37 begin (img-no-src)
+[09:14:23 #523] P19 case 38 begin (media-title)
+[09:14:23 #524] P19 case 39 begin (placeholder-href)
+[09:14:23 #525] P19 case 40 begin (placeholder-no-src)
+[09:14:23 #526] P19 case 41 begin (fencedframe)
+[09:14:23 #527] P19 case 42 begin (invalid-attrs)
+[09:14:24 #528] P19 case 43 begin (invert)
+[09:14:24 #529] P19 case 44 begin (list-item-value)
+[09:14:24 #530] P19 case 45 begin (li-no-list)
+[09:14:24 #531] P19 case 46 begin (hr-in-div)
+[09:14:24 #532] P19 case 47 begin (span-nested)
+[09:14:24 #533] P19 case 48 begin (q-quotes)
+[09:14:24 #534] P19: 49/49 PASS
+[09:14:24 #535] P22 boot step 13 done
+[09:14:24 #536] P21 tc1 role=0 font=OK
+[09:14:24 #537] P21 tc1 role=1 font=OK
+[09:14:24 #538] P21 tc1 role=2 font=OK
+[09:14:24 #539] P21 tc1 role=3 font=OK
+[09:14:24 #540] P21 tc1 role=4 font=OK
+[09:14:24 #541] P21 tc1 role=5 font=OK
+[09:14:24 #542] P21 tc1 role=6 font=OK
+[09:14:24 #543] P21 tc2 null=0 empty=0 x=9 PASS
+[09:14:24 #544] P21 tc3 h1 lh=24 mt=6 font=OK PASS
+[09:14:24 #545] P21 tc3 h2 lh=18 mt=5 font=OK PASS
+[09:14:24 #546] P21 tc3 h3 lh=16 mt=4 font=OK PASS
+[09:14:24 #547] P21 tc4a code lh=15 PASS
+[09:14:24 #548] P21 tc4b bold lh=16 PASS
+[09:14:24 #549] P21 tc4c regular lh=16 PASS
+[09:14:24 #550] P21 tc5a code-wins lh=15 PASS
+[09:14:24 #551] P21 tc5b small/sub/sup lh=14 PASS
+[09:14:24 #552] P21 tc5c big->bold lh=16 PASS
+[09:14:24 #553] P21 tc5d regular lh=16 PASS
+[09:14:24 #554] P21 tc6 regular=92(want 92) bold=73(want 73) PASS
+[09:14:24 #555] P21: 19/19 PASS
+[09:14:24 #556] P22 boot step 14 done
+[09:14:24 #557] P20 tc1 rejects invalid: count=0 (want 0) PASS
+[09:14:24 #558] P20 tc2 merge: count=3 (want 3) PASS
+[09:14:24 #559] P20 tc3 anchor/text: count=6 (want 6) PASS
+[09:14:24 #560] P20 tc4 walk/wrap: idx=1 -> 2, prev->1 PASS
+[09:14:24 #561] P20 tc5 initial-pick: https://v.example/2 (want /2) PASS
+[09:14:24 #562] P20 tc5b far-pick: https://f.example/2 (want /2) PASS
+[09:14:24 #563] P20 tc6 hover: https://h.example/1 PASS miss=https://h.example/2 PASS
+[09:14:24 #564] P20 tc7 highlight: tab=1 clipguard=1 PASS
+[09:14:24 #565] P20 tc7b cull: anyBlack=0 PASS
+[09:14:24 #566] P20 tc8 isHighlighted/addLink: PASS
+[09:14:24 #567] P20 tc8b clear: count=0 (want 0) PASS
+[09:14:24 #568] P20: ALL PASS (0 fails)
+[09:14:24 #569] P20 init battery complete
+[09:14:24 #570] P22 boot step 15 done
+[09:14:24 #571] P21D tc1 boxSizes: 900x600->300x200 (want 300x200) small->100x80 (want 100x80) PASS
+[09:14:24 #572] P21D tc2 accum: 2x2 r0=[35,55] r1=[115,135] (want 35,55,115,135) PASS
+[09:14:24 #573] P21D tc2b partial-divisor: 2x1 r0=[90] r1=[150] (want 2x1 [90],[150]) PASS
+[09:14:24 #574] P21D tc4 rgbToGray: white=255 black=0 red=76 (want 255,0,76) PASS
+[09:14:24 #575] P21D tc3 dither-ramp pixels: PASS
+[09:14:24 #576] P21D tc5 inflate-stored: len=14/14 PASS
+[09:14:24 #577] P21D tc5 inflate-dynamic: len=540/540 PASS
+[09:14:24 #578] P21D tc5 inflate-raw: len=39/39 PASS
+[09:14:24 #579] P21D tc5 inflate-level0: len=300/300 PASS
+[09:14:24 #580] P21D tc5 inflate-big: len=2112/2112 PASS
+[09:14:24 #581] P21D tc6 stream==oneshot: 540/540 PASS
+[09:14:24 #582] P21D tc7 edges: short=NULL trunc-terminated PASS
+[09:14:24 #583] P21D: ALL PASS (0 fails)
+[09:14:24 #584] P21D init battery complete
+[09:14:24 #585] P22 boot step 16 done
+[09:14:24 #586] P22B tc1 bmp24bpp: PASS
+[09:14:24 #587] P22B tc2 bmp8bpp: PASS
+[09:14:24 #588] P22B tc3 bmp8bpp-topdown: PASS
+[09:14:24 #589] P22B tc4 gif-plain: PASS
+[09:14:24 #590] P22B tc5 gif-interlaced: PASS
+[09:14:24 #591] P22B tc6 gif-truncated-nil: PASS
+[09:14:24 #592] P22B tc7 ico-dib: PASS
+[09:14:24 #593] P22B tc8 ico-andmask: PASS
+[09:14:24 #594] P22B: ALL PASS (0 fails)
+[09:14:24 #595] P22B init battery complete
+[09:14:24 #596] P22 boot step 17 done
+[09:14:24 #597] P23 tc1 gray8: PASS
+[09:14:24 #598] P23 tc2 filters0124: PASS
+[09:14:24 #599] P23 tc3 pal-trns: PASS
+[09:14:24 #600] P23 tc4 rgba16: PASS
+[09:14:24 #601] P23 tc5 rgb-trns: PASS
+[09:14:24 #602] P23 tc6 graya8: PASS
+[09:14:24 #603] P23 tc7 gray4: PASS
+[09:14:24 #604] P23 tc8 adam7-p1: PASS
+[09:14:24 #605] P23 tc9 ico-png-entry: PASS
+[09:14:24 #606] P23 diag: short input 8
+[09:14:24 #607] P23 tc9 png-truncated-nil: PASS
+[09:14:24 #608] P23: ALL PASS (0 fails)
+[09:14:24 #609] P23 init battery complete
+[09:14:24 #610] P22 boot step 18 done
+[09:14:24 #611] P25 tc1 8x8 baseline IDCT: PASS (8x8)
+[09:14:24 #612] P25 tc2 16x16 baseline IDCT: PASS (16x16)
+[09:14:24 #613] P25 tc3 64x64 DC-only (maxW=16): PASS (16x10)
+[09:14:24 #614] P25 tc4 grayscale 1-comp: PASS (24x24)
+[09:14:24 #615] P25 tc5 2x2 tiny: PASS (2x2)
+[09:14:24 #616] P25 tc6 progressive DC-only: PASS (32x32)
+[09:14:24 #617] P25 tc7 truncated == Lua reference: PASS (rc=16, rw=16)
+[09:14:24 #618] P25 tc8 arithmetic → NULL: PASS
+[09:14:24 #619] P25 tc9 dither end-to-end: PASS
+[09:14:24 #620] P25 tc10 non-JPEG → NULL: PASS
+[09:14:24 #621] P25: ALL PASS (0 fails)
+[09:14:24 #622] P22 boot step 19 done
+[09:14:24 #623] P26 diag tc1: 0 differing bytes of 720
+[09:14:24 #624] P26 tc1 rect: PASS
+[09:14:24 #625] P26 diag tc1b: 0 differing bytes of 720
+[09:14:24 #626] P26 tc1b single-quote attrs: PASS
+[09:14:24 #627] P26 diag tc2: 0 differing bytes of 720
+[09:14:24 #628] P26 tc2 roundRect clamp: PASS
+[09:14:24 #629] P26 diag tc3: 0 differing bytes of 720
+[09:14:24 #630] P26 tc3 circle: PASS
+[09:14:24 #631] P26 diag tc4: 0 differing bytes of 720
+[09:14:24 #632] P26 tc4 line/polyline/polygon: PASS
+[09:14:24 #633] P26 diag tc5: 0 differing bytes of 720
+[09:14:24 #634] P26 tc5 path MLHVZ: PASS
+[09:14:24 #635] P26 diag tc6: 0 differing bytes of 720
+[09:14:24 #636] P26 tc6 hidden+defs skip: PASS
+[09:14:24 #637] P26 tc7 ellipse → NULL (pcall parity): PASS
+[09:14:24 #638] P26 tc8 no-ink→NULL + non-svg→NULL: PASS
+[09:14:24 #639] P26 diag tc9: 0 differing bytes of 720
+[09:14:24 #640] P26 tc9 use-splice: PASS
+[09:14:24 #641] P26 diag tc10: 0 differing bytes of 720
+[09:14:24 #642] P26 tc10 viewBox offset: PASS
+[09:14:24 #643] P26: ALL PASS (0 fails)
+[09:14:24 #644] P22 boot step 20 done
+[09:14:24 #645] P27 tc1 VP8 tables checksums: PASS
+[09:14:24 #646] P27 tc2 bit reader LSB-first + eos: PASS
+[09:14:24 #647] P27 tc3 over-prefetch eos: PASS
+[09:14:24 #648] P27 tc4 v1 two 1-bit: PASS (used=256)
+[09:14:24 #649] P27 tc4 v2 four 2-bit: PASS (used=256)
+[09:14:24 #650] P27 tc4 v3 1+2+3+3: PASS (used=256)
+[09:14:24 #651] P27 tc4 v4 19x3 rb7: PASS (used=0)
+[09:14:24 #652] P27 tc4 v5 1+3x3 oversub: PASS (used=0)
+[09:14:24 #653] P27 tc4 v6 32x5: PASS (used=256)
+[09:14:24 #654] P27 tc4 v7 single-symbol: PASS (used=256)
+[09:14:24 #655] P27 tc4 v8 all-zero: PASS (used=0)
+[09:14:24 #656] P27 tc4 v9 3x1 oversub: PASS (used=0)
+[09:14:24 #657] P27 tc4 v10 15x15+1 oversub: PASS (used=0)
+[09:14:24 #658] P27 tc4 v11 rb7 underflow: PASS (used=0)
+[09:14:24 #659] P27 tc4 v12 2+1+2: PASS (used=256)
+[09:14:24 #660] P27 tc5 simple-code path: PASS (sym=90)
+[09:14:24 #661] P27: ALL PASS (0 fails)
+[09:14:24 #662] P22 boot step 21 done
+[09:14:24 #663] P28 tc1 L1_lossless: PASS (w=48 h=32 ck=c3eabe00)
+[09:14:24 #664] P28 tc2 L2_palette: PASS (w=40 h=24 ck=92447700)
+[09:14:25 #665] P28 tc3 L3_grad: PASS (w=96 h=64 ck=eae2f400)
+[09:14:25 #666] P28 tc4 L4_noise: PASS (w=200 h=150 ck=80097eec)
+[09:14:25 #667] P28 tc5 L5_solid: PASS (w=16 h=16 ck=c8325a00)
+[09:14:25 #668] P28 tc6 L6_alpha: PASS (w=64 h=48 ck=cdee7fb8)
+[09:14:25 #669] P28 tc7 L7_regions: PASS (w=120 h=80 ck=5c272c6b)
+[09:14:25 #670] P28: ALL PASS (0 fails)
+[09:14:25 #671] P22 boot step 22 done
+[09:14:25 #672] P29 tc1 grad: PASS (w=80 h=48 ck=0004df27 asum=00000000)
+[09:14:25 #673] P29 tc2 photo: PASS (w=96 h=40 ck=00062f44 asum=00000000)
+[09:14:25 #674] P29 tc3 detail: PASS (w=128 h=64 ck=000fde29 asum=00000000)
+[09:14:25 #675] P29 tc4 alpha: PASS (w=64 h=32 ck=000300ae asum=0002f400)
+[09:14:25 #676] P29: ALL PASS (0 fails)
+[09:14:25 #677] P22 boot step 23 done
+[09:14:25 #678] P30 tc1: enqueue/dedupe
+[09:14:25 #679] P30 tc1: PASS (cached=0 want 0)
+[09:14:25 #680] P30 tc2: isDecoded/getImage/isCached semantics
+[09:14:25 #681] P30 tc2: PASS (d=0 g=0x0 c=0)
+[09:14:25 #682] P30 tc3: magic dispatch (BMP / garbage)
+[09:14:25 #683] P30 tc3: PASS (bmp=0x90195900 garbage=0x0)
+[09:14:25 #684] P30 tc4: ico dispatch (reserved=0 type=1)
+[09:14:25 #685] P30 tc4: PASS (ico=0x90195900)
+[09:14:25 #686] P30 tc5: placeholder painter pixels
+[09:14:25 #687] P30 tc5: PASS (border=1 hatch=1 gap=1)
+[09:14:25 #688] P30: ALL PASS (0 fails)
+[09:14:25 #689] P22 boot step 24 done
+[09:14:25 #690] HTTP: http_get http://t/1.png (state=0)
+[09:14:25 #691] P31 tc1: helpers (roman/alpha/marker/expand)
+[09:14:25 #692] P31 tc1: PASS
+[09:14:25 #693] P31 tc2: breakLines oracle
+[09:14:25 #694] P31 tc2: lines=4 lineH=16 words=9 ok=1
+[09:14:25 #695] P31 tc2: PASS
+[09:14:25 #696] P31 tc3: emitFlow link merge oracle
+[09:14:25 #697] P31 tc3: PASS (merged=1 items=5 endY=49)
+[09:14:25 #698] P31 tc4: Layout.build digest
+[09:14:25 #699] P31 tc4: PASS (items=5 th=216)
+[09:14:25 #700] P31 tc5: percent-width table → Layout Error path
+[09:14:25 #701] P31 tc5: PASS (err=1)
+[09:14:25 #702] P31: ALL PASS (0 fails)
+[09:14:25 #703] P22 boot step 25 done
+[09:14:25 #704] P32 tc1: json primitives + escapes
+[09:14:25 #705] P32 tc1: PASS
+[09:14:25 #706] P32 tc2: json errors (strictness)
+[09:14:25 #707] P32 tc2: PASS
+[09:14:25 #708] P32 tc3: cloud parse — full doc
+[09:14:25 #709] P32 tc3: PASS
+[09:14:25 #710] P32 tc4: cloud parse — fallbacks + error doc
+[09:14:25 #711] P32 tc4: PASS
+[09:14:25 #712] P32 tc5: draw gating (pixel check on a text item)
+[09:14:25 #713] P32 tc5: PASS (black=1)
+[09:14:25 #714] P32: ALL PASS (0 fails)
+[09:14:25 #715] P22 boot step 26 done
+[09:14:25 #716] P19e tc1/tc7: distill digests
+[09:14:25 #717] P19e tc1: PASS
+[09:14:25 #718] P19e tc7: PASS
+[09:14:25 #719] P19e: ALL PASS (0 fails)
+[09:14:25 #720] P22 boot step 27 done
+[09:14:25 #721] P24 battery started (async driver)
+[09:14:25 #722] P22 boot step 28 done
+[09:14:25 #723] HTTP: http_get about:home (state=1)
+[09:14:25 #724] HTTP: about timer scheduled id=4 for about:home
+[09:14:25 #725] P24 tc1 start=1
+[09:14:25 #726] HTTP: about timer delivering (id=4 reqId=4 state=1)
+[09:14:25 #727] HTTP: http_get http://t/none (state=0)
+[09:14:25 #728] P24 tc1 cb fired (frames=1)
+[09:14:25 #729] HTTP: http_get about:unknown (state=1)
+[09:14:25 #730] P24 tc4 start=1 (expect 1, error is async-safe)
+[09:14:25 #731] HTTP: http_get about:home (state=0)
+[09:14:25 #732] HTTP: about timer scheduled id=10 for about:home
+[09:14:25 #733] HTTP: http_get about:blank (state=1)
+[09:14:25 #734] HTTP: about timer scheduled id=11 for about:blank
+[09:14:26 #735] HTTP: stale about timer dropped (id=10 reqId=11)
+[09:14:26 #736] HTTP: about timer delivering (id=11 reqId=11 state=1)
+[09:14:26 #737] P24 tc1 about:home success: PASS (status=200 ct=text/html)
+[09:14:26 #738] P24 tc2 idle-not-loading after done: PASS (state=0)
+[09:14:26 #739] P24 tc3 about:blank body: PASS
+[09:14:26 #740] P24 tc4 unknown-about error: PASS
+[09:14:26 #741] P24 tc5 stale-timer dropped: PASS (cb4Success=0)
+[09:14:26 #742] P24 tc6 cancel-while-idle: PASS
+[09:14:26 #743] P24 BATTERY DONE: fails=0
+[09:14:29 #744] P12 tc2 home selection after D,D,R (want 4) = 4
+[09:14:29 #745] P12 tc2a card4 url clean (want no pipe) = YES
+[09:14:29 #746] navigate_to: https://en.wikipedia.org/wiki/Main_Page
+[09:14:29 #747] P12 state -> 3 (frame 140)
+[09:14:31 #748] P12 tc3 error selection after R,R (want 3) = 3
+[09:14:32 #749] navigate_to: about:home
+[09:14:32 #750] P12 state -> 0 (frame 220)
+[09:14:33 #751] P12 state -> 4 (frame 260)
+[09:14:33 #752] navigate_to: about:home
+[09:14:33 #753] P12 state -> 0 (frame 270)
+[09:14:34 #754] P12 state -> 5 (frame 280)
+[09:14:34 #755] navigate_to: about:home
+[09:14:34 #756] P12 state -> 0 (frame 290)
+[09:14:34 #757] P12 state -> 6 (frame 300)
+[09:14:34 #758] updateFrame: heartbeat frame=300
+[09:14:35 #759] navigate_to: about:home
+[09:14:35 #760] P12 state -> 0 (frame 320)
+[09:14:35 #761] P12 tc6 after-cancel searchEngine=1 (want 1, staged discarded)
+[09:14:35 #762] P12 state -> 6 (frame 330)
+[09:14:36 #763] STORAGE: save open
+[09:14:36 #764] STORAGE: save writing (bm=9 hist=0)
+[09:14:36 #765] STORAGE: save close
+[09:14:36 #766] STORAGE: save exit
+[09:14:36 #767] navigate_to: about:home
+[09:14:36 #768] P12 state -> 0 (frame 350)
+[09:14:36 #769] P12 tc6 after-save searchEngine=2 (want 2, persisted)
+[09:14:36 #770] STORAGE: save open
+[09:14:36 #771] STORAGE: save writing (bm=9 hist=0)
+[09:14:36 #772] STORAGE: save close
+[09:14:36 #773] STORAGE: save exit
+[09:14:38 #774] P12 RESULT state=0 (want 0=HOME) scripted sequence complete
+[09:14:38 #775] P13 session1: show
+[09:14:38 #776] KB frame 0: enter
+[09:14:38 #777] KB frame 0: letters ok
+[09:14:38 #778] KB frame 0: anim ok
+[09:14:38 #779] KB frame 0: input ok
+[09:14:38 #780] KB frame 0: app update ok
+[09:14:38 #781] KB frame 0: draw ok
+[09:14:38 #782] KB frame 1: enter
+[09:14:38 #783] KB frame 1: letters ok
+[09:14:38 #784] KB frame 1: anim ok
+[09:14:38 #785] KB frame 1: input ok
+[09:14:38 #786] KB frame 1: app update ok
+[09:14:38 #787] KB frame 1: draw ok
+[09:14:38 #788] KB frame 2: enter
+[09:14:38 #789] KB frame 2: letters ok
+[09:14:38 #790] KB frame 2: anim ok
+[09:14:38 #791] KB frame 2: input ok
+[09:14:38 #792] KB frame 2: app update ok
+[09:14:38 #793] KB frame 2: draw ok
+[09:14:38 #794] KB frame 3: enter
+[09:14:38 #795] KB frame 3: letters ok
+[09:14:38 #796] KB frame 3: anim ok
+[09:14:38 #797] KB frame 3: input ok
+[09:14:38 #798] KB frame 3: app update ok
+[09:14:38 #799] KB frame 3: draw ok
+[09:14:38 #800] KB frame 4: enter
+[09:14:38 #801] KB frame 4: letters ok
+[09:14:38 #802] KB frame 4: anim ok
+[09:14:38 #803] KB frame 4: input ok
+[09:14:38 #804] KB frame 4: app update ok
+[09:14:38 #805] KB frame 4: draw ok
+[09:14:38 #806] KB frame 5: enter
+[09:14:38 #807] KB frame 5: letters ok
+[09:14:38 #808] P13 didShow (count=1)
+[09:14:38 #809] KB frame 5: anim ok
+[09:14:38 #810] KB frame 5: input ok
+[09:14:38 #811] KB frame 5: app update ok
+[09:14:38 #812] KB frame 5: draw ok
+[09:14:38 #813] KB frame 6: enter
+[09:14:38 #814] KB frame 6: letters ok
+[09:14:38 #815] KB frame 6: anim ok
+[09:14:38 #816] KB frame 6: input ok
+[09:14:38 #817] KB frame 6: app update ok
+[09:14:38 #818] KB frame 6: draw ok
+[09:14:38 #819] KB frame 7: enter
+[09:14:38 #820] KB frame 7: letters ok
+[09:14:38 #821] KB frame 7: anim ok
+[09:14:38 #822] KB frame 7: input ok
+[09:14:38 #823] KB frame 7: app update ok
+[09:14:38 #824] KB frame 7: draw ok
+[09:14:38 #825] KB frame 8: enter
+[09:14:38 #826] KB frame 8: letters ok
+[09:14:38 #827] KB frame 8: anim ok
+[09:14:38 #828] KB frame 8: input ok
+[09:14:38 #829] KB frame 8: app update ok
+[09:14:38 #830] KB frame 8: draw ok
+[09:14:38 #831] KB frame 9: enter
+[09:14:38 #832] KB frame 9: letters ok
+[09:14:38 #833] KB frame 9: anim ok
+[09:14:38 #834] KB frame 9: input ok
+[09:14:38 #835] KB frame 9: app update ok
+[09:14:38 #836] KB frame 9: draw ok
+[09:14:38 #837] KB frame 10: enter
+[09:14:38 #838] KB frame 10: letters ok
+[09:14:38 #839] KB frame 10: anim ok
+[09:14:38 #840] KB frame 10: input ok
+[09:14:38 #841] KB frame 10: app update ok
+[09:14:38 #842] KB frame 10: draw ok
+[09:14:38 #843] KB frame 11: enter
+[09:14:38 #844] KB frame 11: letters ok
+[09:14:38 #845] KB frame 11: anim ok
+[09:14:38 #846] KB frame 11: input ok
+[09:14:38 #847] KB frame 11: app update ok
+[09:14:38 #848] KB frame 11: draw ok
+[09:14:38 #849] KB frame 12: enter
+[09:14:38 #850] KB frame 12: letters ok
+[09:14:38 #851] KB frame 12: anim ok
+[09:14:38 #852] KB frame 12: input ok
+[09:14:38 #853] KB frame 12: app update ok
+[09:14:38 #854] KB frame 12: draw ok
+[09:14:38 #855] KB frame 13: enter
+[09:14:38 #856] KB frame 13: letters ok
+[09:14:38 #857] KB frame 13: anim ok
+[09:14:38 #858] KB frame 13: input ok
+[09:14:38 #859] KB frame 13: app update ok
+[09:14:38 #860] KB frame 13: draw ok
+[09:14:38 #861] KB frame 14: enter
+[09:14:38 #862] KB frame 14: letters ok
+[09:14:38 #863] KB frame 14: anim ok
+[09:14:38 #864] KB frame 14: input ok
+[09:14:38 #865] KB frame 14: app update ok
+[09:14:38 #866] KB frame 14: draw ok
+[09:14:38 #867] KB frame 15: enter
+[09:14:38 #868] KB frame 15: letters ok
+[09:14:38 #869] KB frame 15: anim ok
+[09:14:38 #870] KB frame 15: input ok
+[09:14:38 #871] KB frame 15: app update ok
+[09:14:38 #872] KB frame 15: draw ok
+[09:14:38 #873] KB frame 16: enter
+[09:14:38 #874] KB frame 16: letters ok
+[09:14:38 #875] KB frame 16: anim ok
+[09:14:38 #876] KB frame 16: input ok
+[09:14:38 #877] KB frame 16: app update ok
+[09:14:38 #878] KB frame 16: draw ok
+[09:14:38 #879] KB frame 17: enter
+[09:14:38 #880] KB frame 17: letters ok
+[09:14:38 #881] KB frame 17: anim ok
+[09:14:38 #882] KB frame 17: input ok
+[09:14:38 #883] KB frame 17: app update ok
+[09:14:38 #884] KB frame 17: draw ok
+[09:14:38 #885] KB frame 18: enter
+[09:14:38 #886] KB frame 18: letters ok
+[09:14:38 #887] KB frame 18: anim ok
+[09:14:38 #888] KB frame 18: input ok
+[09:14:38 #889] KB frame 18: app update ok
+[09:14:38 #890] KB frame 18: draw ok
+[09:14:38 #891] KB frame 19: enter
+[09:14:38 #892] KB frame 19: letters ok
+[09:14:38 #893] KB frame 19: anim ok
+[09:14:38 #894] KB frame 19: input ok
+[09:14:38 #895] P13 visible=1 width=180 left=222 (animating)
+[09:14:38 #896] KB frame 19: app update ok
+[09:14:38 #897] KB frame 19: draw ok
+[09:14:38 #898] KB frame 20: enter
+[09:14:38 #899] KB frame 20: letters ok
+[09:14:38 #900] KB frame 20: anim ok
+[09:14:38 #901] KB frame 20: input ok
+[09:14:38 #902] KB frame 20: app update ok
+[09:14:38 #903] KB frame 20: draw ok
+[09:14:38 #904] KB frame 21: enter
+[09:14:38 #905] KB frame 21: letters ok
+[09:14:39 #906] KB frame 21: anim ok
+[09:14:39 #907] KB frame 21: input ok
+[09:14:39 #908] KB frame 21: app update ok
+[09:14:39 #909] KB frame 21: draw ok
+[09:14:39 #910] KB frame 22: enter
+[09:14:39 #911] KB frame 22: letters ok
+[09:14:39 #912] KB frame 22: anim ok
+[09:14:39 #913] KB frame 22: input ok
+[09:14:39 #914] KB frame 22: app update ok
+[09:14:39 #915] KB frame 22: draw ok
+[09:14:39 #916] KB frame 23: enter
+[09:14:39 #917] KB frame 23: letters ok
+[09:14:39 #918] KB frame 23: anim ok
+[09:14:39 #919] KB frame 23: input ok
+[09:14:39 #920] KB frame 23: app update ok
+[09:14:39 #921] KB frame 23: draw ok
+[09:14:39 #922] KB frame 24: enter
+[09:14:39 #923] KB frame 24: letters ok
+[09:14:39 #924] KB frame 24: anim ok
+[09:14:39 #925] KB frame 24: input ok
+[09:14:39 #926] KB frame 24: app update ok
+[09:14:39 #927] KB frame 24: draw ok
+[09:14:39 #928] P13 capBehavior=0 (0 normal)
+[09:14:44 #929] P13 willHide ok=0 text=[]
+[09:14:44 #930] P13 didHide (count=1)
+[09:14:44 #931] P13 tc5 textChanges=4 (want 4: a, A, delete, cancel-restore)
+[09:14:44 #932] P13 tc4 willHideOk=0 (want 0 cancel) text=[] (want empty)
+[09:14:44 #933] P13 tc1 didShow=1 didHide=1 visible=0 (want 1 1 0)
+[09:14:44 #934] updateFrame: heartbeat frame=600
+[09:14:45 #935] P13 session2: show with initial 'x'
+[09:14:45 #936] P13 didShow (count=2)
+[09:14:48 #937] P13 willHide ok=1 text=[x1]
+[09:14:48 #938] P13 didHide (count=2)
+[09:14:48 #939] P13 tc4b willHideOk=1 (want 1 OK) text=[x1] (want x1)
+[09:14:48 #940] P13 tc1b didShow=2 didHide=2 visible=0 (want 2 2 0)
+[09:14:48 #941] P13 tc6 update-callback restored: heartbeat next frames
+[09:14:50 #942] P14 tc1 open: prefill=[https://example.com/page] (want https://example.com/page) shown=0 (want 0)
+[09:14:50 #943] P13 didShow (count=3)
+[09:14:50 #944] P14 tc1b launch: shown=1 visible=1 (want 1 1)
+[09:14:51 #945] P14 tc2 preview=[https://example.com/page2] (want https://example.com/page2)
+[09:14:53 #946] P13 didHide (count=3)
+[09:14:54 #947] P14 tc5 after cancel: open=0 (want 0) submits=0 (want 0)
+[09:14:54 #948] AddressBar submit: https://html.duckduckgo.com/html/?q=hello+world
+[09:14:54 #949] P14 submit fired: https://html.duckduckgo.com/html/?q=hello+world
+[09:14:54 #950] P14 tc3 submits=1 (want 1) got=[https://html.duckduckgo.com/html/?q=hello+world] open=0 (want 0)
+[09:14:54 #951] AddressBar submit: https://example.com/
+[09:14:54 #952] P14 submit fired: https://example.com/
+[09:14:54 #953] P14 tc4 submits=2 (want 2) got=[https://example.com/] (want https://example.com/)
+[09:14:54 #954] main: B-release opened address bar (keyboard)
+[09:14:54 #955] P14 tc6 B-release: open=1 (want 1) shown=1 (want 1) visible=1 (want 1)
+[09:14:54 #956] main: system menu close detected, address bar cancelled
+[09:14:54 #957] P14 tc7 menu-gap: open=0 (want 0) visible=1 (hide anim in flight ok) skip=0 (want 0, armed 2 then consumed)
+[09:14:54 #958] P14 RESULT scripted address-bar sequence complete state=0 (want 0=HOME)
+[09:14:54 #959] P13 didShow (count=4)
+[09:14:54 #960] updateFrame: heartbeat frame=900
+[09:15:04 #961] updateFrame: heartbeat frame=1200
+[09:15:14 #962] updateFrame: heartbeat frame=1500
+[09:15:24 #963] updateFrame: heartbeat frame=1800
+[09:15:34 #964] updateFrame: heartbeat frame=2100
+[09:15:44 #965] updateFrame: heartbeat frame=2400
+[09:15:54 #966] updateFrame: heartbeat frame=2700
+[09:16:04 #967] updateFrame: heartbeat frame=3000
+[09:16:10 #968] eventHandler: kEventTerminate, frames=3186

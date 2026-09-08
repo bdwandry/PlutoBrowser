@@ -1,1255 +1,1310 @@
-// svg.c — C port of Source/render/decoders/svg.lua (SVGDecoder).
-//
-// Renders the web-icon subset of SVG into a 1-bit gray grid (255 white
-// canvas, 0 ink) using a small deterministic software rasterizer:
-// Bresenham lines, rect outlines, rounded rects (edges + quadrant arcs from
-// the midpoint circle), midpoint circles/ellipses. Tag scanning, <use>
-// resolution, style merging, hidden-subtree skipping and path flattening
-// mirror svg.lua exactly, including its quirks (e.g. "clipPath" never
-// matching after lowercasing, A-commands drawn as straight chords).
-
-#include "render/decoders/svg.h"
-
-#include <math.h>
-#include <stdlib.h>
+/*
+ * PlutoBrowser — svg.c
+ * Port of Source/render/decoders/svg.lua (reference, 451 lines).
+ * See svg.h for the Lua→C map and every preserved quirk.
+ *
+ * Stack discipline (P22 rule): tag/attr workspaces are static; the only
+ * sizable locals are the expandUses StrBuf (heap) and small scalars.
+ */
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <ctype.h>
+#include "pd_api.h"
+#include "render/decoders/svg.h"
+#include "util/strbuf.h"
 
-#include "render/decoders/dither.h"
-#include "util/mem.h"
+extern PlaydateAPI *pluto_pd(void);
+extern void pluto_free(void *p);
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define PLUTO_SVG_PD 1
-#endif
+/* ── Attribute map (bounded, static — Lua tables are unbounded) ───────────── */
+#define SVG_MAX_ATTRS 32
+#define SVG_MAX_NAME  32
+#define SVG_MAX_VAL   64
 
-/* ── canvas + rasterizer primitives ──────────────────────────────────── */
+typedef struct
+{
+    char key[SVG_MAX_NAME];
+    char val[SVG_MAX_VAL];
+} SvgAttr;
 
-typedef struct {
-    uint8_t** rows;
-    int w, h;
-} Canvas;
-
-static void cv_plot(Canvas* cv, int x, int y) {
-    if (!cv || x < 0 || y < 0 || x >= cv->w || y >= cv->h) return;
-    cv->rows[y][x] = 0;
-}
-
-/* Bresenham; plots both endpoints; any octant. */
-static void cv_line(Canvas* cv, int x0, int y0, int x1, int y1) {
-    int dx = x1 > x0 ? x1 - x0 : x0 - x1;
-    int dy = y0 > y1 ? y0 - y1 : y1 - y0;
-    int sx = x0 < x1 ? 1 : -1;
-    int sy = y0 < y1 ? 1 : -1;
-    int err = dx - dy;
-    for (;;) {
-        int e2;
-        cv_plot(cv, x0, y0);
-        if (x0 == x1 && y0 == y1) break;
-        e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 < dx)  { err += dx; y0 += sy; }
-    }
-}
-
-static void cv_rect(Canvas* cv, int x, int y, int w, int h) {
-    int i;
-    if (w <= 0 || h <= 0) return;
-    for (i = 0; i < w; i++) {
-        cv_plot(cv, x + i, y);
-        cv_plot(cv, x + i, y + h - 1);
-    }
-    for (i = 0; i < h; i++) {
-        cv_plot(cv, x, y + i);
-        cv_plot(cv, x + w - 1, y + i);
-    }
-}
-
-static void cv_hline(Canvas* cv, int x0, int x1, int y) {
-    int i, lo = x0 < x1 ? x0 : x1, hi = x0 < x1 ? x1 : x0;
-    for (i = lo; i <= hi; i++) cv_plot(cv, i, y);
-}
-
-static void cv_vline(Canvas* cv, int x, int y0, int y1) {
-    int i, lo = y0 < y1 ? y0 : y1, hi = y0 < y1 ? y1 : y0;
-    for (i = lo; i <= hi; i++) cv_plot(cv, x, i);
-}
-
-#define OCT_ALL      0xFFu
-#define OCT_TL       0x30u   /* (-x,-y) and (-y,-x) */
-#define OCT_TR       0xC0u   /* (+y,-x) and (+x,-y) */
-#define OCT_BL       0x0Cu   /* (-y,+x) and (-x,+y) */
-#define OCT_BR       0x03u   /* (+x,+y) and (+y,+x) */
-
-/* Midpoint circle around (cx,cy); octmask selects plotted octants. */
-static void cv_circle(Canvas* cv, int cx, int cy, int r, unsigned octmask) {
-    int x, y;
-    long long err;
-    if (r <= 0) { cv_plot(cv, cx, cy); return; }
-    x = r; y = 0;
-    err = 1 - r;
-    while (x >= y) {
-        if (octmask & 0x01u) cv_plot(cv, cx + x, cy + y);
-        if (octmask & 0x02u) cv_plot(cv, cx + y, cy + x);
-        if (octmask & 0x04u) cv_plot(cv, cx - y, cy + x);
-        if (octmask & 0x08u) cv_plot(cv, cx - x, cy + y);
-        if (octmask & 0x10u) cv_plot(cv, cx - x, cy - y);
-        if (octmask & 0x20u) cv_plot(cv, cx - y, cy - x);
-        if (octmask & 0x40u) cv_plot(cv, cx + y, cy - x);
-        if (octmask & 0x80u) cv_plot(cv, cx + x, cy - y);
-        y++;
-        if (err < 0) {
-            err += 2 * y + 1;
-        } else {
-            x--;
-            err += 2 * (y - x) + 1;
-        }
-    }
-}
-
-static void cv_round_rect(Canvas* cv, int x, int y, int w, int h, int r) {
-    int x2, y2;
-    if (w <= 0 || h <= 0) return;
-    if (r < 0) r = 0;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    if (r == 0) { cv_rect(cv, x, y, w, h); return; }
-    x2 = x + w - 1;
-    y2 = y + h - 1;
-    cv_hline(cv, x + r, x2 - r, y);
-    cv_hline(cv, x + r, x2 - r, y2);
-    cv_vline(cv, x, y + r, y2 - r);
-    cv_vline(cv, x2, y + r, y2 - r);
-    cv_circle(cv, x + r, y + r, r, OCT_TL);
-    cv_circle(cv, x2 - r, y + r, r, OCT_TR);
-    cv_circle(cv, x + r, y2 - r, r, OCT_BL);
-    cv_circle(cv, x2 - r, y2 - r, r, OCT_BR);
-}
-
-/* Midpoint ellipse inside bounding box (bbx,bby,bbw,bbh), pure integer. */
-static void canvas_ellipse(Canvas* cv, int bbx, int bby, int bbw, int bbh) {
-    int rx, ry, cx, cy, i;
-    long long Rx2, Ry2, x, y, f;
-    if (bbw <= 0 || bbh <= 0) return;
-    rx = bbw / 2; ry = bbh / 2;
-    cx = bbx + rx; cy = bby + ry;
-    if (rx <= 0 && ry <= 0) { cv_plot(cv, cx, cy); return; }
-    if (rx <= 0) { for (i = cy - ry; i <= cy + ry; i++) cv_plot(cv, cx, i); return; }
-    if (ry <= 0) { for (i = cx - rx; i <= cx + rx; i++) cv_plot(cv, i, cy); return; }
-    Rx2 = (long long)rx * rx;
-    Ry2 = (long long)ry * ry;
-    x = 0; y = ry;
-    for (;;) {
-        cv_plot(cv, cx + (int)x, cy + (int)y);
-        cv_plot(cv, cx - (int)x, cy + (int)y);
-        cv_plot(cv, cx + (int)x, cy - (int)y);
-        cv_plot(cv, cx - (int)x, cy - (int)y);
-        if (2 * Ry2 * x >= 2 * Rx2 * y || y <= 0) break;
-        f = 4 * Ry2 * (x + 1) * (x + 1) + Rx2 * (2 * y - 1) * (2 * y - 1)
-            - 4 * Rx2 * Ry2;
-        x++;
-        if (f >= 0) y--;
-    }
-    while (y > 0) {
-        f = Ry2 * (2 * x + 1) * (2 * x + 1)
-            + 4 * Rx2 * (y - 1) * (y - 1) - 4 * Rx2 * Ry2;
-        y--;
-        if (f <= 0) x++;
-        cv_plot(cv, cx + (int)x, cy + (int)y);
-        cv_plot(cv, cx - (int)x, cy + (int)y);
-        cv_plot(cv, cx + (int)x, cy - (int)y);
-        cv_plot(cv, cx - (int)x, cy - (int)y);
-    }
-}
-
-/* ── small string helpers ────────────────────────────────────────────── */
-
-static int find_ch(const char* s, int len, char c, int from) {
-    int i;
-    for (i = from; i < len; i++)
-        if (s[i] == c) return i;
-    return -1;
-}
-
-static int find_str(const char* s, int len, const char* needle, int nlen,
-                    int from) {
-    int i;
-    if (nlen <= 0) return from <= len ? from : -1;
-    for (i = from; i + nlen <= len; i++)
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
-    return -1;
-}
-
-static char lower_ch(char c) {
-    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
-}
-
-static int is_namech(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == ':' || c == '-';
-}
-
-static int is_ws(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\v' ||
-           c == '\f' || c == '\r';
-}
-
-static int is_numch_viewbox(char c) {
-    return (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' ||
-           c == '-';
-}
-
-static int is_numch_len(char c) {
-    return (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E';
-}
-
-/* Lua string.lower on ASCII. */
-static char* dup_lower(const char* s, int len) {
-    char* out = (char*)pluto_malloc((size_t)len + 1);
-    int i;
-    if (!out) return NULL;
-    for (i = 0; i < len; i++) out[i] = lower_ch(s[i]);
-    out[len] = '\0';
-    return out;
-}
-
-static char* dup_range(const char* s, int len) {
-    char* out = (char*)pluto_malloc((size_t)len + 1);
-    if (!out) return NULL;
-    if (len > 0) memcpy(out, s, (size_t)len);
-    out[len] = '\0';
-    return out;
-}
-
-/* ── attribute map ───────────────────────────────────────────────────── */
-
-#define SVG_MAX_ATTRS 64
-
-typedef struct {
-    char* k[SVG_MAX_ATTRS];
-    char* v[SVG_MAX_ATTRS];
+typedef struct
+{
+    SvgAttr a[SVG_MAX_ATTRS];
     int n;
-} AttrSet;
+} SvgAttrs;
 
-static void attrs_init(AttrSet* a) { a->n = 0; }
-
-static void attrs_free(AttrSet* a) {
-    int i;
-    for (i = 0; i < a->n; i++) {
-        pluto_free(a->k[i]);
-        pluto_free(a->v[i]);
-    }
-    a->n = 0;
+static void attrs_clear(SvgAttrs *m)
+{
+    m->n = 0;
 }
 
-static void attr_set(AttrSet* a, const char* k, int klen,
-                     const char* v, int vlen) {
-    int i;
-    for (i = 0; i < a->n; i++) {
-        if ((int)strlen(a->k[i]) == klen && memcmp(a->k[i], k, (size_t)klen) == 0) {
-            char* nv = dup_range(v, vlen);
-            if (nv) {
-                pluto_free(a->v[i]);
-                a->v[i] = nv;
-            }
+/* Lua: out[k] = v — set (overwrite) or insert. */
+static void attrs_set(SvgAttrs *m, const char *k, size_t klen, const char *v, size_t vlen)
+{
+    if (klen >= SVG_MAX_NAME)
+    {
+        klen = SVG_MAX_NAME - 1;
+    }
+    if (vlen >= SVG_MAX_VAL)
+    {
+        vlen = SVG_MAX_VAL - 1;
+    }
+    for (int i = 0; i < m->n; i++)
+    {
+        if (strlen(m->a[i].key) == klen && memcmp(m->a[i].key, k, klen) == 0)
+        {
+            memcpy(m->a[i].val, v, vlen);
+            m->a[i].val[vlen] = 0;
             return;
         }
     }
-    if (a->n >= SVG_MAX_ATTRS) return;
-    a->k[a->n] = dup_range(k, klen);
-    a->v[a->n] = dup_range(v, vlen);
-    if (a->k[a->n] && a->v[a->n]) {
-        a->n++;
-    } else {
-        pluto_free(a->k[a->n]);
-        pluto_free(a->v[a->n]);
+    if (m->n >= SVG_MAX_ATTRS)
+    {
+        return; /* documented C-side bound */
     }
+    SvgAttr *slot = &m->a[m->n++];
+    memcpy(slot->key, k, klen);
+    slot->key[klen] = 0;
+    memcpy(slot->val, v, vlen);
+    slot->val[vlen] = 0;
 }
 
-/* getAttrs: double-quoted pass first, then single-quoted pass overriding. */
-static void get_attrs(const char* s, int len, AttrSet* out) {
-    int quotePass;
-    attrs_init(out);
-    for (quotePass = 0; quotePass < 2; quotePass++) {
-        char q = quotePass == 0 ? '"' : '\'';
-        int i = 0;
-        while (i < len) {
-            /* scan key run of name chars starting at next name char */
-            while (i < len && !is_namech(s[i])) i++;
-            if (i >= len) break;
-            {
-                int k0 = i;
-                while (i < len && is_namech(s[i])) i++;
-                int k1 = i;
-                /* optional ws, '=', optional ws, quote */
-                int p = k1;
-                while (p < len && is_ws(s[p])) p++;
-                if (p >= len || s[p] != '=') continue;
-                p++;
-                while (p < len && is_ws(s[p])) p++;
-                if (p >= len || s[p] != q) continue;
-                p++;
-                {
-                    int v0 = p;
-                    while (p < len && s[p] != q) p++;
-                    if (p > len) p = len;
-                    if (p < len) {   /* closing quote found */
-                        attr_set(out, s + k0, k1 - k0, s + v0, p - v0);
-                        i = p + 1;
-                    } else {
-                        i = v0;      /* unterminated: skip past value start */
-                    }
-                }
-            }
+static const char *attrs_get(const SvgAttrs *m, const char *key)
+{
+    for (int i = 0; i < m->n; i++)
+    {
+        if (strcmp(m->a[i].key, key) == 0)
+        {
+            return m->a[i].val;
         }
     }
-}
-
-static const char* attr_get(const AttrSet* a, const char* key) {
-    int i;
-    for (i = 0; i < a->n; i++)
-        if (strcmp(a->k[i], key) == 0) return a->v[i];
     return NULL;
 }
 
-/* ── numbers ─────────────────────────────────────────────────────────── */
-
-/* Strict decimal validator matching Lua tonumber semantics for tokens this
- * tokenizer can produce; strtod fills the value only when fully valid. */
-static int lua_number_strict(const char* s, int len, double* out) {
-    int i = 0, mantDigits = 0, expDigits = 0;
-    if (len <= 0 || len > 63) return 0;
-    if (s[i] == '+' || s[i] == '-') i++;
-    while (i < len && s[i] >= '0' && s[i] <= '9') { i++; mantDigits++; }
-    if (i < len && s[i] == '.') {
-        i++;
-        while (i < len && s[i] >= '0' && s[i] <= '9') { i++; mantDigits++; }
-    }
-    if (mantDigits == 0) return 0;
-    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
-        int save = i;
-        i++;
-        if (i < len && (s[i] == '+' || s[i] == '-')) i++;
-        while (i < len && s[i] >= '0' && s[i] <= '9') { i++; expDigits++; }
-        if (expDigits == 0) return 0;   /* "5e"/"5e+" -> nil like Lua */
-        (void)save;
-    }
-    if (i != len) return 0;
+/* Lua: `([%w%:-]+)%s*=%s*"([^"]*)"` — word/colon/hyphen keys, quoted values. */
+static void svg_get_attrs(const char *s, size_t len, SvgAttrs *out)
+{
+    attrs_clear(out);
+    /* Pass 1: double-quoted */
+    for (size_t i = 0; i < len;)
     {
-        char buf[64];
-        char* end = NULL;
-        memcpy(buf, s, (size_t)len);
-        buf[len] = '\0';
-        *out = strtod(buf, &end);
-        return end == buf + len;
-    }
-}
-
-static double num_or0(const char* s) {
-    double v;
-    if (!s) return 0.0;
-    if (lua_number_strict(s, (int)strlen(s), &v)) return v;
-    return 0.0;
-}
-
-typedef struct {
-    double* v;
-    int n, cap;
-} Nums;
-
-static void nums_free(Nums* ns) {
-    if (ns->v) pluto_free(ns->v);
-    ns->v = NULL;
-    ns->n = ns->cap = 0;
-}
-
-static void nums_push(Nums* ns, double d) {
-    if (ns->n >= ns->cap) {
-        int ncap = ns->cap ? ns->cap * 2 : 16;
-        double* nv = (double*)pluto_malloc(sizeof(double) * (size_t)ncap);
-        if (!nv) return;
-        if (ns->v) {
-            memcpy(nv, ns->v, sizeof(double) * (size_t)ns->n);
-            pluto_free(ns->v);
-        }
-        ns->v = nv;
-        ns->cap = ncap;
-    }
-    ns->v[ns->n++] = d;
-}
-
-/* Character-level tokenizer — literal port of svg.lua tokenizePathNumbers,
- * which correctly splits adjacent numbers like "0-8.264". */
-static void tokenize_numbers(const char* s, int len, Nums* out) {
-    int i = 0;
-    out->v = NULL; out->n = 0; out->cap = 0;
-    while (i < len) {
-        unsigned char c = (unsigned char)s[i];
-        int start, hasDigit;
-        if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D || c == 0x2C) {
+        /* key must start with [%w:-] */
+        char c0 = s[i];
+        if (!(isalnum((unsigned char)c0) || c0 == ':' || c0 == '-'))
+        {
             i++;
             continue;
         }
-        start = i;
-        hasDigit = 0;
-        if (c == 0x2B || c == 0x2D) {           /* sign */
-            i++;
-            if (i >= len) break;                /* exits outer loop (Lua) */
-            c = (unsigned char)s[i];
-        }
-        while (c >= 0x30 && c <= 0x39) {        /* integer digits */
-            hasDigit = 1;
-            i++;
-            if (i >= len) break;
-            c = (unsigned char)s[i];
-        }
-        if (c == 0x2E) {                        /* fractional part */
-            if (i + 1 < len && s[i + 1] >= 0x30 && s[i + 1] <= 0x39) {
-                i++;
-                c = (unsigned char)s[i];
-                while (c >= 0x30 && c <= 0x39) {
-                    hasDigit = 1;
-                    i++;
-                    if (i >= len) break;
-                    c = (unsigned char)s[i];
-                }
-            } else if (!hasDigit) {             /* .xxx without integer part */
-                i++;
-                if (i >= len) break;
-                c = (unsigned char)s[i];
-                while (c >= 0x30 && c <= 0x39) {
-                    hasDigit = 1;
-                    i++;
-                    if (i >= len) break;
-                    c = (unsigned char)s[i];
-                }
-            }
-            /* else: digits followed by bare dot -> number ends before dot */
-        }
-        if ((c == 0x65 || c == 0x45) && hasDigit) {   /* exponent */
-            i++;
-            if (i < len) {
-                c = (unsigned char)s[i];
-                if (c == 0x2B || c == 0x2D) i++;
-                while (i < len && s[i] >= 0x30 && s[i] <= 0x39) i++;
-            }
-        }
-        if (i > start && hasDigit) {
-            double num;
-            if (lua_number_strict(s + start, i - start, &num))
-                nums_push(out, num);
-        }
-        if (i == start) i = start + 1;          /* skip unknown char */
-    }
-}
-
-/* ── style / visibility / ink helpers ───────────────────────────────── */
-
-typedef struct {
-    AttrSet xml;    /* from tag attributes */
-    AttrSet style;  /* parsed from style="" (wins over xml) */
-} TagAttrs;
-
-static const char* ta_get(const TagAttrs* t, const char* key) {
-    const char* v = attr_get(&t->style, key);
-    if (v) return v;
-    return attr_get(&t->xml, key);
-}
-
-static int ta_has(const TagAttrs* t, const char* key) {
-    return ta_get(t, key) != NULL;
-}
-
-/* parseStyle: split ';', first ':', trim both, lowercase key. */
-static void parse_style(const char* s, int len, AttrSet* out) {
-    int i = 0;
-    attrs_init(out);
-    while (i < len) {
-        int seg0 = i;
-        int seg1 = find_ch(s, len, ';', i);
-        if (seg1 < 0) seg1 = len;
+        size_t ks = i;
+        while (i < len && (isalnum((unsigned char)s[i]) || s[i] == ':' || s[i] == '-'))
         {
-            int colon = find_ch(s, seg1, ':', seg0);
-            if (colon >= 0) {
-                int k0 = seg0, k1 = colon;
-                int v0 = colon + 1, v1 = seg1;
-                while (k0 < k1 && is_ws(s[k0])) k0++;
-                while (k1 > k0 && is_ws(s[k1 - 1])) k1--;
-                while (v0 < v1 && is_ws(s[v0])) v0++;
-                while (v1 > v0 && is_ws(s[v1 - 1])) v1--;
-                if (k1 > k0) {
-                    int j;
-                    char keybuf[48];
-                    int klen = k1 - k0;
-                    if (klen > 47) klen = 47;
-                    for (j = 0; j < klen; j++)
-                        keybuf[j] = lower_ch(s[k0 + j]);
-                    keybuf[j] = '\0';
-                    attr_set(out, keybuf, klen, s + v0, v1 - v0);
-                }
-            }
+            i++;
         }
-        i = seg1 + 1;
+        size_t ke = i;
+        /* %s*=%s*" */
+        size_t j = i;
+        while (j < len && (s[j] == ' ' || s[j] == '\t'))
+        {
+            j++;
+        }
+        if (j >= len || s[j] != '=')
+        {
+            continue; /* i already advanced past the key run */
+        }
+        j++;
+        while (j < len && (s[j] == ' ' || s[j] == '\t'))
+        {
+            j++;
+        }
+        if (j < len && s[j] == '"')
+        {
+            j++;
+            size_t vs = j;
+            while (j < len && s[j] != '"')
+            {
+                j++;
+            }
+            if (j > len)
+            {
+                break;
+            }
+            attrs_set(out, s + ks, ke - ks, s + vs, j - vs);
+            i = (j < len) ? j + 1 : j;
+        }
+        /* else: not a double-quoted match; skip this key (i advanced) */
+    }
+    /* Pass 2: single-quoted (Lua runs the same pattern again — later
+     * assignments overwrite earlier ones) */
+    for (size_t i = 0; i < len;)
+    {
+        char c0 = s[i];
+        if (!(isalnum((unsigned char)c0) || c0 == ':' || c0 == '-'))
+        {
+            i++;
+            continue;
+        }
+        size_t ks = i;
+        while (i < len && (isalnum((unsigned char)s[i]) || s[i] == ':' || s[i] == '-'))
+        {
+            i++;
+        }
+        size_t ke = i;
+        size_t j = i;
+        while (j < len && (s[j] == ' ' || s[j] == '\t'))
+        {
+            j++;
+        }
+        if (j >= len || s[j] != '=')
+        {
+            continue;
+        }
+        j++;
+        while (j < len && (s[j] == ' ' || s[j] == '\t'))
+        {
+            j++;
+        }
+        if (j < len && s[j] == '\'')
+        {
+            j++;
+            size_t vs = j;
+            while (j < len && s[j] != '\'')
+            {
+                j++;
+            }
+            if (j > len)
+            {
+                break;
+            }
+            attrs_set(out, s + ks, ke - ks, s + vs, j - vs);
+            i = (j < len) ? j + 1 : j;
+        }
     }
 }
 
-static void tagattrs_load(TagAttrs* t, const char* attrStr, int alen) {
-    const char* styleStr;
-    get_attrs(attrStr, alen, &t->xml);
-    styleStr = attr_get(&t->xml, "style");
-    parse_style(styleStr ? styleStr : "", styleStr ? (int)strlen(styleStr) : 0,
-                &t->style);
-}
-
-static void tagattrs_free(TagAttrs* t) {
-    attrs_free(&t->xml);
-    attrs_free(&t->style);
-}
-
-static int is_hidden(const TagAttrs* t) {
-    const char* v;
-    if ((v = ta_get(t, "display")) && strcmp(v, "none") == 0) return 1;
-    if ((v = ta_get(t, "visibility")) &&
-        (strcmp(v, "hidden") == 0 || strcmp(v, "collapse") == 0))
+static int svg_is_hidden(const SvgAttrs *a)
+{
+    const char *d = attrs_get(a, "display");
+    if (d && strcmp(d, "none") == 0)
+    {
         return 1;
+    }
+    const char *v = attrs_get(a, "visibility");
+    if (v && (strcmp(v, "hidden") == 0 || strcmp(v, "collapse") == 0))
+    {
+        return 1;
+    }
     return 0;
 }
 
-static int has_ink(const TagAttrs* t) {
-    const char* fill = ta_get(t, "fill");
-    const char* stroke = ta_get(t, "stroke");
+static int svg_has_ink(const SvgAttrs *a)
+{
+    const char *stroke = attrs_get(a, "stroke");
     if (stroke && strcmp(stroke, "none") != 0 && strcmp(stroke, "") != 0)
+    {
         return 1;
-    if (fill && strcmp(fill, "none") == 0) return 0;
+    }
+    const char *fill = attrs_get(a, "fill");
+    if (fill && strcmp(fill, "none") == 0)
+    {
+        return 0;
+    }
     return 1;
 }
 
-/* ── <use> expansion ─────────────────────────────────────────────────── */
-
-typedef struct {
-    char* data;
-    int len, cap;
-} StrBuf;
-
-static void sb_init(StrBuf* b) { b->data = NULL; b->len = 0; b->cap = 0; }
-
-static void sb_append(StrBuf* b, const char* s, int len) {
-    if (len <= 0) return;
-    if (b->len + len > b->cap) {
-        int ncap = b->cap ? b->cap : 256;
-        char* nd;
-        while (ncap < b->len + len) ncap *= 2;
-        nd = (char*)pluto_malloc((size_t)ncap);
-        if (!nd) return;
-        if (b->data) {
-            memcpy(nd, b->data, (size_t)b->len);
-            pluto_free(b->data);
+/* Lua: parseStyle — "([^;:]+)%s*:%s*([^;]+)", key trimmed+lowered, val
+ * trimmed; LAST duplicate wins (table assignment). */
+static void svg_parse_style(const char *style, size_t len, SvgAttrs *out)
+{
+    attrs_clear(out);
+    size_t i = 0;
+    while (i < len)
+    {
+        /* next segment: up to ';' (or end) */
+        size_t segEnd = i;
+        while (segEnd < len && style[segEnd] != ';')
+        {
+            segEnd++;
         }
-        b->data = nd;
-        b->cap = ncap;
+        /* find ':' in segment */
+        size_t colon = i;
+        while (colon < segEnd && style[colon] != ':')
+        {
+            colon++;
+        }
+        if (colon < segEnd)
+        {
+            /* prop = [i, colon), val = [colon+1, segEnd) — both may include
+             * surrounding spaces; trim them. Lua's `[^;:]+` cannot be empty. */
+            size_t ps = i, pe = colon;
+            while (ps < pe && (style[ps] == ' ' || style[ps] == '\t'))
+            {
+                ps++;
+            }
+            while (pe > ps && (style[pe - 1] == ' ' || style[pe - 1] == '\t'))
+            {
+                pe--;
+            }
+            size_t vs = colon + 1, ve = segEnd;
+            while (vs < ve && (style[vs] == ' ' || style[vs] == '\t'))
+            {
+                vs++;
+            }
+            while (ve > vs && (style[ve - 1] == ' ' || style[ve - 1] == '\t'))
+            {
+                ve--;
+            }
+            if (pe > ps)
+            {
+                /* lowercase the key (Lua string.lower) */
+                char key[SVG_MAX_NAME];
+                size_t kl = pe - ps;
+                if (kl >= SVG_MAX_NAME)
+                {
+                    kl = SVG_MAX_NAME - 1;
+                }
+                for (size_t t = 0; t < kl; t++)
+                {
+                    key[t] = (char)tolower((unsigned char)style[ps + t]);
+                }
+                key[kl] = 0;
+                attrs_set(out, key, kl, style + vs, ve - vs);
+            }
+        }
+        i = segEnd + 1;
     }
-    memcpy(b->data + b->len, s, (size_t)len);
-    b->len += len;
 }
 
-/* expandUses: replace each <use href="#id"/> with the element whose id
- * matches (reconstructed "<tag attrs>"), or drop it. Literal port. */
-static char* expand_uses(const char* src, int slen, int* outLen) {
-    StrBuf out;
-    int lastPos = 0;
-    sb_init(&out);
-    while (1) {
-        int s = -1, e = -1, p = lastPos;
-        while ((p = find_ch(src, slen, '<', p)) >= 0) {
-            if (p + 3 < slen &&
-                lower_ch(src[p + 1]) == 'u' &&
-                lower_ch(src[p + 2]) == 's' &&
-                lower_ch(src[p + 3]) == 'e') {
-                e = find_ch(src, slen, '>', p + 4);
-                if (e < 0) { p++; continue; }
-                s = p;
+/* Lua: mergeStyle — style wins over attributes. C: parse style into a
+ * scratch map then assign each pair over the attrs map. */
+static void svg_merge_style(SvgAttrs *attrs)
+{
+    const char *style = attrs_get(attrs, "style");
+    if (!style || !*style)
+    {
+        return;
+    }
+    /* static: 1.4KB struct off the game-task stack (walker is sequential,
+     * non-reentrant — same pattern as g_svgPts/g_svgCo and DocStyle). */
+    static SvgAttrs st;
+    svg_parse_style(style, strlen(style), &st);
+    for (int i = 0; i < st.n; i++)
+    {
+        attrs_set(attrs, st.a[i].key, strlen(st.a[i].key), st.a[i].val, strlen(st.a[i].val));
+    }
+}
+
+/* ── Path number tokenizer (character-level, verbatim algorithm) ──────────── */
+#define SVG_MAX_NUMS 4096
+typedef struct
+{
+    double v[SVG_MAX_NUMS];
+    int n;
+} SvgNums;
+
+static void svg_tokenize_numbers(const char *s, size_t len, SvgNums *out)
+{
+    out->n = 0;
+    size_t i = 0;
+    while (i < len)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0D || c == 0x2C)
+        {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        int hasDigit = 0;
+        if (c == 0x2B || c == 0x2D) /* +/- */
+        {
+            i++;
+            if (i >= len)
+            {
                 break;
             }
-            p++;
+            c = (unsigned char)s[i];
         }
-        if (s < 0) {
-            sb_append(&out, src + lastPos, slen - lastPos);
+        while (i < len && s[i] >= 0x30 && s[i] <= 0x39)
+        {
+            hasDigit = 1;
+            i++;
+        }
+        c = (i < len) ? (unsigned char)s[i] : 0;
+        if (c == 0x2E) /* '.' */
+        {
+            if (i + 1 < len && s[i + 1] >= 0x30 && s[i + 1] <= 0x39)
+            {
+                i++;
+                while (i < len && s[i] >= 0x30 && s[i] <= 0x39)
+                {
+                    hasDigit = 1;
+                    i++;
+                }
+            }
+            else if (!hasDigit)
+            {
+                i++;
+                while (i < len && s[i] >= 0x30 && s[i] <= 0x39)
+                {
+                    hasDigit = 1;
+                    i++;
+                }
+            }
+            /* else: digits then '.' with no following digit → number ends
+             * before the dot (verbatim) */
+        }
+        c = (i < len) ? (unsigned char)s[i] : 0;
+        if ((c == 0x65 || c == 0x45) && hasDigit) /* e/E */
+        {
+            i++;
+            if (i < len)
+            {
+                c = (unsigned char)s[i];
+                if (c == 0x2B || c == 0x2D)
+                {
+                    i++;
+                }
+                while (i < len && s[i] >= 0x30 && s[i] <= 0x39)
+                {
+                    i++;
+                }
+            }
+        }
+        if (i > start && hasDigit && out->n < SVG_MAX_NUMS)
+        {
+            char tmp[64];
+            size_t tl = i - start;
+            if (tl >= sizeof(tmp))
+            {
+                tl = sizeof(tmp) - 1;
+            }
+            memcpy(tmp, s + start, tl);
+            tmp[tl] = 0;
+            char *endp = NULL;
+            double num = strtod(tmp, &endp);
+            if (endp && endp != tmp)
+            {
+                out->v[out->n++] = num;
+            }
+            else
+            {
+                /* Lua: tonumber(sub) — if nil, not appended */
+            }
+        }
+        if (i == start)
+        {
+            i = start + 1; /* skip unknown char (verbatim) */
+        }
+    }
+}
+
+/* ── Tag scanner state shared with the decode walk ────────────────────────── */
+static char g_tagName[SVG_MAX_NAME];
+static char g_tagAttrsRaw[1024];
+
+/* 32KB-each number buffers must NOT live on the stack (device game-task
+ * stack is shallow; the P22/P24 lesson). Decode is synchronous and
+ * single-threaded, so BSS scratch is safe. */
+static SvgNums g_svgPts;
+static SvgNums g_svgCo;
+
+/* Lua: scanTags — verbatim traversal: comments, CDATA, !DOCTYPE (!D/!d) and
+ * processing instructions (?x/?X) are skipped; other tags trimmed, close and
+ * self-close flags detected, name lowercased. */
+static const char *svg_scan_next(const char *body, size_t len, size_t *pos,
+                                 const char **tagNameOut, size_t *tagLen,
+                                 SvgAttrs *attrs, int *isClose, int *isSelfClose)
+{
+    size_t p = *pos;
+    while (p < len)
+    {
+        const char *s = memchr(body + p, '<', len - p);
+        if (!s)
+        {
             break;
         }
-        sb_append(&out, src + lastPos, s - lastPos);
+        size_t si = (size_t)(s - body);
+        const char *e = memchr(s, '>', len - si);
+        if (!e)
         {
-            AttrSet ua;
-            const char* hrefRaw;
-            get_attrs(src + s + 4, e - (s + 4), &ua);
-            hrefRaw = attr_get(&ua, "href");
-            if (!hrefRaw) hrefRaw = attr_get(&ua, "xlink:href");
-            if (hrefRaw && hrefRaw[0] == '#' && hrefRaw[1] != '\0') {
-                const char* id = hrefRaw + 1;
-                int idLen = (int)strlen(id);
-                int q = 0;
-                int replaced = 0;
-                while (!replaced && (q = find_ch(src, slen, '<', q)) >= 0) {
-                    if (q + 1 < slen && is_namech(src[q + 1])) {
-                        int nameEnd = q + 2;
-                        int te;
-                        while (nameEnd < slen && is_namech(src[nameEnd]))
-                            nameEnd++;
-                        te = find_ch(src, slen, '>', nameEnd);
-                        if (te >= 0) {
-                            AttrSet ea;
-                            get_attrs(src + nameEnd, te - nameEnd, &ea);
-                            {
-                                const char* elId = attr_get(&ea, "id");
-                                if (elId && (int)strlen(elId) == idLen &&
-                                    memcmp(elId, id, (size_t)idLen) == 0) {
-                                    sb_append(&out, "<", 1);
-                                    sb_append(&out, src + q + 1,
-                                              nameEnd - (q + 1));
-                                    sb_append(&out, src + nameEnd,
-                                              te - nameEnd);
-                                    sb_append(&out, ">", 1);
-                                    replaced = 1;
-                                }
-                            }
-                            attrs_free(&ea);
-                        }
-                        q = te >= 0 ? te : q + 1;
-                    } else {
-                        q++;
-                    }
-                    q++;
+            break;
+        }
+        size_t ei = (size_t)(e - body);
+        p = ei + 1;
+        size_t inLen = ei - si - 1;
+        const char *inside = s + 1;
+        const char *head = inside;
+        if (inLen >= 3 && head[0] == '!' && head[1] == '-' && head[2] == '-')
+        {
+            const char *ce = NULL;
+            for (size_t q = ei + 1; q + 2 < len; q++)
+            {
+                if (body[q] == '-' && body[q + 1] == '-' && body[q + 2] == '>')
+                {
+                    ce = body + q;
+                    break;
                 }
             }
-            attrs_free(&ua);
+            if (ce)
+            {
+                p = (size_t)(ce - body) + 3;
+            }
+            continue;
         }
-        lastPos = e + 1;
+        if (inLen >= 2 && head[0] == '!' && head[1] == '[')
+        {
+            const char *ce = NULL;
+            for (size_t q = ei + 1; q + 2 < len; q++)
+            {
+                if (body[q] == ']' && body[q + 1] == ']' && body[q + 2] == '>')
+                {
+                    ce = body + q;
+                    break;
+                }
+            }
+            if (ce)
+            {
+                p = (size_t)(ce - body) + 3;
+            }
+            continue;
+        }
+        if (inLen >= 2 && ((head[0] == '!' && (head[1] == 'D' || head[1] == 'd')) ||
+                           (head[0] == '?' && (head[1] == 'x' || head[1] == 'X'))))
+        {
+            continue;
+        }
+        /* trim whitespace (Lua: gsub "^%s*(.-)%s*$") */
+        size_t ts = 0, te = inLen;
+        while (ts < te && isspace((unsigned char)inside[ts]))
+        {
+            ts++;
+        }
+        while (te > ts && isspace((unsigned char)inside[te - 1]))
+        {
+            te--;
+        }
+        if (ts >= te)
+        {
+            continue; /* trimmed == "" */
+        }
+        *isClose = (inside[ts] == '/');
+        size_t tb = *isClose ? ts + 1 : ts;
+        size_t tbe = te;
+        *isSelfClose = (inside[tbe - 1] == '/');
+        if (*isSelfClose)
+        {
+            tbe--;
+        }
+        /* tag name: ^([%w%:-]+) */
+        size_t ns = tb;
+        while (ns < tbe && (isalnum((unsigned char)inside[ns]) || inside[ns] == ':' || inside[ns] == '-'))
+        {
+            ns++;
+        }
+        size_t nl = ns - tb;
+        if (nl == 0)
+        {
+            continue; /* string.match failed → no visit */
+        }
+        if (nl >= SVG_MAX_NAME)
+        {
+            nl = SVG_MAX_NAME - 1;
+        }
+        for (size_t t = 0; t < nl; t++)
+        {
+            g_tagName[t] = (char)tolower((unsigned char)inside[tb + t]);
+        }
+        g_tagName[nl] = 0;
+        /* attrStr = sub(tagBody, #tagName+1) — relative to tagBody start tb */
+        size_t as = tb + nl, ae = tbe;
+        size_t alen = ae > as ? ae - as : 0;
+        if (alen >= sizeof(g_tagAttrsRaw))
+        {
+            alen = sizeof(g_tagAttrsRaw) - 1;
+        }
+        memcpy(g_tagAttrsRaw, inside + as, alen);
+        g_tagAttrsRaw[alen] = 0;
+        svg_get_attrs(g_tagAttrsRaw, alen, attrs);
+        *tagNameOut = g_tagName;
+        *tagLen = nl;
+        *pos = p;
+        return s;
     }
-    *outLen = out.len;
-    if (!out.data) {
-        out.data = (char*)pluto_malloc(1);
-        if (out.data) out.data[0] = '\0';
-    }
-    return out.data;
+    return NULL;
 }
 
-/* ── viewBox / width / height scanners ──────────────────────────────── */
+/* ── <use> expansion (verbatim: re-serialize the id'd element) ────────────── */
+static int strbuf_append_strz(StrBuf *sb, const char *s)
+{
+    return strbuf_append(sb, s);
+}
 
-static int parse_viewbox(const char* x, int len,
-                         double* mx, double* my, double* vw, double* vh) {
-    int pos = 0;
-    while ((pos = find_str(x, len, "viewBox", 7, pos)) >= 0) {
-        int p = pos + 7;
-        while (p < len && is_ws(x[p])) p++;
-        if (p < len && x[p] == '=') {
-            double nums[4];
-            int ok = 1, k;
-            p++;
-            while (p < len && is_ws(x[p])) p++;
-            if (p < len && (x[p] == '"' || x[p] == '\'')) {
-                p++;
-                while (p < len && is_ws(x[p])) p++;
-                for (k = 0; k < 4 && ok; k++) {
-                    int n0 = p;
-                    while (p < len && is_numch_viewbox(x[p])) p++;
-                    if (p == n0 ||
-                        !lua_number_strict(x + n0, p - n0, &nums[k])) {
-                        ok = 0;
+static int svg_expand_uses(const char *src, size_t len, StrBuf *out)
+{
+    size_t lastPos = 0;
+    while (lastPos < len)
+    {
+        /* find <[uU][sS][eE] tag - manual scan (kept on one line: a literal
+         * [^>]*\/?> pattern would terminate this block comment early) */
+        size_t s = lastPos;
+        int found = 0;
+        while (s + 3 < len)
+        {
+            if (src[s] == '<' && (src[s + 1] == 'u' || src[s + 1] == 'U') &&
+                (src[s + 2] == 's' || src[s + 2] == 'S') &&
+                (src[s + 3] == 'e' || src[s + 3] == 'E'))
+            {
+                found = 1;
+                break;
+            }
+            s++;
+        }
+        if (!found)
+        {
+            strbuf_append_n(out, src + lastPos, len - lastPos);
+            break;
+        }
+        const char *e = memchr(src + s, '>', len - s);
+        if (!e)
+        {
+            strbuf_append_n(out, src + lastPos, len - lastPos);
+            break;
+        }
+        size_t ei = (size_t)(e - src);
+        strbuf_append_n(out, src + lastPos, s - lastPos);
+        /* Lua: getAttrs(sub(src, s + 4, e - 1)) — attrs after "<use" */
+        size_t aStart = s + 4, aEnd = ei; /* sub is 1-based inclusive; aEnd = e-1 0-based exclusive */
+        if (aEnd > aStart)
+        {
+            SvgAttrs ua;
+            svg_get_attrs(src + aStart, aEnd - aStart, &ua);
+            const char *href = attrs_get(&ua, "href");
+            const char *xhref = attrs_get(&ua, "xlink:href");
+            const char *h = href ? href : xhref;
+            if (h && h[0] == '#')
+            {
+                const char *id = h + 1;
+                /* find first element whose id attr == id */
+                size_t q = 0;
+                int spliced = 0;
+                while (q < len)
+                {
+                    const char *lt = memchr(src + q, '<', len - q);
+                    if (!lt)
+                    {
                         break;
                     }
-                    if (k < 3) {         /* %s+ separator required */
-                        int ws0 = p;
-                        while (p < len && is_ws(x[p])) p++;
-                        if (p == ws0) ok = 0;
+                    size_t lti = (size_t)(lt - src);
+                    const char *gt = memchr(lt, '>', len - lti);
+                    if (!gt)
+                    {
+                        break;
+                    }
+                    size_t gti = (size_t)(gt - src);
+                    q = gti + 1;
+                    /* Lua gmatch includes EVERY <...> segment, then getAttrs
+                     * parses the whole inside; emulate: parse inside text. */
+                    size_t inLen = gti - lti - 1;
+                    if (inLen && inLen < sizeof(g_tagAttrsRaw))
+                    {
+                        memcpy(g_tagAttrsRaw, lt + 1, inLen);
+                        g_tagAttrsRaw[inLen] = 0;
+                        SvgAttrs ea;
+                        svg_get_attrs(g_tagAttrsRaw, inLen, &ea);
+                        const char *eid = attrs_get(&ea, "id");
+                        if (eid && strcmp(eid, id) == 0)
+                        {
+                            /* ref = "<" .. elTag .. elStr .. ">" where the
+                             * gmatch capture is <([%w%:-]+)([^>]*)>: elTag is
+                             * the name run, elStr the rest INCLUDING self-close
+                             * slash if present. */
+                            size_t ns = 1;
+                            while (ns < inLen && (isalnum((unsigned char)g_tagAttrsRaw[ns]) ||
+                                                  g_tagAttrsRaw[ns] == ':' || g_tagAttrsRaw[ns] == '-'))
+                            {
+                                ns++;
+                            }
+                            strbuf_append_strz(out, "<");
+                            strbuf_append_n(out, g_tagAttrsRaw, ns);
+                            strbuf_append_n(out, g_tagAttrsRaw + ns, inLen - ns);
+                            strbuf_append_strz(out, ">");
+                            spliced = 1;
+                            break;
+                        }
                     }
                 }
-                if (ok) {
-                    *mx = nums[0]; *my = nums[1];
-                    *vw = nums[2]; *vh = nums[3];
-                    return 1;
+                (void)spliced; /* Lua appends "" when no ref: nothing to do */
+            }
+        }
+        lastPos = ei + 1;
+    }
+    return 0;
+}
+
+/* ── Decode ───────────────────────────────────────────────────────────────── */
+#define SVG_MAX_DEPTH 128
+
+LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
+{
+    if (!xml || !strstr(xml, "<svg"))
+    {
+        return NULL;
+    }
+    if (maxW <= 0)
+    {
+        maxW = 360;
+    }
+    if (maxH <= 0)
+    {
+        maxH = 200;
+    }
+    size_t len = strlen(xml);
+
+    /* Lua string.match FIRST-MATCH-ANYWHERE semantics (stroke-width trap). */
+    double vbMinX = 0, vbMinY = 0, vbW = 0, vbH = 0;
+    int haveVb = 0;
+    {
+        const char *v = strstr(xml, "viewBox");
+        if (v)
+        {
+            /* viewBox%s*=%s*["']%s*number %s+ number %s+ number %s+ number */
+            const char *p = v + 7;
+            while (*p == ' ' || *p == '\t')
+            {
+                p++;
+            }
+            if (*p == '=')
+            {
+                p++;
+                while (*p == ' ' || *p == '\t')
+                {
+                    p++;
+                }
+                if (*p == '"' || *p == '\'')
+                {
+                    p++;
+                    int got[4] = {0};
+                    double nums[4];
+                    for (int k = 0; k < 4; k++)
+                    {
+                        while (*p == ' ' || *p == '\t')
+                        {
+                            p++;
+                        }
+                        char *endp = NULL;
+                        double d = strtod(p, &endp);
+                        if (endp == p)
+                        {
+                            break;
+                        }
+                        nums[k] = d;
+                        got[k] = 1;
+                        p = endp;
+                    }
+                    if (got[0] && got[1] && got[2] && got[3])
+                    {
+                        vbMinX = nums[0];
+                        vbMinY = nums[1];
+                        vbW = nums[2];
+                        vbH = nums[3];
+                        haveVb = 1;
+                    }
                 }
             }
         }
-        pos = pos + 1;
     }
-    return 0;
-}
-
-/* First occurrence anywhere whose tail matches key ws '=' ws quote NUMS. */
-static int parse_len_attr(const char* x, int len, const char* key,
-                          double* out) {
-    int klen = (int)strlen(key);
-    int pos = 0;
-    while ((pos = find_str(x, len, key, klen, pos)) >= 0) {
-        int p = pos + klen;
-        while (p < len && is_ws(x[p])) p++;
-        if (p < len && x[p] == '=') {
-            p++;
-            while (p < len && is_ws(x[p])) p++;
-            if (p < len && (x[p] == '"' || x[p] == '\'')) {
-                int n0 = ++p;
-                while (p < len && is_numch_len(x[p])) p++;
-                if (p > n0 && lua_number_strict(x + n0, p - n0, out))
-                    return 1;
+    double srcW = 0, srcH = 0, minX = 0, minY = 0;
+    if (haveVb)
+    {
+        srcW = vbW;
+        srcH = vbH;
+        minX = vbMinX;
+        minY = vbMinY;
+    }
+    if (srcW <= 0 || srcH <= 0)
+    {
+        /* Lua: tonumber(vbW) or tonumber(wRaw) or 100 — width/height first
+         * match anywhere (so stroke-width leaks in exactly the same way). */
+        const char *w = strstr(xml, "width");
+        const char *h = strstr(xml, "height");
+        double wv = 0, hv = 0;
+        int haveW = 0, haveH = 0;
+        if (w)
+        {
+            const char *p = w + 5;
+            while (*p == ' ' || *p == '\t')
+            {
+                p++;
+            }
+            if (*p == '=')
+            {
+                p++;
+                while (*p == ' ' || *p == '\t')
+                {
+                    p++;
+                }
+                if (*p == '"' || *p == '\'')
+                {
+                    p++;
+                    char *endp = NULL;
+                    double d = strtod(p, &endp);
+                    if (endp != p)
+                    {
+                        wv = d;
+                        haveW = 1;
+                    }
+                }
             }
         }
-        pos = pos + 1;
-    }
-    return 0;
-}
-
-/* ── tag scanner ─────────────────────────────────────────────────────── */
-
-static int is_container_name(const char* tag) {
-    /* NOTE: kept verbatim from svg.lua; "clipPath" never matches because
-     * tag names are lowercased before this check (faithful quirk). */
-    return strcmp(tag, "svg") == 0 || strcmp(tag, "g") == 0 ||
-           strcmp(tag, "a") == 0 || strcmp(tag, "symbol") == 0 ||
-           strcmp(tag, "mask") == 0 || strcmp(tag, "clipPath") == 0 ||
-           strcmp(tag, "defs") == 0 || strcmp(tag, "pattern") == 0 ||
-           strcmp(tag, "marker") == 0 || strcmp(tag, "switch") == 0;
-}
-
-typedef struct {
-    Canvas cv;
-    double scale, minX, minY;
-    int skipDepth;
-    int* stack;
-    int stackN, stackCap;
-    int drawn;
-} SvgState;
-
-static void state_push(SvgState* st, int v) {
-    if (st->stackN >= st->stackCap) {
-        int ncap = st->stackCap ? st->stackCap * 2 : 16;
-        int* ns = (int*)pluto_malloc(sizeof(int) * (size_t)ncap);
-        if (!ns) return;
-        if (st->stack) {
-            memcpy(ns, st->stack, sizeof(int) * (size_t)st->stackN);
-            pluto_free(st->stack);
+        if (h)
+        {
+            const char *p = h + 6;
+            while (*p == ' ' || *p == '\t')
+            {
+                p++;
+            }
+            if (*p == '=')
+            {
+                p++;
+                while (*p == ' ' || *p == '\t')
+                {
+                    p++;
+                }
+                if (*p == '"' || *p == '\'')
+                {
+                    p++;
+                    char *endp = NULL;
+                    double d = strtod(p, &endp);
+                    if (endp != p)
+                    {
+                        hv = d;
+                        haveH = 1;
+                    }
+                }
+            }
         }
-        st->stack = ns;
-        st->stackCap = ncap;
+        srcW = haveW ? wv : 100.0;
+        srcH = haveH ? hv : 100.0;
+        if (haveVb)
+        {
+            /* Lua reads minX/minY only from viewBox (already set above) */
+        }
+        else
+        {
+            minX = 0;
+            minY = 0;
+        }
     }
-    st->stack[st->stackN++] = v;
-}
+    if (srcW <= 0 || srcH <= 0)
+    {
+        return NULL;
+    }
 
-static int tx(SvgState* st, double x) {
-    return (int)floor((x - st->minX) * st->scale);
-}
+    double scale = (double)maxW / srcW;
+    double sy = (double)maxH / srcH;
+    if (sy < scale)
+    {
+        scale = sy;
+    }
+    if (scale > 2)
+    {
+        scale = 2;
+    }
+    int targetW = (int)floor(srcW * scale);
+    int targetH = (int)floor(srcH * scale);
+    if (targetW < 20)
+    {
+        targetW = 20;
+    }
+    if (targetH < 20)
+    {
+        targetH = 20;
+    }
 
-static int ty(SvgState* st, double y) {
-    return (int)floor((y - st->minY) * st->scale);
-}
+    /* expandUses */
+    StrBuf body;
+    if (strbuf_init(&body) != 0)
+    {
+        return NULL;
+    }
+    svg_expand_uses(xml, len, &body);
+    const char *doc = body.data ? body.data : "";
+    size_t docLen = body.len;
 
-/* ── path flattening ─────────────────────────────────────────────────── */
+    PlaydateAPI *pd = pluto_pd();
+    LCDBitmap *img = pd->graphics->newBitmap(targetW, targetH, (LCDColor)kColorWhite);
+    if (!img)
+    {
+        strbuf_free(&body);
+        return NULL;
+    }
 
-static void draw_path(SvgState* st, const char* d, int dlen) {
-    Canvas* cv = &st->cv;
+    pd->graphics->pushContext(img);
+    /* Lua gfx.setLineWidth(1) — no C setter exists; C drawLine takes an
+     * explicit width of 1 per call (same observable 1px strokes). All draw
+     * calls below pass kColorBlack explicitly (no C setColor). */
+
     double curX = 0, curY = 0, startX = 0, startY = 0;
     double lastCtrlX = 0, lastCtrlY = 0;
     int hasPoint = 0;
-    int i = 0;
+    int errFlag = 0; /* Lua pcall: ellipse → gfx.drawEllipse error → nil */
 
-    while (i < dlen) {
-        char cmd;
-        int a0, a1;
-        Nums coords;
-        int isRel;
-        char cUp;
+    int skipDepth = 0;
+    /* static: 512B + 1.4KB off the game-task stack (single decode at a time
+     * by design — the SVG sync-decode path runs inside the HTTP done
+     * callback, and the device gameTask stack is tiny; the P33 device run
+     * overflowed exactly here). */
+    static int stack[SVG_MAX_DEPTH];
+    int stackN = 0;
+    int drawn = 0;
 
-        while (i < dlen && !((d[i] >= 'a' && d[i] <= 'z') ||
-                             (d[i] >= 'A' && d[i] <= 'Z')))
-            i++;
-        if (i >= dlen) break;
-        cmd = d[i++];
-        a0 = i;
-        while (i < dlen && !((d[i] >= 'a' && d[i] <= 'z') ||
-                             (d[i] >= 'A' && d[i] <= 'Z')))
-            i++;
-        a1 = i;
+#define TX(v) (int)floor(((v) - minX) * scale)
+#define TY(v) (int)floor(((v) - minY) * scale)
 
-        tokenize_numbers(d + a0, a1 - a0, &coords);
-        isRel = (cmd >= 'a' && cmd <= 'z');
-        cUp = (char)(isRel ? cmd - 32 : cmd);
-
-#define PT(ix, ox, oy)                                            \
-    do {                                                          \
-        double px_ = (ix) < coords.n ? coords.v[(ix)] : 0.0;      \
-        double py_ = (ix) + 1 < coords.n ? coords.v[(ix) + 1] : 0.0; \
-        if (isRel) { (ox) = curX + px_; (oy) = curY + py_; }      \
-        else { (ox) = px_; (oy) = py_; }                          \
-    } while (0)
-
-        switch (cUp) {
-            case 'M': {
-                int k;
-                for (k = 0; k < coords.n; k += 2) {
-                    double nx, ny;
-                    PT(k, nx, ny);
-                    if (k == 0) {
-                        curX = nx; curY = ny;
-                        startX = nx; startY = ny;
-                        hasPoint = 1;
-                    } else {
-                        cv_line(cv, tx(st, curX), ty(st, curY),
-                                tx(st, nx), ty(st, ny));
-                        curX = nx; curY = ny;
-                    }
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            case 'L': {
-                int k;
-                for (k = 0; k < coords.n; k += 2) {
-                    double nx, ny;
-                    PT(k, nx, ny);
-                    cv_line(cv, tx(st, curX), ty(st, curY),
-                            tx(st, nx), ty(st, ny));
-                    curX = nx; curY = ny;
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            case 'H': {
-                int k;
-                for (k = 0; k < coords.n; k++) {
-                    double nx = isRel ? curX + coords.v[k] : coords.v[k];
-                    cv_line(cv, tx(st, curX), ty(st, curY),
-                            tx(st, nx), ty(st, curY));
-                    curX = nx;
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            case 'V': {
-                int k;
-                for (k = 0; k < coords.n; k++) {
-                    double ny = isRel ? curY + coords.v[k] : coords.v[k];
-                    cv_line(cv, tx(st, curX), ty(st, curY),
-                            tx(st, curX), ty(st, ny));
-                    curY = ny;
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            case 'Z': {
-                if (hasPoint) {
-                    cv_line(cv, tx(st, curX), ty(st, curY),
-                            tx(st, startX), ty(st, startY));
-                    curX = startX; curY = startY;
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            case 'C': {
-                int k;
-                for (k = 0; k < coords.n; k += 6) {
-                    double x1, y1, x2, y2, x3, y3;
-                    int t;
-                    PT(k, x1, y1);
-                    PT(k + 2, x2, y2);
-                    PT(k + 4, x3, y3);
-                    for (t = 1; t <= 8; t++) {
-                        double u = t / 8.0;
-                        double nx, ny;
-                        nx = (1-u)*(1-u)*(1-u)*curX
-                             + 3*(1-u)*(1-u)*u*x1
-                             + 3*(1-u)*u*u*x2 + u*u*u*x3;
-                        ny = (1-u)*(1-u)*(1-u)*curY
-                             + 3*(1-u)*(1-u)*u*y1
-                             + 3*(1-u)*u*u*y2 + u*u*u*y3;
-                        cv_line(cv, tx(st, curX), ty(st, curY),
-                                tx(st, nx), ty(st, ny));
-                        curX = nx; curY = ny;
-                    }
-                    lastCtrlX = x2; lastCtrlY = y2;
-                }
-                break;
-            }
-            case 'S': {
-                int k;
-                for (k = 0; k < coords.n; k += 4) {
-                    double sx1 = curX * 2 - lastCtrlX;
-                    double sy1 = curY * 2 - lastCtrlY;
-                    double x2, y2, x3, y3;
-                    int t;
-                    PT(k, x2, y2);
-                    PT(k + 2, x3, y3);
-                    for (t = 1; t <= 8; t++) {
-                        double u = t / 8.0;
-                        double nx, ny;
-                        nx = (1-u)*(1-u)*(1-u)*curX
-                             + 3*(1-u)*(1-u)*u*sx1
-                             + 3*(1-u)*u*u*x2 + u*u*u*x3;
-                        ny = (1-u)*(1-u)*(1-u)*curY
-                             + 3*(1-u)*(1-u)*u*sy1
-                             + 3*(1-u)*u*u*y2 + u*u*u*y3;
-                        cv_line(cv, tx(st, curX), ty(st, curY),
-                                tx(st, nx), ty(st, ny));
-                        curX = nx; curY = ny;
-                    }
-                    lastCtrlX = x2; lastCtrlY = y2;
-                }
-                break;
-            }
-            case 'Q': {
-                int k;
-                for (k = 0; k < coords.n; k += 4) {
-                    double x1, y1, x2, y2;
-                    int t;
-                    PT(k, x1, y1);
-                    PT(k + 2, x2, y2);
-                    for (t = 1; t <= 6; t++) {
-                        double u = t / 6.0;
-                        double nx = (1-u)*(1-u)*curX
-                                    + 2*(1-u)*u*x1 + u*u*x2;
-                        double ny = (1-u)*(1-u)*curY
-                                    + 2*(1-u)*u*y1 + u*u*y2;
-                        cv_line(cv, tx(st, curX), ty(st, curY),
-                                tx(st, nx), ty(st, ny));
-                        curX = nx; curY = ny;
-                    }
-                    lastCtrlX = x1; lastCtrlY = y1;
-                }
-                break;
-            }
-            case 'T': {
-                int k;
-                for (k = 0; k < coords.n; k += 2) {
-                    double qx1 = curX * 2 - lastCtrlX;
-                    double qy1 = curY * 2 - lastCtrlY;
-                    double x2, y2;
-                    int t;
-                    PT(k, x2, y2);
-                    for (t = 1; t <= 6; t++) {
-                        double u = t / 6.0;
-                        double nx = (1-u)*(1-u)*curX
-                                    + 2*(1-u)*u*qx1 + u*u*x2;
-                        double ny = (1-u)*(1-u)*curY
-                                    + 2*(1-u)*u*qy1 + u*u*y2;
-                        cv_line(cv, tx(st, curX), ty(st, curY),
-                                tx(st, nx), ty(st, ny));
-                        curX = nx; curY = ny;
-                    }
-                    lastCtrlX = qx1; lastCtrlY = qy1;
-                }
-                break;
-            }
-            case 'A': {
-                int k;
-                for (k = 0; k < coords.n; k += 7) {
-                    double ex, ey;
-                    PT(k + 5, ex, ey);
-                    cv_line(cv, tx(st, curX), ty(st, curY),
-                            tx(st, ex), ty(st, ey));
-                    curX = ex; curY = ey;
-                }
-                lastCtrlX = curX; lastCtrlY = curY;
-                break;
-            }
-            default:
-                break;
-        }
-#undef PT
-        nums_free(&coords);
-    }
-}
-
-/* ── shape dispatch for an opening tag ──────────────────────────────── */
-
-/* tonumber(x) or default — used where svg.lua writes (tonumber(a[k]) or d). */
-static double num_attr_or(const TagAttrs* t, const char* key, double def) {
-    const char* s = ta_get(t, key);
-    double v;
-    if (!s) return def;
-    if (lua_number_strict(s, (int)strlen(s), &v)) return v;
-    return def;
-}
-
-static void shape_open(SvgState* st, const char* tag, TagAttrs* t) {
-    Canvas* cv = &st->cv;
-    double sc = st->scale;
-
-    if (strcmp(tag, "rect") == 0 && has_ink(t) &&
-        ta_has(t, "x") && ta_has(t, "y") &&
-        ta_has(t, "width") && ta_has(t, "height")) {
-        int x = tx(st, num_or0(ta_get(t, "x")));
-        int y = ty(st, num_or0(ta_get(t, "y")));
-        int w = (int)floor(num_or0(ta_get(t, "width")) * sc);
-        int h = (int)floor(num_or0(ta_get(t, "height")) * sc);
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
-        if (ta_has(t, "rx") || ta_has(t, "ry")) {
-            double rraw = num_attr_or(t, "rx", 2.0);
-            int r = (int)floor(rraw * sc);
-            if (r < 1) r = 1;
-            if (r > 4) r = 4;
-            cv_round_rect(cv, x, y, w, h, r);
-        } else {
-            cv_rect(cv, x, y, w, h);
-        }
-        st->drawn++;
-    } else if (strcmp(tag, "circle") == 0 && has_ink(t) &&
-               ta_has(t, "cx") && ta_has(t, "cy") && ta_has(t, "r")) {
-        int r = (int)floor(num_attr_or(t, "r", 1.0) * sc);
-        if (r < 1) r = 1;
-        cv_circle(cv, tx(st, num_or0(ta_get(t, "cx"))),
-                  ty(st, num_or0(ta_get(t, "cy"))), r, OCT_ALL);
-        st->drawn++;
-    } else if (strcmp(tag, "ellipse") == 0 && has_ink(t) &&
-               ta_has(t, "cx") && ta_has(t, "cy") &&
-               ta_has(t, "rx") && ta_has(t, "ry")) {
-        int ecx = tx(st, num_or0(ta_get(t, "cx")));
-        int ecy = ty(st, num_or0(ta_get(t, "cy")));
-        int erx = (int)floor(num_attr_or(t, "rx", 1.0) * sc);
-        int ery = (int)floor(num_attr_or(t, "ry", 1.0) * sc);
-        double stepsD = floor((erx < ery ? erx : ery) / 2.0);
-        int steps = (int)stepsD;
-        int si;
-        if (erx < 1) erx = 1;
-        if (ery < 1) ery = 1;
-        if (steps > 5) steps = 5;
-        if (steps < 2) steps = 2;
-        for (si = 1; si <= steps; si++) {
-            double f = 1 - ((si - 1) / (double)steps) * 0.6;
-            int exv = ecx - (int)floor(erx * f);
-            int eyv = ecy - (int)floor(ery * f);
-            int ew = (int)floor(erx * f * 2);
-            int eh = (int)floor(ery * f * 2);
-            if (ew < 2) ew = 2;
-            if (eh < 2) eh = 2;
-            canvas_ellipse(cv, exv, eyv, ew, eh);
-        }
-        st->drawn++;
-    } else if (strcmp(tag, "line") == 0 && has_ink(t) &&
-               ta_has(t, "x1") && ta_has(t, "y1") &&
-               ta_has(t, "x2") && ta_has(t, "y2")) {
-        cv_line(cv, tx(st, num_or0(ta_get(t, "x1"))),
-                ty(st, num_or0(ta_get(t, "y1"))),
-                tx(st, num_or0(ta_get(t, "x2"))),
-                ty(st, num_or0(ta_get(t, "y2"))));
-        st->drawn++;
-    } else if ((strcmp(tag, "polygon") == 0 || strcmp(tag, "polyline") == 0)
-               && has_ink(t) && ta_has(t, "points")) {
-        Nums pts;
-        int i;
-        tokenize_numbers(ta_get(t, "points"),
-                         (int)strlen(ta_get(t, "points")), &pts);
-        for (i = 0; i + 3 < pts.n; i += 2) {
-            cv_line(cv, tx(st, pts.v[i]), ty(st, pts.v[i + 1]),
-                    tx(st, pts.v[i + 2]), ty(st, pts.v[i + 3]));
-        }
-        if (strcmp(tag, "polygon") == 0 && pts.n >= 4) {
-            cv_line(cv, tx(st, pts.v[pts.n - 2]), ty(st, pts.v[pts.n - 1]),
-                    tx(st, pts.v[0]), ty(st, pts.v[1]));
-        }
-        nums_free(&pts);
-        st->drawn++;
-    } else if (strcmp(tag, "path") == 0 && has_ink(t) && ta_has(t, "d")) {
-        const char* d = ta_get(t, "d");
-        draw_path(st, d, (int)strlen(d));
-        st->drawn++;
-    }
-}
-
-/* ── main decode ─────────────────────────────────────────────────────── */
-
-int svg_decode_gray(const char* data, size_t len,
-                    int maxW, int maxH,
-                    uint8_t*** outRows, int* outW, int* outH,
-                    int* outDrawn) {
-    double vbMinX = 0, vbMinY = 0, vbW = 0, vbH = 0;
-    double wRaw = 0, hRaw = 0;
-    int hasVb, hasW, hasH;
-    double srcW, srcH, minX, minY, scale;
-    int targetW, targetH, yi;
-    char* body = NULL;
-    int bodyLen = 0;
-    SvgState st;
-
-    if (outRows == NULL || outW == NULL || outH == NULL) return -1;
-    *outRows = NULL;
-    *outW = *outH = 0;
-    if (outDrawn) *outDrawn = 0;
-    if (data == NULL || len <= 0 || len > 0x7FFFFFF0) return -1;
-
-    if (find_str(data, (int)len, "<svg", 4, 0) < 0) return -1;
-
-    if (maxW <= 0) maxW = 360;
-    if (maxH <= 0) maxH = 200;
-
-    hasVb = parse_viewbox(data, (int)len, &vbMinX, &vbMinY, &vbW, &vbH);
-    hasW = parse_len_attr(data, (int)len, "width", &wRaw);
-    hasH = parse_len_attr(data, (int)len, "height", &hRaw);
-
-    srcW = hasVb ? vbW : (hasW ? wRaw : 100.0);
-    srcH = hasVb ? vbH : (hasH ? hRaw : 100.0);
-    minX = hasVb ? vbMinX : 0.0;
-    minY = hasVb ? vbMinY : 0.0;
-
-    if (srcW <= 0 || srcH <= 0) return -1;
-
-    scale = maxW / srcW;
-    if (maxH / srcH < scale) scale = maxH / srcH;
-    if (scale > 2) scale = 2;
-    targetW = (int)floor(srcW * scale);
-    targetH = (int)floor(srcH * scale);
-    if (targetW < 20) targetW = 20;
-    if (targetH < 20) targetH = 20;
-
-    memset(&st, 0, sizeof(st));
-    st.cv.w = targetW;
-    st.cv.h = targetH;
-    st.cv.rows = (uint8_t**)pluto_malloc(sizeof(uint8_t*) * (size_t)targetH);
-    if (!st.cv.rows) return -1;
-    for (yi = 0; yi < targetH; yi++) {
-        st.cv.rows[yi] = (uint8_t*)pluto_malloc((size_t)targetW);
-        if (!st.cv.rows[yi]) {
-            for (; yi > 0; yi--) pluto_free(st.cv.rows[yi - 1]);
-            pluto_free(st.cv.rows);
-            return -1;
-        }
-        memset(st.cv.rows[yi], 255, (size_t)targetW);
-    }
-    st.scale = scale;
-    st.minX = minX;
-    st.minY = minY;
-    st.skipDepth = 0;
-    st.drawn = 0;
-
-    body = expand_uses(data, (int)len, &bodyLen);
-
-    /* scan tags and draw (errors cannot throw in C; bounds are guarded) */
+    size_t pos = 0;
+    const char *tagName = NULL;
+    size_t tagLen = 0;
+    static SvgAttrs attrs; /* 1.4KB off the game-task stack (see above) */
+    int isClose = 0, isSelfClose = 0;
+    while (!errFlag &&
+           svg_scan_next(doc, docLen, &pos, &tagName, &tagLen, &attrs, &isClose, &isSelfClose))
     {
-        int pos = 0;
-        int blen = bodyLen;
-        while (1) {
-            int s = find_ch(body, blen, '<', pos);
-            int e, inLen;
-            const char* in;
-            char h0, h1, h2;
-            if (s < 0) break;
-            e = find_ch(body, blen, '>', s);
-            if (e < 0) break;
-            in = body + s + 1;
-            inLen = e - s - 1;
-            pos = e + 1;
-            h0 = inLen > 0 ? in[0] : 0;
-            h1 = inLen > 1 ? in[1] : 0;
-            h2 = inLen > 2 ? in[2] : 0;
-            if (h0 == '!' && h1 == '-' && h2 == '-') {
-                int ce = find_str(body, blen, "-->", 3, e);
-                if (ce >= 0) pos = ce + 3;
-            } else if (h0 == '!' && h1 == '[') {
-                int ce = find_str(body, blen, "]]>", 3, e);
-                if (ce >= 0) pos = ce + 3;
-            } else if (!((h0 == '!' && h1 == 'D') ||
-                         (h0 == '!' && h1 == 'd') ||
-                         (h0 == '?' && h1 == 'x') ||
-                         (h0 == '?' && h1 == 'X'))) {
-                int t0 = 0, t1 = inLen;
-                while (t0 < t1 && is_ws(in[t0])) t0++;
-                while (t1 > t0 && is_ws(in[t1 - 1])) t1--;
-                if (t1 > t0) {
-                    int isClose = in[t0] == '/';
-                    int b0 = isClose ? t0 + 1 : t0;
-                    int b1 = t1;
-                    int isSelfClose;
-                    int nameEnd;
-                    char* tagName;
-                    if (in[b1 - 1] == '/') b1--;
-                    isSelfClose = t1 > t0 && in[t1 - 1] == '/';
-                    if (b1 > b0 && is_namech(in[b0])) {
-                        nameEnd = b0 + 1;
-                        while (nameEnd < b1 && is_namech(in[nameEnd]))
-                            nameEnd++;
-                        tagName = dup_lower(in + b0, nameEnd - b0);
-                        if (tagName) {
-                            if (!isClose) {
-                                TagAttrs t;
-                                tagattrs_load(&t, in + nameEnd,
-                                              b1 - nameEnd);
+        if (!isClose)
+        {
+            svg_merge_style(&attrs);
+            int ownHidden = svg_is_hidden(&attrs);
+            int enteringSkip = (strcmp(tagName, "defs") == 0) || ownHidden;
+            int container = (strcmp(tagName, "svg") == 0 || strcmp(tagName, "g") == 0 ||
+                             strcmp(tagName, "a") == 0 || strcmp(tagName, "symbol") == 0 ||
+                             strcmp(tagName, "mask") == 0 || strcmp(tagName, "clippath") == 0 ||
+                             strcmp(tagName, "defs") == 0 || strcmp(tagName, "pattern") == 0 ||
+                             strcmp(tagName, "marker") == 0 || strcmp(tagName, "switch") == 0);
+            if (container && !isSelfClose)
+            {
+                if (stackN < SVG_MAX_DEPTH)
+                {
+                    stack[stackN++] = skipDepth;
+                }
+                if (enteringSkip)
+                {
+                    skipDepth++;
+                }
+            }
+            if (!enteringSkip && skipDepth == 0)
+            {
+                if (strcmp(tagName, "rect") == 0 && svg_has_ink(&attrs) &&
+                    attrs_get(&attrs, "x") && attrs_get(&attrs, "y") &&
+                    attrs_get(&attrs, "width") && attrs_get(&attrs, "height"))
+                {
+                    int x = TX(strtod(attrs_get(&attrs, "x"), NULL));
+                    int y = TY(strtod(attrs_get(&attrs, "y"), NULL));
+                    int w = (int)floor(strtod(attrs_get(&attrs, "width"), NULL) * scale);
+                    int h = (int)floor(strtod(attrs_get(&attrs, "height"), NULL) * scale);
+                    if (w < 1)
+                    {
+                        w = 1;
+                    }
+                    if (h < 1)
+                    {
+                        h = 1;
+                    }
+                    const char *rx = attrs_get(&attrs, "rx");
+                    const char *ry = attrs_get(&attrs, "ry");
+                    if (rx || ry)
+                    {
+                        /* Lua parity: math.floor((tonumber(attrs["rx"]) or 2) * scale)
+                         * — rx falls back to 2, ry is never consulted here. */
+                        double rv = rx ? strtod(rx, NULL) : 2.0;
+                        int rad = (int)floor(rv * scale);
+                        if (rad < 1)
+                        {
+                            rad = 1;
+                        }
+                        if (rad > 4)
+                        {
+                            rad = 4;
+                        }
+                        pd->graphics->drawRoundRect(x, y, w, h, rad, 1, (LCDColor)kColorBlack);
+                    }
+                    else
+                    {
+                        pd->graphics->drawRect(x, y, w, h, (LCDColor)kColorBlack);
+                    }
+                    drawn++;
+                }
+                else if (strcmp(tagName, "circle") == 0 && svg_has_ink(&attrs) &&
+                         attrs_get(&attrs, "cx") && attrs_get(&attrs, "cy") && attrs_get(&attrs, "r"))
+                {
+                    int r = (int)floor(strtod(attrs_get(&attrs, "r"), NULL) * scale);
+                    if (r < 1)
+                    {
+                        r = 1;
+                    }
+                    int cx = TX(strtod(attrs_get(&attrs, "cx"), NULL));
+                    int cy = TY(strtod(attrs_get(&attrs, "cy"), NULL));
+                    /* Lua drawCircleAtPoint = drawEllipseInRect(cx-r, cy-r, 2r, 2r) */
+                    pd->graphics->drawEllipse(cx - r, cy - r, r * 2, r * 2, 1, 0, 360,
+                                              (LCDColor)kColorBlack);
+                    drawn++;
+                }
+                else if (strcmp(tagName, "ellipse") == 0 && svg_has_ink(&attrs) &&
+                         attrs_get(&attrs, "cx") && attrs_get(&attrs, "cy") &&
+                         attrs_get(&attrs, "rx") && attrs_get(&attrs, "ry"))
+                {
+                    /* VERBATIM PARITY: the reference calls gfx.drawEllipse,
+                     * which does not exist in the SDK Lua API → runtime error
+                     * → pcall unwinds → decode returns nil. Reproduce the
+                     * observable result (nil) exactly. */
+                    errFlag = 1;
+                }
+                else if (strcmp(tagName, "line") == 0 && svg_has_ink(&attrs) &&
+                         attrs_get(&attrs, "x1") && attrs_get(&attrs, "y1") &&
+                         attrs_get(&attrs, "x2") && attrs_get(&attrs, "y2"))
+                {
+                    pd->graphics->drawLine(
+                        TX(strtod(attrs_get(&attrs, "x1"), NULL)),
+                        TY(strtod(attrs_get(&attrs, "y1"), NULL)),
+                        TX(strtod(attrs_get(&attrs, "x2"), NULL)),
+                        TY(strtod(attrs_get(&attrs, "y2"), NULL)), 1, (LCDColor)kColorBlack);
+                    drawn++;
+                }
+                else if ((strcmp(tagName, "polygon") == 0 || strcmp(tagName, "polyline") == 0) &&
+                         svg_has_ink(&attrs) && attrs_get(&attrs, "points"))
+                {
+                    SvgNums *pts = &g_svgPts;
+                    svg_tokenize_numbers(attrs_get(&attrs, "points"), strlen(attrs_get(&attrs, "points")), pts);
+                    for (int pi = 0; pi + 3 < pts->n; pi += 2)
+                    {
+                        pd->graphics->drawLine(TX(pts->v[pi]), TY(pts->v[pi + 1]),
+                                               TX(pts->v[pi + 2]), TY(pts->v[pi + 3]), 1,
+                                               (LCDColor)kColorBlack);
+                    }
+                    if (strcmp(tagName, "polygon") == 0 && pts->n >= 4)
+                    {
+                        pd->graphics->drawLine(TX(pts->v[pts->n - 2]), TY(pts->v[pts->n - 1]),
+                                               TX(pts->v[0]), TY(pts->v[1]), 1, (LCDColor)kColorBlack);
+                    }
+                    drawn++;
+                }
+                else if (strcmp(tagName, "path") == 0 && svg_has_ink(&attrs) &&
+                         attrs_get(&attrs, "d"))
+                {
+                    curX = 0;
+                    curY = 0;
+                    startX = 0;
+                    startY = 0;
+                    hasPoint = 0;
+                    lastCtrlX = 0;
+                    lastCtrlY = 0;
+                    const char *d = attrs_get(&attrs, "d");
+                    size_t dl = strlen(d);
+                    size_t i = 0;
+                    while (i < dl)
+                    {
+                        /* find command letter */
+                        while (i < dl && !isalpha((unsigned char)d[i]))
+                        {
+                            i++;
+                        }
+                        if (i >= dl)
+                        {
+                            break;
+                        }
+                        char cmd = d[i];
+                        i++;
+                        /* args: up to the next letter */
+                        size_t as = i;
+                        while (i < dl && !isalpha((unsigned char)d[i]))
+                        {
+                            i++;
+                        }
+                        SvgNums *co = &g_svgCo;
+                        svg_tokenize_numbers(d + as, i - as, co);
+                        int isRel = islower((unsigned char)cmd);
+                        char c = (char)toupper((unsigned char)cmd);
+#define PT(px, py) (isRel ? (curX + (px)) : (px)), (isRel ? (curY + (py)) : (py))
+                        if (c == 'M')
+                        {
+                            for (int k = 0; k + 1 < co->n; k += 2)
+                            {
+                                double px, py;
+                                if (isRel)
                                 {
-                                    int ownHidden = is_hidden(&t);
-                                    int enteringSkip =
-                                        strcmp(tagName, "defs") == 0 ||
-                                        ownHidden;
-                                    if (is_container_name(tagName) &&
-                                        !isSelfClose) {
-                                        state_push(&st, st.skipDepth);
-                                        if (enteringSkip) st.skipDepth++;
-                                    }
-                                    if (!enteringSkip && st.skipDepth == 0) {
-                                        shape_open(&st, tagName, &t);
-                                    }
+                                    px = curX + co->v[k];
+                                    py = curY + co->v[k + 1];
                                 }
-                                tagattrs_free(&t);
-                            } else {
-                                if (is_container_name(tagName)) {
-                                    if (st.stackN > 0)
-                                        st.skipDepth =
-                                            st.stack[--st.stackN];
+                                else
+                                {
+                                    px = co->v[k];
+                                    py = co->v[k + 1];
+                                }
+                                if (k == 0)
+                                {
+                                    curX = px;
+                                    curY = py;
+                                    startX = curX;
+                                    startY = curY;
+                                    hasPoint = 1;
+                                }
+                                else
+                                {
+                                    pd->graphics->drawLine(TX(curX), TY(curY), TX(px), TY(py), 1, (LCDColor)kColorBlack);
+                                    curX = px;
+                                    curY = py;
                                 }
                             }
-                            pluto_free(tagName);
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
                         }
+                        else if (c == 'L')
+                        {
+                            for (int k = 0; k + 1 < co->n; k += 2)
+                            {
+                                double px, py;
+                                if (isRel)
+                                {
+                                    px = curX + co->v[k];
+                                    py = curY + co->v[k + 1];
+                                }
+                                else
+                                {
+                                    px = co->v[k];
+                                    py = co->v[k + 1];
+                                }
+                                pd->graphics->drawLine(TX(curX), TY(curY), TX(px), TY(py), 1, (LCDColor)kColorBlack);
+                                curX = px;
+                                curY = py;
+                            }
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
+                        }
+                        else if (c == 'H')
+                        {
+                            for (int k = 0; k < co->n; k++)
+                            {
+                                double nx = isRel ? (curX + co->v[k]) : co->v[k];
+                                pd->graphics->drawLine(TX(curX), TY(curY), TX(nx), TY(curY), 1, (LCDColor)kColorBlack);
+                                curX = nx;
+                            }
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
+                        }
+                        else if (c == 'V')
+                        {
+                            for (int k = 0; k < co->n; k++)
+                            {
+                                double ny = isRel ? (curY + co->v[k]) : co->v[k];
+                                pd->graphics->drawLine(TX(curX), TY(curY), TX(curX), TY(ny), 1, (LCDColor)kColorBlack);
+                                curY = ny;
+                            }
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
+                        }
+                        else if (c == 'Z')
+                        {
+                            if (hasPoint)
+                            {
+                                pd->graphics->drawLine(TX(curX), TY(curY), TX(startX), TY(startY), 1, (LCDColor)kColorBlack);
+                                curX = startX;
+                                curY = startY;
+                            }
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
+                        }
+                        else if (c == 'C')
+                        {
+                            for (int k = 0; k + 5 < co->n; k += 6)
+                            {
+                                double x1, y1, x2, y2, x3, y3;
+                                if (isRel)
+                                {
+                                    x1 = curX + co->v[k];
+                                    y1 = curY + co->v[k + 1];
+                                    x2 = curX + co->v[k + 2];
+                                    y2 = curY + co->v[k + 3];
+                                    x3 = curX + co->v[k + 4];
+                                    y3 = curY + co->v[k + 5];
+                                }
+                                else
+                                {
+                                    x1 = co->v[k];
+                                    y1 = co->v[k + 1];
+                                    x2 = co->v[k + 2];
+                                    y2 = co->v[k + 3];
+                                    x3 = co->v[k + 4];
+                                    y3 = co->v[k + 5];
+                                }
+                                for (int t = 1; t <= 8; t++)
+                                {
+                                    double u = t / 8.0;
+                                    double nx = (1 - u) * (1 - u) * (1 - u) * curX + 3 * (1 - u) * (1 - u) * u * x1 + 3 * (1 - u) * u * u * x2 + u * u * u * x3;
+                                    double ny = (1 - u) * (1 - u) * (1 - u) * curY + 3 * (1 - u) * (1 - u) * u * y1 + 3 * (1 - u) * u * u * y2 + u * u * u * y3;
+                                    pd->graphics->drawLine(TX(curX), TY(curY), TX(nx), TY(ny), 1, (LCDColor)kColorBlack);
+                                    curX = nx;
+                                    curY = ny;
+                                }
+                                lastCtrlX = x2;
+                                lastCtrlY = y2;
+                            }
+                        }
+                        else if (c == 'S')
+                        {
+                            for (int k = 0; k + 3 < co->n; k += 4)
+                            {
+                                double sx1 = curX * 2 - lastCtrlX;
+                                double sy1 = curY * 2 - lastCtrlY;
+                                double x2, y2, x3, y3;
+                                if (isRel)
+                                {
+                                    x2 = curX + co->v[k];
+                                    y2 = curY + co->v[k + 1];
+                                    x3 = curX + co->v[k + 2];
+                                    y3 = curY + co->v[k + 3];
+                                }
+                                else
+                                {
+                                    x2 = co->v[k];
+                                    y2 = co->v[k + 1];
+                                    x3 = co->v[k + 2];
+                                    y3 = co->v[k + 3];
+                                }
+                                for (int t = 1; t <= 8; t++)
+                                {
+                                    double u = t / 8.0;
+                                    double nx = (1 - u) * (1 - u) * (1 - u) * curX + 3 * (1 - u) * (1 - u) * u * sx1 + 3 * (1 - u) * u * u * x2 + u * u * u * x3;
+                                    double ny = (1 - u) * (1 - u) * (1 - u) * curY + 3 * (1 - u) * (1 - u) * u * sy1 + 3 * (1 - u) * u * u * y2 + u * u * u * y3;
+                                    pd->graphics->drawLine(TX(curX), TY(curY), TX(nx), TY(ny), 1, (LCDColor)kColorBlack);
+                                    curX = nx;
+                                    curY = ny;
+                                }
+                                lastCtrlX = x2;
+                                lastCtrlY = y2;
+                            }
+                        }
+                        else if (c == 'Q')
+                        {
+                            for (int k = 0; k + 3 < co->n; k += 4)
+                            {
+                                double x1, y1, x2, y2;
+                                if (isRel)
+                                {
+                                    x1 = curX + co->v[k];
+                                    y1 = curY + co->v[k + 1];
+                                    x2 = curX + co->v[k + 2];
+                                    y2 = curY + co->v[k + 3];
+                                }
+                                else
+                                {
+                                    x1 = co->v[k];
+                                    y1 = co->v[k + 1];
+                                    x2 = co->v[k + 2];
+                                    y2 = co->v[k + 3];
+                                }
+                                for (int t = 1; t <= 6; t++)
+                                {
+                                    double u = t / 6.0;
+                                    double nx = (1 - u) * (1 - u) * curX + 2 * (1 - u) * u * x1 + u * u * x2;
+                                    double ny = (1 - u) * (1 - u) * curY + 2 * (1 - u) * u * y1 + u * u * y2;
+                                    pd->graphics->drawLine(TX(curX), TY(curY), TX(nx), TY(ny), 1, (LCDColor)kColorBlack);
+                                    curX = nx;
+                                    curY = ny;
+                                }
+                                lastCtrlX = x1;
+                                lastCtrlY = y1;
+                            }
+                        }
+                        else if (c == 'T')
+                        {
+                            for (int k = 0; k + 1 < co->n; k += 2)
+                            {
+                                double tx1 = curX * 2 - lastCtrlX;
+                                double ty1 = curY * 2 - lastCtrlY;
+                                double x2, y2;
+                                if (isRel)
+                                {
+                                    x2 = curX + co->v[k];
+                                    y2 = curY + co->v[k + 1];
+                                }
+                                else
+                                {
+                                    x2 = co->v[k];
+                                    y2 = co->v[k + 1];
+                                }
+                                for (int t = 1; t <= 6; t++)
+                                {
+                                    double u = t / 6.0;
+                                    double nx = (1 - u) * (1 - u) * curX + 2 * (1 - u) * u * tx1 + u * u * x2;
+                                    double ny = (1 - u) * (1 - u) * curY + 2 * (1 - u) * u * ty1 + u * u * y2;
+                                    pd->graphics->drawLine(TX(curX), TY(curY), TX(nx), TY(ny), 1, (LCDColor)kColorBlack);
+                                    curX = nx;
+                                    curY = ny;
+                                }
+                                lastCtrlX = tx1;
+                                lastCtrlY = ty1;
+                            }
+                        }
+                        else if (c == 'A')
+                        {
+                            for (int k = 0; k + 6 < co->n; k += 7)
+                            {
+                                double exv = (k + 5 < co->n) ? co->v[k + 5] : 0;
+                                double eyv = (k + 6 < co->n) ? co->v[k + 6] : 0;
+                                double ex, ey;
+                                if (isRel)
+                                {
+                                    ex = curX + exv;
+                                    ey = curY + eyv;
+                                }
+                                else
+                                {
+                                    ex = exv;
+                                    ey = eyv;
+                                }
+                                pd->graphics->drawLine(TX(curX), TY(curY), TX(ex), TY(ey), 1, (LCDColor)kColorBlack);
+                                curX = ex;
+                                curY = ey;
+                            }
+                            lastCtrlX = curX;
+                            lastCtrlY = curY;
+                        }
+#undef PT
                     }
+                    drawn++;
+                }
+            }
+        }
+        else
+        {
+            if (strcmp(tagName, "svg") == 0 || strcmp(tagName, "g") == 0 ||
+                strcmp(tagName, "a") == 0 || strcmp(tagName, "symbol") == 0 ||
+                strcmp(tagName, "mask") == 0 || strcmp(tagName, "clippath") == 0 ||
+                strcmp(tagName, "defs") == 0 || strcmp(tagName, "pattern") == 0 ||
+                strcmp(tagName, "marker") == 0 || strcmp(tagName, "switch") == 0)
+            {
+                if (stackN > 0)
+                {
+                    skipDepth = stack[--stackN];
                 }
             }
         }
     }
 
-    pluto_free(body);
-    pluto_free(st.stack);
+    pd->graphics->popContext();
+    strbuf_free(&body);
 
-    if (st.drawn == 0) {
-        svg_free_rows(st.cv.rows, targetH);
-        return -1;
+    if (errFlag)
+    {
+        pd->graphics->freeBitmap(img);
+        return NULL; /* Lua pcall parity */
     }
-    *outRows = st.cv.rows;
-    *outW = targetW;
-    *outH = targetH;
-    if (outDrawn) *outDrawn = st.drawn;
-    return 0;
-}
-
-void svg_free_rows(uint8_t** rows, int h) {
-    if (rows == NULL) return;
-    for (; h > 0; h--) pluto_free(rows[h - 1]);
-    pluto_free(rows);
-}
-
-/* ── device/simulator bitmap wrapper ─────────────────────────────────── */
-
-#ifdef PLUTO_SVG_PD
-#include "pd_api.h"
-
-typedef struct {
-    uint8_t** rows;
-    int w, h;
-} SvgCtx;
-
-static int svg_pixel(void* ud, int x, int y) {
-    SvgCtx* c = (SvgCtx*)ud;
-    if (!c || !c->rows || y < 0 || y >= c->h || x < 0 || x >= c->w)
-        return 255;
-    return c->rows[y][x];
-}
-
-struct LCDBitmap* svg_decode(struct PlaydateAPI* pd, const char* data,
-                             size_t len, int maxW, int maxH) {
-    uint8_t** rows = NULL;
-    int w = 0, h = 0, drawn = 0;
-    struct LCDBitmap* img;
-    SvgCtx ctx;
-    if (!pd) return NULL;
-    if (svg_decode_gray(data, len, maxW, maxH,
-                        &rows, &w, &h, &drawn) != 0)
+    if (drawn == 0)
+    {
+        pd->graphics->freeBitmap(img);
         return NULL;
-    ctx.rows = rows;
-    ctx.w = w;
-    ctx.h = h;
-    img = dither_to_image(pd, svg_pixel, &ctx, w, h);
-    svg_free_rows(rows, h);
+    }
     return img;
 }
-#endif

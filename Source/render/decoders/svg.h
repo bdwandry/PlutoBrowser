@@ -1,35 +1,54 @@
-#ifndef PLUTO_RENDER_DECODERS_SVG_H
-#define PLUTO_RENDER_DECODERS_SVG_H
-
-#include <stddef.h>
-#include <stdint.h>
-
-struct PlaydateAPI;
-
-/* C port of Source/render/decoders/svg.lua (SVGDecoder).
+/*
+ * PlutoBrowser — svg.h
+ * Port of Source/render/decoders/svg.lua (reference, 451 lines).
  *
- * Renders the web-icon subset of SVG (rect/circle/ellipse/line/polygon/
- * polyline/path with M L H V Z C S Q T A, g/a/symbol containers, defs skip,
- * <use> best-effort resolution, style="" override, inherited display:none /
- * visibility:hidden) into a 1-bit gray grid: 255 = white canvas, 0 = ink.
- * The software rasterizer (Bresenham lines, midpoint circles/ellipses,
- * rounded rects with quadrant arcs) is deterministic; device parity with
- * playdate.graphics primitives is approximate by design.
+ * Lua → C function map:
+ *   SVGDecoder.decode(xmlString, maxW, maxH) → svg_decode()
+ *   getAttrs         → svg_get_attrs()          (internal)
+ *   isHidden/hasInk  → svg_is_hidden/svg_has_ink (internal)
+ *   parseStyle       → svg_parse_style()         (internal)
+ *   mergeStyle       → svg_merge_style()         (internal)
+ *   tokenizePathNumbers → svg_tokenize_numbers() (internal, char-level parser)
+ *   tokenizePoints   → same tokenizer
+ *   scanTags         → inline scan loop in svg_decode (verbatim traversal)
+ *   expandUses       → svg_expand_uses()         (internal)
  *
- * svg_decode_gray returns 0 on success with (*outRows)[y][x] valid for
- * y < *outH, x < *outW and *outDrawn >= 1; -1 on reject (no "<svg",
- * nonpositive source dims, zero shapes drawn, OOM). Free with
- * svg_free_rows(). */
-int svg_decode_gray(const char* data, size_t len,
-                    int maxW, int maxH,
-                    uint8_t*** outRows, int* outW, int* outH,
-                    int* outDrawn);
+ * Preserved semantics (verbatim, quirks included):
+ *   - getAttrs runs a double-quote pass then a single-quote pass; the single
+ *     pass OVERWRITES duplicates (Lua table assignment order).
+ *   - isHidden/hasInk/mergeStyle style-wins-over-attr semantics.
+ *   - viewBox/width/height use string.match FIRST-MATCH-ANYWHERE, so
+ *     stroke-width="4" before width="..." supplies srcW=4 (tc12 parity).
+ *   - scale = min(maxW/srcW, maxH/srcH) capped at 2; target >= 20 px.
+ *   - tx/ty = floor((v - viewBoxMin) * scale).
+ *   - The ellipse branch calls gfx.drawEllipse which DOES NOT EXIST in the
+ *     SDK Lua API → error inside pcall → the whole decode returns nil.
+ *     The C port reproduces this exactly (errFlag → NULL), per parity rules.
+ *   - "clipPath" containers never match (scanTags lowercases the tag name but
+ *     the reference compares against "clipPath") → dead container; kept dead.
+ *   - Paths: M/L/H/V/Z/C(8-step)/Q(6-step)/S/T/A(line-to-endpoint) with the
+ *     reference's exact segment arithmetic and odd-coordinate clamping (nil
+ *     → 0).
+ *   - <use> splicing: href/xlink:href="#id" → first element with that id is
+ *     re-serialized as "<tag" .. attrs .. ">" and drawn in place; the id'd
+ *     original (typically inside defs) stays skipped.
+ *   - NULL when drawn == 0 or on the ellipse error path.
+ *
+ * Documented deviations (C-side bounds, unreachable for realistic inputs):
+ *   - attribute list capped (32 pairs), group-stack depth capped (128),
+ *     path coordinate buffer capped (4096 numbers); Lua tables are unbounded.
+ *   - decoding is not re-entrant (static workspaces), like every other
+ *     PlutoBrowser decoder.
+ */
+#ifndef PLUTO_SVG_H
+#define PLUTO_SVG_H
 
-void svg_free_rows(uint8_t** rows, int h);
+#include "pd_api.h"
 
-/* device/simulator wrapper returning an LCDBitmap (NULL on failure). */
-struct LCDBitmap;
-struct LCDBitmap* svg_decode(struct PlaydateAPI* pd, const char* data,
-                             size_t len, int maxW, int maxH);
+/* Decode an SVG document into a new 1-bit LCDBitmap (white background, black
+ * strokes), downscaled into maxW x maxH with the reference's box rules.
+ * Returns NULL for: no "<svg", non-positive source dims, zero drawn shapes,
+ * or the ellipse error path (Lua pcall parity). Caller frees the bitmap. */
+LCDBitmap *svg_decode(const char *xml, int maxW, int maxH);
 
-#endif
+#endif /* PLUTO_SVG_H */

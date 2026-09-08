@@ -1,5 +1,4 @@
-build/Source/ui/hud.o: Source/ui/hud.c Source/ui/hud.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
+build/Source/ui/hud.o: Source/ui/hud.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/newlib.h \
@@ -9,6 +8,7 @@ build/Source/ui/hud.o: Source/ui/hud.c Source/ui/hud.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/features.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/cdefs.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/_default_types.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -32,12 +32,12 @@ build/Source/ui/hud.o: Source/ui/hud.c Source/ui/hud.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- Source/ui/../core/constants.h Source/ui/../core/url.h \
- Source/ui/../core/../util/strbuf.h Source/ui/../render/style.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
+ Source/ui/hud.h Source/core/constants.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
+ Source/render/style.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/alloca.h \
@@ -54,10 +54,6 @@ build/Source/ui/hud.o: Source/ui/hud.c Source/ui/hud.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
-
-Source/ui/hud.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -76,6 +72,8 @@ Source/ui/hud.h:
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/cdefs.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/_default_types.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h:
 
@@ -123,21 +121,19 @@ Source/ui/hud.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-Source/ui/../core/constants.h:
+Source/ui/hud.h:
 
-Source/ui/../core/url.h:
-
-Source/ui/../core/../util/strbuf.h:
-
-Source/ui/../render/style.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
+Source/core/constants.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
+
+Source/render/style.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h:
 

@@ -1,68 +1,74 @@
-// cookie_jar.h — RFC 6265 session cookies (C port of core/cookie_jar.lua).
-//
-// All decision quirks mirror the Lua original exactly, including:
-//  - Max-Age / Expires processed in header order; Expires skipped once any
-//    expiry is set; past expiry sets delete instead of storing.
-//  - Domain attr accepted only when it equals/suffix-matches the request
-//    host AND contains a dot (or is "localhost"); otherwise the whole
-//    Set-Cookie is rejected.
-//  - store() replaces same-key entries (moving them to the END of the list)
-//    and silently no-ops when value AND expiry are unchanged.
-// The clock is injectable for deterministic tests (cj_set_now_fn).
-
+/*
+ * PlutoBrowser — cookie_jar.h
+ * RFC 6265 session cookie management (port of Source/core/cookie_jar.lua).
+ *
+ * Semantics preserved exactly from the Lua reference:
+ *   - parseSetCookie: name/value validation, domain rejection, path default,
+ *     secure/httpOnly/samesite, max-age, expires (3 date formats), delete
+ *     semantics for Max-Age<=0 / past Expires.
+ *   - store: dedupe by (hostOnly,domain,path,name); identical value+expires
+ *     is a no-op; deletes remove; 300-cookie cap; save after every change.
+ *   - getHeader: domain/path/secure match + lazy prune of expired entries.
+ *   - prune/clear/count.
+ *
+ * Storage coupling: the Lua module persisted via Storage.cookies + save().
+ * In C the jar owns its list and calls an injectable save hook (wired to the
+ * storage module in Phase 9) so this phase stays independent.
+ */
 #ifndef PLUTO_COOKIE_JAR_H
 #define PLUTO_COOKIE_JAR_H
 
 #include <stddef.h>
 
-#include "../util/strbuf.h"
-#include "storage_data.h"
+#define COOKIE_JAR_MAX 300
 
-struct PlaydateAPI;
+typedef struct Cookie
+{
+    char *name;        /* heap; never NULL for a stored cookie */
+    char *value;       /* heap; may be "" */
+    char *domain;      /* heap; dot-stripped */
+    int hostOnly;
+    char *path;        /* heap; starts with '/' */
+    int secure;
+    int httpOnly;
+    char samesite[8];  /* "" | "lax" | "strict" | "none" */
+    long long expires; /* epoch seconds; -1 = session cookie */
+    int deleteFlag;    /* set by parse for Max-Age<=0 / past Expires */
+} Cookie;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* Inject persistence: storage module assigns this in Phase 9 (may be NULL). */
+void cookie_jar_set_save_hook(void (*fn)(void));
 
-#define CJ_MAX_COOKIES 300
+/* Parse a raw Set-Cookie value received from `host`. Returns a heap cookie
+ * (caller frees with cookie_jar_free_cookie) or NULL if it must be ignored.
+ * Sets cookie->deleteFlag for Max-Age<=0 / past Expires. */
+Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw);
 
-typedef double (*CJNowFn)(void); // epoch seconds
+/* Free a cookie returned by parse. */
+void cookie_jar_free_cookie(Cookie *c);
 
-void cj_init(struct PlaydateAPI* pd);
+/* Store (or delete) a cookie received from `host`. */
+void cookie_jar_store(const char *host, const char *raw);
 
-// NULL restores the playdate clock (Lua nowSeconds parity).
-void cj_set_now_fn(CJNowFn fn);
-double cj_now(void);
+/* Process all Set-Cookie values from one response. */
+void cookie_jar_process_set_cookies(const char *host, char **list, int count);
 
-// Howard Hinnant days-from-civil -> epoch seconds, with the Lua clamps
-// (year floor>=0, month clamped to [1,12], day floor>=1; h/m/s used raw,
-// treated as 0 when absent callers pass 0).
-double cj_make_timestamp(double year, double month, double day, double hour,
-                         double minute, double second);
+/* Build the Cookie request header value for host/path/ssl, or "" when none
+ * apply. Expired cookies are pruned lazily (save hook fires if pruned).
+ * Writes into buf (cap bytes); always NUL-terminated. Returns buf. */
+char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
+                            char *buf, size_t cap);
 
-// RFC 6265 date parsing (IMF-fixdate / RFC850 / asctime). Returns 1 + *out.
-int  cj_parse_date(const char* str, double* out);
+/* Drop expired/malformed cookies (called once at startup in the Lua ref). */
+void cookie_jar_prune(void);
 
-// Parse one Set-Cookie value. Returns 1 when acceptable (check out->del),
-// 0 when the header must be ignored entirely.
-int  cj_parse_set_cookie(const char* host, const char* raw, PlutoCookie* out);
+/* Remove all cookies. */
+void cookie_jar_clear(void);
 
-// Store/delete from a raw Set-Cookie value received from `host`.
-void cj_store(const char* host, const char* raw);
-void cj_process_set_cookies(const char* host, const char* const* list,
-                            size_t n);
+/* Number of stored cookies. */
+int cookie_jar_count(void);
 
-// Cookie: header value for a request ("name=value; ..." or ""). Lazily
-// prunes expired/malformed cookies (saving when anything was dropped).
-void cj_get_header(const char* host, const char* path, int isSsl,
-                   StrBuf* out);
+/* Test support: direct access to the stored list (index < count). */
+const Cookie *cookie_jar_get(int index);
 
-void   cj_prune(void);
-void   cj_clear(void);
-size_t cj_count(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // PLUTO_COOKIE_JAR_H
+#endif /* PLUTO_COOKIE_JAR_H */

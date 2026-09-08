@@ -1,0 +1,15 @@
+tc6a|onetwothree
+tc6b|xy
+tc6c|
+tc6d|a & b <c>
+tc7a|true
+tc7b|false
+tc7c|false
+tc7d|false
+tc7e|false
+tc7f|false
+tc7g|true
+tc7h|true
+tc8a|<svg id="x" width="10"><circle r="1"/><text>A<b>B</b></text></svg>
+tc8b|<svg><text>1 &lt; 2 &amp; &quot;q&quot;</text></svg>
+tc8c|<svg><g><rect w="2"/><brk/></g></svg>

@@ -1,127 +1,193 @@
-// png.c — C port of Source/render/decoders/png.lua (PNGDecoder).
-//
-// Pure on-device PNG decoder: streams the zlib scanline data (never
-// holding the full uncompressed image), unfilters one row at a time and
-// box-filters down to ~screen size.
-
-#include "render/decoders/png.h"
-
-#include <math.h>
+/*
+ * PlutoBrowser — png.c
+ * Port of Source/render/decoders/png.lua (reference, 270 lines).
+ * Streaming PNG decode: chunk scan → inflate stream → row unfilter →
+ * grayscale conversion → box-filter downscale → Bayer dither.
+ * See png.h for the Lua→C map and preserved semantics.
+ */
 #include <stdlib.h>
 #include <string.h>
-
-#include "core/tasks.h"
+#include "render/decoders/png.h"
+#include "core/logger.h"
 #include "render/decoders/dither.h"
 #include "render/decoders/inflate.h"
 #include "render/decoders/scale.h"
-#include "util/mem.h"
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define PLUTO_PNG_PD 1
-#endif
+extern PlaydateAPI *pluto_pd(void);
 
-static uint32_t read_u32be(const uint8_t* s) {
-    return ((uint32_t)s[0] << 24) | ((uint32_t)s[1] << 16) |
-           ((uint32_t)s[2] << 8) | (uint32_t)s[3];
+static uint32_t rd32be(const uint8_t *d, size_t pos, size_t len)
+{
+    if (pos + 3 >= len)
+    {
+        return 0;
+    }
+    return ((uint32_t)d[pos] << 24) | ((uint32_t)d[pos + 1] << 16) |
+           ((uint32_t)d[pos + 2] << 8) | (uint32_t)d[pos + 3];
 }
 
-static int paeth_predictor(int a, int b, int c) {
+/* Lua paethPredictor (verbatim tie-break order). */
+static int paeth_predictor(int a, int b, int c)
+{
     int p = a + b - c;
-    int pa = p > a ? p - a : a - p;
-    int pb = p > b ? p - b : b - p;
-    int pc = p > c ? p - c : c - p;
+    int pa = p - a;
+    if (pa < 0) pa = -pa;
+    int pb = p - b;
+    if (pb < 0) pb = -pb;
+    int pc = p - c;
+    if (pc < 0) pc = -pc;
     if (pa <= pb && pa <= pc) return a;
     if (pb <= pc) return b;
     return c;
 }
 
-/* Composite an 8-bit gray value over white given alpha 0..255 */
-static int composite(int gray, int a) {
-    if (a >= 255) return gray;
+/* Lua composite: exact floor((gray*a + 255*(255-a))/255 + 0.5). */
+static uint8_t png_composite(int gray, int a)
+{
+    if (a >= 255) return (uint8_t)gray;
     if (a <= 0) return 255;
-    return (int)floor((double)(gray * a + 255 * (255 - a)) / 255.0 + 0.5);
+    return (uint8_t)((gray * a + 255 * (255 - a)) / 255);
 }
 
-int png_decode_gray(const uint8_t* data, size_t len,
-                    int maxW, int maxH,
-                    uint8_t*** outRows, int* outW, int* outH) {
-    *outRows = NULL;
-    *outW = *outH = 0;
-    if (data == NULL || len < 24) return -1;
+/* Output-pixel closure state (Lua: rows[y], r[x+1] or 255). */
+typedef struct
+{
+    uint8_t **rows;
+    int outCount;
+    int outWidth;
+} PngCtx;
 
-    /* signature: 0x89 'P' 'N' 'G' */
-    if (data[0] != 0x89 || data[1] != 'P' || data[2] != 'N' ||
-        data[3] != 'G')
-        return -1;
+static uint8_t png_out_pixel(void *ud, int x, int y)
+{
+    PngCtx *c = (PngCtx *)ud;
+    if (y < 0 || y >= c->outCount)
+    {
+        return 255;
+    }
+    const uint8_t *r = c->rows[y];
+    if (!r || x < 0 || x >= c->outWidth)
+    {
+        return 255;
+    }
+    return r[x];
+}
 
-    size_t pos = 8;   /* Lua pos = 9, 1-based */
+LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH)
+{
+    if (!data || len < 24)
+    {
+        logger_log("PNG decode: short input %zu", len);
+        return NULL;
+    }
+    /* Signature: 0x89 'P' 'N' 'G' \r \n 0x1A \n (Lua's double-check collapses). */
+    if (data[0] != 0x89 || data[1] != 'P' || data[2] != 'N' || data[3] != 'G' ||
+        data[4] != 0x0D || data[5] != 0x0A || data[6] != 0x1A || data[7] != 0x0A)
+    {
+        logger_log("PNG decode: bad signature");
+        return NULL;
+    }
+
     uint32_t width = 0, height = 0;
-    int bitDepth = 8, colorType = 0, interlace = 0;
-
-    uint8_t palette[256];      /* gray values */
-    uint8_t paletteA[256];
-    int nColors = 0;
-    memset(paletteA, 255, sizeof(paletteA));
-
-    uint8_t* idat = NULL;
-    size_t idatLen = 0, idatCap = 0;
-    uint8_t trns[300];
+    int haveIhdr = 0;
+    uint8_t bitDepth = 8, colorType = 0, interlace = 0;
+    uint8_t palette[256];   /* palette[i] = gray */
+    uint8_t paletteA[256];  /* alpha per entry, 255 default */
+    int palCount = 0;
+    /* IDAT chunks: Lua table.concat's them; scan twice — first to size, then
+     * to copy (the chunk scan is chunkLen-driven, not sequential). */
+    struct { size_t off; size_t clen; } idat[64];
+    int idatCount = 0;
+    size_t idatTotal = 0;
+    const uint8_t *trnsData = NULL;
     size_t trnsLen = 0;
 
-    while (pos < len) {
-        if (pos + 8 > len) break;
-        uint32_t chunkLen = read_u32be(data + pos);
-        const uint8_t* type = data + pos + 4;
-        size_t dataPos = pos + 8;
-        pos = pos + 12 + chunkLen;
-        if ((long long)pos > (long long)len + 12) break;   // Lua quirk
+    memset(palette, 0, sizeof(palette));
+    memset(paletteA, 255, sizeof(paletteA));
 
-        if (memcmp(type, "IHDR", 4) == 0) {
-            width = read_u32be(data + dataPos);
-            height = read_u32be(data + dataPos + 4);
-            bitDepth = dataPos + 8 < len ? data[dataPos + 8] : 8;
-            colorType = dataPos + 9 < len ? data[dataPos + 9] : 0;
-            interlace = dataPos + 12 < len ? data[dataPos + 12] : 0;
-        } else if (memcmp(type, "PLTE", 4) == 0) {
-            nColors = (int)(chunkLen / 3);
-            for (int i = 0; i < nColors && i < 256; i++) {
-                size_t p = dataPos + (size_t)i * 3;
-                int r = p < len ? data[p] : 0;
-                int g = p + 1 < len ? data[p + 1] : 0;
-                int b = p + 2 < len ? data[p + 2] : 0;
-                palette[i] =
-                    (uint8_t)dither_rgb_to_gray(r, g, b);
+    size_t pos = 8;
+    while (pos < len)
+    {
+        uint32_t chunkLen = rd32be(data, pos, len);
+        const uint8_t *ctype = data + pos + 4;
+        size_t chunkDataPos = pos + 8;
+        pos = pos + 12 + chunkLen;
+        if (pos > len + 12)
+        {
+            break; /* Lua `pos > #data + 12` overrun break */
+        }
+        if (pos < 12 || chunkDataPos + chunkLen > len)
+        {
+            /* Lua slices clamp short reads; treat a short chunk's data as
+             * truncated and stop scanning (parity with `or nil` fallbacks). */
+            if (chunkDataPos + chunkLen > len)
+            {
+                break;
+            }
+        }
+
+        if (memcmp(ctype, "IHDR", 4) == 0)
+        {
+            width = rd32be(data, chunkDataPos, len);
+            height = rd32be(data, chunkDataPos + 4, len);
+            bitDepth = (chunkDataPos + 8 < len) ? data[chunkDataPos + 8] : 8;
+            colorType = (chunkDataPos + 9 < len) ? data[chunkDataPos + 9] : 0;
+            interlace = (chunkDataPos + 12 < len) ? data[chunkDataPos + 12] : 0;
+            haveIhdr = 1;
+        }
+        else if (memcmp(ctype, "PLTE", 4) == 0)
+        {
+            int numColors = (int)(chunkLen / 3);
+            for (int i = 0; i < numColors && i < 256; i++)
+            {
+                size_t p = chunkDataPos + (size_t)i * 3;
+                int r = (p + 2 < len) ? data[p + 2] : 0;
+                int g = (p + 1 < len) ? data[p + 1] : 0;
+                int b = (p < len) ? data[p] : 0;
+                palette[i] = (uint8_t)dither_rgb_to_gray(r, g, b);
                 paletteA[i] = 255;
             }
-        } else if (memcmp(type, "tRNS", 4) == 0) {
-            trnsLen = chunkLen < sizeof(trns) ? chunkLen : sizeof(trns);
-            memcpy(trns, data + dataPos, trnsLen);
-        } else if (memcmp(type, "IDAT", 4) == 0) {
-            if (idatLen + chunkLen > idatCap) {
-                size_t nc = idatCap ? idatCap * 2 : 4096;
-                while (nc < idatLen + chunkLen) nc *= 2;
-                uint8_t* ni = (uint8_t*)pluto_realloc(idat, nc);
-                if (ni == NULL) { pluto_free(idat); return -1; }
-                idat = ni;
-                idatCap = nc;
+            palCount = numColors > 256 ? 256 : numColors;
+        }
+        else if (memcmp(ctype, "tRNS", 4) == 0)
+        {
+            trnsData = data + chunkDataPos;
+            trnsLen = chunkLen;
+        }
+        else if (memcmp(ctype, "IDAT", 4) == 0)
+        {
+            if (idatCount < 64)
+            {
+                idat[idatCount].off = chunkDataPos;
+                idat[idatCount].clen = chunkLen;
+                idatTotal += chunkLen;
+                idatCount++;
             }
-            size_t avail = len - dataPos;
-            size_t take = chunkLen < avail ? chunkLen : avail;
-            memcpy(idat + idatLen, data + dataPos, take);
-            idatLen += take;
-        } else if (memcmp(type, "IEND", 4) == 0) {
+        }
+        else if (memcmp(ctype, "IEND", 4) == 0)
+        {
             break;
+        }
+        if (chunkLen == 0 && pos <= 12)
+        {
+            break; /* zero-length chunk guard (Lua slice-emptiness behavior) */
         }
     }
 
-    if (width == 0 || height == 0) return -1;
+    if (!haveIhdr || width == 0 || height == 0 ||
+        width > 0x7FFFFFF || height > 0x7FFFFFF)
+    {
+        logger_log("PNG decode: hdr bad (have=%d w=%u h=%u)", haveIhdr, width, height);
+        return NULL; /* Lua: `if not width or not height or <= 0` */
+    }
     if (maxW <= 0) maxW = 360;
     if (maxH <= 0) maxH = 200;
 
-    /* tRNS for palette: one alpha byte per entry */
-    if (trnsLen > 0 && colorType == 3) {
+    /* tRNS for palette: one alpha byte per entry. */
+    if (trnsData && colorType == 3)
+    {
         for (size_t i = 0; i < trnsLen && i < 256; i++)
-            paletteA[i] = trns[i];
+        {
+            paletteA[i] = trnsData[i];
+        }
     }
 
     int channels = 1;
@@ -130,269 +196,257 @@ int png_decode_gray(const uint8_t* data, size_t len,
     else if (colorType == 4) channels = 2;
     else if (colorType == 6) channels = 4;
 
-    /* interlaced: first Adam7 pass only (every 8th pixel) */
-    uint32_t srcW = width, srcH = height;
-    if (interlace == 1) {
-        srcW = (width + 7) / 8;
+    int srcW = (int)width, srcH = (int)height;
+    if (interlace == 1)
+    {
+        srcW = (srcW + 7) / 8;
+        srcH = (srcH + 7) / 8;
         if (srcW < 1) srcW = 1;
-        srcH = (height + 7) / 8;
         if (srcH < 1) srcH = 1;
     }
 
-    size_t rowBytes =
-        ((size_t)srcW * channels * bitDepth + 7) / 8;
-    size_t bppBytes = (size_t)channels * bitDepth / 8;
+    int depth = bitDepth;
+    size_t rowBytes = ((size_t)srcW * channels * depth + 7) / 8;
+    int bppBytes = channels * depth / 8;
     if (bppBytes < 1) bppBytes = 1;
-    size_t sampleBytes = (size_t)bitDepth / 8;
+    int sampleBytes = depth / 8;
     if (sampleBytes < 1) sampleBytes = 1;
 
-    /* NOTE: the stream aliases idat (C buffers are not Lua values),
-     * so idat stays alive until after the decode loop */
-    InflateStream* inflate = inflate_stream_new(idat, idatLen);
-    if (inflate == NULL) {
-        pluto_free(idat);
-        return -1;
+    /* Concatenate IDAT chunks (Lua table.concat). */
+    uint8_t *compressed = (uint8_t *)malloc(idatTotal ? idatTotal : 1);
+    if (!compressed)
+    {
+        return NULL;
+    }
+    size_t coff = 0;
+    for (int i = 0; i < idatCount; i++)
+    {
+        memcpy(compressed + coff, data + idat[i].off, idat[i].clen);
+        coff += idat[i].clen;
     }
 
-    ScaleAccum* acc = scale_accum_new((int)srcW, (int)srcH, maxW, maxH);
-    int boxW, boxH, targetW, targetH;
-    scale_box_sizes((int)srcW, (int)srcH, maxW, maxH,
-                    &boxW, &boxH, &targetW, &targetH);
+    InflateStream *inf = inflate_stream_new(compressed, idatTotal);
+    if (!inf)
+    {
+        free(compressed);
+        logger_log("PNG decode: stream_new NULL (idatTotal=%zu count=%d)", idatTotal, idatCount);
+        return NULL;
+    }
+    /* NOTE: the stream references `compressed` in place (Lua-parity no-copy);
+     * it must stay alive until inflate_stream_free. */
 
-    uint8_t* prevRow = (uint8_t*)pluto_malloc(rowBytes ? rowBytes : 1);
-    uint8_t* curRow = (uint8_t*)pluto_malloc(rowBytes ? rowBytes : 1);
-    uint8_t* rawRow = (uint8_t*)pluto_malloc(rowBytes ? rowBytes : 1);
-    uint8_t* grayRow = (uint8_t*)pluto_malloc(srcW ? srcW : 1);
-    if (prevRow == NULL || curRow == NULL || rawRow == NULL ||
-        grayRow == NULL || acc == NULL) {
-        pluto_free(prevRow);
-        pluto_free(curRow);
-        pluto_free(rawRow);
-        pluto_free(grayRow);
+    ScaleAccum *acc = scale_accum_new(srcW, srcH, maxW, maxH);
+    int boxW = 0, boxH = 0, targetW = 0, targetH = 0;
+    scale_box_sizes(srcW, srcH, maxW, maxH, &boxW, &boxH, &targetW, &targetH);
+    if (!acc)
+    {
+        inflate_stream_free(inf);
+        return NULL;
+    }
+
+    uint8_t *prevRow = (uint8_t *)calloc(rowBytes ? rowBytes : 1, 1);
+    uint8_t *curRow = (uint8_t *)calloc(rowBytes ? rowBytes : 1, 1);
+    uint8_t *grayRow = (uint8_t *)malloc((size_t)srcW ? (size_t)srcW : 1);
+    if (!prevRow || !curRow || !grayRow)
+    {
+        free(prevRow);
+        free(curRow);
+        free(grayRow);
         scale_accum_free(acc);
-        inflate_stream_free(inflate);
-        return -1;
+        inflate_stream_free(inf);
+        return NULL;
     }
-    memset(prevRow, 0, rowBytes);
 
-    const int unpackMask = (bitDepth < 8) ? (1 << bitDepth) - 1 : 0;
-    const int grayScale =
-        (bitDepth < 8) ? 255 / unpackMask : 1;   /* integer div, like Lua */
-    const int perByte = (bitDepth < 8) ? 8 / bitDepth : 1;
-
-    /* tRNS keys for grayscale / truecolor */
-    int tRNSgrayKey = -1;
-    int tRNSkr = -1, tRNSkg = -1, tRNSkb = -1;
-    if (trnsLen > 0) {
-        if (colorType == 0 && trnsLen >= 2) tRNSgrayKey = trns[0];
-        if (colorType == 2 && trnsLen >= 6) {
-            tRNSkr = trns[0];
-            tRNSkg = trns[2];
-            tRNSkb = trns[4];
+    /* tRNS keys for grayscale / truecolor (Lua tRNSkey). */
+    int haveTrnsKey = 0;
+    int trnsGrayKey = 0;
+    int trnsR = 0, trnsG = 0, trnsB = 0;
+    if (trnsData)
+    {
+        if (colorType == 0 && trnsLen >= 2)
+        {
+            haveTrnsKey = 1;
+            trnsGrayKey = trnsData[0]; /* Lua byte(1): high byte of the 16-bit value */
+        }
+        else if (colorType == 2 && trnsLen >= 6)
+        {
+            haveTrnsKey = 1;
+            trnsR = trnsData[0];
+            trnsG = trnsData[2];
+            trnsB = trnsData[4];
         }
     }
 
-    for (uint32_t y = 0; y < srcH; y++) {
-        tasks_yield_check();
+    const int unpackMask = depth < 8 ? (1 << depth) - 1 : 0;
+    const int grayScale = depth < 8 ? 255 / unpackMask : 1;
+    const int perByte = depth < 8 ? 8 / depth : 1;
 
-        uint8_t header = 0;
-        if (inflate_stream_read(inflate, &header, 1) != 1) break;
-        int filterType = header;
-
-        if (inflate_stream_read(inflate, rawRow, rowBytes) != rowBytes)
+    int done = 0;
+    for (int y = 0; y < srcH && !done; y++)
+    {
+        /* Tasks.yieldCheck() site (parity comment; budgeted at task layer). */
+        size_t got1 = 0;
+        const uint8_t *h = inflate_stream_read(inf, 1, &got1);
+        if (!h || got1 == 0)
+        {
+            done = 1;
             break;
+        }
+        int filterType = h[0];
 
-        /* unfilter byte-by-byte */
-        for (size_t x = 0; x < rowBytes; x++) {
-            int xv = rawRow[x];
-            int a = (x >= bppBytes) ? curRow[x - bppBytes] : 0;
-            int b = prevRow[x];
-            int c = (x >= bppBytes) ? prevRow[x - bppBytes] : 0;
-            switch (filterType) {
-                case 1: curRow[x] = (uint8_t)((xv + a) & 0xFF); break;
-                case 2: curRow[x] = (uint8_t)((xv + b) & 0xFF); break;
-                case 3:
-                    curRow[x] =
-                        (uint8_t)((xv + ((a + b) >> 1)) & 0xFF);
-                    break;
-                case 4:
-                    curRow[x] =
-                        (uint8_t)((xv + paeth_predictor(a, b, c)) &
-                                  0xFF);
-                    break;
-                default:
-                    curRow[x] = (uint8_t)xv;   /* 0 and any unknown type */
-            }
+        size_t gotR = 0;
+        const uint8_t *raw = inflate_stream_read(inf, rowBytes, &gotR);
+        if (!raw || gotR == 0)
+        {
+            done = 1;
+            break;
         }
 
-#define CR(idx) ((idx) < rowBytes ? curRow[(idx)] : 0)
-        /* convert to grayscale */
-        if (colorType == 0) {
-            if (bitDepth == 16) {
-                for (uint32_t x = 0; x < srcW; x++)
-                    grayRow[x] = CR(x * 2);
-            } else if (bitDepth == 8) {
-                for (uint32_t x = 0; x < srcW; x++) grayRow[x] = CR(x);
-            } else {
-                for (uint32_t x = 0; x < srcW; x++) {
-                    size_t byteIdx = x / perByte;
-                    int shift = 8 - bitDepth -
-                                (int)((x % perByte) * bitDepth);
-                    grayRow[x] =
-                        (uint8_t)(((CR(byteIdx) >> shift) & unpackMask) *
-                                  grayScale);
+        /* Unfilter row (missing bytes read as 0 — Lua `or 0`). */
+        for (size_t x = 0; x < rowBytes; x++)
+        {
+            int xv = x < gotR ? raw[x] : 0;
+            int a = (x >= (size_t)bppBytes) ? curRow[x - bppBytes] : 0;
+            int b = prevRow[x];
+            int c = (x >= (size_t)bppBytes) ? prevRow[x - bppBytes] : 0;
+            int v;
+            switch (filterType)
+            {
+            case 1: v = (xv + a) & 0xFF; break;
+            case 2: v = (xv + b) & 0xFF; break;
+            case 3: v = (xv + ((a + b) >> 1)) & 0xFF; break;
+            case 4: v = (xv + paeth_predictor(a, b, c)) & 0xFF; break;
+            default: v = xv; break; /* 0 and unknown → copy (Lua else) */
+            }
+            curRow[x] = (uint8_t)v;
+        }
+
+        /* Convert to grayscale row. */
+        if (colorType == 0)
+        {
+            if (depth == 16)
+            {
+                for (int x = 0; x < srcW; x++)
+                {
+                    grayRow[x] = curRow[x * 2];
                 }
             }
-            if (tRNSgrayKey >= 0) {
-                for (uint32_t x = 0; x < srcW; x++)
-                    if (grayRow[x] == tRNSgrayKey) grayRow[x] = 255;
+            else if (depth == 8)
+            {
+                memcpy(grayRow, curRow, (size_t)srcW);
             }
-        } else if (colorType == 3) {
-            for (uint32_t x = 0; x < srcW; x++) {
+            else
+            {
+                for (int x = 0; x < srcW; x++)
+                {
+                    int byteIdx = x / perByte;
+                    int shift = 8 - depth - (x % perByte) * depth;
+                    grayRow[x] = (uint8_t)(((curRow[byteIdx] >> shift) & unpackMask) * grayScale);
+                }
+            }
+            if (haveTrnsKey)
+            {
+                for (int x = 0; x < srcW; x++)
+                {
+                    if (grayRow[x] == trnsGrayKey)
+                    {
+                        grayRow[x] = 255;
+                    }
+                }
+            }
+        }
+        else if (colorType == 3)
+        {
+            for (int x = 0; x < srcW; x++)
+            {
                 int idx;
-                if (bitDepth == 8) {
-                    idx = CR(x) + 1;
-                } else {
-                    size_t byteIdx = x / perByte;
-                    int shift = 8 - bitDepth -
-                                (int)((x % perByte) * bitDepth);
-                    idx = ((CR(byteIdx) >> shift) & unpackMask) + 1;
+                if (depth == 8)
+                {
+                    idx = curRow[x];
                 }
-                int g = (idx >= 1 && idx <= nColors) ? palette[idx - 1]
-                                                     : 255;
-                int al = (idx >= 1 && idx <= nColors) ? paletteA[idx - 1]
-                                                      : 255;
-                grayRow[x] = (uint8_t)composite(g, al);
+                else
+                {
+                    int byteIdx = x / perByte;
+                    int shift = 8 - depth - (x % perByte) * depth;
+                    idx = (curRow[byteIdx] >> shift) & unpackMask;
+                }
+                /* Lua palette[idx or 1] or 255 — out-of-range → 255 */
+                int g = idx < palCount ? palette[idx] : 255;
+                int a = idx < palCount ? paletteA[idx] : 255;
+                grayRow[x] = png_composite(g, a);
             }
-        } else if (colorType == 2 || colorType == 6) {
-            size_t step = 3;
-            if (colorType == 6) step = 4;
-            for (uint32_t x = 0; x < srcW; x++) {
+        }
+        else if (colorType == 2 || colorType == 6)
+        {
+            int step = (colorType == 6) ? 4 : 3;
+            for (int x = 0; x < srcW; x++)
+            {
                 size_t p = (size_t)x * step * sampleBytes;
-                int r = CR(p), g = CR(p + sampleBytes),
-                    bl = CR(p + sampleBytes * 2);
-                if (tRNSkr >= 0 && r == tRNSkr && g == tRNSkg &&
-                    bl == tRNSkb) {
+                int r = (p < rowBytes) ? curRow[p] : 0;
+                int g = (p + sampleBytes < rowBytes) ? curRow[p + sampleBytes] : 0;
+                int b = (p + sampleBytes * 2 < rowBytes) ? curRow[p + sampleBytes * 2] : 0;
+                int gv;
+                if (haveTrnsKey && r == trnsR && g == trnsG && b == trnsB)
+                {
                     grayRow[x] = 255;
                     continue;
                 }
-                int gv = dither_rgb_to_gray(r, g, bl);
+                gv = dither_rgb_to_gray(r, g, b);
                 if (colorType == 6)
-                    grayRow[x] = (uint8_t)composite(
-                        gv, p + sampleBytes * 3 < rowBytes
-                                ? curRow[p + sampleBytes * 3]
-                                : 255);
-                else
-                    grayRow[x] = (uint8_t)gv;
-            }
-        } else if (colorType == 4) {
-            if (bitDepth == 16) {
-                for (uint32_t x = 0; x < srcW; x++) {
-                    size_t p = (size_t)x * 4;
-                    grayRow[x] = (uint8_t)composite(
-                        CR(p), p + 2 < rowBytes ? curRow[p + 2] : 255);
+                {
+                    int av = (p + sampleBytes * 3 < rowBytes) ? curRow[p + sampleBytes * 3] : 255;
+                    grayRow[x] = png_composite(gv, av);
                 }
-            } else {
-                for (uint32_t x = 0; x < srcW; x++) {
-                    size_t p = (size_t)x * 2;
-                    grayRow[x] = (uint8_t)composite(
-                        CR(p), p + 1 < rowBytes ? curRow[p + 1] : 255);
+                else
+                {
+                    grayRow[x] = (uint8_t)gv;
                 }
             }
         }
-#undef CR
+        else if (colorType == 4)
+        {
+            if (depth == 16)
+            {
+                for (int x = 0; x < srcW; x++)
+                {
+                    size_t p = (size_t)x * 4;
+                    int g = (p < rowBytes) ? curRow[p] : 0;
+                    int a = (p + 2 < rowBytes) ? curRow[p + 2] : 255;
+                    grayRow[x] = png_composite(g, a);
+                }
+            }
+            else
+            {
+                for (int x = 0; x < srcW; x++)
+                {
+                    size_t p = (size_t)x * 2;
+                    int g = (p < rowBytes) ? curRow[p] : 0;
+                    int a = (p + 1 < rowBytes) ? curRow[p + 1] : 255;
+                    grayRow[x] = png_composite(g, a);
+                }
+            }
+        }
 
         scale_accum_add_row(acc, grayRow);
-
-        uint8_t* tmp = prevRow;
+        uint8_t *tmp = prevRow;
         prevRow = curRow;
         curRow = tmp;
     }
 
-    inflate_stream_free(inflate);
-    pluto_free(idat);
-    pluto_free(prevRow);
-    pluto_free(curRow);
-    pluto_free(rawRow);
-    pluto_free(grayRow);
+    int outCount = 0, outWidth = 0;
+    uint8_t **rows = scale_accum_finish(acc, &outCount, &outWidth);
+    LCDBitmap *img = NULL;
+    if (rows && outCount > 0) /* Lua: if acc.count == 0 then return nil */
+    {
+        PngCtx pc = { rows, outCount, outWidth };
+        img = dither_to_bitmap(targetW, targetH, png_out_pixel, &pc);
+    }
 
-    int tw, th;
-    int count = scale_accum_finish(acc, &tw, &th);
-    if (count == 0) {
-        scale_accum_free(acc);
-        return -1;
-    }
-    /* convert accumulator int rows into a byte grid we hand off */
-    uint8_t** rows =
-        (uint8_t**)pluto_malloc(sizeof(uint8_t*) * (size_t)count);
-    if (rows == NULL) {
-        scale_accum_free(acc);
-        return -1;
-    }
-    int okGrid = 1;
-    for (int ry = 0; ry < count && okGrid; ry++) {
-        rows[ry] = (uint8_t*)pluto_malloc((size_t)acc->targetW);
-        if (rows[ry] == NULL) { okGrid = 0; break; }
-        for (int cx = 0; cx < acc->targetW; cx++)
-            rows[ry][cx] = (uint8_t)acc->out[ry][cx];
-    }
-    if (!okGrid) {
-        for (int ry = 0; ry < count; ry++) pluto_free(rows[ry]);
-        pluto_free(rows);
-        scale_accum_free(acc);
-        return -1;
-    }
-    *outRows = rows;
-    *outW = acc->targetW;
-    *outH = count;   /* actual rows produced (may exceed target) */
-    (void)tw;
-    (void)targetH;
+    free(prevRow);
+    free(curRow);
+    free(grayRow);
     scale_accum_free(acc);
-    return 0;
-}
-
-void png_free_rows(uint8_t** rows, int h) {
-    if (rows == NULL) return;
-    for (int y = 0; y < h; y++) pluto_free(rows[y]);
-    pluto_free(rows);
-}
-
-/* ── device/simulator bitmap wrapper ─────────────────────────────────── */
-
-#ifdef PLUTO_PNG_PD
-#include "pd_api.h"
-
-typedef struct {
-    uint8_t** rows;
-    int w, h;
-} PngPixCtx;
-
-static int png_pix(void* ud, int x, int y) {
-    PngPixCtx* c = (PngPixCtx*)ud;
-    if (y >= c->h || c->rows[y] == NULL) return 255;
-    return x < c->w ? c->rows[y][x] : 255;
-}
-
-struct LCDBitmap* png_decode(struct PlaydateAPI* pd, const uint8_t* data,
-                             size_t len, int maxW, int maxH) {
-    uint8_t** rows = NULL;
-    int tw = 0, th = 0;
-    if (png_decode_gray(data, len, maxW, maxH, &rows, &tw, &th) != 0)
-        return NULL;
-    PngPixCtx ctx = { rows, tw, th };
-    struct LCDBitmap* img =
-        dither_to_image(pd, png_pix, &ctx, tw, th);
-    png_free_rows(rows, th);
+    inflate_stream_free(inf);
+    free(compressed);
     return img;
 }
-#else
-struct LCDBitmap* png_decode(struct PlaydateAPI* pd, const uint8_t* data,
-                             size_t len, int maxW, int maxH) {
-    (void)data;
-    (void)len;
-    (void)maxW;
-    (void)maxH;
-    (void)pd;
-    return NULL;
-}
-#endif

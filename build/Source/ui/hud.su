@@ -1,0 +1,2 @@
+hud.c:30:6:hud_draw	1080	static
+hud.c:83:6:hud_draw_hover_status	104	static

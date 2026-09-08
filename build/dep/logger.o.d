@@ -1,4 +1,4 @@
-build/Source/core/logger.o: Source/core/logger.c Source/core/logger.h \
+build/Source/core/logger.o: Source/core/logger.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -28,6 +28,11 @@ build/Source/core/logger.o: Source/core/logger.c Source/core/logger.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/sched.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
+ Source/core/logger.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -41,10 +46,6 @@ build/Source/core/logger.o: Source/core/logger.c Source/core/logger.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
@@ -52,8 +53,6 @@ build/Source/core/logger.o: Source/core/logger.c Source/core/logger.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
-
-Source/core/logger.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h:
 
@@ -113,6 +112,16 @@ Source/core/logger.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h:
 
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
+
+Source/core/logger.h:
+
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
@@ -138,14 +147,6 @@ Source/core/logger.h:
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
 

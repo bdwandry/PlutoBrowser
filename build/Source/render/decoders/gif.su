@@ -1,0 +1,3 @@
+gif.c:159:16:gif_out_pixel	0	static
+gif.c:105:13:gif_flush_row.constprop	32	static
+gif.c:166:12:gif_decode	368	static

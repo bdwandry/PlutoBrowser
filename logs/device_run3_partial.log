@@ -1,0 +1,413 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[03:56:36 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[03:56:36 #2] P1 fmt: [str][X][%][-42]
+[03:56:36 #3] P1 checkpoint: before strbuf_free
+[03:56:36 #4] P1 checkpoint: after strbuf_free
+[03:56:36 #5] P2 checkpoint: before logger_error
+[03:56:36 #6] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:1469
+[03:56:36 #7] P2 checkpoint: after logger_error
+[03:56:36 #8] P3 checkpoint: begin engines
+[03:56:36 #9] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[03:56:36 #10] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[03:56:36 #11] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[03:56:36 #12] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[03:56:36 #13] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[03:56:36 #14] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[03:56:36 #15] === PlutoBrowser boot (Phase 0 scaffold) ===
+[03:56:36 #16] eventHandler: kEventInit, osversion=30101
+[03:56:36 #17] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[03:56:36 #18] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[03:56:36 #19] P5 about: host=home norm=about:home
+[03:56:36 #20] P5 noscheme: norm=https://example.com/path ssl=1
+[03:56:36 #21] P5 defport: norm=http://x.com/
+[03:56:36 #22] P5 unwrap=https://example.org/page
+[03:56:36 #23] P5 resolve1=https://x.com/a/b/c.png
+[03:56:36 #24] P5 resolve2=https://x.com/root.png
+[03:56:36 #25] P5 resolve3=https://cdn.y.com/i.png
+[03:56:36 #26] P5 resolve4=https://x.com/a/page.html#top
+[03:56:36 #27] P5 search: hw=1 dotcom=0 ip=0 about=0
+[03:56:36 #28] P5 encode=%s val=a+b%26clank
+[03:56:36 #29] P5 decode=a b&clank
+[03:56:36 #30] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[03:56:36 #31] P7 utf16le=Aé😀
+[03:56:36 #32] P7 cp1252 len=10(first=E2:want) first=E2
+[03:56:36 #33] P7 meta=<html><head><meta charset="iso-8859-1"><title>t</title></head><body>café</body></html>
+[03:56:36 #34] P7 hdr-passthrough=identical
+[03:56:36 #35] P7 utf8 passthrough=café
+[03:56:36 #36] P8 tc1a=sid=abc123; plain=1 (want sid=abc123; plain=1)
+[03:56:36 #37] P8 tc1b=plain=1 (want plain=1)
+[03:56:36 #38] P8 tc1c=[] (want empty)
+[03:56:36 #39] P8 tc4-http=plain=1 (want plain=1)
+[03:56:36 #40] P8 tc4-https=plain=1; sec=9 (want plain=1; sec=9)
+[03:56:36 #41] P8 tc2=sec=9 (want sec=9) count=2 (want 2)
+[03:56:36 #42] P8 tc5 count=5 (want 5)
+[03:56:36 #43] P8 tc5 d1.expires>1824103680 (want >0 name=a)
+[03:56:38 #44] P8 tc3 after-expiry count=5 (want 5, tmp pruned)
+[03:56:39 #45] P8 tc7 count=300 lo=cap10 hi=cap309 (want 300 cap10 cap309)
+[03:56:39 #46] P8 cleared count=0 (want 0)
+[03:56:39 #47] STORAGE: init enter
+[03:56:39 #48] STORAGE: load enter
+[03:56:39 #49] STORAGE: file opened, parsing
+[03:56:39 #50] STORAGE: init exit
+[03:56:39 #51] P9 init bookmarks=9 (want 9 defaults) history=0
+[03:56:39 #52] STORAGE: save open
+[03:56:39 #53] STORAGE: save writing (bm=9 hist=1)
+[03:56:39 #54] STORAGE: save close
+[03:56:39 #55] STORAGE: save exit
+[03:56:39 #56] STORAGE: save open
+[03:56:39 #57] STORAGE: save writing (bm=9 hist=2)
+[03:56:39 #58] STORAGE: save close
+[03:56:39 #59] STORAGE: save exit
+[03:56:39 #60] STORAGE: save open
+[03:56:39 #61] STORAGE: save writing (bm=9 hist=2)
+[03:56:39 #62] STORAGE: save close
+[03:56:39 #63] STORAGE: save exit
+[03:56:39 #64] P9 tc2 top=First Again url=https://a.example/1 time=03:56 (want top First Again a.example)
+[03:56:39 #65] P9 tc3 second=Second Page count=2 (want Second Page, 2)
+[03:56:39 #66] STORAGE: save open
+[03:56:39 #67] STORAGE: save writing (bm=9 hist=3)
+[03:56:39 #68] STORAGE: save close
+[03:56:39 #69] STORAGE: save exit
+[03:56:39 #70] STORAGE: save open
+[03:56:39 #71] STORAGE: save writing (bm=9 hist=4)
+[03:56:39 #72] STORAGE: save close
+[03:56:39 #73] STORAGE: save exit
+[03:56:39 #74] STORAGE: save open
+[03:56:39 #75] STORAGE: save writing (bm=9 hist=5)
+[03:56:39 #76] STORAGE: save close
+[03:56:39 #77] STORAGE: save exit
+[03:56:39 #78] STORAGE: save open
+[03:56:39 #79] STORAGE: save writing (bm=9 hist=6)
+[03:56:39 #80] STORAGE: save close
+[03:56:39 #81] STORAGE: save exit
+[03:56:39 #82] STORAGE: save open
+[03:56:39 #83] STORAGE: save writing (bm=9 hist=7)
+[03:56:39 #84] STORAGE: save close
+[03:56:39 #85] STORAGE: save exit
+[03:56:39 #86] STORAGE: save open
+[03:56:39 #87] STORAGE: save writing (bm=9 hist=8)
+[03:56:39 #88] STORAGE: save close
+[03:56:39 #89] STORAGE: save exit
+[03:56:39 #90] STORAGE: save open
+[03:56:39 #91] STORAGE: save writing (bm=9 hist=9)
+[03:56:39 #92] STORAGE: save close
+[03:56:39 #93] STORAGE: save exit
+[03:56:39 #94] STORAGE: save open
+[03:56:39 #95] STORAGE: save writing (bm=9 hist=10)
+[03:56:39 #96] STORAGE: save close
+[03:56:39 #97] STORAGE: save exit
+[03:56:39 #98] STORAGE: save open
+[03:56:39 #99] STORAGE: save writing (bm=9 hist=11)
+[03:56:39 #100] STORAGE: save close
+[03:56:39 #101] STORAGE: save exit
+[03:56:39 #102] STORAGE: save open
+[03:56:39 #103] STORAGE: save writing (bm=9 hist=12)
+[03:56:39 #104] STORAGE: save close
+[03:56:39 #105] STORAGE: save exit
+[03:56:39 #106] STORAGE: save open
+[03:56:39 #107] STORAGE: save writing (bm=9 hist=13)
+[03:56:39 #108] STORAGE: save close
+[03:56:39 #109] STORAGE: save exit
+[03:56:39 #110] STORAGE: save open
+[03:56:39 #111] STORAGE: save writing (bm=9 hist=14)
+[03:56:39 #112] STORAGE: save close
+[03:56:39 #113] STORAGE: save exit
+[03:56:39 #114] STORAGE: save open
+[03:56:39 #115] STORAGE: save writing (bm=9 hist=15)
+[03:56:39 #116] STORAGE: save close
+[03:56:39 #117] STORAGE: save exit
+[03:56:39 #118] STORAGE: save open
+[03:56:39 #119] STORAGE: save writing (bm=9 hist=16)
+[03:56:39 #120] STORAGE: save close
+[03:56:39 #121] STORAGE: save exit
+[03:56:39 #122] STORAGE: save open
+[03:56:39 #123] STORAGE: save writing (bm=9 hist=17)
+[03:56:39 #124] STORAGE: save close
+[03:56:39 #125] STORAGE: save exit
+[03:56:39 #126] STORAGE: save open
+[03:56:39 #127] STORAGE: save writing (bm=9 hist=18)
+[03:56:39 #128] STORAGE: save close
+[03:56:39 #129] STORAGE: save exit
+[03:56:39 #130] STORAGE: save open
+[03:56:39 #131] STORAGE: save writing (bm=9 hist=19)
+[03:56:39 #132] STORAGE: save close
+[03:56:39 #133] STORAGE: save exit
+[03:56:39 #134] STORAGE: save open
+[03:56:39 #135] STORAGE: save writing (bm=9 hist=20)
+[03:56:39 #136] STORAGE: save close
+[03:56:39 #137] STORAGE: save exit
+[03:56:39 #138] STORAGE: save open
+[03:56:39 #139] STORAGE: save writing (bm=9 hist=21)
+[03:56:39 #140] STORAGE: save close
+[03:56:39 #141] STORAGE: save exit
+[03:56:39 #142] STORAGE: save open
+[03:56:39 #143] STORAGE: save writing (bm=9 hist=22)
+[03:56:39 #144] STORAGE: save close
+[03:56:39 #145] STORAGE: save exit
+[03:56:39 #146] STORAGE: save open
+[03:56:39 #147] STORAGE: save writing (bm=9 hist=23)
+[03:56:39 #148] STORAGE: save close
+[03:56:39 #149] STORAGE: save exit
+[03:56:40 #150] STORAGE: save open
+[03:56:40 #151] STORAGE: save writing (bm=9 hist=24)
+[03:56:40 #152] STORAGE: save close
+[03:56:40 #153] STORAGE: save exit
+[03:56:40 #154] STORAGE: save open
+[03:56:40 #155] STORAGE: save writing (bm=9 hist=25)
+[03:56:40 #156] STORAGE: save close
+[03:56:40 #157] STORAGE: save exit
+[03:56:40 #158] STORAGE: save open
+[03:56:40 #159] STORAGE: save writing (bm=9 hist=26)
+[03:56:40 #160] STORAGE: save close
+[03:56:40 #161] STORAGE: save exit
+[03:56:40 #162] STORAGE: save open
+[03:56:40 #163] STORAGE: save writing (bm=9 hist=27)
+[03:56:40 #164] STORAGE: save close
+[03:56:40 #165] STORAGE: save exit
+[03:56:40 #166] STORAGE: save open
+[03:56:40 #167] STORAGE: save writing (bm=9 hist=28)
+[03:56:40 #168] STORAGE: save close
+[03:56:40 #169] STORAGE: save exit
+[03:56:40 #170] STORAGE: save open
+[03:56:40 #171] STORAGE: save writing (bm=9 hist=29)
+[03:56:40 #172] STORAGE: save close
+[03:56:40 #173] STORAGE: save exit
+[03:56:40 #174] STORAGE: save open
+[03:56:40 #175] STORAGE: save writing (bm=9 hist=30)
+[03:56:40 #176] STORAGE: save close
+[03:56:40 #177] STORAGE: save exit
+[03:56:40 #178] STORAGE: save open
+[03:56:40 #179] STORAGE: save writing (bm=9 hist=31)
+[03:56:40 #180] STORAGE: save close
+[03:56:40 #181] STORAGE: save exit
+[03:56:40 #182] STORAGE: save open
+[03:56:40 #183] STORAGE: save writing (bm=9 hist=32)
+[03:56:40 #184] STORAGE: save close
+[03:56:40 #185] STORAGE: save exit
+[03:56:40 #186] STORAGE: save open
+[03:56:40 #187] STORAGE: save writing (bm=9 hist=33)
+[03:56:40 #188] STORAGE: save close
+[03:56:40 #189] STORAGE: save exit
+[03:56:40 #190] STORAGE: save open
+[03:56:40 #191] STORAGE: save writing (bm=9 hist=34)
+[03:56:40 #192] STORAGE: save close
+[03:56:40 #193] STORAGE: save exit
+[03:56:40 #194] STORAGE: save open
+[03:56:40 #195] STORAGE: save writing (bm=9 hist=35)
+[03:56:40 #196] STORAGE: save close
+[03:56:40 #197] STORAGE: save exit
+[03:56:40 #198] STORAGE: save open
+[03:56:40 #199] STORAGE: save writing (bm=9 hist=36)
+[03:56:40 #200] STORAGE: save close
+[03:56:40 #201] STORAGE: save exit
+[03:56:40 #202] STORAGE: save open
+[03:56:40 #203] STORAGE: save writing (bm=9 hist=37)
+[03:56:40 #204] STORAGE: save close
+[03:56:40 #205] STORAGE: save exit
+[03:56:40 #206] STORAGE: save open
+[03:56:40 #207] STORAGE: save writing (bm=9 hist=38)
+[03:56:40 #208] STORAGE: save close
+[03:56:40 #209] STORAGE: save exit
+[03:56:40 #210] STORAGE: save open
+[03:56:40 #211] STORAGE: save writing (bm=9 hist=39)
+[03:56:40 #212] STORAGE: save close
+[03:56:40 #213] STORAGE: save exit
+[03:56:40 #214] STORAGE: save open
+[03:56:40 #215] STORAGE: save writing (bm=9 hist=40)
+[03:56:40 #216] STORAGE: save close
+[03:56:40 #217] STORAGE: save exit
+[03:56:40 #218] STORAGE: save open
+[03:56:40 #219] STORAGE: save writing (bm=9 hist=41)
+[03:56:40 #220] STORAGE: save close
+[03:56:40 #221] STORAGE: save exit
+[03:56:40 #222] STORAGE: save open
+[03:56:40 #223] STORAGE: save writing (bm=9 hist=42)
+[03:56:40 #224] STORAGE: save close
+[03:56:40 #225] STORAGE: save exit
+[03:56:40 #226] STORAGE: save open
+[03:56:40 #227] STORAGE: save writing (bm=9 hist=43)
+[03:56:40 #228] STORAGE: save close
+[03:56:40 #229] STORAGE: save exit
+[03:56:40 #230] STORAGE: save open
+[03:56:40 #231] STORAGE: save writing (bm=9 hist=44)
+[03:56:40 #232] STORAGE: save close
+[03:56:40 #233] STORAGE: save exit
+[03:56:40 #234] STORAGE: save open
+[03:56:40 #235] STORAGE: save writing (bm=9 hist=45)
+[03:56:40 #236] STORAGE: save close
+[03:56:40 #237] STORAGE: save exit
+[03:56:40 #238] STORAGE: save open
+[03:56:40 #239] STORAGE: save writing (bm=9 hist=46)
+[03:56:40 #240] STORAGE: save close
+[03:56:40 #241] STORAGE: save exit
+[03:56:40 #242] STORAGE: save open
+[03:56:40 #243] STORAGE: save writing (bm=9 hist=47)
+[03:56:40 #244] STORAGE: save close
+[03:56:40 #245] STORAGE: save exit
+[03:56:40 #246] STORAGE: save open
+[03:56:40 #247] STORAGE: save writing (bm=9 hist=48)
+[03:56:40 #248] STORAGE: save close
+[03:56:40 #249] STORAGE: save exit
+[03:56:40 #250] STORAGE: save open
+[03:56:40 #251] STORAGE: save writing (bm=9 hist=49)
+[03:56:40 #252] STORAGE: save close
+[03:56:40 #253] STORAGE: save exit
+[03:56:40 #254] STORAGE: save open
+[03:56:40 #255] STORAGE: save writing (bm=9 hist=50)
+[03:56:40 #256] STORAGE: save close
+[03:56:40 #257] STORAGE: save exit
+[03:56:40 #258] STORAGE: save open
+[03:56:40 #259] STORAGE: save writing (bm=9 hist=50)
+[03:56:40 #260] STORAGE: save close
+[03:56:40 #261] STORAGE: save exit
+[03:56:40 #262] STORAGE: save open
+[03:56:40 #263] STORAGE: save writing (bm=9 hist=50)
+[03:56:40 #264] STORAGE: save close
+[03:56:41 #265] STORAGE: save exit
+[03:56:41 #266] STORAGE: save open
+[03:56:41 #267] STORAGE: save writing (bm=9 hist=50)
+[03:56:41 #268] STORAGE: save close
+[03:56:41 #269] STORAGE: save exit
+[03:56:41 #270] STORAGE: save open
+[03:56:41 #271] STORAGE: save writing (bm=9 hist=50)
+[03:56:41 #272] STORAGE: save close
+[03:56:41 #273] STORAGE: save exit
+[03:56:41 #274] STORAGE: save open
+[03:56:41 #275] STORAGE: save writing (bm=9 hist=50)
+[03:56:41 #276] STORAGE: save close
+[03:56:41 #277] STORAGE: save exit
+[03:56:41 #278] STORAGE: save open
+[03:56:41 #279] STORAGE: save writing (bm=9 hist=50)
+[03:56:41 #280] STORAGE: save close
+[03:56:41 #281] STORAGE: save exit
+[03:56:41 #282] STORAGE: save open
+[03:56:41 #283] STORAGE: save writing (bm=9 hist=50)
+[03:56:41 #284] STORAGE: save close
+[03:56:41 #285] STORAGE: save exit
+[03:56:41 #286] P9 tc4 count=50 (want 50) top=https://cap.example/54 (want cap.example/54)
+[03:56:41 #287] STORAGE: save open
+[03:56:41 #288] STORAGE: save writing (bm=10 hist=50)
+[03:56:41 #289] STORAGE: save close
+[03:56:41 #290] STORAGE: save exit
+[03:56:41 #291] STORAGE: save open
+[03:56:41 #292] STORAGE: save writing (bm=10 hist=50)
+[03:56:41 #293] STORAGE: save close
+[03:56:41 #294] STORAGE: save exit
+[03:56:41 #295] P9 tc5 9->10->10 (want +1 then same) title=New Title (want New Title)
+[03:56:41 #296] STORAGE: save open
+[03:56:41 #297] STORAGE: save writing (bm=11 hist=50)
+[03:56:41 #298] STORAGE: save close
+[03:56:41 #299] STORAGE: save exit
+[03:56:41 #300] STORAGE: save open
+[03:56:41 #301] STORAGE: save writing (bm=10 hist=50)
+[03:56:41 #302] STORAGE: save close
+[03:56:41 #303] STORAGE: save exit
+[03:56:41 #304] P9 tc6 10->11 removed=1 (want +1, 1) now=10
+[03:56:41 #305] STORAGE: load enter
+[03:56:41 #306] STORAGE: file opened, parsing
+[03:56:41 #307] P9 tc7 reload bookmarks=10 (want 10) history=50 (want 50)
+[03:56:41 #308] STORAGE: load enter
+[03:56:41 #309] STORAGE: file opened, parsing
+[03:56:41 #310] STORAGE: save open
+[03:56:41 #311] STORAGE: save writing (bm=9 hist=0)
+[03:56:41 #312] STORAGE: save close
+[03:56:41 #313] STORAGE: save exit
+[03:56:41 #314] P9 tc8 corrupt-recovery bookmarks=9 (want 9)
+[03:56:41 #315] STORAGE: save open
+[03:56:41 #316] STORAGE: save writing (bm=9 hist=0)
+[03:56:41 #317] STORAGE: save close
+[03:56:41 #318] STORAGE: save exit
+[03:56:41 #319] STORAGE: load enter
+[03:56:41 #320] STORAGE: file opened, parsing
+[03:56:41 #321] P9 tc1b jar-after-reload=0 (cookie section persists; jar restore in P30)
+[03:56:41 #322] P9 about-filter 0==0 (want equal)
+[03:56:41 #323] P10 tc1 fonts-ready=7 (want 7)
+[03:56:41 #324] P10 tc2 body(Hello)=41 h1(Hello)=62 empty=0 (want >0, >w_body? no: h1 wider, 0)
+[03:56:41 #325] P10 tc3 h1 lh=24 mt=6 (want 24, 6) ptr=1
+[03:56:41 #326] P10 tc3 h2 lh=18 mt=5 (want 18, 5)
+[03:56:41 #327] P10 tc3 h3 lh=16 mt=4 (want 16, 4)
+[03:56:41 #328] P10 tc3 body-bold lh=16 (want 16) ptr=1
+[03:56:41 #329] P10 tc3 mono lh=15 (want 15)
+[03:56:41 #330] P10 tc3 small lh=14 (want 14) ptr=1
+[03:56:41 #331] P10 tc3 sub lh=14 (want 14)
+[03:56:41 #332] P15 tc1=[&<AB (c) -- A] (want [&<AB (c) -- A])
+[03:56:41 #333] P15 tc2=[cafe  --   x...] (want [cafe  --   x...])
+[03:56:41 #334] P15 tc3=[a&lt;b&gt;&amp;&quot;c] (want [a&lt;b&gt;&amp;&quot;c])
+[03:56:41 #335] P15 tc4=[x foobar y] (want [x foobar y])
+[03:56:41 #336] P15 tc5=[plain ascii 123!] (want identical)
+[03:56:41 #337] P15 tc6=[ --  ...pi ] (want [ --  ...pi ])
+[03:56:41 #338] P15 tc7=[ --  piA - ] (want [ --  piA - ])
+[03:56:41 #339] P15 tc8=[&] (want [&])
+[03:56:41 #340] P15 tc9=[AT&T] (want [AT&T])
+[03:56:41 #341] P15 tc10 empty ok=1
+[03:56:41 #342] P15 tc11 null ok=1
+[03:56:41 #343] P15 tc12=[not  not in   deg] (want [not  not in   deg])
+[03:56:41 #344] P15 tc13=[a&b&c&;a&#38Ab] (want [a&b&c&;a&#38Ab])
+[03:56:41 #345] P15 tc14=[CAFE a$c<>  &] (want [CAFE a$c<>  &])
+[03:56:41 #346] P15 init battery complete
+[03:56:41 #347] P16 tc1 tokens=18 (want 18) title=[Home & More] (want [Home & More])
+[03:56:41 #348] P16 tc1 p-attrs=3 (want 3) class=[intro] data-x=[7] checked=true
+[03:56:41 #349] P16 tc1 img self=1 (want 1) src=[a.png]; br self=0 (want 0)
+[03:56:41 #350] P16 tc1 a href=[/next?page=1&x=2] (want [/next?page=1&x=2])
+[03:56:41 #351] P16 tc1 /a closing=1 self=1 (want 1 1)
+[03:56:41 #352] P16 tc2 tokens=3 (want 3) href=[a>b] (want [a>b]) data-x=[1]
+[03:56:41 #353] P16 tc3 tokens=1 (want 1) t0=[text ] (want [text ])
+[03:56:41 #354] P16 tc4 tokens=3 (want 3) title=[Hi & Bye] (want [Hi & Bye]) t0.name=p
+[03:56:41 #355] P16 tc5 tokens=1 (want 1) t0=[a ] (want [a ])
+[03:56:41 #356] P16 tc6 href=[a&b] (want [a&b]) title=[xA] (want [xA]) text=[e degt] (want [e degt])
+[03:56:41 #357] P16 tc7 nattrs=1 (want 1) href=[1] (want [1])
+[03:56:41 #358] P16 tc8 nattrs=3 (want 3) z=[] (want []) b=true (want true) w=[1] (want [1])
+[03:56:41 #359] P16 tc9 tokens=0 (want 0) title=[Web Page] (want [Web Page])
+[03:56:44 #360] P16 tc10 inlen=320000 (want 320000) tokens=98256 (want 98256) tags=65504 (want 65504) title=[Web Page]
+[03:56:44 #361] P16 init battery complete
+[03:56:44 #362] P17 tc1 ser=PASS cnt=PASS tok=12 (want 12) text=4 (want 4) elem=6 (want 6) proc=12 (want 12) max=0 (want 0) skip=0 (want 0)
+[03:56:44 #363] P17 tc2 ser=PASS cnt=PASS tok=19 (want 19) text=3 (want 3) elem=8 (want 8) proc=19 (want 19) max=0 (want 0) skip=0 (want 0)
+[03:56:44 #364] P17 tc3 ser=PASS cnt=PASS tok=17 (want 17) text=5 (want 5) elem=4 (want 4) proc=17 (want 17) max=0 (want 0) skip=0 (want 0)
+[03:56:44 #365] P17 tc4 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=3 (want 3) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[03:56:44 #366] P17 tc5 ser=PASS cnt=PASS tok=11 (want 11) text=2 (want 2) elem=2 (want 2) proc=11 (want 11) max=0 (want 0) skip=3 (want 3)
+[03:56:44 #367] P17 tc7 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=2 (want 2) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[03:56:44 #368] P17 tc8 ser=PASS cnt=PASS tok=6 (want 6) text=2 (want 2) elem=3 (want 3) proc=6 (want 6) max=0 (want 0) skip=0 (want 0)
+[03:56:45 #369] P17 tc5b ser=PASS cnt=PASS tok=1207 (want 1207) text=236 (want 236) elem=235 (want 235) proc=1207 (want 1207) max=0 (want 0) skip=500 (want 500)
+[03:56:45 #370] P17 tc6 ser=PASS cnt=PASS tok=12000 (want 12000) text=3000 (want 3000) elem=3000 (want 3000) proc=9000 (want 9000) max=0 (want 0) skip=0 (want 0)
+[03:56:45 #371] P17 init battery complete
+[03:56:45 #372] P18 checkpoint: begin helpers (30 cases)
+[03:56:45 #373] P18 tc1a PASS
+[03:56:45 #374] P18 tc1b PASS
+[03:56:45 #375] P18 tc1c PASS
+[03:56:45 #376] P18 tc1d PASS
+[03:56:45 #377] P18 tc1e PASS
+[03:56:45 #378] P18 tc1f PASS
+[03:56:45 #379] P18 tc1g PASS
+[03:56:45 #380] P18 tc2a PASS
+[03:56:45 #381] P18 tc2b PASS
+[03:56:45 #382] P18 tc2c PASS
+[03:56:45 #383] P18 tc2d PASS
+[03:56:45 #384] P18 tc3a PASS
+[03:56:45 #385] P18 tc3b PASS
+[03:56:45 #386] P18 tc3c PASS
+[03:56:45 #387] P18 tc3d PASS
+[03:56:45 #388] P18 tc3e PASS
+[03:56:45 #389] P18 tc3f PASS
+[03:56:45 #390] P18 tc3g PASS
+[03:56:45 #391] P18 tc4a PASS
+[03:56:45 #392] P18 tc4b PASS
+[03:56:45 #393] P18 tc4c PASS
+[03:56:45 #394] P18 tc4d PASS
+[03:56:45 #395] P18 tc4e PASS
+[03:56:45 #396] P18 tc4f PASS
+[03:56:45 #397] P18 tc4g PASS
+[03:56:45 #398] P18 tc4h PASS
+[03:56:45 #399] P18 tc5a PASS
+[03:56:45 #400] P18 tc5b PASS
+[03:56:45 #401] P18 tc5c PASS
+[03:56:45 #402] P18 tc5d PASS
+[03:56:46 #403] P18 checkpoint: helpers done
+[03:56:46 #404] P18 checkpoint: begin parse skeleton (13 cases)
+[03:56:46 #405] P18 parse1 PASS
+[03:56:46 #406] P18 parse2 PASS
+[03:56:46 #407] P18 parse3 PASS
+[03:56:46 #408] P18 parse4 PASS
+[03:56:46 #409] P18 parse5 PASS
+[03:56:46 #410] P18 parse6 PASS
+[03:56:46 #411] P18 parse7 PASS

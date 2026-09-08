@@ -1,0 +1,8 @@
+--- watchdog reset at 2026/09/06 03:47:29---
+build:057d750f-3.1.1-release.210171-gitlab-runner
+   r0:90fe29e8    r1:00000000     r2:00000400    r3: 00000000
+  r12:006d2800    lr:24021037     pc:24021036   psr: 4100002c
+rcccsr:00000000
+heap allocated: 1473632
+Lua totalbytes=0 GCdebt=0 GCestimate=0 stacksize=0
+

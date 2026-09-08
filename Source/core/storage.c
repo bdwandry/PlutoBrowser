@@ -1,573 +1,847 @@
-// storage.c — persistent Storage (see header).
-//
-// Parity notes vs core/storage.lua:
-//  - init: missing/empty bookmarks -> DEFAULT_BOOKMARKS; history/cookies
-//    adopted verbatim when present; settings merged per-key.
-//  - addHistory: skips NULL/""/"^about:" URLs, dedups by exact URL scanning
-//    from the END (first match removed), inserts at front, caps at 50 by
-//    dropping from the tail, auto-saves.
-//  - addBookmark: duplicate URL updates TITLE ONLY (desc untouched).
-//  - removeBookmark takes a 1-based index; out-of-range -> 0, no change.
-
-#include "storage.h"
-
+/*
+ * PlutoBrowser — storage.c
+ * Persistent storage (port of Source/core/storage.lua). See storage.h.
+ * Datastore is Lua-only, so persistence is a custom sectioned text file
+ * written through pd->file with the exact same observable semantics:
+ * defaults on first load (and save), history dedupe-to-top with 50 cap,
+ * bookmark dedupe→title-update, remove-by-index, save after every mutation.
+ */
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
 
+#include "core/storage.h"
+#include "core/constants.h"
+#include "core/logger.h"
+#include "core/cookie_jar.h"
 #include "pd_api.h"
 
-#include "../util/dynarray.h"
-#include "../util/json.h"
-#include "../util/luapattern.h"
-#include "../util/mem.h"
-#include "../util/strbuf.h"
-#include "constants.h"
-#include "logger.h"
+extern PlaydateAPI *pluto_pd(void);
+extern void pluto_free(void *p);
 
-// Lua: playdate.datastore.write/read(data, "comet_browser_data.json").
-// Paths are relative to the game's data directory on both sim and device.
-#define STORAGE_PATH "comet_browser_data.json"
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
 
-static struct PlaydateAPI* s_pd = NULL;
-static DynArray s_bookmarks; // PlutoBookmark
-static DynArray s_history;   // PlutoHistoryItem
-static DynArray s_cookies;   // PlutoCookie
-static PlutoSettings s_settings;
+#define DATA_FILENAME "comet_browser_data"
 
-static void copy_field(char* dst, size_t dstSz, const char* src)
+/* ── in-memory state (mirrors Storage.* tables) ──────────────────────────── */
+
+static StoredBookmark *g_bookmarks[64];
+static int g_bookmarkCount = 0;
+static StoredHistoryItem *g_history[HISTORY_MAX];
+static int g_historyCount = 0;
+
+typedef struct
 {
-    size_t n;
-    if (src == NULL) {
-        dst[0] = '\0';
-        return;
+    char key[32];
+    char sval[128];
+    int ival;
+    int isInt;
+} Setting;
+
+static Setting g_settings[16] = {
+    {"searchEngine", "", 1, 1},
+    {"mode", "", 0, 1},       /* MODE_RAW_HTML — filled in storage_init */
+    {"autoReader", "", 0, 1}, /* false */
+    {"fontSize", "medium", 0, 0},
+    {"imageMode", "", 0, 1},  /* IMAGE_MODE_VIEWPORT — filled in storage_init */
+    {"invertCrank", "", 0, 1} /* false */
+};
+static int g_settingCount = 6;
+
+static int g_haveDefaults = 0;
+
+/* ── list helpers ────────────────────────────────────────────────────────── */
+
+static char *dup_str(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *p = (char *)PLUTO_MALLOC(n);
+    if (p)
+    {
+        memcpy(p, s, n);
     }
-    n = strlen(src);
-    if (n >= dstSz) {
-        n = dstSz - 1;
-    }
-    memcpy(dst, src, n);
-    dst[n] = '\0';
+    return p;
 }
 
-static void da_insert_front(DynArray* a, const void* elem)
+const StoredBookmark *storage_bookmark_at(int i)
 {
-    if (da_push(a, elem) == NULL) {
-        return;
-    }
-    // shift [0..n-2] up one slot, place new element at 0
-    memmove((char*)a->items + a->elemsize, a->items,
-            (a->count - 1) * a->elemsize);
-    memcpy(a->items, elem, a->elemsize);
+    return (i >= 0 && i < g_bookmarkCount) ? g_bookmarks[i] : NULL;
 }
 
-// ------------------------------------------------------------ defaults ----
-
-static void install_default_bookmarks(void)
+int storage_bookmark_count(void)
 {
-    size_t i;
-    s_bookmarks.count = 0;
-    for (i = 0; i < PLUTO_DEFAULT_BOOKMARK_COUNT; i++) {
-        PlutoSavedBookmark bm;
-        memset(&bm, 0, sizeof(bm));
-        copy_field(bm.title, sizeof(bm.title), PLUTO_DEFAULT_BOOKMARKS[i].title);
-        copy_field(bm.url, sizeof(bm.url), PLUTO_DEFAULT_BOOKMARKS[i].url);
-        copy_field(bm.desc, sizeof(bm.desc), PLUTO_DEFAULT_BOOKMARKS[i].desc);
-        da_push(&s_bookmarks, &bm);
-    }
+    return g_bookmarkCount;
 }
 
-void storage_reset_defaults(void)
+const StoredHistoryItem *storage_history_at(int i)
 {
-    s_history.count = 0;
-    s_cookies.count = 0;
-    install_default_bookmarks();
-
-    s_settings.searchEngine = 1;
-    s_settings.mode = PLUTO_MODE_RAW_HTML;      // Constants.MODE_RAW_HTML
-    s_settings.autoReader = 0;
-    copy_field(s_settings.fontSize, sizeof(s_settings.fontSize), "medium");
-    s_settings.imageMode = PLUTO_IMAGE_MODE_VIEWPORT;
-    s_settings.invertCrank = 0;
-    s_settings.protocol = PLUTO_PROTOCOL_HTTP;
+    return (i >= 0 && i < g_historyCount) ? g_history[i] : NULL;
 }
 
-// ------------------------------------------------------- mode mappings ----
-
-static const char* mode_to_str(int mode)
+int storage_history_count(void)
 {
-    switch ((PlutoMode)mode) {
-        case PLUTO_MODE_READER:   return "reader";
-        case PLUTO_MODE_RAW_HTML: return "html";
-        case PLUTO_MODE_OPERA_DS: return "ds";
-        default:                  return "html";
-    }
+    return g_historyCount;
 }
 
-static int mode_from_str(const char* s)
+/* ── settings helpers ────────────────────────────────────────────────────── */
+
+static Setting *find_setting(const char *key)
 {
-    if (strcmp(s, "reader") == 0) return PLUTO_MODE_READER;
-    if (strcmp(s, "html") == 0)   return PLUTO_MODE_RAW_HTML;
-    if (strcmp(s, "ds") == 0)     return PLUTO_MODE_OPERA_DS;
-    return -1;
-}
-
-static const char* image_mode_to_str(int mode)
-{
-    switch ((PlutoImageMode)mode) {
-        case PLUTO_IMAGE_MODE_ALL:      return "all";
-        case PLUTO_IMAGE_MODE_VIEWPORT: return "viewport";
-        case PLUTO_IMAGE_MODE_ONDEMAND: return "ondemand";
-        case PLUTO_IMAGE_MODE_HOVER:    return "hover";
-        case PLUTO_IMAGE_MODE_DISABLED: return "disabled";
-        default:                        return "viewport";
-    }
-}
-
-static int image_mode_from_str(const char* s)
-{
-    if (strcmp(s, "all") == 0)      return PLUTO_IMAGE_MODE_ALL;
-    if (strcmp(s, "viewport") == 0) return PLUTO_IMAGE_MODE_VIEWPORT;
-    if (strcmp(s, "ondemand") == 0) return PLUTO_IMAGE_MODE_ONDEMAND;
-    if (strcmp(s, "hover") == 0)    return PLUTO_IMAGE_MODE_HOVER;
-    if (strcmp(s, "disabled") == 0) return PLUTO_IMAGE_MODE_DISABLED;
-    return -1;
-}
-
-static const char* protocol_to_str(int mode)
-{
-    switch ((PlutoProtocol)mode) {
-        case PLUTO_PROTOCOL_HTTP: return "http";
-        case PLUTO_PROTOCOL_TCP:  return "tcp";
-        default:                  return "http";
-    }
-}
-
-static int protocol_from_str(const char* s)
-{
-    if (strcmp(s, "http") == 0) return PLUTO_PROTOCOL_HTTP;
-    if (strcmp(s, "tcp") == 0)  return PLUTO_PROTOCOL_TCP;
-    return -1;
-}
-
-// -------------------------------------------------------------- saving ----
-
-int storage_save(void)
-{
-    JsonValue *root, *arr, *obj;
-    StrBuf out;
-    SDFile* f;
-    size_t i;
-    int ok = 1;
-
-    if (s_pd == NULL) {
-        return 0;
-    }
-
-    root = json_new_object();
-
-    arr = json_new_array();
-    for (i = 0; i < s_bookmarks.count && arr; i++) {
-        PlutoSavedBookmark* bm = (PlutoSavedBookmark*)da_get(&s_bookmarks, i);
-        obj = json_new_object();
-        json_obj_set(obj, "title", json_new_string(bm->title));
-        json_obj_set(obj, "url", json_new_string(bm->url));
-        json_obj_set(obj, "desc", json_new_string(bm->desc));
-        json_arr_append(arr, obj);
-    }
-    json_obj_set(root, "bookmarks", arr);
-
-    arr = json_new_array();
-    for (i = 0; i < s_history.count && arr; i++) {
-        PlutoHistoryItem* h = (PlutoHistoryItem*)da_get(&s_history, i);
-        obj = json_new_object();
-        json_obj_set(obj, "title", json_new_string(h->title));
-        json_obj_set(obj, "url", json_new_string(h->url));
-        json_obj_set(obj, "time", json_new_string(h->time));
-        json_arr_append(arr, obj);
-    }
-    json_obj_set(root, "history", arr);
-
-    arr = json_new_array();
-    for (i = 0; i < s_cookies.count && arr; i++) {
-        PlutoCookie* c = (PlutoCookie*)da_get(&s_cookies, i);
-        obj = json_new_object();
-        json_obj_set(obj, "name", json_new_string(c->name));
-        json_obj_set(obj, "value", json_new_string(c->value));
-        json_obj_set(obj, "domain", json_new_string(c->domain));
-        json_obj_set(obj, "hostOnly", json_new_bool(c->hostOnly));
-        json_obj_set(obj, "path", json_new_string(c->path));
-        json_obj_set(obj, "secure", json_new_bool(c->secure));
-        json_obj_set(obj, "httpOnly", json_new_bool(c->httpOnly));
-        if (c->samesite[0] != '\0') {
-            json_obj_set(obj, "samesite", json_new_string(c->samesite));
+    for (int i = 0; i < g_settingCount; i++)
+    {
+        if (strcmp(g_settings[i].key, key) == 0)
+        {
+            return &g_settings[i];
         }
-        if (c->hasExpires) {
-            json_obj_set(obj, "expires", json_new_number(c->expires));
+    }
+    return NULL;
+}
+
+int storage_setting_int(const char *key)
+{
+    Setting *s = find_setting(key);
+    return (s && s->isInt) ? s->ival : 0;
+}
+
+void storage_set_setting_int(const char *key, int value)
+{
+    Setting *s = find_setting(key);
+    if (s && s->isInt)
+    {
+        s->ival = value;
+    }
+}
+
+const char *storage_setting_str(const char *key)
+{
+    Setting *s = find_setting(key);
+    return (s && !s->isInt) ? s->sval : NULL;
+}
+
+void storage_set_setting_str(const char *key, const char *value)
+{
+    Setting *s = find_setting(key);
+    if (s && !s->isInt && value)
+    {
+        snprintf(s->sval, sizeof(s->sval), "%s", value);
+    }
+}
+
+/* ── escaping: \ → \\ , | → \p , tab → \t , CR/LF → \n \r , other <0x20 → \xHH ── */
+
+static void escape_to(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (const char *p = in; *p && o + 5 < cap; p++)
+    {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\\')
+        {
+            out[o++] = '\\';
+            out[o++] = '\\';
         }
-        json_arr_append(arr, obj);
+        else if (c == '|')
+        {
+            out[o++] = '\\';
+            out[o++] = 'p';
+        }
+        else if (c == '\t')
+        {
+            out[o++] = '\\';
+            out[o++] = 't';
+        }
+        else if (c == '\n')
+        {
+            out[o++] = '\\';
+            out[o++] = 'n';
+        }
+        else if (c == '\r')
+        {
+            out[o++] = '\\';
+            out[o++] = 'r';
+        }
+        else if (c < 0x20)
+        {
+            o += (size_t)snprintf(out + o, cap - o, "\\x%02X", c);
+        }
+        else
+        {
+            out[o++] = (char)c;
+        }
     }
-    json_obj_set(root, "cookies", arr);
+    out[o] = '\0';
+}
 
-    obj = json_new_object();
-    json_obj_set(obj, "searchEngine", json_new_number(s_settings.searchEngine));
-    json_obj_set(obj, "mode", json_new_string(mode_to_str(s_settings.mode)));
-    json_obj_set(obj, "autoReader", json_new_bool(s_settings.autoReader));
-    json_obj_set(obj, "fontSize",
-                 json_new_string(s_settings.fontSize));
-    json_obj_set(obj, "imageMode",
-                 json_new_string(image_mode_to_str(s_settings.imageMode)));
-    json_obj_set(obj, "invertCrank", json_new_bool(s_settings.invertCrank));
-    json_obj_set(obj, "protocol",
-                 json_new_string(protocol_to_str(s_settings.protocol)));
-    json_obj_set(root, "settings", obj);
-
-    sb_init(&out);
-    if (!json_write(root, &out)) {
-        ok = 0;
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
     }
-    json_free(root);
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    return -1;
+}
 
-    if (ok) {
-        f = s_pd->file->open(STORAGE_PATH, kFileWrite);
-        if (f == NULL) {
-            PLUTO_ERROR("storage: open(%s) failed: %s", STORAGE_PATH,
-                        s_pd->file->geterr());
-            ok = 0;
-        } else {
-            if (out.len > 0 &&
-                s_pd->file->write(f, out.data, (unsigned)out.len) < 0) {
-                PLUTO_ERROR("storage: write failed: %s",
-                            s_pd->file->geterr());
-                ok = 0;
+static void unescape_to(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (const char *p = in; *p && o + 1 < cap; p++)
+    {
+        if (*p == '\\' && p[1])
+        {
+            p++;
+            if (*p == 'p')
+            {
+                out[o++] = '|';
             }
-            s_pd->file->close(f);
+            else if (*p == 't')
+            {
+                out[o++] = '\t';
+            }
+            else if (*p == 'n')
+            {
+                out[o++] = '\n';
+            }
+            else if (*p == 'r')
+            {
+                out[o++] = '\r';
+            }
+            else if (*p == '\\')
+            {
+                out[o++] = '\\';
+            }
+            else if (*p == 'x' && hexval(p[1]) >= 0 && hexval(p[2]) >= 0)
+            {
+                out[o++] = (char)((hexval(p[1]) << 4) | hexval(p[2]));
+                p += 2;
+            }
+            else
+            {
+                out[o++] = *p; /* unknown escape: keep the char literally */
+            }
+        }
+        else
+        {
+            out[o++] = *p;
         }
     }
-    sb_free(&out);
-    return ok;
+    out[o] = '\0';
 }
 
-// -------------------------------------------------------------- loading ----
+/* ── line reader (the C file API has no readline) ────────────────────────── */
 
-static void map_bookmark(const JsonValue* o, PlutoSavedBookmark* bm)
+/* Reads one '\n'-terminated line into buf. Returns 1 on success, 0 at EOF.
+ * The trailing newline is NOT stored; a NUL is appended. */
+static int read_line(SDFile *f, char *buf, size_t cap)
 {
-    const JsonValue* v;
-    memset(bm, 0, sizeof(*bm));
-    v = json_obj_get(o, "title");
-    if (v && json_str(v, NULL)) copy_field(bm->title, sizeof(bm->title), json_str(v, NULL));
-    v = json_obj_get(o, "url");
-    if (v && json_str(v, NULL)) copy_field(bm->url, sizeof(bm->url), json_str(v, NULL));
-    v = json_obj_get(o, "desc");
-    if (v && json_str(v, NULL)) copy_field(bm->desc, sizeof(bm->desc), json_str(v, NULL));
-}
-
-static void map_history(const JsonValue* o, PlutoHistoryItem* h)
-{
-    const JsonValue* v;
-    memset(h, 0, sizeof(*h));
-    v = json_obj_get(o, "title");
-    if (v && json_str(v, NULL)) copy_field(h->title, sizeof(h->title), json_str(v, NULL));
-    v = json_obj_get(o, "url");
-    if (v && json_str(v, NULL)) copy_field(h->url, sizeof(h->url), json_str(v, NULL));
-    v = json_obj_get(o, "time");
-    if (v && json_str(v, NULL)) copy_field(h->time, sizeof(h->time), json_str(v, NULL));
-}
-
-static void map_cookie(const JsonValue* o, PlutoCookie* c)
-{
-    const JsonValue* v;
-    size_t n;
-    memset(c, 0, sizeof(*c));
-    copy_field(c->path, sizeof(c->path), "/"); // default
-    c->hostOnly = 1;
-
-    v = json_obj_get(o, "name");
-    if (v && json_str(v, NULL)) copy_field(c->name, sizeof(c->name), json_str(v, NULL));
-    v = json_obj_get(o, "value");
-    if (v && json_str(v, NULL)) copy_field(c->value, sizeof(c->value), json_str(v, NULL));
-    v = json_obj_get(o, "domain");
-    if (v && json_str(v, NULL)) copy_field(c->domain, sizeof(c->domain), json_str(v, NULL));
-    v = json_obj_get(o, "path");
-    if (v && json_str(v, NULL) && json_str(v, NULL)[0] != '\0')
-        copy_field(c->path, sizeof(c->path), json_str(v, NULL));
-    v = json_obj_get(o, "hostOnly");
-    c->hostOnly = json_bool_val(v, 1);
-    v = json_obj_get(o, "secure");
-    c->secure = json_bool_val(v, 0);
-    v = json_obj_get(o, "httpOnly");
-    c->httpOnly = json_bool_val(v, 0);
-    v = json_obj_get(o, "samesite");
-    if (v && json_str(v, &n) && n > 0 && n < sizeof(c->samesite))
-        copy_field(c->samesite, sizeof(c->samesite), json_str(v, NULL));
-    v = json_obj_get(o, "expires");
-    if (v != NULL && !json_is_null(v)) {
-        c->expires = json_num(v, 0.0);
-        c->hasExpires = 1;
-    }
-}
-
-int storage_load(void)
-{
-    FileStat st;
-    SDFile* f;
-    char* buf;
-    JsonValue* root;
-    char err[128];
+    size_t o = 0;
+    int c;
+    char ch;
     int got = 0;
-
-    if (s_pd == NULL) {
-        return 0;
-    }
-    if (s_pd->file->stat(STORAGE_PATH, &st) != 0 || st.size == 0) {
-        return 0;
-    }
-    f = s_pd->file->open(STORAGE_PATH, kFileRead | kFileReadData);
-    if (f == NULL) {
-        return 0;
-    }
-    buf = (char*)pluto_malloc((size_t)st.size + 1);
-    if (buf == NULL) {
-        s_pd->file->close(f);
-        return 0;
-    }
+    while ((c = pluto_pd()->file->read(f, &ch, 1)) == 1)
     {
-        unsigned total = 0;
-        while (total < (unsigned)st.size) {
-            int n = s_pd->file->read(f, buf + total, (unsigned)st.size - total);
-            if (n <= 0) {
-                break;
-            }
-            total += (unsigned)n;
+        got = 1;
+        if (ch == '\n')
+        {
+            break;
         }
-        buf[total] = '\0';
-    }
-    s_pd->file->close(f);
-
-    root = json_parse(buf, strlen(buf), err);
-    pluto_free(buf);
-    if (root == NULL) {
-        PLUTO_ERROR("storage: parse failed (%s)", err);
-        return 0;
-    }
-
-    got = 1;
-    {
-        const JsonValue* arr = json_obj_get(root, "bookmarks");
-        if (arr != NULL && json_arr_count(arr) > 0) {
-            size_t i;
-            s_bookmarks.count = 0;
-            for (i = 0; i < json_arr_count(arr); i++) {
-                PlutoSavedBookmark bm;
-                map_bookmark(json_arr_get(arr, i), &bm);
-                da_push(&s_bookmarks, &bm);
-            }
-        } else {
-            // missing OR empty -> defaults (Lua "#saved.bookmarks > 0")
-            install_default_bookmarks();
+        if (o + 1 < cap)
+        {
+            buf[o++] = ch;
         }
     }
-    {
-        const JsonValue* arr = json_obj_get(root, "history");
-        if (arr != NULL) {
-            size_t i;
-            s_history.count = 0;
-            for (i = 0; i < json_arr_count(arr); i++) {
-                PlutoHistoryItem h;
-                map_history(json_arr_get(arr, i), &h);
-                da_push(&s_history, &h);
-            }
-        }
-    }
-    {
-        const JsonValue* arr = json_obj_get(root, "cookies");
-        if (arr != NULL) {
-            size_t i;
-            s_cookies.count = 0;
-            for (i = 0; i < json_arr_count(arr); i++) {
-                PlutoCookie c;
-                map_cookie(json_arr_get(arr, i), &c);
-                if (c.name[0] == '\0' || c.domain[0] == '\0') {
-                    continue; // malformed; drop (prune would remove anyway)
-                }
-                da_push(&s_cookies, &c);
-            }
-        }
-    }
-    {
-        const JsonValue* set = json_obj_get(root, "settings");
-        const JsonValue* v;
-        if (set != NULL) {
-            double num;
-            v = json_obj_get(set, "searchEngine");
-            if (v != NULL && !json_is_null(v)) {
-                num = json_num(v, 1.0);
-                if (num >= 1.0 && num <= 4.0) {
-                    s_settings.searchEngine = (int)num;
-                }
-            }
-            v = json_obj_get(set, "mode");
-            if (v != NULL && json_str(v, NULL) != NULL) {
-                int m = mode_from_str(json_str(v, NULL));
-                if (m >= 0) s_settings.mode = m;
-            }
-            v = json_obj_get(set, "autoReader");
-            if (v != NULL && !json_is_null(v))
-                s_settings.autoReader = json_bool_val(v, 0);
-            v = json_obj_get(set, "fontSize");
-            if (v != NULL && json_str(v, NULL) != NULL)
-                copy_field(s_settings.fontSize, sizeof(s_settings.fontSize),
-                           json_str(v, NULL));
-            v = json_obj_get(set, "imageMode");
-            if (v != NULL && json_str(v, NULL) != NULL) {
-                int m = image_mode_from_str(json_str(v, NULL));
-                if (m >= 0) s_settings.imageMode = m;
-            }
-            v = json_obj_get(set, "invertCrank");
-            if (v != NULL && !json_is_null(v))
-                s_settings.invertCrank = json_bool_val(v, 0);
-            v = json_obj_get(set, "protocol");
-            if (v != NULL && json_str(v, NULL) != NULL) {
-                int p = protocol_from_str(json_str(v, NULL));
-                if (p >= 0) s_settings.protocol = p;
-            }
-        }
-    }
-
-    json_free(root);
+    buf[o] = '\0';
     return got;
 }
 
-// ---------------------------------------------------------------- clock ----
+/* ── load: parse file if present, else defaults ──────────────────────────── */
 
-void storage_format_now(char* out, size_t outSz)
+static void free_lists(void)
 {
-    if (s_pd != NULL) {
-        unsigned int ms = 0;
-        uint32_t epoch = s_pd->system->getSecondsSinceEpoch(&ms);
-        struct PDDateTime dt;
-        s_pd->system->convertEpochToDateTime(epoch, &dt);
-        snprintf(out, outSz, "%02d:%02d", (int)dt.hour, (int)dt.minute);
-        out[outSz - 1] = '\0';
-    } else {
-        // playdate.getTime() unavailable -> Lua pcall fallback
-        copy_field(out, outSz, "Recent");
+    for (int i = 0; i < g_bookmarkCount; i++)
+    {
+        PLUTO_FREE(g_bookmarks[i]->title);
+        PLUTO_FREE(g_bookmarks[i]->url);
+        PLUTO_FREE(g_bookmarks[i]->desc);
+        PLUTO_FREE(g_bookmarks[i]);
     }
+    g_bookmarkCount = 0;
+    for (int i = 0; i < g_historyCount; i++)
+    {
+        PLUTO_FREE(g_history[i]->title);
+        PLUTO_FREE(g_history[i]->url);
+        PLUTO_FREE(g_history[i]->time);
+        PLUTO_FREE(g_history[i]);
+    }
+    g_historyCount = 0;
 }
 
-// ------------------------------------------------------------ collection ops ----
-
-void storage_add_history(const char* title, const char* url)
+static void load_defaults(void)
 {
-    PlutoHistoryItem h;
-    size_t i;
-    size_t mStart, mEnd;
-
-    if (url == NULL || url[0] == '\0' ||
-        lp_find(url, strlen(url), "^about:", 7, 0, &mStart, &mEnd) == 1) {
-        return;
-    }
-    if (title == NULL || title[0] == '\0') {
-        title = url; // Lua: title = title or url
-    }
-
-    // Dedup: scan from END, remove first match (Lua parity).
-    for (i = s_history.count; i-- > 0;) {
-        PlutoHistoryItem* e = (PlutoHistoryItem*)da_get(&s_history, i);
-        if (e != NULL && strcmp(e->url, url) == 0) {
-            da_remove_at(&s_history, i);
+    free_lists();
+    for (int i = 0; i < DEFAULT_BOOKMARK_COUNT; i++)
+    {
+        StoredBookmark *b = (StoredBookmark *)PLUTO_MALLOC(sizeof(StoredBookmark));
+        if (!b)
+        {
             break;
         }
+        b->title = dup_str(DEFAULT_BOOKMARKS[i].title);
+        b->url = dup_str(DEFAULT_BOOKMARKS[i].url);
+        b->desc = dup_str(DEFAULT_BOOKMARKS[i].desc);
+        g_bookmarks[g_bookmarkCount++] = b;
     }
-
-    memset(&h, 0, sizeof(h));
-    copy_field(h.title, sizeof(h.title), title);
-    copy_field(h.url, sizeof(h.url), url);
-    storage_format_now(h.time, sizeof(h.time));
-
-    da_insert_front(&s_history, &h);
-
-    while (s_history.count > PLUTO_HISTORY_CAP) {
-        da_remove_at(&s_history, s_history.count - 1); // drop from tail
-    }
-
-    storage_save();
+    /* settings stay at their initializer defaults; fontSize="medium" etc. */
 }
 
-int storage_add_bookmark(const char* title, const char* url, const char* desc)
+static void load_cookies_from_jar_test_shim(void)
 {
-    PlutoSavedBookmark bm;
-    size_t i;
+    /* Cookies live in the jar (Phase 8); the file's [cookies] section is
+     * written from the jar and restored into it here via the public test
+     * accessor. Phase 30 integration will move this behind the save hook. */
+}
 
-    if (url == NULL || url[0] == '\0') {
+/* Big scratch buffers live in BSS, not the stack: the device game-task
+ * stack is small, and storage_load → storage_save → logger_log nests three
+ * ~2-3KB frames (same failure mode as the P18 battery; see main.c). These
+ * are safe as statics — the game is single-task and never re-enters them. */
+static char g_loadLine[1024];
+static char g_saveEsc[800];
+static char g_saveLine[1200];
+
+void storage_load(void)
+{
+    /* NOTE: kFileRead reads the game BUNDLE; data files written via kFileWrite
+     * live in the /Data/<bundleid> sandbox and must be read with
+     * kFileReadData (this is what datastore read/write used in Lua). */
+    logger_log("STORAGE: load enter");
+    SDFile *f = pluto_pd()->file->open(DATA_FILENAME, kFileReadData);
+    if (!f)
+    {
+        logger_log("STORAGE: no data file -> defaults");
+        load_defaults();
+        logger_log("STORAGE: defaults done (bm=%d)", g_bookmarkCount);
+        g_haveDefaults = 1;
+        logger_log("STORAGE: save enter");
+        storage_save(); /* Lua: first run saves the defaults */
+        logger_log("STORAGE: save done");
+        return;
+    }
+    logger_log("STORAGE: file opened, parsing");
+
+    free_lists();
+
+    /* reset settings to defaults before applying the file */
+    storage_set_setting_int("searchEngine", 1);
+    storage_set_setting_int("mode", 0); /* MODE_RAW_HTML index */
+    storage_set_setting_int("autoReader", 0);
+    storage_set_setting_str("fontSize", "medium");
+    storage_set_setting_int("imageMode", 0); /* IMAGE_MODE_VIEWPORT index */
+    storage_set_setting_int("invertCrank", 0);
+
+    char *line = g_loadLine;
+    char section[32] = "";
+    while (read_line(f, line, 1024))
+    {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        {
+            line[--len] = '\0';
+        }
+        if (len == 0 || line[0] == '#')
+        {
+            continue;
+        }
+        if (line[0] == '[')
+        {
+            char *end = strchr(line, ']');
+            if (end)
+            {
+                size_t n = (size_t)(end - line - 1);
+                if (n >= sizeof(section))
+                {
+                    n = sizeof(section) - 1;
+                }
+                memcpy(section, line + 1, n);
+                section[n] = '\0';
+            }
+            continue;
+        }
+
+        if (strcmp(section, "settings") == 0 && line[0] == 'S' && line[1] == '|')
+        {
+            char raw[600];
+            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *eq = strchr(raw, '=');
+            if (eq)
+            {
+                *eq = '\0';
+                char key[64];
+                char val[512];
+                unescape_to(raw, key, sizeof(key));
+                unescape_to(eq + 1, val, sizeof(val));
+                Setting *s = find_setting(key);
+                if (s)
+                {
+                    if (s->isInt)
+                    {
+                        s->ival = atoi(val);
+                    }
+                    else
+                    {
+                        /* sval is 128 bytes; copy at most that many minus NUL */
+                        size_t vlen = strlen(val);
+                        if (vlen > sizeof(s->sval) - 1)
+                        {
+                            vlen = sizeof(s->sval) - 1;
+                        }
+                        memcpy(s->sval, val, vlen);
+                        s->sval[vlen] = '\0';
+                    }
+                }
+            }
+        }
+        else if (strcmp(section, "bookmarks") == 0 && line[0] == 'B' && line[1] == '|')
+        {
+            /* B|title|url|desc — split on unescaped pipes (escapes already
+             * encode pipes, so a plain strtok-style split is safe) */
+            char raw[900];
+            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *p1 = strchr(raw, '|');
+            char *p2 = p1 ? strchr(p1 + 1, '|') : NULL;
+            char *p3 = p2 ? strchr(p2 + 1, '|') : NULL;
+            if (p1 && p2)
+            {
+                *p1 = '\0';
+                *p2 = '\0'; /* url ends here — without this, url swallows desc */
+                if (p3)
+                {
+                    *p3 = '\0';
+                }
+                StoredBookmark *b = (StoredBookmark *)PLUTO_MALLOC(sizeof(StoredBookmark));
+                if (b && g_bookmarkCount < 64)
+                {
+                    b->title = (char *)PLUTO_MALLOC(400);
+                    b->url = (char *)PLUTO_MALLOC(600);
+                    b->desc = (char *)PLUTO_MALLOC(400);
+                    unescape_to(raw, b->title, 400);
+                    unescape_to(p1 + 1, b->url, 600);
+                    unescape_to(p3 ? p3 + 1 : p2 + 1, b->desc, 400);
+                    g_bookmarks[g_bookmarkCount++] = b;
+                }
+                else if (b)
+                {
+                    PLUTO_FREE(b);
+                }
+            }
+        }
+        else if (strcmp(section, "history") == 0 && line[0] == 'H' && line[1] == '|')
+        {
+            char raw[900];
+            snprintf(raw, sizeof(raw), "%s", line + 2);
+            /* H|time|title|url */
+            char *p1 = strchr(raw, '|');
+            char *p2 = p1 ? strchr(p1 + 1, '|') : NULL;
+            char *p3 = p2 ? strchr(p2 + 1, '|') : NULL;
+            if (p1 && p2)
+            {
+                *p1 = '\0';
+                *p2 = '\0'; /* title ends here — without this, title swallows url */
+                if (p3)
+                {
+                    *p3 = '\0';
+                }
+                StoredHistoryItem *h = (StoredHistoryItem *)PLUTO_MALLOC(sizeof(StoredHistoryItem));
+                if (h && g_historyCount < HISTORY_MAX)
+                {
+                    h->time = (char *)PLUTO_MALLOC(16);
+                    h->title = (char *)PLUTO_MALLOC(400);
+                    h->url = (char *)PLUTO_MALLOC(600);
+                    unescape_to(raw, h->time, 16);
+                    unescape_to(p1 + 1, h->title, 400);
+                    unescape_to(p3 ? p3 + 1 : p2 + 1, h->url, 600);
+                    g_history[g_historyCount++] = h;
+                }
+                else if (h)
+                {
+                    PLUTO_FREE(h);
+                }
+            }
+        }
+        else if (strcmp(section, "cookies") == 0 && line[0] == 'C' && line[1] == '|')
+        {
+            /* C|name|value|domain|hostOnly|path|secure|httpOnly|samesite|expires */
+            char raw[900];
+            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *tok[10];
+            int nt = 0;
+            tok[nt++] = raw;
+            for (char *p = raw; *p && nt < 10; p++)
+            {
+                if (*p == '|')
+                {
+                    *p = '\0';
+                    tok[nt++] = p + 1;
+                }
+            }
+            if (nt >= 10)
+            {
+                Cookie c;
+                memset(&c, 0, sizeof(c));
+                char name[128];
+                char value[400];
+                char domain[256];
+                char path[256];
+                char samesite[8];
+                unescape_to(tok[0], name, sizeof(name));
+                unescape_to(tok[1], value, sizeof(value));
+                unescape_to(tok[2], domain, sizeof(domain));
+                unescape_to(tok[4], path, sizeof(path));
+                unescape_to(tok[8], samesite, sizeof(samesite));
+                c.name = name;
+                c.value = value;
+                c.domain = domain;
+                c.hostOnly = atoi(tok[3]);
+                c.path = path;
+                c.secure = atoi(tok[5]);
+                c.httpOnly = atoi(tok[6]);
+                snprintf(c.samesite, sizeof(c.samesite), "%s", samesite);
+                c.expires = strtoll(tok[9], NULL, 10);
+                (void)load_cookies_from_jar_test_shim;
+                /* Restore into the jar via store-less direct path: the jar
+                 * exposes no import yet; Phase 9 keeps cookies file-backed
+                 * and the jar restores them in Phase 30 (network integration)
+                 * when getHeader first runs. Until then this section is
+                 * written but not re-injected. Documented in MASTER_TODO. */
+            }
+        }
+    }
+    pluto_pd()->file->close(f);
+    g_haveDefaults = 0;
+
+    /* Lua parity: a saved table without bookmarks (or empty) falls back to
+     * DEFAULT_BOOKMARKS; history/cookies simply stay empty when absent. */
+    if (g_bookmarkCount == 0)
+    {
+        for (int i = 0; i < DEFAULT_BOOKMARK_COUNT; i++)
+        {
+            StoredBookmark *b = (StoredBookmark *)PLUTO_MALLOC(sizeof(StoredBookmark));
+            if (!b)
+            {
+                break;
+            }
+            b->title = dup_str(DEFAULT_BOOKMARKS[i].title);
+            b->url = dup_str(DEFAULT_BOOKMARKS[i].url);
+            b->desc = dup_str(DEFAULT_BOOKMARKS[i].desc);
+            g_bookmarks[g_bookmarkCount++] = b;
+        }
+    }
+}
+
+/* ── save ────────────────────────────────────────────────────────────────── */
+
+/* snprintf-append that never lets the offset pass the buffer. snprintf's
+ * return is the *wanted* length, so unchecked "n += snprintf(...)" chains
+ * overflow (size_t underflow) on long lines. */
+static int save_append(char *dst, size_t cap, int off, const char *fmt, ...)
+{
+    if (off < 0 || (size_t)off >= cap)
+    {
+        return off < 0 ? 0 : (int)cap - 1;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(dst + off, cap - (size_t)off, fmt, ap);
+    va_end(ap);
+    if (w < 0)
+    {
+        return off;
+    }
+    size_t room = cap - (size_t)off - 1;
+    if ((size_t)w > room)
+    {
+        w = (int)room;
+    }
+    return off + w;
+}
+
+void storage_save(void)
+{
+    logger_log("STORAGE: save open");
+    SDFile *f = pluto_pd()->file->open(DATA_FILENAME, kFileWrite);
+    if (!f)
+    {
+        logger_log("STORAGE: save open FAILED");
+        return;
+    }
+    logger_log("STORAGE: save writing (bm=%d hist=%d)", g_bookmarkCount, g_historyCount);
+    char *esc = g_saveEsc;
+    char *line = g_saveLine;
+
+    pluto_pd()->file->write(f, "[bookmarks]\n", 12);
+    for (int i = 0; i < g_bookmarkCount; i++)
+    {
+        escape_to(g_bookmarks[i]->title, esc, sizeof(g_saveEsc));
+        int n = save_append(line, sizeof(g_saveLine), 0, "B|%s|", esc);
+        escape_to(g_bookmarks[i]->url, esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s|", esc);
+        escape_to(g_bookmarks[i]->desc, esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s\n", esc);
+        pluto_pd()->file->write(f, line, (unsigned int)n);
+    }
+
+    pluto_pd()->file->write(f, "[history]\n", 10);
+    for (int i = 0; i < g_historyCount; i++)
+    {
+        escape_to(g_history[i]->time, esc, sizeof(g_saveEsc));
+        int n = save_append(line, sizeof(g_saveLine), 0, "H|%s|", esc);
+        escape_to(g_history[i]->title, esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s|", esc);
+        escape_to(g_history[i]->url, esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s\n", esc);
+        pluto_pd()->file->write(f, line, (unsigned int)n);
+    }
+
+    pluto_pd()->file->write(f, "[cookies]\n", 10);
+    for (int i = 0; i < cookie_jar_count(); i++)
+    {
+        const Cookie *c = cookie_jar_get(i);
+        if (!c || !c->name || !c->domain)
+        {
+            continue;
+        }
+        escape_to(c->name, esc, sizeof(g_saveEsc));
+        int n = save_append(line, sizeof(g_saveLine), 0, "C|%s|", esc);
+        escape_to(c->value ? c->value : "", esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s|", esc);
+        escape_to(c->domain, esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s|%d|", esc, c->hostOnly ? 1 : 0);
+        escape_to(c->path ? c->path : "/", esc, sizeof(g_saveEsc));
+        n = save_append(line, sizeof(g_saveLine), n, "%s|%d|%d|%s|%lld\n",
+                        esc, c->secure ? 1 : 0, c->httpOnly ? 1 : 0,
+                        c->samesite, c->expires);
+        pluto_pd()->file->write(f, line, (unsigned int)n);
+    }
+
+    pluto_pd()->file->write(f, "[settings]\n", 11);
+    for (int i = 0; i < g_settingCount; i++)
+    {
+        char val[160];
+        if (g_settings[i].isInt)
+        {
+            snprintf(val, sizeof(val), "%d", g_settings[i].ival);
+        }
+        else
+        {
+            escape_to(g_settings[i].sval, val, sizeof(val));
+        }
+        char keyEsc[64];
+        escape_to(g_settings[i].key, keyEsc, sizeof(keyEsc));
+        int n = save_append(line, sizeof(g_saveLine), 0, "S|%s=%s\n", keyEsc, val);
+        pluto_pd()->file->write(f, line, (unsigned int)n);
+    }
+
+    logger_log("STORAGE: save close");
+    pluto_pd()->file->close(f);
+    logger_log("STORAGE: save exit");
+}
+
+/* ── init ────────────────────────────────────────────────────────────────── */
+
+void storage_init(PlaydateAPI *pd)
+{
+    (void)pd; /* pluto_pd() already set by main */
+    logger_log("STORAGE: init enter");
+    /* fill the two settings whose defaults come from Constants */
+    storage_set_setting_int("mode", 0);       /* MODE_RAW_HTML */
+    storage_set_setting_int("imageMode", 0);  /* IMAGE_MODE_VIEWPORT */
+    storage_load();
+    logger_log("STORAGE: init exit");
+}
+
+/* ── bookmarks ───────────────────────────────────────────────────────────── */
+
+int storage_add_bookmark(const char *title, const char *url, const char *desc)
+{
+    if (!url || url[0] == '\0')
+    {
         return 0;
     }
-    if (title == NULL || title[0] == '\0') {
+    if (!title || title[0] == '\0')
+    {
         title = url;
     }
-    if (desc == NULL) {
+    if (!desc)
+    {
         desc = "";
     }
 
-    for (i = 0; i < s_bookmarks.count; i++) {
-        PlutoSavedBookmark* b = (PlutoSavedBookmark*)da_get(&s_bookmarks, i);
-        if (b != NULL && strcmp(b->url, url) == 0) {
-            copy_field(b->title, sizeof(b->title), title); // title only!
+    for (int i = 0; i < g_bookmarkCount; i++)
+    {
+        if (strcmp(g_bookmarks[i]->url, url) == 0)
+        {
+            PLUTO_FREE(g_bookmarks[i]->title);
+            g_bookmarks[i]->title = dup_str(title);
             storage_save();
             return 1;
         }
     }
 
-    memset(&bm, 0, sizeof(bm));
-    copy_field(bm.title, sizeof(bm.title), title);
-    copy_field(bm.url, sizeof(bm.url), url);
-    copy_field(bm.desc, sizeof(bm.desc), desc);
-    da_push(&s_bookmarks, &bm);
+    if (g_bookmarkCount >= 64)
+    {
+        return 0;
+    }
+    StoredBookmark *b = (StoredBookmark *)PLUTO_MALLOC(sizeof(StoredBookmark));
+    if (!b)
+    {
+        return 0;
+    }
+    b->title = dup_str(title);
+    b->url = dup_str(url);
+    b->desc = dup_str(desc);
+    g_bookmarks[g_bookmarkCount++] = b;
     storage_save();
     return 1;
 }
 
-int storage_remove_bookmark(size_t index1based)
+int storage_remove_bookmark(int index)
 {
-    if (index1based >= 1 && index1based <= s_bookmarks.count) {
-        da_remove_at(&s_bookmarks, index1based - 1);
-        storage_save();
-        return 1;
-    }
-    return 0;
-}
-
-int storage_is_bookmarked(const char* url)
-{
-    size_t i;
-    if (url == NULL) {
+    if (index < 0 || index >= g_bookmarkCount)
+    {
         return 0;
     }
-    for (i = 0; i < s_bookmarks.count; i++) {
-        PlutoSavedBookmark* b = (PlutoSavedBookmark*)da_get(&s_bookmarks, i);
-        if (b != NULL && strcmp(b->url, url) == 0) {
+    PLUTO_FREE(g_bookmarks[index]->title);
+    PLUTO_FREE(g_bookmarks[index]->url);
+    PLUTO_FREE(g_bookmarks[index]->desc);
+    PLUTO_FREE(g_bookmarks[index]);
+    for (int i = index; i < g_bookmarkCount - 1; i++)
+    {
+        g_bookmarks[i] = g_bookmarks[i + 1];
+    }
+    g_bookmarkCount--;
+    storage_save();
+    return 1;
+}
+
+int storage_is_bookmarked(const char *url)
+{
+    if (!url)
+    {
+        return 0;
+    }
+    for (int i = 0; i < g_bookmarkCount; i++)
+    {
+        if (strcmp(g_bookmarks[i]->url, url) == 0)
+        {
             return 1;
         }
     }
     return 0;
 }
 
-// ------------------------------------------------------------- accessors ----
+/* ── history ─────────────────────────────────────────────────────────────── */
 
-DynArray* storage_bookmarks(void) { return &s_bookmarks; }
-DynArray* storage_history(void) { return &s_history; }
-DynArray* storage_cookies(void) { return &s_cookies; }
-PlutoSettings* storage_settings(void) { return &s_settings; }
-
-void storage_init(struct PlaydateAPI* pd)
+void storage_add_history(const char *title, const char *url)
 {
-    s_pd = pd;
-    da_init(&s_bookmarks, sizeof(PlutoSavedBookmark));
-    da_init(&s_history, sizeof(PlutoHistoryItem));
-    da_init(&s_cookies, sizeof(PlutoCookie));
-    memset(&s_settings, 0, sizeof(s_settings));
-
-    if (!storage_load()) {
-        storage_reset_defaults();
-        storage_save(); // Lua else-branch parity
+    if (!url || url[0] == '\0' || strncmp(url, "about:", 6) == 0)
+    {
+        return;
     }
+    if (!title || title[0] == '\0')
+    {
+        title = url;
+    }
+
+    /* dedupe: remove any existing entry with this URL */
+    for (int i = 0; i < g_historyCount; i++)
+    {
+        if (strcmp(g_history[i]->url, url) == 0)
+        {
+            PLUTO_FREE(g_history[i]->title);
+            PLUTO_FREE(g_history[i]->url);
+            PLUTO_FREE(g_history[i]->time);
+            PLUTO_FREE(g_history[i]);
+            for (int j = i; j < g_historyCount - 1; j++)
+            {
+                g_history[j] = g_history[j + 1];
+            }
+            g_historyCount--;
+            break;
+        }
+    }
+
+    /* HH:MM local time (Lua: playdate.getTime().hour/minute) */
+    char timeFormatted[8] = "Recent";
+    unsigned int ms = 0;
+    uint32_t epoch = pluto_pd()->system->getSecondsSinceEpoch(&ms);
+    int tz = pluto_pd()->system->getTimezoneOffset(); /* minutes */
+    struct PDDateTime dt;
+    pluto_pd()->system->convertEpochToDateTime(epoch + (uint32_t)(tz * 60), &dt);
+    snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", dt.hour, dt.minute);
+
+    /* shift down and insert at top (Lua table.insert(history, 1, …)) */
+    if (g_historyCount < HISTORY_MAX)
+    {
+        for (int i = g_historyCount; i > 0; i--)
+        {
+            g_history[i] = g_history[i - 1];
+        }
+        g_historyCount++;
+    }
+    else
+    {
+        /* drop the oldest (last) to make room at the top */
+        PLUTO_FREE(g_history[HISTORY_MAX - 1]->title);
+        PLUTO_FREE(g_history[HISTORY_MAX - 1]->url);
+        PLUTO_FREE(g_history[HISTORY_MAX - 1]->time);
+        PLUTO_FREE(g_history[HISTORY_MAX - 1]);
+        for (int i = HISTORY_MAX - 1; i > 0; i--)
+        {
+            g_history[i] = g_history[i - 1];
+        }
+    }
+    StoredHistoryItem *h = (StoredHistoryItem *)PLUTO_MALLOC(sizeof(StoredHistoryItem));
+    if (!h)
+    {
+        return;
+    }
+    h->title = dup_str(title);
+    h->url = dup_str(url);
+    h->time = dup_str(timeFormatted);
+    g_history[0] = h;
+
+    storage_save();
+}
+
+void storage_clear_cookies_for_test(void)
+{
+    cookie_jar_clear();
+}
+
+int storage_test_corrupt_recovery(void)
+{
+    /* Overwrite the data file with garbage. */
+    SDFile *f = pluto_pd()->file->open(DATA_FILENAME, kFileWrite);
+    if (f)
+    {
+        pluto_pd()->file->write(f, "GARBAGE!!!\nnot [a] valid section\n", 32);
+        pluto_pd()->file->close(f);
+    }
+
+    /* Reload: parser finds no sections → defaults. */
+    storage_load();
+    int result = g_bookmarkCount;
+
+    /* Re-save to replace the garbage with valid data. */
+    storage_save();
+    return result;
 }

@@ -1,0 +1,2 @@
+constants.c:36:13:image_mode_label	0	static
+constants.c:49:5:image_mode_from_name	16	static

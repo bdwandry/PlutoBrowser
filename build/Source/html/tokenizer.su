@@ -1,0 +1,8 @@
+tokenizer.c:110:12:toklist_push	32	static
+tokenizer.c:275:20:find_close_tag	48	static
+tokenizer.c:96:14:arena_dup	24	static
+tokenizer.c:165:12:attr_push	24	static
+tokenizer.c:431:12:push_text.part.0	64	static
+tokenizer.c:190:12:store_attr	40	static
+tokenizer.c:500:5:tokenizer_tokenize	368	static
+tokenizer.c:709:6:tokenizer_free_result	24	static

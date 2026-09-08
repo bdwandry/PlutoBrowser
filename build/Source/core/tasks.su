@@ -1,0 +1,8 @@
+tasks.c:19:6:tasks_init	8	static
+tasks.c:27:6:tasks_report_progress	0	static
+tasks.c:43:7:tasks_get_progress	0	static
+tasks.c:48:5:tasks_is_running	0	static
+tasks.c:53:5:tasks_run	48	static
+tasks.c:73:5:tasks_yield_check	8	static
+tasks.c:91:6:tasks_cancel_all	0	static
+tasks.c:101:6:tasks_update	48	static

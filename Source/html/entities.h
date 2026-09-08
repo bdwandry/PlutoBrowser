@@ -1,26 +1,33 @@
-// entities.h — HTML entity decoder & UTF-8 sanitizer
-// (C port of html/entities.lua).
-//
-// Phase P06. decode() mirrors the source pipeline:
-//   fast path (no '&' and no byte >=0x80 -> verbatim copy),
-//   1. decimal numeric entities   &#123;
-//   2. hex numeric entities       &#x1F;   (asymmetric: fewer specials)
-//   3. named entities             &name;   (%a+ only — &frac12; does NOT match)
-//   early return when no high bytes were present,
-//   4. fixed UTF-8 sequence rewrites,
-//   5. transliteration map + final byte loop (2-byte cp decode, 3+ -> " ").
-// Ownership: returned string is fresh pluto_malloc, NUL-terminated;
-// outLen gets the real byte length.
+/*
+ * PlutoBrowser — entities.h
+ * HTML Entity Decoder & UTF-8 Sanitizer (port of Source/html/entities.lua).
+ *
+ * Lua reference behavior preserved exactly:
+ *  - decode(text): fast path returns the input unchanged when it contains
+ *    neither '&' nor any byte >= 0x80; then sequential passes mirroring the
+ *    Lua gsub chain:
+ *      1. decimal  numeric entities  &#123;
+ *      2. hex      numeric entities  &#x1F; / &#X1F;
+ *      3. named    entities          &name;  (unknown → " name ")
+ *      4. UTF-8 multi-byte sequence cleanup (BOM, dashes, quotes, math…)
+ *      5. transliterate 2-byte Latin sequences via the codepoint table and
+ *         replace everything else non-ASCII with ' '
+ *    Passes run in sequence (not one merged scan) so double-encoded input
+ *    such as "&#38;amp;" cascades to "&" exactly like the reference.
+ *  - encode(text): inverse escaping for embedding text in markup:
+ *    & → &amp;  < → &lt;  > → &gt;  " → &quot;
+ *
+ * Both functions return a heap string owned by the caller (SDK allocator;
+ * free with pluto_free).
+ */
 #ifndef PLUTO_ENTITIES_H
 #define PLUTO_ENTITIES_H
 
-#include <stddef.h>
+/* Caller frees the result with pluto_free(). Never returns NULL except on
+ * catastrophic allocation failure (empty string otherwise). */
+char *entities_decode(const char *text);
 
-struct PlaydateAPI;
+/* Caller frees the result with pluto_free(). */
+char *entities_encode(const char *text);
 
-void entities_init(struct PlaydateAPI* pd);
-
-char* entities_decode(const char* text, size_t len, size_t* outLen);
-char* entities_encode(const char* text, size_t len, size_t* outLen);
-
-#endif // PLUTO_ENTITIES_H
+#endif /* PLUTO_ENTITIES_H */

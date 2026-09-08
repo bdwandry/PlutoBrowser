@@ -1,144 +1,180 @@
-// history_page.c — P30: C port of CometBrowser Source/ui/history_page.lua.
-
-#include "ui/history_page.h"
-
+/*
+ * PlutoBrowser — history_page.c
+ * Browsing history view (port of Source/ui/history_page.lua).
+ * Same list mechanics as bookmarks_page but backed by storage history
+ * (title 34-char / URL 46-char truncation, empty-state message).
+ */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define HI_HAS_PD 1
-#endif
+#include "ui/history_page.h"
+#include "core/constants.h"
+#include "core/storage.h"
+#include "render/style.h"
+#include "pd_api.h"
 
-#include "../core/constants.h"
-#include "../core/logger.h"
-#include "../core/storage.h"
-#include "../render/style.h"
-#include "../util/dynarray.h"
+extern PlaydateAPI *pluto_pd(void);
 
-static int s_selectedIndex = 1;
-static double s_scrollY = 0.0;
+#define BTN_UP (1 << 2)
+#define BTN_DOWN (1 << 3)
+#define BTN_A (1 << 5)
+#define BTN_B (1 << 4)
 
-void hi_open(void) {
-    s_selectedIndex = 1;
-    s_scrollY = 0.0;
+static int g_selectedIndex = 1;
+static float g_scrollY = 0;
+
+void history_page_open(void)
+{
+    g_selectedIndex = 1;
+    g_scrollY = 0;
 }
 
-int hi_selected_index(void) { return s_selectedIndex; }
-double hi_scroll_y(void) { return s_scrollY; }
+int history_page_selected_index(void)
+{
+    return g_selectedIndex;
+}
 
-LpAction hi_handle_input(LrButton btn, char* outUrl, size_t cap) {
-    DynArray* hist = storage_history();
-    int count = hist ? (int)hist->count : 0;
-
-    if (count == 0) {
-        if (btn == LR_BTN_B) return LP_ACT_CLOSE;
-        return LP_ACT_NONE;
+static char *dup_url(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+    if (out)
+    {
+        memcpy(out, s, n);
     }
+    return out;
+}
 
-    if (btn == LR_BTN_DOWN || btn == LR_BTN_UP) {
-        lr_nav(&s_selectedIndex, btn, count);
-        return LP_ACT_NONE;
-    }
-
-    if (btn == LR_BTN_A) {
-        PlutoHistoryItem* h = da_get(hist, (size_t)s_selectedIndex - 1);
-        if (h != NULL) {
-            if (outUrl != NULL && cap > 0) {
-                snprintf(outUrl, cap, "%s", h->url);
-            }
-            return LP_ACT_OPEN;
+char *history_page_handle_input(unsigned int pushed)
+{
+    int count = storage_history_count();
+    if (count == 0)
+    {
+        if (pushed & BTN_B)
+        {
+            return dup_url("close");
         }
-        return LP_ACT_NONE;
+        return NULL;
     }
 
-    if (btn == LR_BTN_B) return LP_ACT_CLOSE;
-    return LP_ACT_NONE;
+    if (pushed & BTN_DOWN)
+    {
+        g_selectedIndex = (g_selectedIndex + 1 <= count) ? g_selectedIndex + 1 : count;
+    }
+    else if (pushed & BTN_UP)
+    {
+        g_selectedIndex = (g_selectedIndex - 1 >= 1) ? g_selectedIndex - 1 : 1;
+    }
+
+    if (pushed & BTN_A)
+    {
+        const StoredHistoryItem *sel = storage_history_at(g_selectedIndex - 1);
+        if (sel)
+        {
+            return dup_url(sel->url);
+        }
+    }
+    else if (pushed & BTN_B)
+    {
+        return dup_url("close");
+    }
+
+    return NULL;
 }
 
-#ifdef HI_HAS_PD
+void history_page_draw(float crankChange)
+{
+    PlaydateAPI *pd = pluto_pd();
+    LCDFont *fontH = style_font(PLUTO_FONT_HEADING2);
+    LCDFont *fontB = style_font(PLUTO_FONT_BODY_BOLD);
+    LCDFont *fontS = style_font(PLUTO_FONT_SMALL);
 
-static PlaydateAPI* s_pd = NULL;
+    if (crankChange != 0.0f)
+    {
+        g_scrollY += crankChange * 2.0f;
+        if (g_scrollY < 0)
+        {
+            g_scrollY = 0;
+        }
+    }
 
-void hi_init_pd(PlaydateAPI* pd) { s_pd = pd; }
+    int startY = CONTENT_Y + 10 - (int)g_scrollY;
 
-void hi_draw(double crankChange) {
-    if (s_pd == NULL) return;
-
-    DynArray* hist = storage_history();
-    int count = hist ? (int)hist->count : 0;
-
-        PlutoFont* fontH = style_get_heading_font(2, NULL, NULL);
-    int bsz = 0;
-    PlutoFont* fontB = style_get_body_font(1, 0, &bsz);
-    PlutoFont* fontS = style_get_ui_small_font();
-
-    lr_scroll(&s_scrollY, crankChange);
-
-    int startY = PLUTO_CONTENT_Y + 10 - (int)s_scrollY;
-
-    
-    s_pd->graphics->setFont(fontH);
-    s_pd->graphics->drawText("BROWSING HISTORY", 16, kASCIIEncoding,
-                             16, startY);
-    s_pd->graphics->drawLine(16, startY + 18, PLUTO_SCREEN_WIDTH - 16,
-                             startY + 18, 1, kColorBlack);
+    pd->graphics->setFont(fontH);
+    const char *title = "BROWSING HISTORY";
+    pd->graphics->drawText(title, strlen(title), kUTF8Encoding, 16, startY);
+    pd->graphics->drawLine(16, startY + 18, SCREEN_WIDTH - 16, startY + 18, 1,
+                           kColorBlack);
 
     int itemY = startY + 26;
-    const int itemH = 34;
+    int itemH = 34;
+    int count = storage_history_count();
 
-    static char clipped[PLUTO_BM_URL_MAX];
-
-    if (count == 0) {
-        s_pd->graphics->setFont(fontB);
-        s_pd->graphics->drawText("No browsing history recorded yet.", 33,
-                                 kASCIIEncoding, 16, itemY);
+    if (count == 0)
+    {
+        pd->graphics->setFont(fontB);
+        const char *empty = "No browsing history recorded yet.";
+        pd->graphics->drawText(empty, strlen(empty), kUTF8Encoding, 16, itemY);
         return;
     }
 
-    for (int i = 1; i <= count; i++) {
-        int isSel = (i == s_selectedIndex);
+    for (int i = 1; i <= count; i++)
+    {
+        const StoredHistoryItem *h = storage_history_at(i - 1);
+        if (!h)
+        {
+            continue;
+        }
+        int isSel = (i == g_selectedIndex);
         int drawY = itemY + (i - 1) * (itemH + 4);
 
-        if (!lr_row_visible((float)drawY, (float)itemH)) continue;
+        if (drawY + itemH >= CONTENT_Y && drawY <= SCREEN_HEIGHT)
+        {
+            if (isSel)
+            {
+                pd->graphics->fillRoundRect(16, drawY, SCREEN_WIDTH - 32, itemH,
+                                            4, kColorBlack);
+                pd->graphics->setDrawMode(kDrawModeFillWhite);
+            }
+            else
+            {
+                pd->graphics->fillRoundRect(16, drawY, SCREEN_WIDTH - 32, itemH,
+                                            4, kColorWhite);
+                pd->graphics->drawRoundRect(16, drawY, SCREEN_WIDTH - 32, itemH,
+                                            4, 1, kColorBlack);
+                pd->graphics->setDrawMode(kDrawModeCopy);
+            }
 
-        PlutoHistoryItem* h = da_get(hist, (size_t)i - 1);
-        if (h == NULL) continue;
+            pd->graphics->setFont(fontB);
+            const char *t = h->title ? h->title : h->url;
+            char titleBuf[48];
+            if (strlen(t) > 34)
+            {
+                snprintf(titleBuf, sizeof(titleBuf), "%.31s...", t);
+            }
+            else
+            {
+                snprintf(titleBuf, sizeof(titleBuf), "%s", t);
+            }
+            pd->graphics->drawText(titleBuf, strlen(titleBuf), kUTF8Encoding, 24,
+                                   drawY + 3);
 
-        if (isSel) {
-            s_pd->graphics->fillRoundRect(
-                16.0f, (float)drawY, (float)(PLUTO_SCREEN_WIDTH - 32),
-                (float)itemH, 4, kColorBlack);
-            s_pd->graphics->setDrawMode(kDrawModeFillWhite);
-        } else {
-            s_pd->graphics->fillRoundRect(
-                16.0f, (float)drawY, (float)(PLUTO_SCREEN_WIDTH - 32),
-                (float)itemH, 4, kColorWhite);
-            s_pd->graphics->drawRoundRect(16, drawY,
-                                          PLUTO_SCREEN_WIDTH - 32,
-                                          itemH, 4, 1, kColorBlack);
-            s_pd->graphics->setDrawMode(kDrawModeCopy);
+            pd->graphics->setFont(fontS);
+            const char *u = h->url ? h->url : "";
+            char urlBuf[64];
+            if (strlen(u) > 46)
+            {
+                snprintf(urlBuf, sizeof(urlBuf), "%.43s...", u);
+            }
+            else
+            {
+                snprintf(urlBuf, sizeof(urlBuf), "%s", u);
+            }
+            pd->graphics->drawText(urlBuf, strlen(urlBuf), kUTF8Encoding, 24,
+                                   drawY + 18);
+
+            pd->graphics->setDrawMode(kDrawModeCopy);
         }
-
-        /* title = h.title or h.url */
-        const char* rawTitle =
-            (h->title[0] != '\0') ? h->title : h->url;
-        lr_clip_title(clipped, sizeof(clipped), rawTitle);
-        s_pd->graphics->setFont(fontB);
-        s_pd->graphics->drawText(clipped, strlen(clipped),
-                                 kUTF8Encoding, 24, drawY + 3);
-
-        lr_clip_url(clipped, sizeof(clipped), h->url);
-        s_pd->graphics->setFont(fontS);
-        s_pd->graphics->drawText(clipped, strlen(clipped),
-                                 kUTF8Encoding, 24, drawY + 18);
-
-        s_pd->graphics->setDrawMode(kDrawModeCopy);
     }
 }
-
-#else /* host build */
-
-void hi_init_pd(PlaydateAPI* pd) { (void)pd; }
-void hi_draw(double crankChange) { (void)crankChange; }
-
-#endif

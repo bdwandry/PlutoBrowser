@@ -1,0 +1,13 @@
+EMPTY|title=Blank Page|base=https://x.com/
+EMPTY|title=Blank Page|base=https://x.com/
+OK|title=My Page|base=https://x.com/|meta=nil
+OK|title=Web Page|base=https://x.com/|meta=nil
+OK|title=Web Page|base=https://x.com/page.html|meta=nil
+OK|title=Web Page|base=https://cdn.example.com/abs/|meta=nil
+OK|title=Web Page|base=https://x.com/start|meta={delay=5,url=https://x.com/next.html}
+OK|title=Web Page|base=https://x.com/|meta={delay=0,url=https://a.b/c?d=1}
+OK|title=Web Page|base=https://x.com/|meta={delay=10,url=nil}
+OK|title=Web Page|base=https://x.com/dir/|meta={delay=2.5,url=https://x.com/dir/rel/page}
+OK|title=Web Page|base=https://x.com/|meta=nil
+OK|title=Web Page|base=https://b.com/|meta={delay=1,url=https://b.com/x}
+OK|title=Web Page|base=https://x.com/|meta={delay=3,url=https://x.com/a}

@@ -1,0 +1,44 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[15:57:56 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[15:57:56 #2] P1 fmt: [str][X][%][-42]
+[15:57:56 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:236
+[15:57:56 #4] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[15:57:56 #5] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[15:57:56 #6] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[15:57:56 #7] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[15:57:56 #8] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[15:57:56 #9] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[15:57:56 #10] === PlutoBrowser boot (Phase 0 scaffold) ===
+[15:57:56 #11] eventHandler: kEventInit, osversion=30101
+[15:57:56 #12] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[15:57:56 #13] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[15:57:56 #14] P5 about: host=home norm=about:home
+[15:57:56 #15] P5 noscheme: norm=https://example.com/path ssl=1
+[15:57:56 #16] P5 defport: norm=http://x.com/
+[15:57:56 #17] P5 unwrap=https://example.org/page
+[15:57:56 #18] P5 resolve1=https://x.com/a/b/c.png
+[15:57:56 #19] P5 resolve2=https://x.com/root.png
+[15:57:56 #20] P5 resolve3=https://cdn.y.com/i.png
+[15:57:56 #21] P5 resolve4=https://x.com/a/page.html#top
+[15:57:56 #22] P5 search: hw=1 dotcom=0 ip=0 about=0
+[15:57:56 #23] P5 encode=%s val=a+b%26clank
+[15:57:56 #24] P5 decode=a b&clank
+[15:57:56 #25] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[15:57:56 #26] P4 scheduled: pending=2
+[15:57:56 #27] updateFrame: first frame executed
+[15:57:56 #28] P4 chain complete (5 iterations)
+[15:57:56 #29] P6 cancel_all after t1 done + t2 error (cancelledFired must stay 0)
+[15:57:56 #30] P6 RESULT: done=1 (want 1) error=1 (want 1) cancelledCompleted=0 (want 0) progress=0.00 running=0
+[15:57:57 #31] P4 oneshot fired (count=1)
+[15:57:57 #32] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[15:58:06 #33] updateFrame: heartbeat frame=300
+[15:58:16 #34] updateFrame: heartbeat frame=600
+[15:58:25 #35] updateFrame: heartbeat frame=900
+[15:58:35 #36] updateFrame: heartbeat frame=1200
+[15:58:45 #37] updateFrame: heartbeat frame=1500
+[15:58:55 #38] updateFrame: heartbeat frame=1800
+[15:59:05 #39] updateFrame: heartbeat frame=2100
+[15:59:15 #40] updateFrame: heartbeat frame=2400
+[15:59:25 #41] updateFrame: heartbeat frame=2700
+[15:59:30 #42] eventHandler: kEventTerminate, frames=2864

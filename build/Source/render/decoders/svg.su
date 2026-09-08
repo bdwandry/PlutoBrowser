@@ -1,0 +1,6 @@
+svg.c:308:13:svg_tokenize_numbers	112	static
+svg.c:46:13:attrs_set	48	static
+svg.c:89:13:svg_get_attrs	56	static
+svg.c:546:12:svg_expand_uses	6200	static
+svg.c:203:12:svg_has_ink.constprop	32	static
+svg.c:651:12:svg_decode	320	static

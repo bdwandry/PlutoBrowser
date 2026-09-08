@@ -1,333 +1,740 @@
-#include "html/tokenizer.h"
-#include "html/entities.h"
-#include "core/tasks.h"
-#include "util/mem.h"
+/*
+ * PlutoBrowser — tokenizer.c
+ * Single-pass HTML tokenizer (port of Source/html/tokenizer.lua).
+ *
+ * Every branch of the Lua reference is reproduced, including quirks that are
+ * part of observable behavior (verified against the actual reference):
+ *   - attribute value search starts at ke+1 (right after the key): with a
+ *     spaced '=' ("z = \"b\"") the search lands ON '=', which is excluded
+ *     from the unquoted-value charset, so the value is "" and the rest of
+ *     the attribute string re-scans from there (tc8 parity: z=[] b=true).
+ *   - '</b>' closing tags report isSelfClosing=1 (Lua: isSelfClosing = slash
+ *     or isClosing); '<br>' reports isSelfClosing=0.
+ *   - boolean attributes store the TRUE sentinel; duplicate attrs first-win.
+ *   - the 256KB cut searches '>' from 1-based max(1, cut-128) — i.e. 0-based
+ *     MAX-129 — and keeps everything through that '>'.
+ *   - an unterminated <title> consumes only the opening tag (no token) when
+ *     no '</title>' exists; a found one skips titleClose+8 and may leave
+ *     '</title>'-interior bytes for the next loop iteration (Lua parity).
+ *
+ * Strings produced during tokenizing are copied into an internal arena
+ * (grow-only, freed with the result) so 256KB pages don't fragment the small
+ * device heap with thousands of tiny allocations.
+ */
+#include "tokenizer.h"
+
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define HTT_MAX_HTML_SIZE 262144
+#include "pd_api.h"
+#include "core/logger.h"
+#include "html/entities.h"
 
-static int htt_key_char(int c) {
-    return isalnum((unsigned char)c) || c == '-' || c == '_' || c == ':';
-}
+PlaydateAPI *pluto_pd(void);
+void pluto_free(void *p);
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
 
-static int htt_unquoted_val_char(int c) {
-    return isalnum((unsigned char)c) || c == '-' || c == '_' ||
-           c == '.' || c == '/' || c == '?' || c == '#';
-}
+const char PLUTO_TOK_ATTR_TRUE[1] = { '\x01' };
 
-static void htt_put_attr(StrMap* attrs, const char* lkey, char* decoded) {
-    if (decoded == NULL) return;
-    if (sm_get(attrs, lkey) != NULL) {
-        pluto_free(decoded);
-        return;
+#define MAX_HTML_SIZE 262144 /* 256KB max buffer size (Lua parity) */
+
+/* ── String arena: chunk list (same design as dom.c) ──────────────────────
+ * Pointers handed out by arena_dup must stay valid for the result's lifetime
+ * even as more strings are added — so chunks are allocated once and never
+ * moved/reallocated. A chunk that fills up is retired; a new one is appended. */
+typedef struct ArenaChunk
+{
+    struct ArenaChunk *next;
+    size_t used;
+    size_t cap;
+    char data[]; /* flexible array member */
+} ArenaChunk;
+
+typedef struct
+{
+    ArenaChunk *head;
+    ArenaChunk *tail;
+} Arena;
+
+#define ARENA_CHUNK_MIN 8192
+
+static int arena_reserve(Arena *a, size_t extra)
+{
+    if (a->tail && a->tail->cap - a->tail->used >= extra + 1)
+    {
+        return 0;
     }
-    sm_put(attrs, lkey, decoded);
+    size_t cap = ARENA_CHUNK_MIN;
+    if (extra + 1 > cap)
+    {
+        cap = extra + 1; /* oversized string gets its own right-sized chunk */
+    }
+    ArenaChunk *c = (ArenaChunk *)PLUTO_MALLOC(sizeof(ArenaChunk) + cap);
+    if (!c)
+    {
+        return -1;
+    }
+    c->next = NULL;
+    c->used = 0;
+    c->cap = cap;
+    if (a->tail)
+    {
+        a->tail->next = c;
+    }
+    else
+    {
+        a->head = c;
+    }
+    a->tail = c;
+    return 0;
 }
 
-static StrMap* htt_parse_attrs(const char* s, size_t n) {
-    StrMap* attrs = sm_create(8);
-    if (attrs == NULL) return NULL;
-    size_t i = 0;
-    while (i < n) {
-        size_t st = i;
-        while (st < n && isspace((unsigned char)s[st])) st++;
-        if (st >= n) break;
-        i = st;
-        size_t ke = st;
-        while (ke < n && htt_key_char((unsigned char)s[ke])) ke++;
-        if (ke == st) { i = st + 1; continue; }
-        size_t keyLen = ke - st;
-        char* key = pluto_strndup(s + st, keyLen);
-        if (key == NULL) break;
-        for (char* p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
+/* Copy `n` bytes + NUL into the arena; returns pointer or NULL on failure. */
+static char *arena_dup(Arena *a, const char *s, size_t n)
+{
+    if (arena_reserve(a, n) != 0)
+    {
+        return NULL;
+    }
+    char *out = a->tail->data + a->tail->used;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    a->tail->used += n + 1;
+    return out;
+}
 
-        size_t j = ke;
-        while (j < n && isspace((unsigned char)s[j])) j++;
-        int hasEq = (j < n && s[j] == '=');
-        if (hasEq) {
-            size_t vs = ke + 1;
-            while (vs < n && isspace((unsigned char)s[vs])) vs++;
-            if (vs >= n) {
-                htt_put_attr(attrs, key, pluto_strdup(""));
-                pluto_free(key);
-                break;
-            }
-            char c = s[vs];
-            if (c == '"' || c == '\'') {
-                const char* q0 = s + vs + 1;
-                const char* qe = memchr(q0, c, n - (vs + 1));
-                if (qe == NULL) {
-                    pluto_free(key);
-                    break;
-                }
-                size_t vLen = (size_t)(qe - q0);
-                char* raw = pluto_strndup(q0, vLen);
-                size_t dLen = 0;
-                char* dec = raw ? entities_decode(raw, vLen, &dLen) : NULL;
-                pluto_free(raw);
-                htt_put_attr(attrs, key, dec);
-                i = (size_t)(qe - s) + 1;
-            } else {
-                size_t ve = vs;
-                while (ve < n && htt_unquoted_val_char((unsigned char)s[ve])) ve++;
-                size_t vLen = ve - vs;
-                char* raw = pluto_strndup(s + vs, vLen);
-                size_t dLen = 0;
-                char* dec = raw ? entities_decode(raw, vLen, &dLen) : NULL;
-                pluto_free(raw);
-                htt_put_attr(attrs, key, dec);
-                i = ve;
-            }
-        } else {
-            if (sm_get(attrs, key) == NULL)
-                sm_put(attrs, key, HT_ATTR_TRUE);
-            i = ke;
+/* ── Token list / attr list ────────────────────────────────────────────────── */
+static int toklist_push(TokenList *tl, const Token *t)
+{
+    if (tl->count == tl->cap)
+    {
+        int ncap = tl->cap ? tl->cap * 2 : 256;
+        Token *ni = (Token *)PLUTO_MALLOC((size_t)ncap * sizeof(Token));
+        if (!ni)
+        {
+            return -1;
         }
-        pluto_free(key);
+        if (tl->items)
+        {
+            memcpy(ni, tl->items, (size_t)tl->count * sizeof(Token));
+            PLUTO_FREE(tl->items);
+        }
+        tl->items = ni;
+        tl->cap = ncap;
     }
-    return attrs;
+    tl->items[tl->count++] = *t;
+    return 0;
 }
 
-static long htt_find_tag_end(const char* s, size_t n, size_t startIdx) {
-    size_t i = startIdx;
-    while (i < n) {
-        const char* m = memchr(s + i, '>', n - i);
-        const char* dq = memchr(s + i, '"', n - i);
-        const char* sq = memchr(s + i, '\'', n - i);
-        const char* hit = m;
-        if (hit == NULL || (dq != NULL && dq < hit)) hit = dq;
-        if (hit == NULL || (sq != NULL && sq < hit)) hit = sq;
-        if (hit == NULL) return -1;
-        char b = *hit;
-        if (b == '>') return (long)(hit - s);
-        const char* close = memchr(hit + 1, b, n - (size_t)(hit - s) - 1);
-        if (close == NULL) return -1;
-        i = (size_t)(close - s) + 1;
+/* Attr storage: arrays grow by doubling; attr capacity is derived from
+ * attrCount (attr counts per tag are tiny; correctness over speed). */
+static int attr_ensure_cap(Token *t)
+{
+    int cap = 4;
+    while (cap < t->attrCount + 1)
+    {
+        cap *= 2;
+    }
+    if (t->attrs && cap <= 4 && t->attrCount < 4)
+    {
+        return 0; /* initial block already large enough */
+    }
+    if (t->attrCount == 0)
+    {
+        if (!t->attrs)
+        {
+            t->attrs = (TokenAttr *)PLUTO_MALLOC((size_t)cap * sizeof(TokenAttr));
+            return t->attrs ? 0 : -1;
+        }
+        return 0;
+    }
+    TokenAttr *na = (TokenAttr *)PLUTO_MALLOC((size_t)cap * sizeof(TokenAttr));
+    if (!na)
+    {
+        return -1;
+    }
+    memcpy(na, t->attrs, (size_t)t->attrCount * sizeof(TokenAttr));
+    PLUTO_FREE(t->attrs);
+    t->attrs = na;
+    return 0;
+}
+
+static int attr_push(Token *t, char *key, char *value)
+{
+    if (attr_ensure_cap(t) != 0)
+    {
+        return -1;
+    }
+    t->attrs[t->attrCount].key = key;
+    t->attrs[t->attrCount].value = value;
+    t->attrCount++;
+    return 0;
+}
+
+static int attr_has_key(const Token *tok, const char *key)
+{
+    for (int a = 0; a < tok->attrCount; a++)
+    {
+        if (strcmp(tok->attrs[a].key, key) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Store an attribute (entity-decoded) if the key is not already present. */
+static int store_attr(Token *tok, Arena *arena, const char *key,
+                      const char *val, size_t vlen)
+{
+    if (attr_has_key(tok, key))
+    {
+        return 0; /* first-wins parity (Lua: attrs[lk] == nil guard) */
+    }
+    char *k = arena_dup(arena, key, strlen(key));
+    if (!k)
+    {
+        return -1;
+    }
+    char *raw = (char *)PLUTO_MALLOC(vlen + 1);
+    if (!raw)
+    {
+        return -1;
+    }
+    memcpy(raw, val, vlen);
+    raw[vlen] = '\0';
+    char *dec = entities_decode(raw);
+    PLUTO_FREE(raw);
+    if (!dec)
+    {
+        return -1;
+    }
+    char *v = arena_dup(arena, dec, strlen(dec));
+    pluto_free(dec);
+    if (!v)
+    {
+        return -1;
+    }
+    return attr_push(tok, k, v);
+}
+
+/* ── findTagEnd: closing '>' of a tag, skipping quoted values ──────────────── */
+static const char *find_tag_end(const char *p)
+{
+    while (*p)
+    {
+        while (*p && *p != '>' && *p != '"' && *p != '\'')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            return NULL;
+        }
+        if (*p == '>')
+        {
+            return p;
+        }
+        char q = *p; /* inside a quoted value: skip to the matching quote */
+        p++;
+        while (*p && *p != q)
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            return NULL;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+/* Bounded substring search. */
+static const char *find_from(const char *hay, const char *hayEnd,
+                             const char *needle, size_t needleLen)
+{
+    if (needleLen == 0 || hayEnd - hay < (ptrdiff_t)needleLen)
+    {
+        return NULL;
+    }
+    for (const char *p = hay; p + (ptrdiff_t)needleLen <= hayEnd; p++)
+    {
+        if (*p == needle[0] && memcmp(p, needle, needleLen) == 0)
+        {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Case-insensitive search for "</tag>" starting at `from`. */
+static const char *find_close_tag(const char *from, const char *hayEnd, const char *tag)
+{
+    char pat[24];
+    snprintf(pat, sizeof(pat), "</%s>", tag);
+    size_t plen = strlen(pat);
+    for (const char *p = from; p + (ptrdiff_t)plen <= hayEnd; p++)
+    {
+        if (*p == '<' && strncasecmp(p, pat, plen) == 0)
+        {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* ── parseAttributes (Lua algorithm, quirks included) ──────────────────────── */
+static int parse_attributes(const char *p0, const char *n0, Token *tok, Arena *arena)
+{
+    const char *i = p0;
+    const char *n = n0;
+    while (i < n)
+    {
+        /* find next non-space (%S) */
+        while (i < n && isspace((unsigned char)*i))
+        {
+            i++;
+        }
+        if (i >= n)
+        {
+            break;
+        }
+        const char *s = i;
+
+        /* key end: first char not in [%w%-_:] */
+        const char *ke = s;
+        while (ke < n && (isalnum((unsigned char)*ke) || *ke == '-' || *ke == '_' || *ke == ':'))
+        {
+            ke++;
+        }
+        if (ke == s)
+        {
+            i = s + 1;
+            continue;
+        }
+
+        size_t klen = (size_t)(ke - s);
+        char lowerKey[64];
+        if (klen >= sizeof(lowerKey))
+        {
+            klen = sizeof(lowerKey) - 1;
+        }
+        for (size_t c = 0; c < klen; c++)
+        {
+            lowerKey[c] = (char)tolower((unsigned char)s[c]);
+        }
+        lowerKey[klen] = '\0';
+
+        /* Lua: string.find(attrStr, "^%s*=", ke) — whitespace BEFORE '=' only */
+        const char *e = ke;
+        while (e < n && isspace((unsigned char)*e))
+        {
+            e++;
+        }
+        int hasEquals = (e < n && *e == '=');
+
+        if (!hasEquals)
+        {
+            /* boolean attribute → Lua true (first win) */
+            if (!attr_has_key(tok, lowerKey))
+            {
+                char *k = arena_dup(arena, lowerKey, strlen(lowerKey));
+                if (!k || attr_push(tok, k, (char *)PLUTO_TOK_ATTR_TRUE) != 0)
+                {
+                    return -1;
+                }
+            }
+            i = ke;
+            continue;
+        }
+
+        /* Lua: vs = find(attrStr, "%S", ke + 1) — starts right after the key,
+         * so with a spaced '=' this lands ON '=' (empty value quirk). */
+        const char *vs = ke + 1;
+        while (vs < n && isspace((unsigned char)*vs))
+        {
+            vs++;
+        }
+        if (vs >= n)
+        {
+            /* key= with nothing after it → attrs[key] = "" (once) */
+            if (!attr_has_key(tok, lowerKey))
+            {
+                char *k = arena_dup(arena, lowerKey, strlen(lowerKey));
+                char *v = arena_dup(arena, "", 0);
+                if (!k || !v || attr_push(tok, k, v) != 0)
+                {
+                    return -1;
+                }
+            }
+            break;
+        }
+
+        char c = *vs;
+        if (c == '"' || c == '\'')
+        {
+            const char *ve = vs + 1;
+            while (ve < n && *ve != c)
+            {
+                ve++;
+            }
+            if (ve >= n)
+            {
+                break; /* Lua: unterminated quote aborts the loop */
+            }
+            if (store_attr(tok, arena, lowerKey, vs + 1, (size_t)(ve - vs - 1)) != 0)
+            {
+                return -1;
+            }
+            i = ve + 1;
+        }
+        else
+        {
+            /* unquoted: ends at first char not in [%w%-_%.%/%?%#] — note '='
+             * is excluded, so a spaced '=' yields an empty value (Lua parity) */
+            const char *ve = vs;
+            while (ve < n && (isalnum((unsigned char)*ve) || *ve == '-' || *ve == '_' ||
+                              *ve == '.' || *ve == '/' || *ve == '?' || *ve == '#'))
+            {
+                ve++;
+            }
+            if (store_attr(tok, arena, lowerKey, vs, (size_t)(ve - vs)) != 0)
+            {
+                return -1;
+            }
+            i = ve;
+        }
+    }
+    return 0;
+}
+
+/* ── helpers for the main loop ─────────────────────────────────────────────── */
+
+/* Trim [b,e) like Lua gsub("^%s*(.-)%s*$","%1"). */
+static void trim_span(const char **b, const char **e)
+{
+    while (*b < *e && isspace((unsigned char)**b))
+    {
+        (*b)++;
+    }
+    while (*e > *b && isspace((unsigned char)(*e)[-1]))
+    {
+        (*e)--;
+    }
+}
+
+/* Decode a text span and push a text token (skipped when empty). */
+static int push_text(TokenizeResult *res, Arena *arena, const char *p, size_t len)
+{
+    if (len == 0)
+    {
+        return 0;
+    }
+    char *raw = (char *)PLUTO_MALLOC(len + 1);
+    if (!raw)
+    {
+        return -1;
+    }
+    memcpy(raw, p, len);
+    raw[len] = '\0';
+    char *dec = entities_decode(raw);
+    PLUTO_FREE(raw);
+    if (!dec)
+    {
+        return -1;
+    }
+    size_t dlen = strlen(dec);
+    if (dlen == 0)
+    {
+        pluto_free(dec);
+        return 0; /* Lua: text ~= "" guard */
+    }
+    char *stored = arena_dup(arena, dec, dlen);
+    pluto_free(dec);
+    if (!stored)
+    {
+        return -1;
+    }
+    Token t;
+    memset(&t, 0, sizeof(t));
+    t.type = TOK_TEXT;
+    t.content = stored;
+    return toklist_push(&res->tokens, &t);
+}
+
+/* Collapse runs of whitespace to single spaces (Lua gsub("%s+"," ")). */
+static void collapse_ws(const char *src, size_t len, char *dst, size_t dstCap)
+{
+    size_t o = 0;
+    int lastSpace = 0;
+    for (size_t i = 0; i < len && o + 1 < dstCap; i++)
+    {
+        char c = src[i];
+        if (isspace((unsigned char)c))
+        {
+            if (!lastSpace && o > 0)
+            {
+                dst[o++] = ' ';
+            }
+            lastSpace = 1;
+        }
+        else
+        {
+            dst[o++] = c;
+            lastSpace = 0;
+        }
+    }
+    while (o > 0 && dst[o - 1] == ' ')
+    {
+        o--; /* trim trailing */
+    }
+    dst[o] = '\0';
+}
+
+/* ── Public API ────────────────────────────────────────────────────────────── */
+
+int tokenizer_tokenize(const char *html, TokenizeResult *out)
+{
+    memset(out, 0, sizeof(*out));
+    strcpy(out->pageTitle, "Web Page");
+
+    Arena *arena = (Arena *)PLUTO_MALLOC(sizeof(Arena));
+    if (!arena)
+    {
+        return -1;
+    }
+    memset(arena, 0, sizeof(*arena));
+    out->_arena = arena;
+
+    if (!html || !html[0])
+    {
+        return 0; /* Lua: empty input → no tokens, default title */
+    }
+
+    const char *src = html;
+    size_t len = strlen(src);
+    char *cutBuf = NULL;
+
+    if (len > MAX_HTML_SIZE)
+    {
+        /* Lua: find ">" from 1-based max(1, MAX-128) = 0-based MAX-129;
+         * cut keeps everything through that '>' (or MAX when none). */
+        size_t cut = MAX_HTML_SIZE;
+        const char *gt = strchr(src + (MAX_HTML_SIZE - 129), '>');
+        if (gt)
+        {
+            cut = (size_t)(gt - src) + 1;
+        }
+        cutBuf = (char *)PLUTO_MALLOC(cut + 1);
+        if (!cutBuf)
+        {
+            return -1;
+        }
+        memcpy(cutBuf, src, cut);
+        cutBuf[cut] = '\0';
+        src = cutBuf;
+        len = cut;
+    }
+
+    const char *pos = src;
+    const char *end = src + len;
+
+    while (pos < end)
+    {
+        const char *tagStart = memchr(pos, '<', (size_t)(end - pos));
+        if (!tagStart)
+        {
+            if (push_text(out, arena, pos, (size_t)(end - pos)) != 0)
+            {
+                goto fail;
+            }
+            break;
+        }
+
+        /* text before this tag */
+        if (tagStart > pos)
+        {
+            if (push_text(out, arena, pos, (size_t)(tagStart - pos)) != 0)
+            {
+                goto fail;
+            }
+        }
+
+        const char *tagEnd = find_tag_end(tagStart + 1);
+        if (!tagEnd)
+        {
+            /* unterminated tag: drop the broken remainder (Lua parity) */
+            break;
+        }
+
+        const char *b = tagStart + 1;
+        const char *e = tagEnd;
+        trim_span(&b, &e);
+        size_t insideLen = (size_t)(e - b);
+
+        /* head = lowercase first 8 bytes of the trimmed inside */
+        char head[9] = { 0 };
+        for (size_t c = 0; c < insideLen && c < 8; c++)
+        {
+            head[c] = (char)tolower((unsigned char)b[c]);
+        }
+
+        if (insideLen >= 3 && strncmp(b, "!--", 3) == 0)
+        {
+            /* 1. HTML comment: <!-- ... --> */
+            const char *cend = find_from(tagStart, end, "-->", 3);
+            pos = cend ? cend + 3 : tagEnd + 1;
+        }
+        else if (strncmp(head, "script", 6) == 0)
+        {
+            /* 2. skip <script> ... </script> */
+            const char *sc = find_close_tag(tagEnd, end, "script");
+            if (sc)
+            {
+                const char *gt = memchr(sc, '>', (size_t)(end - sc));
+                pos = (gt ? gt : sc) + 1;
+            }
+            else
+            {
+                pos = end;
+            }
+        }
+        else if (strncmp(head, "style", 5) == 0)
+        {
+            /* 3. skip <style> ... </style> */
+            const char *sc = find_close_tag(tagEnd, end, "style");
+            if (sc)
+            {
+                const char *gt = memchr(sc, '>', (size_t)(end - sc));
+                pos = (gt ? gt : sc) + 1;
+            }
+            else
+            {
+                pos = end;
+            }
+        }
+        else if (strncmp(head, "title", 5) == 0)
+        {
+            /* 4. page <title>: no token; pageTitle = collapsed decoded text */
+            const char *tc = find_close_tag(tagEnd, end, "title");
+            if (tc)
+            {
+                char collapsed[256];
+                collapse_ws(tagEnd + 1, (size_t)(tc - (tagEnd + 1)),
+                            collapsed, sizeof(collapsed));
+                char *dec = entities_decode(collapsed);
+                if (dec)
+                {
+                    snprintf(out->pageTitle, sizeof(out->pageTitle), "%s", dec);
+                    pluto_free(dec);
+                }
+                pos = tc + 8; /* Lua: titleClose + 8 */
+            }
+            else
+            {
+                pos = tagEnd + 1;
+            }
+        }
+        else
+        {
+            /* 7. normal tag */
+            int isClosing = (insideLen > 0 && b[0] == '/');
+            const char *body = isClosing ? b + 1 : b;
+            size_t bodyLen = isClosing ? insideLen - 1 : insideLen;
+            /* tagBody already trimmed (rawInside was trimmed) */
+
+            int selfFromSlash = (bodyLen > 0 && body[bodyLen - 1] == '/');
+            int isSelfClosing = selfFromSlash || isClosing;
+            if (selfFromSlash)
+            {
+                bodyLen--;
+            }
+
+            size_t nameLen = 0;
+            while (nameLen < bodyLen &&
+                   (isalnum((unsigned char)body[nameLen]) || body[nameLen] == '-' ||
+                    body[nameLen] == ':'))
+            {
+                nameLen++;
+            }
+
+            if (nameLen > 0)
+            {
+                Token t;
+                memset(&t, 0, sizeof(t));
+                t.type = TOK_TAG;
+                t.name = arena_dup(arena, body, nameLen);
+                if (!t.name)
+                {
+                    goto fail;
+                }
+                for (size_t c = 0; c < nameLen; c++)
+                {
+                    t.name[c] = (char)tolower((unsigned char)t.name[c]);
+                }
+                t.isClosing = isClosing;
+                t.isSelfClosing = isSelfClosing;
+                if (parse_attributes(body + nameLen, body + bodyLen, &t, arena) != 0)
+                {
+                    goto fail;
+                }
+                if (toklist_push(&out->tokens, &t) != 0)
+                {
+                    goto fail;
+                }
+            }
+
+            pos = tagEnd + 1;
+        }
+    }
+
+    if (cutBuf)
+    {
+        PLUTO_FREE(cutBuf);
+    }
+    return 0;
+
+fail:
+    if (cutBuf)
+    {
+        PLUTO_FREE(cutBuf);
     }
     return -1;
 }
 
-static const char* htt_find_ci(const char* s, size_t n, size_t from,
-                               const char* lit, size_t litLen) {
-    if (litLen == 0 || n < litLen) return NULL;
-    for (size_t i = from; i + litLen <= n; i++) {
-        if (strncasecmp(s + i, lit, litLen) == 0) return s + i;
+void tokenizer_free_result(TokenizeResult *res)
+{
+    if (!res)
+    {
+        return;
     }
-    return NULL;
-}
-
-static char* htt_collapse_ws(const char* s, size_t n) {
-    char* out = pluto_malloc(n + 1);
-    if (out == NULL) return NULL;
-    size_t o = 0, i = 0;
-    while (i < n) {
-        if (isspace((unsigned char)s[i])) {
-            out[o++] = ' ';
-            while (i < n && isspace((unsigned char)s[i])) i++;
-        } else {
-            out[o++] = s[i++];
+    for (int i = 0; i < res->tokens.count; i++)
+    {
+        Token *t = &res->tokens.items[i];
+        if (t->attrs)
+        {
+            PLUTO_FREE(t->attrs);
         }
     }
-    out[o] = '\0';
-    return out;
-}
-
-static void htt_trim(const char** p, size_t* n) {
-    const char* s = *p;
-    size_t len = *n;
-    size_t a = 0, b = len;
-    while (a < b && isspace((unsigned char)s[a])) a++;
-    while (b > a && isspace((unsigned char)s[b - 1])) b--;
-    *p = s + a;
-    *n = b - a;
-}
-
-static int htt_push_token(HttTokens* tks, HttToken tok) {
-    if (tks->count == tks->cap) {
-        size_t ncap = tks->cap ? tks->cap * 2 : 64;
-        HttToken* ni = pluto_realloc(tks->items, ncap * sizeof(HttToken));
-        if (ni == NULL) return 0;
-        tks->items = ni;
-        tks->cap = ncap;
+    if (res->tokens.items)
+    {
+        PLUTO_FREE(res->tokens.items);
     }
-    tks->items[tks->count++] = tok;
-    return 1;
-}
-
-static int htt_push_text(HttTokens* tks, const char* s, size_t n) {
-    if (n == 0) return 1;
-    size_t dLen = 0;
-    char* dec = entities_decode(s, n, &dLen);
-    if (dec == NULL) return 0;
-    HttToken tok;
-    memset(&tok, 0, sizeof(tok));
-    tok.type = HTT_TEXT;
-    tok.text = dec;
-    tok.textLen = dLen;
-    if (!htt_push_token(tks, tok)) {
-        pluto_free(dec);
-        return 0;
-    }
-    return 1;
-}
-
-HttTokens* htt_tokenize(const char* html, size_t len) {
-    HttTokens* tks = pluto_malloc(sizeof(HttTokens));
-    if (tks == NULL) return NULL;
-    memset(tks, 0, sizeof(*tks));
-    tks->pageTitle = pluto_strdup("Web Page");
-    if (tks->pageTitle == NULL) {
-        pluto_free(tks);
-        return NULL;
-    }
-    if (html == NULL || len == 0) return tks;
-
-    size_t workLen = len;
-    if (len > HTT_MAX_HTML_SIZE) {
-        size_t winStart = HTT_MAX_HTML_SIZE > 128 ? HTT_MAX_HTML_SIZE - 128 : 0;
-        const char* gt = memchr(html + winStart, '>', len - winStart);
-        workLen = gt ? (size_t)(gt - html) + 1 : HTT_MAX_HTML_SIZE;
-    }
-
-    size_t pos = 0;
-    while (pos < workLen) {
-        if (tasks_yield_check()) break;
-        tasks_report_progress(0.5 * ((double)(pos + 1) / (double)workLen));
-
-        const char* lt = memchr(html + pos, '<', workLen - pos);
-        if (lt == NULL) {
-            if (!htt_push_text(tks, html + pos, workLen - pos)) goto fail;
-            break;
+    Arena *arena = (Arena *)res->_arena;
+    if (arena)
+    {
+        ArenaChunk *c = arena->head;
+        while (c)
+        {
+            ArenaChunk *nx = c->next;
+            PLUTO_FREE(c);
+            c = nx;
         }
-        size_t tagStart = (size_t)(lt - html);
-        if (tagStart > pos) {
-            if (!htt_push_text(tks, html + pos, tagStart - pos)) goto fail;
-        }
-
-        long te = htt_find_tag_end(html, workLen, tagStart + 1);
-        if (te < 0) break;
-        size_t tagEnd = (size_t)te;
-
-        const char* rinP = html + tagStart + 1;
-        size_t rinN = tagEnd - (tagStart + 1);
-        htt_trim(&rinP, &rinN);
-
-        char head[9];
-        size_t hn = rinN < 8 ? rinN : 8;
-        for (size_t k = 0; k < hn; k++)
-            head[k] = (char)tolower((unsigned char)rinP[k]);
-        head[hn] = '\0';
-
-        if (rinN >= 3 && memcmp(rinP, "!--", 3) == 0) {
-            const char* ce = memchr(html + tagStart, '-', workLen - tagStart);
-            const char* found = NULL;
-            for (const char* q = ce; q && q + 2 <= html + workLen; ) {
-                if (q[0] == '-' && q[1] == '-' && q[2] == '>') { found = q; break; }
-                const char* nx = memchr(q + 1, '-', (size_t)(html + workLen - (q + 1)));
-                q = nx;
-            }
-            pos = found ? (size_t)(found - html) + 3 : tagEnd + 1;
-        } else if (hn >= 6 && strncasecmp(head, "script", 6) == 0) {
-            const char* sc = htt_find_ci(html, workLen, tagEnd, "</script>", 9);
-            if (sc != NULL) {
-                const char* gt = memchr(sc, '>', workLen - (size_t)(sc - html));
-                pos = (gt ? (size_t)(gt - html) : (size_t)(sc - html)) + 1;
-            } else {
-                pos = workLen;
-            }
-        } else if (hn >= 5 && strncasecmp(head, "style", 5) == 0) {
-            const char* sc = htt_find_ci(html, workLen, tagEnd, "</style>", 8);
-            if (sc != NULL) {
-                const char* gt = memchr(sc, '>', workLen - (size_t)(sc - html));
-                pos = (gt ? (size_t)(gt - html) : (size_t)(sc - html)) + 1;
-            } else {
-                pos = workLen;
-            }
-        } else if (hn >= 5 && strncasecmp(head, "title", 5) == 0) {
-            const char* tc = htt_find_ci(html, workLen, tagEnd, "</title>", 8);
-            if (tc != NULL) {
-                const char* tp = html + tagEnd + 1;
-                size_t tn = (size_t)(tc - tp);
-                char* collapsed = htt_collapse_ws(tp, tn);
-                if (collapsed != NULL) {
-                    const char* cp = collapsed;
-                    size_t cn = strlen(collapsed);
-                    htt_trim(&cp, &cn);
-                    size_t dLen = 0;
-                    char* dec = entities_decode(cp, cn, &dLen);
-                    pluto_free(collapsed);
-                    if (dec != NULL) {
-                        pluto_free(tks->pageTitle);
-                        tks->pageTitle = dec;
-                    }
-                }
-                pos = (size_t)(tc - html) + 8;
-            } else {
-                pos = tagEnd + 1;
-            }
-        } else {
-            int isClosing = rinN > 0 && rinP[0] == '/';
-            const char* bodyP = isClosing ? rinP + 1 : rinP;
-            size_t bodyN = isClosing ? rinN - 1 : rinN;
-            htt_trim(&bodyP, &bodyN);
-
-            int endsSlash = bodyN > 0 && bodyP[bodyN - 1] == '/';
-            int isSelfClosing = endsSlash || isClosing;
-            if (endsSlash) bodyN--;
-
-            size_t tn = 0;
-            while (tn < bodyN && htt_key_char((unsigned char)bodyP[tn])) tn++;
-            if (tn > 0) {
-                char* name = pluto_strndup(bodyP, tn);
-                if (name == NULL) goto fail;
-                for (char* p = name; *p; p++) *p = (char)tolower((unsigned char)*p);
-                StrMap* attrs = htt_parse_attrs(bodyP + tn, bodyN - tn);
-                if (attrs == NULL) {
-                    pluto_free(name);
-                    goto fail;
-                }
-                HttToken tok;
-                memset(&tok, 0, sizeof(tok));
-                tok.type = HTT_TAG;
-                tok.name = name;
-                tok.isClosing = isClosing;
-                tok.isSelfClosing = isSelfClosing;
-                tok.attrs = attrs;
-                if (!htt_push_token(tks, tok)) {
-                    sm_destroy(attrs);
-                    pluto_free(name);
-                    goto fail;
-                }
-            }
-            pos = tagEnd + 1;
-        }
+        PLUTO_FREE(arena);
     }
-    return tks;
-
-fail:
-    htt_free(tks);
-    return NULL;
-}
-
-void htt_free(HttTokens* tks) {
-    if (tks == NULL) return;
-    for (size_t i = 0; i < tks->count; i++) {
-        HttToken* t = &tks->items[i];
-        if (t->type == HTT_TEXT) {
-            pluto_free(t->text);
-        } else {
-            pluto_free(t->name);
-            if (t->attrs != NULL) {
-                sm_destroy(t->attrs);
-            }
-        }
-    }
-    pluto_free(tks->items);
-    pluto_free(tks->pageTitle);
-    pluto_free(tks);
-}
-
-void htt_init(struct PlaydateAPI* pd) {
-    (void)pd;
+    memset(res, 0, sizeof(*res));
 }

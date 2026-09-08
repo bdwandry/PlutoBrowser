@@ -1,4426 +1,4508 @@
-#include "html/document.h"
-#include "html/tokenizer.h"
-#include "html/dom.h"
-#include "html/readability.h"
-#include "html/entities.h"
-#include "core/url.h"
-#include "core/tasks.h"
-#include "core/constants.h"
-#include "util/mem.h"
-#include "util/strbuf.h"
-#include "core/logger.h"
-#include <ctype.h>
+/*
+ * PlutoBrowser — document.c
+ * Complete port of Source/html/document.lua (parse helpers + DOM walk + full
+ * Document.parse pipeline).
+ *
+ * LUA → C FUNCTION MAP (document.lua 1488 lines):
+ *   parseStyle        → doc_parse_style        (last duplicate key wins)
+ *   parseAlign        → doc_parse_align        (lowercased center/right/left only)
+ *   isDisplayNone     → doc_is_display_none    (hidden/popover/display:none)
+ *   isInvertedStyle   → doc_is_inverted_style  (patterns on lowercased value)
+ *   parseBoxSpacing   → doc_parse_box_spacing  (strict num, halved, left-only pad)
+ *   concatNodeText    → doc_concat_node_text
+ *   validHref         → doc_valid_href         ("", "#…", javascript:, data:)
+ *   serializeSvgNode  → doc_serialize_svg_node
+ *   Document.parse    → document_parse (+ document_free)
+ *     Lua closure state (state.*) → Walker struct; Lua recursive walk(node) →
+ *     iterative frame stack (push_enter/push_exit/WFrame) with one recursion
+ *     level for table cells; Lua 1-based table.insert semantics preserved at
+ *     every call site (verified against capture batteries P18/P19).
+ *
+ * Every helper reproduces the Lua reference's observable behavior, including
+ * its quirks (each verified against the verbatim Lua code — see MASTER_TODO):
+ *   - parseStyle: "([%w%-]+)%s*:%s*([^;]+)" — the LAST duplicate key wins;
+ *     unparseable segments (no valid "key:") do NOT abort the scan, the
+ *     gmatch simply continues with the segment AFTER the next ';'.
+ *   - parseBoxSpacing: num() uses strict tonumber on the component (only the
+ *     '%' stripped) — "10px" is NOT a number and the component is dropped.
+ *     Component values are halved (floor). padding applies only to LEFT.
+ *   - isInvertedStyle patterns run against the LOWERCASED style value (they
+ *     come from parseStyle, which lowercases values).
+ *   - validHref rejects "", "#…", javascript:, data: (case-insensitive).
+ *   - parseAlign returns the LOWERCASED value only for center/right/left.
+ * Attributes arrive as raw (key, value) pairs — exactly like tok.attrs in
+ * Lua — and every helper parses attrs["style"] internally via parseStyle.
+ */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
-#define DOC_MAX_BLOCKS 1200
-#define DOC_MAX_INLINES 900
+#include "pd_api.h"
+#include "html/document.h"
+#include "html/tokenizer.h"
+#include "html/readability.h"
+#include "html/entities.h"
+#include "core/constants.h"
+#include "core/url.h"
+#include "util/strbuf.h"
 
-/* ── small string helpers ─────────────────────────────────────────────── */
+extern PlaydateAPI *pluto_pd(void);
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_REALLOC(p, n) pluto_pd()->system->realloc((p), (n))
+#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
 
-static int d_contains(const char* hay, const char* needle) {
-    return hay != NULL && strstr(hay, needle) != NULL;
+/* Lua string.lower: ASCII only. */
+static char lua_lower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
 }
 
-static int d_starts_ci(const char* s, const char* ciLower) {
-    return s != NULL && strncasecmp(s, ciLower, strlen(ciLower)) == 0;
+static void lua_lower_buf(char *dst, const char *src, size_t cap)
+{
+    size_t i = 0;
+    for (; src[i] && i + 1 < cap; i++)
+    {
+        dst[i] = lua_lower(src[i]);
+    }
+    dst[i] = '\0';
 }
 
-/* Lua tonumber(): full-string numeric parse */
-static double d_tonum(const char* v, int* ok) {
-    *ok = 0;
-    if (v == NULL) return 0.0;
-    while (*v != '\0' && isspace((unsigned char)*v)) v++;
-    char* end = NULL;
-    double n = strtod(v, &end);
-    if (end == v) return 0.0;
-    while (*end != '\0' && isspace((unsigned char)*end)) end++;
-    if (*end != '\0') return 0.0;
-    *ok = 1;
-    return n;
+/* ASCII strncasecmp (Lua-style char-class equivalence). */
+static int ci_prefix(const char *s, const char *prefix, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        char cs = lua_lower(s[i]);
+        char cp = lua_lower(prefix[i]);
+        if (cs != cp)
+        {
+            return (unsigned char)cs - (unsigned char)cp;
+        }
+        if (cs == '\0')
+        {
+            return 0;
+        }
+    }
+    return 0;
 }
 
-/* CSS length -> floor(n / 2) after '%' strip; invalid -> 0 */
+/* ── Generic (key, value) map access — mirrors Lua attrs tables ───────────── */
 
-static int d_css_half(const char* v) {
-    int ok = 0;
-    double n;
-    if (v == NULL) return 0;
-    char buf[48];
-    size_t j = 0;
-    for (size_t i = 0; v[i] != '\0' && j + 1 < sizeof(buf); i++)
-        if (v[i] != '%') buf[j++] = v[i];
-    buf[j] = '\0';
-    n = d_tonum(buf, &ok);
-    if (!ok) return 0;
-    return (int)floor(n / 2.0);
+static const char *map_get(const DocStyleEntry *map, int count, const char *key)
+{
+    if (!map)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        if (strcmp(map[i].key, key) == 0)
+        {
+            return map[i].val;
+        }
+    }
+    return NULL;
 }
 
-/* ── attribute accessors ──────────────────────────────────────────────── */
-
-static const char* da_get(StrMap* attrs, const char* key) {
-    if (attrs == NULL) return NULL;
-    void* v = sm_get(attrs, key);
-    return (v == NULL || v == HT_ATTR_TRUE) ? NULL : (const char*)v;
+/* Lua %s character class: space, \t, \n, \v, \f, \r. */
+static int is_lspace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
+           c == '\r';
 }
 
-static int da_has(StrMap* attrs, const char* key) {
-    return attrs != NULL && sm_get(attrs, key) != NULL;
+static int is_lkey(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-';
 }
 
-/* ── parseStyle: keys/values lowercased + trimmed; LAST duplicate wins ── */
+/* ── parseStyle ─────────────────────────────────────────────────────────────── */
 
-typedef struct {
-    char key[40];
-    char val[80];
-} DStyleEntry;
-
-typedef struct {
-    DStyleEntry e[16];
-    int n;
-} DStyle;
-
-static void d_parse_style(DStyle* out, const char* styleStr) {
+void doc_parse_style(const char *styleStr, DocStyle *out)
+{
     memset(out, 0, sizeof(*out));
-    if (styleStr == NULL || styleStr[0] == '\0') return;
-    const char* p = styleStr;
-    while (*p != '\0') {
-        const char* ks = p;
-        while (*p != '\0' && (isalnum((unsigned char)*p) || *p == '-')) p++;
-        size_t klen = (size_t)(p - ks);
-        const char* q = p;
-        while (*q != '\0' && isspace((unsigned char)*q)) q++;
-        if (klen == 0 || *q != ':') {
-            if (*p == '\0') break;
-            p = (*p == ';') ? p + 1 : q;
-            if (*p == ':') p++;
-            while (*p != '\0' && *p != ';') p++;
-            if (*p == ';') p++;
+    if (!styleStr || styleStr[0] == '\0')
+    {
+        return;
+    }
+    /* Exact emulation of string.gmatch(styleStr, "([%w%-]+)%s*:%s*([^;]+)"):
+     * the scan is NOT anchored to ';'-segments — it advances one character at
+     * a time and takes the FIRST position where a [%w%-]+ run (optionally
+     * space-separated) hits ':'. The value [^;]+ then consumes to the next
+     * ';' or end. After a match, scanning resumes after the value. A match
+     * with an all-space tail still stores an EMPTY value (Lua "" is truthy
+     * and consumers treat it as set-but-blank). */
+    const char *s = styleStr;
+    size_t n = strlen(s);
+    size_t pos = 0;
+    while (pos < n)
+    {
+        if (!is_lkey(s[pos]))
+        {
+            pos++;
             continue;
         }
-        p = q + 1;
-        while (*p != '\0' && isspace((unsigned char)*p)) p++;
-        const char* vs = p;
-        while (*p != '\0' && *p != ';') p++;
-        size_t vlen = (size_t)(p - vs);
-        if (*p == ';') p++;
-        if (klen == 0 || vlen == 0) continue;
-
-        char key[40], val[80];
-        if (klen >= sizeof(key)) klen = sizeof(key) - 1;
-        memcpy(key, ks, klen);
-        key[klen] = '\0';
-        for (char* c = key; *c; c++) *c = (char)tolower((unsigned char)*c);
-        if (vlen >= sizeof(val)) vlen = sizeof(val) - 1;
-        memcpy(val, vs, vlen);
-        val[vlen] = '\0';
+        size_t ke = pos;
+        while (ke < n && is_lkey(s[ke]))
         {
-            size_t a = 0, len = vlen;
-            while (a < len && isspace((unsigned char)val[a])) a++;
-            while (len > a && isspace((unsigned char)val[len - 1])) len--;
-            memmove(val, val + a, len - a);
-            val[len - a] = '\0';
-            for (char* c = val; *c; c++) *c = (char)tolower((unsigned char)*c);
+            ke++;
         }
-
-        int found = 0;
-        for (int i = 0; i < out->n; i++) {
-            if (strcmp(out->e[i].key, key) == 0) {
-                snprintf(out->e[i].val, sizeof(out->e[0].val), "%s", val);
-                found = 1;
-                break;
+        size_t c = ke;
+        while (c < n && is_lspace(s[c]))
+        {
+            c++;
+        }
+        if (c < n && s[c] == ':')
+        {
+            /* %s* (greedy, with Lua backtracking) then [^;]+ (≥1 char). */
+            size_t vStart = c + 1;
+            size_t vEnd = vStart;
+            while (vEnd < n && is_lspace(s[vEnd]))
+            {
+                vEnd++;
             }
+            if (vEnd == n && vEnd > vStart)
+            {
+                /* Only spaces to end: Lua backtracks %s* so [^;]+ takes one
+                 * space → value trims to "" (an EMPTY entry is stored). */
+                vEnd = n;
+                size_t a = vStart, z = vEnd;
+                char key[32];
+                size_t kn = (ke - pos) < sizeof(key) - 1 ? (ke - pos)
+                                                         : sizeof(key) - 1;
+                size_t i;
+                for (i = 0; i < kn; i++)
+                {
+                    key[i] = lua_lower(s[pos + i]);
+                }
+                key[i] = '\0';
+                int found = -1;
+                for (int e = 0; e < out->count; e++)
+                {
+                    if (strcmp(out->e[e].key, key) == 0)
+                    {
+                        found = e;
+                        break;
+                    }
+                }
+                if (found < 0 && out->count < DOC_STYLE_MAX)
+                {
+                    snprintf(out->e[out->count].key,
+                             sizeof(out->e[out->count].key), "%s", key);
+                    out->e[out->count].val[0] = '\0';
+                    out->count++;
+                }
+                (void)a;
+                (void)z;
+                pos = n;
+                continue;
+            }
+            if (vEnd < n)
+            {
+                /* [^;]+ consumes to the next ';' or end. */
+                while (vEnd < n && s[vEnd] != ';')
+                {
+                    vEnd++;
+                }
+                /* Lua trims value with gsub "^%s*(.-)%s*$". */
+                size_t a = vStart, z = vEnd;
+                while (a < z && is_lspace(s[a]))
+                {
+                    a++;
+                }
+                while (z > a && is_lspace(s[z - 1]))
+                {
+                    z--;
+                }
+                char key[32];
+                char val[128];
+                size_t kn = (ke - pos) < sizeof(key) - 1 ? (ke - pos)
+                                                         : sizeof(key) - 1;
+                size_t vn = (z - a) < sizeof(val) - 1 ? (z - a) : sizeof(val) - 1;
+                size_t i;
+                for (i = 0; i < kn; i++)
+                {
+                    key[i] = lua_lower(s[pos + i]);
+                }
+                key[i] = '\0';
+                for (i = 0; i < vn; i++)
+                {
+                    val[i] = lua_lower(s[a + i]);
+                }
+                val[i] = '\0';
+                int found = -1;
+                for (int e = 0; e < out->count; e++)
+                {
+                    if (strcmp(out->e[e].key, key) == 0)
+                    {
+                        found = e;
+                        break;
+                    }
+                }
+                if (found >= 0)
+                {
+                    snprintf(out->e[found].val, sizeof(out->e[found].val), "%s",
+                             val);
+                }
+                else if (out->count < DOC_STYLE_MAX)
+                {
+                    snprintf(out->e[out->count].key,
+                             sizeof(out->e[out->count].key), "%s", key);
+                    snprintf(out->e[out->count].val,
+                             sizeof(out->e[out->count].val), "%s", val);
+                    out->count++;
+                }
+                pos = vEnd; /* gmatch resumes after the whole match */
+                continue;
+            }
+            /* Tail empty after ':' → [^;]+ fails even with backtracking
+             * ("k:" at end) → NO entry; resume scan one char later. */
+            pos = pos + 1;
+            continue;
         }
-        if (!found && out->n < 16) {
-            snprintf(out->e[out->n].key, sizeof(out->e[0].key), "%s", key);
-            snprintf(out->e[out->n].val, sizeof(out->e[0].val), "%s", val);
-            out->n++;
-        }
+        /* No ':' after this run → retry at the next character (gmatch). */
+        pos = pos + 1;
     }
 }
 
-static const char* d_style_get(const DStyle* st, const char* key) {
-    for (int i = 0; i < st->n; i++)
-        if (strcmp(st->e[i].key, key) == 0) return st->e[i].val;
+static const char *style_get(const DocStyle *st, const char *key)
+{
+    for (int i = 0; i < st->count; i++)
+    {
+        if (strcmp(st->e[i].key, key) == 0)
+        {
+            return st->e[i].val;
+        }
+    }
     return NULL;
 }
 
-/* ── align / visibility / inversion ───────────────────────────────────── */
+/* ── parseAlign ─────────────────────────────────────────────────────────────── */
 
-static const char* d_parse_align(StrMap* attrs) {
-    if (attrs == NULL) return NULL;
-    const char* a = da_get(attrs, "align");
-    DStyle st;
-    d_parse_style(&st, da_get(attrs, "style"));
-    const char* ta = d_style_get(&st, "text-align");
-    if (ta != NULL) a = ta;
-    if (a == NULL) return NULL;
-    if (strcasecmp(a, "center") == 0) return "center";
-    if (strcasecmp(a, "right") == 0) return "right";
-    if (strcasecmp(a, "left") == 0) return "left";
+const char *doc_parse_align(const DocStyleEntry *attrs, int attrCount)
+{
+    if (!attrs || attrCount == 0)
+    {
+        return NULL;
+    }
+    const char *a = map_get(attrs, attrCount, "align");
+    const char *styleStr = map_get(attrs, attrCount, "style");
+    static DocStyle st; /* static: 1.6KB struct off the game-task stack */
+    doc_parse_style(styleStr, &st);
+    const char *ta = style_get(&st, "text-align");
+    if (ta)
+    {
+        a = ta;
+    }
+    if (!a)
+    {
+        return NULL;
+    }
+    static char buf[64];
+    lua_lower_buf(buf, a, sizeof(buf));
+    if (strcmp(buf, "center") == 0 || strcmp(buf, "right") == 0 ||
+        strcmp(buf, "left") == 0)
+    {
+        return buf;
+    }
     return NULL;
 }
 
-static int d_is_display_none(StrMap* attrs) {
-    if (attrs == NULL) return 0;
-    if (da_has(attrs, "hidden")) return 1;
-    if (da_has(attrs, "popover")) return 1;
-    DStyle st;
-    d_parse_style(&st, da_get(attrs, "style"));
-    const char* disp = d_style_get(&st, "display");
-    if (disp != NULL && strstr(disp, "none") != NULL) return 1;
-    const char* vis = d_style_get(&st, "visibility");
-    if (vis != NULL && strstr(vis, "hidden") != NULL) return 1;
+/* ── isDisplayNone ──────────────────────────────────────────────────────────── */
+
+int doc_is_display_none(const DocStyleEntry *attrs, int attrCount)
+{
+    if (!attrs || attrCount == 0)
+    {
+        return 0;
+    }
+    if (map_get(attrs, attrCount, "hidden"))
+    {
+        return 1;
+    }
+    if (map_get(attrs, attrCount, "popover"))
+    {
+        return 1;
+    }
+    const char *styleStr = map_get(attrs, attrCount, "style");
+    static DocStyle st; /* static: 1.6KB struct off the game-task stack */
+    doc_parse_style(styleStr, &st);
+    const char *d = style_get(&st, "display");
+    if (d && strstr(d, "none"))
+    {
+        return 1;
+    }
+    const char *v = style_get(&st, "visibility");
+    if (v && strstr(v, "hidden"))
+    {
+        return 1;
+    }
     return 0;
 }
 
-static int d_is_inverted_style(StrMap* attrs) {
-    if (attrs == NULL) return 0;
-    DStyle st;
-    d_parse_style(&st, da_get(attrs, "style"));
-    const char* c = d_style_get(&st, "color");
-    const char* bg = d_style_get(&st, "background-color");
-    if (bg == NULL) bg = d_style_get(&st, "background");
-    if (c != NULL && (strstr(c, "white") != NULL ||
-                      strstr(c, "#fff") != NULL || strstr(c, "#FFFF") != NULL))
-        return 1;
-    if (bg != NULL && (strstr(bg, "black") != NULL ||
-                       strstr(bg, "#000") != NULL))
-        return 1;
+/* ── isInvertedStyle ────────────────────────────────────────────────────────── */
+
+int doc_is_inverted_style(const DocStyleEntry *attrs, int attrCount)
+{
+    if (!attrs || attrCount == 0)
+    {
+        return 0;
+    }
+    const char *styleStr = map_get(attrs, attrCount, "style");
+    static DocStyle st; /* static: 1.6KB struct off the game-task stack */
+    doc_parse_style(styleStr, &st);
+    const char *c = style_get(&st, "color");
+    if (c)
+    {
+        /* Patterns run on the already-lowercased value (parseStyle). */
+        if (strstr(c, "white") || strstr(c, "#fff") ||
+            (strncmp(c, "#ffff", 5) == 0 && c[5] != '\0'))
+        {
+            return 1;
+        }
+    }
+    const char *bg = style_get(&st, "background-color");
+    if (!bg)
+    {
+        bg = style_get(&st, "background");
+    }
+    if (bg)
+    {
+        if (strstr(bg, "black") || strstr(bg, "#000"))
+        {
+            return 1;
+        }
+    }
     return 0;
 }
 
-/* ── box spacing ──────────────────────────────────────────────────────── */
+/* ── parseBoxSpacing ────────────────────────────────────────────────────────── */
 
-typedef struct {
-    int top, bottom, left, right;
-} DBox;
+/* Lua num(): strip '%', then STRICT tonumber. "10px" fails → component 0. */
+static int box_num(const char *v)
+{
+    if (!v)
+    {
+        return 0;
+    }
+    char tmp[64];
+    size_t o = 0;
+    for (size_t i = 0; v[i] && o + 1 < sizeof(tmp); i++)
+    {
+        if (v[i] != '%')
+        {
+            tmp[o++] = v[i];
+        }
+    }
+    tmp[o] = '\0';
+    char *end = NULL;
+    double d = strtod(tmp, &end);
+    if (end == tmp || *end != '\0')
+    {
+        return 0;
+    }
+    return (int)floor(d / 2.0); /* math.floor(n / 2) — true floor */
+}
 
-static size_t d_split_ws_comma(const char* s, char parts[][24], size_t max) {
-    size_t n = 0;
-    const char* p = s;
-    while (*p != '\0' && n < max) {
-        while (*p != '\0' && (isspace((unsigned char)*p) || *p == ',')) p++;
-        if (*p == '\0') break;
+/* Split value on spaces/commas (Lua "[^%s,]+"), max 4 parts. */
+static int split_parts(const char *v, char parts[4][32])
+{
+    int n = 0;
+    const char *p = v;
+    while (*p && n < 4)
+    {
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == '\n' || *p == '\r')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
         size_t len = 0;
-        while (p[len] != '\0' &&
-               !(isspace((unsigned char)p[len]) || p[len] == ','))
+        while (p[len] && p[len] != ' ' && p[len] != '\t' && p[len] != ',' &&
+               p[len] != '\n' && p[len] != '\r')
+        {
             len++;
-        if (len > 23) len = 23;
-        memcpy(parts[n], p, len);
-        parts[n][len] = '\0';
+        }
+        size_t cn = len < 31 ? len : 31;
+        memcpy(parts[n], p, cn);
+        parts[n][cn] = '\0';
         n++;
         p += len;
     }
     return n;
 }
 
-static void d_parse_box_spacing(StrMap* attrs, DBox* out) {
-    out->top = out->bottom = out->left = out->right = 0;
-    if (attrs == NULL) return;
-    DStyle st;
-    d_parse_style(&st, da_get(attrs, "style"));
-
-    const char* m = d_style_get(&st, "margin");
-    if (m != NULL) {
-        char parts[8][24];
-        size_t np = d_split_ws_comma(m, parts, 8);
-        int haveT = 0, haveB = 0, haveL = 0, haveR = 0;
-        int vT = 0, vB = 0, vL = 0, vR = 0;
-        if (np == 1) {
-            vT = vR = vB = vL = d_css_half(parts[0]);
-            haveT = haveR = haveB = haveL = 1;
-        } else if (np == 2) {
-            vT = vB = d_css_half(parts[0]); haveT = haveB = 1;
-            vR = vL = d_css_half(parts[1]); haveR = haveL = 1;
-        } else if (np == 3) {
-            vT = d_css_half(parts[0]); haveT = 1;
-            vR = vL = d_css_half(parts[1]); haveR = haveL = 1;
-            vB = d_css_half(parts[2]); haveB = 1;
-        } else if (np >= 4) {
-            vT = d_css_half(parts[0]); haveT = 1;
-            vR = d_css_half(parts[1]); haveR = 1;
-            vB = d_css_half(parts[2]); haveB = 1;
-            vL = d_css_half(parts[3]); haveL = 1;
+DocBoxSpacing doc_parse_box_spacing(const DocStyleEntry *attrs, int attrCount)
+{
+    DocBoxSpacing out = {0, 0, 0, 0};
+    if (!attrs || attrCount == 0)
+    {
+        return out;
+    }
+    const char *styleStr = map_get(attrs, attrCount, "style");
+    static DocStyle st; /* static: 1.6KB struct off the game-task stack */
+    doc_parse_style(styleStr, &st);
+    const char *m = style_get(&st, "margin");
+    if (m)
+    {
+        char parts[4][32];
+        int n = split_parts(m, parts);
+        int t = 0, r = 0, b = 0, l = 0;
+        if (n == 1)
+        {
+            t = r = b = l = box_num(parts[0]);
         }
-        if (haveT) out->top = vT;
-        if (haveB) out->bottom = vB;
-        if (haveL) out->left = vL;
-        if (haveR) out->right = vR;
-    } else {
-        const char* mt = d_style_get(&st, "margin-top");
-        if (mt != NULL) out->top = d_css_half(mt);
-        const char* mb = d_style_get(&st, "margin-bottom");
-        if (mb != NULL) out->bottom = d_css_half(mb);
-        const char* ml = d_style_get(&st, "margin-left");
-        if (ml != NULL) out->left = d_css_half(ml);
-        const char* mr = d_style_get(&st, "margin-right");
-        if (mr != NULL) out->right = d_css_half(mr);
-    }
-
-    const char* pad = d_style_get(&st, "padding");
-    if (pad != NULL) {
-        char parts[8][24];
-        size_t np = d_split_ws_comma(pad, parts, 8);
-        if (np == 1) out->left += d_css_half(parts[0]);
-        else if (np == 2) out->left += d_css_half(parts[1]);
-        else if (np >= 4) out->left += d_css_half(parts[3]);
-    } else {
-        const char* pl = d_style_get(&st, "padding-left");
-        if (pl != NULL) out->left += d_css_half(pl);
-    }
-}
-
-/* ── node text concat + svg serialization ─────────────────────────────── */
-
-static void d_concat_into(DomNode* node, StrBuf* sb);
-
-static char* d_concat_node_text(DomNode* node) {
-    StrBuf sb;
-    sb_init(&sb);
-    d_concat_into(node, &sb);
-    return sb_detach(&sb);
-}
-
-static void d_concat_into(DomNode* node, StrBuf* sb) {
-    if (node == NULL) return;
-    if (node->kind == DOM_TEXT) {
-        sb_append_str(sb, node->text ? node->text : "");
-    } else if (node->kind == DOM_ELEMENT) {
-        for (size_t i = 0; i < node->nChildren; i++)
-            d_concat_into(node->children[i], sb);
-    }
-}
-
-static void d_svg_escape_value(const char* v, StrBuf* out) {
-    for (const char* p = v ? v : ""; *p != '\0'; p++) {
-        if (*p == '"') sb_append_str(out, "&quot;");
-        else if (*p == '<') sb_append_str(out, "&lt;");
-        else sb_append_char(out, *p);
-    }
-}
-
-static void d_serialize_svg_into(DomNode* n, StrBuf* out);
-
-static char* d_serialize_svg_node(DomNode* n) {
-    StrBuf sb;
-    sb_init(&sb);
-    d_serialize_svg_into(n, &sb);
-    return sb_detach(&sb);
-}
-
-static void d_attr_iter_cb(const char* key, void* value, void* ud) {
-    StrBuf* out = (StrBuf*)ud;
-    sb_append_char(out, ' ');
-    sb_append_str(out, key);
-    sb_append_str(out, "=\"");
-    d_svg_escape_value((value == HT_ATTR_TRUE) ? "" : (const char*)value, out);
-    sb_append_char(out, '"');
-}
-
-static void d_serialize_svg_into(DomNode* n, StrBuf* out) {
-    if (n == NULL) return;
-    if (n->kind == DOM_TEXT) {
-        size_t encLen = 0;
-        char* enc = entities_encode(n->text ? n->text : "",
-                                    n->textLen, &encLen);
-        if (enc != NULL) {
-            sb_append(out, enc, encLen);
-            pluto_free(enc);
+        else if (n == 2)
+        {
+            t = b = box_num(parts[0]);
+            r = l = box_num(parts[1]);
         }
-        return;
-    }
-    if (n->kind != DOM_ELEMENT) return;
-    sb_append_char(out, '<');
-    sb_append_str(out, n->tag);
-    sm_foreach(n->attrs, d_attr_iter_cb, out);
-    if (n->nChildren == 0) {
-        sb_append_str(out, "/>");
-        return;
-    }
-    sb_append_char(out, '>');
-    for (size_t i = 0; i < n->nChildren; i++)
-        d_serialize_svg_into(n->children[i], out);
-    sb_append_str(out, "</");
-    sb_append_str(out, n->tag);
-    sb_append_char(out, '>');
-}
-
-static int d_valid_href(const char* raw) {
-    if (raw == NULL || raw[0] == '\0') return 0;
-    if (raw[0] == '#') return 0;
-    if (d_starts_ci(raw, "javascript:")) return 0;
-    if (d_starts_ci(raw, "data:")) return 0;
-    return 1;
-}
-
-/* ── meta refresh content parsing ─────────────────────────────────────── */
-/* "^(%d+%.?%d*)%s*;%s*[Uu][Rr][Ll]=%s*(.+)$" or "^(%d+\.?%d*)%s*$"       */
-
-static int d_parse_meta_content(const char* content, double* delayOut,
-                                char** urlOut) {
-    *urlOut = NULL;
-    if (content == NULL) return 0;
-    const char* p = content;
-    if (!isdigit((unsigned char)*p)) return 0;
-    const char* ds = p;
-    while (isdigit((unsigned char)*p)) p++;
-    if (*p == '.') {
-        p++;
-        while (isdigit((unsigned char)*p)) p++;
-    }
-    char dbuf[24];
-    size_t dl = (size_t)(p - ds);
-    if (dl >= sizeof(dbuf)) dl = sizeof(dbuf) - 1;
-    memcpy(dbuf, ds, dl);
-    dbuf[dl] = '\0';
-
-    if (*p == ';') {
-        p++;
-        while (*p != '\0' && isspace((unsigned char)*p)) p++;
-        if ((*p == 'u' || *p == 'U') && strncasecmp(p, "url", 3) == 0 &&
-            p[3] == '=') {
-            p += 4;
-            while (*p != '\0' && isspace((unsigned char)*p)) p++;
-            const char* us = p;
-            while (*p != '\0') p++;          /* (.+)$ to end */
-            size_t ul = (size_t)(p - us);
-            while (ul > 0 && isspace((unsigned char)us[ul - 1])) ul--;
-            if (ul == 0) {
-                *delayOut = strtod(dbuf, NULL);
-                return 1;
-            }
-            char* u = pluto_strndup(us, ul);
-            if (u == NULL) return 0;
-            *delayOut = strtod(dbuf, NULL);
-            *urlOut = u;
-            return 1;
+        else if (n == 3)
+        {
+            t = box_num(parts[0]);
+            r = l = box_num(parts[1]);
+            b = box_num(parts[2]);
         }
-        return 0;  /* ';' but not url= : neither Lua pattern matches */
-    }
-    while (*p != '\0' && isspace((unsigned char)*p)) p++;
-    if (*p != '\0') return 0;
-    *delayOut = strtod(dbuf, NULL);
-    return 1;
-}
-
-/* ── forward declarations (mutually recursive walker) ─────────────────── */
-
-typedef struct DocState DocState;
-/* Retained recursive walker — used only by d_handle_row for cell content.
-   Cell content is bounded depth so recursion is safe. The main tree
-   traversal uses the iterative d_walk_iterative below. */
-static void d_walk(DocState* st, DomNode* node);
-static void d_walk_children(DocState* st, DomNode* node);
-
-/* ── iterative walker infrastructure ──────────────────────────────────── */
-
-enum {
-    FLAG_BOLD = 0, FLAG_ITALIC, FLAG_UNDERLINE, FLAG_STRIKE,
-    FLAG_MARK, FLAG_SMALL, FLAG_BIG, FLAG_SUB, FLAG_SUP, FLAG_CODE,
-    FLAG_INVERT, FLAG_COUNT
-};
-
-/* WPOST values MUST stay at or above FLAG_COUNT so the EXIT dispatcher can
-   distinguish a WPOST* handler from a flag-index decrement. */
-enum {
-    WPOST_NONE = FLAG_COUNT,
-    WPOST_FLUSH,
-    WPOST_FLAGS,
-    WPOST_FLAG_DEC,
-    WPOST_A,
-    WPOST_FORM,
-    WPOST_FIGURE,
-    WPOST_MATH,
-    WPOST_TEXTAREA,
-    WPOST_UL,
-    WPOST_PRE,
-    WPOST_FIELDSET,
-    WPOST_Q,
-    WPOST_MSQRT,
-    WPOST_SPAN,
-    WPOST_FIGURE_CAPTION,
-    WPOST_DETAILS,
-    WPOST_DIALOG,
-    WPOST_INERT_DEC
-};
-
-typedef struct {
-    enum { WENTRY_NODE, WENTRY_ENTER, WENTRY_EXIT, WENTRY_MATHTEXT } kind;
-    DomNode* node;
-    int postType;
-    int clientX, clientY, lmStyle;
-    int baseline;
-    float fx;
-    void* savedPtr;
-} WalkEntry;
-
-static WalkEntry* g_walkStack = NULL;
-static int g_walkSp = 0;
-static int g_walkCap = 0;
-
-#define WALK_STACK_INIT_CAP 64
-
-static void walk_init(void) {
-    g_walkStack = (WalkEntry*)pluto_malloc(WALK_STACK_INIT_CAP * sizeof(WalkEntry));
-    g_walkCap = WALK_STACK_INIT_CAP;
-    g_walkSp = 0;
-}
-
-static void walk_shutdown(void) {
-    pluto_free(g_walkStack);
-    g_walkStack = NULL;
-    g_walkSp = 0;
-    g_walkCap = 0;
-}
-
-static void walk_push(void) {
-    if (g_walkSp >= g_walkCap) {
-        g_walkCap *= 2;
-        g_walkStack = (WalkEntry*)pluto_realloc(g_walkStack, g_walkCap * sizeof(WalkEntry));
-    }
-    g_walkSp++;
-}
-
-static WalkEntry* walk_pop(void) {
-    if (g_walkSp > 0) return &g_walkStack[--g_walkSp];
-    return NULL;
-}
-
-static WalkEntry* walk_peek(void) {
-    if (g_walkSp > 0) return &g_walkStack[g_walkSp - 1];
-    return NULL;
-}
-
-static unsigned char* d_flag_by_index(DocState* st, int idx);
-/* forward decl — defined after DocState */
-
-/* ── inline / block plumbing ──────────────────────────────────────────── */
-
-typedef struct {
-    unsigned char bold, italic, underline, code, small, big;
-    unsigned char sub, sup, mark, strike, invert;
-} DFlags;
-
-typedef struct {
-    DFlags savedFlags;
-    long countBefore;
-    int tagKind; /* 0=span/font, 1=time, 2=data */
-} SpanSave;
-
-typedef struct {
-    StrBuf savedPreBuffer;
-    int savedInPre;
-} PreSave;
-
-typedef struct {
-    StrBuf savedFigCaption;
-    DocBlock* savedFigureImage;
-    int savedFigureCaptionDone;
-    int savedFigureActive;
-} FigureSave;
-
-typedef struct {
-    char* savedFormAction;
-    char* savedFormMethod;
-} FormSave;
-
-typedef struct {
-    int savedInTextarea;
-    char* savedTextareaName;
-    StrBuf savedTextareaBuffer;
-} TextareaSave;
-
-typedef struct {
-    int savedDisabledDepth;
-} FieldsetSave;
-
-typedef struct {
-    char dkey[24];
-    int isOpen;
-} DetailsSave;
-
-typedef struct {
-    int savedInMath;
-    StrBuf savedMathParts;
-} MathSave;
-
-typedef struct {
-    int ordered;
-    int start;
-    int reversed;
-    const char* markerType;  /* static */
-    int count;
-    int depth;
-} DListCtx;
-
-/* progressive <td>/<th> build target (single slot; nested tables inside
- * cells are dropped by parity with the Lua walker) */
-typedef struct {
-    DocInline* inlines;
-    size_t nInlines;
-    size_t capInlines;
-    int isHeader;
-    const char* align;
-} DCellBuild;
-
-/* progressive <table> build target */
-typedef struct {
-    DocTableRow* rows;
-    size_t nRows;
-    size_t capRows;
-} DTableBuild;
-
-struct DocState {
-    DocDocument* doc;
-    const char* baseUrl;
-
-    DFlags f;
-
-    char* currentHref;         /* owned */
-    long currentAnchorIndex;   /* -1 = none */
-    StrBuf linkText;
-    long anchorCounter;
-
-    int inPre;
-    StrBuf preBuffer;
-
-    int inTextarea;
-    char* textareaName;        /* owned */
-    StrBuf textareaBuffer;
-
-    int inMath;
-    StrBuf mathParts;
-
-    DCellBuild* cell;          /* non-NULL while walking a td/th subtree */
-    int cellFirstText;
-    DTableBuild* tbl;          /* non-NULL between <table> open and close */
-
-    int figureCaptionDone;
-    StrBuf figCaption;
-    DocBlock* figureImage;
-    int figureActive;
-
-    int inert;
-    int disabledDepth;
-    int truncated;
-
-    DListCtx* listCtx;
-    int dlDepth;
-
-    DocBlock* currentBlock;
-
-    char* formAction;          /* owned resolved URL or NULL */
-    char* formMethod;          /* owned lowercased or NULL */
-
-    int detailsIndex;
-    const DocParseOpts* opts;
-
-    int hasMetaRefresh;
-    double metaDelay;
-    char* metaUrl;             /* owned */
-};
-
-static unsigned char* d_flag_by_index(DocState* st, int idx) {
-    switch (idx) {
-        case FLAG_BOLD:     return &st->f.bold;
-        case FLAG_ITALIC:   return &st->f.italic;
-        case FLAG_UNDERLINE:return &st->f.underline;
-        case FLAG_STRIKE:   return &st->f.strike;
-        case FLAG_MARK:     return &st->f.mark;
-        case FLAG_SMALL:    return &st->f.small;
-        case FLAG_BIG:      return &st->f.big;
-        case FLAG_SUB:      return &st->f.sub;
-        case FLAG_SUP:      return &st->f.sup;
-        case FLAG_CODE:     return &st->f.code;
-        case FLAG_INVERT:   return &st->f.invert;
-    }
-    return NULL;
-}
-
-static int d_flag_index_for_tag(const char* tag) {
-    if (!strcmp(tag, "b") || !strcmp(tag, "strong")) return FLAG_BOLD;
-    if (!strcmp(tag, "i") || !strcmp(tag, "em"))     return FLAG_ITALIC;
-    if (!strcmp(tag, "u"))                            return FLAG_UNDERLINE;
-    if (!strcmp(tag, "s") || !strcmp(tag, "strike") ||
-        !strcmp(tag, "del"))                          return FLAG_STRIKE;
-    if (!strcmp(tag, "mark"))                         return FLAG_MARK;
-    if (!strcmp(tag, "small"))                        return FLAG_SMALL;
-    if (!strcmp(tag, "big"))                          return FLAG_BIG;
-    if (!strcmp(tag, "sub"))                          return FLAG_SUB;
-    if (!strcmp(tag, "sup"))                          return FLAG_SUP;
-    if (!strcmp(tag, "tt") || !strcmp(tag, "code") ||
-        !strcmp(tag, "kbd") || !strcmp(tag, "samp"))  return FLAG_CODE;
-    return -1;
-}
-
-static void di_free(DocInline* in) {
-    pluto_free(in->text);
-    pluto_free(in->href);
-}
-
-/* frees a standalone table row (cells + their inlines) */
-static void dtr_free(DocTableRow* r) {
-    for (size_t i = 0; i < r->nCells; i++) {
-        DocTableCell* c = &r->cells[i];
-        for (size_t j = 0; j < c->nInlines; j++) di_free(&c->inlines[j]);
-        pluto_free(c->inlines);
-        pluto_free(c->abbr);
-    }
-    pluto_free(r->cells);
-    r->cells = NULL;
-    r->nCells = r->capCells = 0;
-}
-
-/* frees every owned field of a block EXCEPT the struct itself
- * (blocks live inline inside DocDocument.blocks) */
-static void db_free_fields(DocBlock* b) {
-    for (size_t i = 0; i < b->nInlines; i++) di_free(&b->inlines[i]);
-    pluto_free(b->inlines);
-    b->inlines = NULL;
-    b->nInlines = b->capInlines = 0;
-
-    /* frees a standalone table row (cells + their inlines) */
-    for (size_t i = 0; i < b->nRows; i++) {
-        DocTableRow* r = &b->rows[i];
-        for (size_t j = 0; j < r->nCells; j++) {
-            DocTableCell* c2 = &r->cells[j];
-            for (size_t k = 0; k < c2->nInlines; k++)
-                di_free(&c2->inlines[k]);
-            pluto_free(c2->inlines);
-            pluto_free(c2->abbr);
+        else if (n == 4)
+        {
+            t = box_num(parts[0]);
+            r = box_num(parts[1]);
+            b = box_num(parts[2]);
+            l = box_num(parts[3]);
         }
-        pluto_free(r->cells);
+        out.top = t;
+        out.bottom = b;
+        out.left = l;
+        out.right = r;
     }
-    pluto_free(b->rows);
-    b->rows = NULL;
-    b->nRows = b->capRows = 0;
-
-    pluto_free(b->codeText);
-    for (size_t i = 0; i < b->nLines; i++) pluto_free(b->lines[i]);
-    pluto_free(b->lines);
-    b->lines = NULL;
-    b->nLines = 0;
-    pluto_free(b->src);
-    pluto_free(b->alt);
-    pluto_free(b->caption);
-    pluto_free(b->imgHref);
-    pluto_free(b->usemap);
-    pluto_free(b->svgXml);
-    pluto_free(b->tableCaption);
-    pluto_free(b->tableWidth);
-    pluto_free(b->inputType);
-    pluto_free(b->inName);
-    pluto_free(b->inValue);
-    pluto_free(b->placeholder);
-    pluto_free(b->checkboxLabel);
-    pluto_free(b->submitLabel);
-    pluto_free(b->formAction);
-    pluto_free(b->formMethod);
-    for (size_t i = 0; i < b->nOptions; i++) {
-        pluto_free(b->options[i].text);
-        pluto_free(b->options[i].value);
-    }
-    pluto_free(b->options);
-    b->options = NULL;
-    b->nOptions = b->capOptions = 0;
-    pluto_free(b->boxLabel);
-    pluto_free(b->toggleKey);
-    pluto_free(b->phTag);
-    pluto_free(b->phHref);
-    pluto_free(b->readerHost);
-    pluto_free(b->readerTitle);
-    pluto_free(b->readingTime);
-}
-
-static void db_free(DocBlock* b) {
-    if (b == NULL) return;
-    db_free_fields(b);
-    pluto_free(b);
-}
-
-static int db_push_inline(DocBlock* b, DocInline in) {
-    if (b->nInlines == b->capInlines) {
-        size_t nc = b->capInlines ? b->capInlines * 2 : 8;
-        DocInline* ni = pluto_realloc(b->inlines, nc * sizeof(DocInline));
-        if (ni == NULL) return 0;
-        b->inlines = ni;
-        b->capInlines = nc;
-    }
-    b->inlines[b->nInlines++] = in;
-    return 1;
-}
-
-static void doc_add_block(DocState* st, DocBlock* blk) {
-    if (blk != NULL && st->doc->nBlocks < DOC_MAX_BLOCKS) {
-        DocDocument* doc = st->doc;
-        DocBlock* nb = pluto_realloc(doc->blocks,
-                                     (doc->nBlocks + 1) * sizeof(DocBlock));
-        if (nb == NULL) {
-            db_free(blk);
-            return;
-        }
-        doc->blocks = nb;
-        doc->capBlocks = doc->nBlocks + 1;
-        doc->blocks[doc->nBlocks++] = *blk;
-        pluto_free(blk);
-        return;
-    }
-    if (blk != NULL) st->truncated = 1;
-    db_free(blk);
-}
-
-static void doc_flush_block(DocState* st) {
-    DocBlock* cb = st->currentBlock;
-    if (cb == NULL) return;
-    st->currentBlock = NULL;
-    if (!(cb->type == DB_PARAGRAPH && cb->nInlines == 0))
-        doc_add_block(st, cb);
     else
-        db_free(cb);
-}
-
-static void doc_ensure_block(DocState* st) {
-    if (st->currentBlock != NULL) return;
-    DocBlock* b = pluto_malloc(sizeof(DocBlock));
-    if (b == NULL) return;
-    memset(b, 0, sizeof(*b));
-    b->type = DB_PARAGRAPH;
-    st->currentBlock = b;
-}
-
-static void doc_add_inline(DocState* st, DocInline* in) {
-    doc_ensure_block(st);
-    if (st->currentBlock == NULL) {
-        di_free(in);
-        return;
-    }
-    if (st->currentBlock->nInlines >= DOC_MAX_INLINES) {
-        di_free(in);
-        return;
-    }
-    if (!db_push_inline(st->currentBlock, *in)) di_free(in);
-}
-
-static void doc_add_inline_text(DocState* st, const char* raw) {
-    if (raw == NULL || raw[0] == '\0') return;
-    char* collapsed = NULL;
-    const char* text = raw;
-    if (!st->inPre) {
-        collapsed = pluto_malloc(strlen(raw) * 2 + 2);
-        if (collapsed == NULL) return;
-        const char* p = raw;
-        char* o = collapsed;
-        while (*p != '\0') {
-            if (*p == '\r' || *p == '\n' || *p == '\t') {
-                *o++ = ' ';
-                while (*p == '\r' || *p == '\n' || *p == '\t') p++;
-            } else {
-                *o++ = *p++;
-            }
+    {
+        const char *mt = style_get(&st, "margin-top");
+        if (mt)
+        {
+            out.top = box_num(mt);
         }
-        *o = '\0';
-        text = collapsed;
-    }
-    size_t tl = strlen(text);
-    size_t a = 0;
-    while (a < tl && isspace((unsigned char)text[a])) a++;
-    if (a == tl) {
-        pluto_free(collapsed);
-        return;
-    }
-
-    if (st->currentHref != NULL)
-        sb_append_str(&st->linkText, text);
-
-    DocInline in;
-    memset(&in, 0, sizeof(in));
-    in.type = DIT_TEXT;
-    in.text = pluto_strdup(text);
-    in.textLen = tl;
-    in.bold = st->f.bold;
-    in.italic = st->f.italic;
-    in.underline = st->f.underline || (st->currentHref != NULL);
-    in.code = st->f.code;
-    in.small = st->f.small;
-    in.big = st->f.big;
-    in.sub = st->f.sub;
-    in.sup = st->f.sup;
-    in.mark = st->f.mark;
-    in.strike = st->f.strike;
-    in.invert = st->f.invert;
-    in.inert = st->inert > 0;
-    in.anchorIndex = st->currentAnchorIndex;
-    if (st->currentHref != NULL) in.href = pluto_strdup(st->currentHref);
-    pluto_free(collapsed);
-    doc_add_inline(st, &in);
-}
-
-/* ── block factory ────────────────────────────────────────────────────── */
-
-static DocBlock* d_new_block(int type) {
-    DocBlock* b = pluto_malloc(sizeof(DocBlock));
-    if (b == NULL) return NULL;
-    memset(b, 0, sizeof(*b));
-    b->type = type;
-    return b;
-}
-
-/* ── links ────────────────────────────────────────────────────────────── */
-
-static void doc_push_link(DocDocument* doc, const char* href,
-                          const char* text, const char* target) {
-    DocLink nl;
-    memset(&nl, 0, sizeof(nl));
-    nl.href = pluto_strdup(href ? href : "");
-    nl.text = pluto_strdup(text ? text : "");
-    nl.target = pluto_strdup(target ? target : "");
-    if (nl.href == NULL || nl.text == NULL || nl.target == NULL) {
-        pluto_free(nl.href); pluto_free(nl.text); pluto_free(nl.target);
-        return;
-    }
-    DocLink* arr = pluto_realloc(doc->links,
-                                 (doc->nLinks + 1) * sizeof(DocLink));
-    if (arr == NULL) {
-        pluto_free(nl.href); pluto_free(nl.text); pluto_free(nl.target);
-        return;
-    }
-    doc->links = arr;
-    doc->capLinks = doc->nLinks + 1;
-    doc->links[doc->nLinks++] = nl;
-}
-
-static void d_cell_push_inline(DocState* st, DocInline* in) {
-    DCellBuild* c = st->cell;
-    if (c->nInlines >= DOC_MAX_INLINES) {
-        di_free(in);
-        return;
-    }
-    if (c->nInlines == c->capInlines) {
-        size_t nc = c->capInlines ? c->capInlines * 2 : 8;
-        DocInline* ni = pluto_realloc(c->inlines, nc * sizeof(DocInline));
-        if (ni == NULL) {
-            di_free(in);
-            return;
+        const char *mb = style_get(&st, "margin-bottom");
+        if (mb)
+        {
+            out.bottom = box_num(mb);
         }
-        c->inlines = ni;
-        c->capInlines = nc;
-    }
-    c->inlines[c->nInlines++] = *in;
-}
-
-/* ── text node routing ────────────────────────────────────────────────── */
-
-static void d_handle_text_node(DocState* st, DomNode* n) {
-    const char* text = (n->text != NULL) ? n->text : "";
-    if (text[0] == '\0') return;
-    if (st->inPre) { sb_append_str(&st->preBuffer, text); return; }
-    if (st->inTextarea) { sb_append_str(&st->textareaBuffer, text); return; }
-    if (st->cell != NULL) {
-        /* first text of the cell loses its leading whitespace; other runs
-         * only collapse \r\n\t to spaces (no full whitespace squeeze) */
-        const char* txt = text;
-        char buf[512];
-        if (st->cellFirstText) {
-            while (*txt != '\0' && isspace((unsigned char)*txt)) txt++;
-            st->cellFirstText = 0;
+        const char *ml = style_get(&st, "margin-left");
+        if (ml)
+        {
+            out.left = box_num(ml);
         }
-        char* o = buf;
-        for (const char* p = txt; *p != '\0' && o + 1 < buf + sizeof(buf); p++) {
-            if (*p == '\r' || *p == '\n' || *p == '\t') {
-                *o++ = ' ';
-                while (p[1] == '\r' || p[1] == '\n' || p[1] == '\t') p++;
-            } else {
-                *o++ = *p;
-            }
-        }
-        *o = '\0';
-        if (buf[0] == '\0') return;
-        DocInline in;
-        memset(&in, 0, sizeof(in));
-        in.type = DIT_TEXT;
-        in.text = pluto_strdup(buf);
-        in.textLen = strlen(buf);
-        if (in.text == NULL) return;
-        in.bold = st->f.bold;
-        in.italic = st->f.italic;
-        in.underline = st->f.underline || (st->currentHref != NULL);
-        in.code = st->f.code;
-        in.small = st->f.small;
-        in.big = st->f.big;
-        in.sub = st->f.sub;
-        in.sup = st->f.sup;
-        in.mark = st->f.mark;
-        in.strike = st->f.strike;
-        in.invert = st->f.invert;
-        in.inert = st->inert > 0;
-        in.anchorIndex = st->currentAnchorIndex;
-        if (st->currentHref != NULL)
-            in.href = pluto_strdup(st->currentHref);
-        d_cell_push_inline(st, &in);
-        return;
-    }
-    if (st->figureActive && !st->figureCaptionDone) {
-        sb_append_str(&st->figCaption, text);
-        return;
-    }
-    if (st->inMath) { sb_append_str(&st->mathParts, text); return; }
-    doc_add_inline_text(st, text);
-}
-
-/* ── images ───────────────────────────────────────────────────────────── */
-
-static void d_handle_image(DocState* st, StrMap* attrs) {
-    char srcBuf[1024];
-    const char* src = da_get(attrs, "src");
-    if (src == NULL || src[0] == '\0') src = da_get(attrs, "data-src");
-    if (src == NULL || src[0] == '\0') {
-        const char* ss = da_get(attrs, "srcset");
-        if (ss != NULL && ss[0] != '\0') {
-            size_t j = 0;
-            const char* p = ss;
-            while (*p != '\0' && !(isspace((unsigned char)*p) || *p == ',') &&
-                   j + 1 < sizeof(srcBuf))
-                srcBuf[j++] = *p++;
-            srcBuf[j] = '\0';
-            if (j > 0) src = srcBuf;
+        const char *mr = style_get(&st, "margin-right");
+        if (mr)
+        {
+            out.right = box_num(mr);
         }
     }
-    if (src == NULL || src[0] == '\0') return;
-
-    const char* alt = da_get(attrs, "alt");
-    if (alt == NULL || alt[0] == '\0') alt = da_get(attrs, "title");
-    if (alt == NULL || alt[0] == '\0') alt = "Image";
-
-    int ok = 0;
-    double wv = d_tonum(da_get(attrs, "width"), &ok);
-    int w = (ok && wv > 0) ? (int)wv : 160;
-    double hv = d_tonum(da_get(attrs, "height"), &ok);
-    int h = (ok && hv > 0) ? (int)hv : 80;
-
-    /* filter before resolution, on the raw attribute */
-    if (d_contains(src, "tracking") || d_contains(src, "beacon")) return;
-
-    if (w > 360) w = 360;
-    if (h > 180) h = 180;
-
-    const char* usemap = da_get(attrs, "usemap");
-    if (usemap != NULL && usemap[0] == '#') usemap++;
-
-    StrBuf resolved;
-    sb_init(&resolved);
-    url_resolve(st->baseUrl, src, &resolved);
-
-    DocBlock* blk = d_new_block(DB_IMAGE);
-    if (blk == NULL) { sb_clear(&resolved); return; }
-    blk->src = sb_detach(&resolved);
-    blk->alt = pluto_strdup(alt);
-    blk->width = w;
-    blk->height = h;
-    blk->align = d_parse_align(attrs);
-    blk->imgInert = st->inert > 0;
-    if (st->currentHref != NULL)
-        blk->imgHref = pluto_strdup(st->currentHref);
-    if (usemap != NULL && usemap[0] != '\0')
-        blk->usemap = pluto_strdup(usemap);
-
-    if (st->figureActive) {
-        db_free(st->figureImage);
-        st->figureImage = blk;
-        return;
-    }
-    doc_add_block(st, blk);
-}
-
-/* ── element dispatch ─────────────────────────────────────────────────── */
-
-static void d_quote_char(DocState* st) {
-    DocInline in;
-    memset(&in, 0, sizeof(in));
-    in.type = DIT_TEXT;
-    in.text = pluto_strdup("\"");
-    in.bold = 1;
-    in.italic = 1;
-    doc_add_inline(st, &in);
-}
-
-static void d_break_inline(DocState* st, int type) {
-    DocInline in;
-    memset(&in, 0, sizeof(in));
-    in.type = type;
-    in.bold = st->f.bold;
-    in.italic = st->f.italic;
-    in.underline = st->f.underline || (st->currentHref != NULL);
-    in.code = st->f.code;
-    in.small = st->f.small;
-    in.big = st->f.big;
-    in.sub = st->f.sub;
-    in.sup = st->f.sup;
-    in.mark = st->f.mark;
-    in.strike = st->f.strike;
-    in.invert = st->f.invert;
-    in.inert = st->inert > 0;
-    in.anchorIndex = st->currentAnchorIndex;
-    if (st->currentHref != NULL) in.href = pluto_strdup(st->currentHref);
-    doc_add_inline(st, &in);
-}
-
-static void d_split_code_lines(DocBlock* b) {
-    const char* p = (b->codeText != NULL) ? b->codeText : "";
-    size_t cap = 0;
-    const char* seg = p;
-    for (;;) {
-        if (*p == '\n' || *p == '\0') {
-            size_t len = (size_t)(p - seg);
-            if (len > 0 && seg[len - 1] == '\r') len--;
-            if (b->nLines == cap) {
-                size_t nc = cap ? cap * 2 : 8;
-                char** nl = pluto_realloc(b->lines, nc * sizeof(char*));
-                if (nl == NULL) return;
-                b->lines = nl;
-                cap = nc;
-            }
-            b->lines[b->nLines++] = pluto_strndup(seg, len);
-            if (*p == '\0') break;
-            seg = p + 1;
+    const char *p = style_get(&st, "padding");
+    if (p)
+    {
+        char parts[4][32];
+        int n = split_parts(p, parts);
+        if (n == 1)
+        {
+            out.left += box_num(parts[0]);
         }
-        p++;
+        else if (n == 2)
+        {
+            out.left += box_num(parts[1]);
+        }
+        else if (n == 4)
+        {
+            out.left += box_num(parts[3]);
+        }
     }
-}
-
-/* ── P11 helpers ──────────────────────────────────────────────────────── */
-
-static char* d_lower_dup(const char* s) {
-    if (s == NULL) return NULL;
-    char* out = pluto_strdup(s);
-    if (out == NULL) return NULL;
-    for (char* c = out; *c; c++) *c = (char)tolower((unsigned char)*c);
+    else
+    {
+        const char *pl = style_get(&st, "padding-left");
+        if (pl)
+        {
+            out.left += box_num(pl);
+        }
+    }
     return out;
 }
 
-/* in-place Lua "%s+" -> " " collapse plus end trim */
-static void d_collapse_trim(char* s) {
-    if (s == NULL) return;
-    size_t r = 0, w = 0;
-    int inWs = 0;
-    while (s[r] != '\0') {
-        if (isspace((unsigned char)s[r])) {
-            inWs = 1;
-            r++;
-        } else {
-            if (inWs && w > 0) s[w++] = ' ';
-            inWs = 0;
-            s[w++] = s[r++];
+/* ── concatNodeText ─────────────────────────────────────────────────────────── */
+
+static size_t concat_rec(const DomNode *n, char *buf, size_t cap, size_t off)
+{
+    if (!n)
+    {
+        return off;
+    }
+    if (n->kind == DOM_TEXT)
+    {
+        const char *t = n->text ? n->text : "";
+        size_t len = strlen(t);
+        if (off + 1 < cap)
+        {
+            size_t room = cap - off - 1;
+            size_t cn = len < room ? len : room;
+            memcpy(buf + off, t, cn);
+        }
+        return off + len; /* logical offset advances by FULL len; writes clamped */
+    }
+    if (n->kind == DOM_ELEMENT)
+    {
+        for (int i = 0; i < n->childCount; i++)
+        {
+            off = concat_rec(n->children[i], buf, cap, off);
         }
     }
-    s[w] = '\0';
+    return off;
 }
 
-static int d_details_override(const DocState* st, const char* key,
-                              int defaultOpen) {
-    if (st->opts != NULL && st->opts->detailsOverrides != NULL) {
-        for (size_t i = 0; i < st->opts->nOverrides; i++)
-            if (strcmp(st->opts->detailsOverrides[i].key, key) == 0)
-                return st->opts->detailsOverrides[i].open ? 1 : 0;
+size_t doc_concat_node_text(const DomNode *node, char *buf, size_t cap)
+{
+    size_t need = concat_rec(node, buf, cap, 0);
+    if (cap > 0)
+    {
+        size_t written = need < cap - 1 ? need : cap - 1;
+        buf[written] = '\0';
     }
-    return defaultOpen;
+    return need;
 }
 
-/* shared "common" attribute bundle for input-family blocks */
-typedef struct {
-    char* name;          /* owned */
-    char* value;         /* owned */
-    unsigned char disabled, readonlyFlag, requiredFlag, inertFlag;
-    int maxlength;       /* -1 unset */
-} DInputCommon;
+/* ── validHref ──────────────────────────────────────────────────────────────── */
 
-static void d_input_common(DocState* st, StrMap* attrs, DInputCommon* c) {
-    memset(c, 0, sizeof(*c));
-    const char* nm = da_get(attrs, "name");
-    c->name = pluto_strdup((nm != NULL) ? nm : "q");
-    const char* val = da_get(attrs, "value");
-    c->value = pluto_strdup((val != NULL) ? val : "");
-    int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
-    c->disabled = (unsigned char)dis;
-    c->readonlyFlag =
-        (unsigned char)(da_has(attrs, "readonly") || dis);
-    c->requiredFlag = (unsigned char)da_has(attrs, "required");
-    int ok = 0;
-    double mv = d_tonum(da_get(attrs, "maxlength"), &ok);
-    c->maxlength = ok ? (int)mv : -1;
-    c->inertFlag = (unsigned char)((st->inert > 0) || dis);
-}
-
-/* copies the common bundle into a block; takes ownership of name/value */
-static void d_block_set_common(DocBlock* b, DInputCommon* c,
-                               DocState* st) {
-    b->inName = c->name;
-    b->inValue = c->value;
-    b->disabledFlag = c->disabled;
-    b->readonlyFlag = c->readonlyFlag;
-    b->requiredFlag = c->requiredFlag;
-    b->maxlength = c->maxlength;
-    b->blockInert = c->inertFlag;
-    if (st->formAction != NULL && st->formAction[0] != '\0')
-        b->formAction = pluto_strdup(st->formAction);
-    if (st->formMethod != NULL && st->formMethod[0] != '\0')
-        b->formMethod = pluto_strdup(st->formMethod);
-}
-
-/* per-element formaction / formmethod attribute overrides */
-static void d_form_overrides(DocState* st, StrMap* attrs, DocBlock* b) {
-    const char* fa = da_get(attrs, "formaction");
-    if (fa != NULL && fa[0] != '\0') {
-        StrBuf fb;
-        sb_init(&fb);
-        url_resolve(st->baseUrl, fa, &fb);
-        pluto_free(b->formAction);
-        b->formAction = sb_detach(&fb);
+int doc_valid_href(const char *raw)
+{
+    if (!raw || raw[0] == '\0')
+    {
+        return 0;
     }
-    const char* fm = da_get(attrs, "formmethod");
-    if (fm != NULL && fm[0] != '\0') {
-        pluto_free(b->formMethod);
-        b->formMethod = d_lower_dup(fm);
+    if (raw[0] == '#')
+    {
+        return 0;
     }
+    if (ci_prefix(raw, "javascript:", 11) == 0)
+    {
+        return 0;
+    }
+    if (ci_prefix(raw, "data:", 5) == 0)
+    {
+        return 0;
+    }
+    return 1;
 }
 
-static int d_str_eq_ci(const char* a, const char* b) {
-    return a != NULL && b != NULL && strcasecmp(a, b) == 0;
+/* ── serializeSvgNode ───────────────────────────────────────────────────────── */
+
+static int svg_append_escaped_attr(StrBuf *sb, const char *v)
+{
+    for (const char *p = v; *p; p++)
+    {
+        if (*p == '"')
+        {
+            if (strbuf_append(sb, "&quot;") != 0)
+            {
+                return -1;
+            }
+        }
+        else if (*p == '<')
+        {
+            if (strbuf_append(sb, "&lt;") != 0)
+            {
+                return -1;
+            }
+        }
+        else if (strbuf_append_char(sb, *p) != 0)
+        {
+            return -1;
+        }
+    }
+    return 0;
 }
 
-/* viewBox fallback sizing. The Lua source binds captures #1/#2 (minx/miny)
- * and uses them as w/h fallbacks — replicate exactly, quirks included:
- *   vbW, vbH = match("^%s*([num]+)%s+([num]+)%s+[num]+%s+[num]+$")   */
-static void d_parse_viewbox(const char* vb, double* wOut, double* hOut) {
-    *wOut = 0;
-    *hOut = 0;
-    if (vb == NULL) return;
-    int n = 0;
-    double first = 0, second = 0;
-    const char* p = vb;
-    while (*p != '\0' && n < 2) {
-        while (*p != '\0' && isspace((unsigned char)*p)) p++;
-        if (*p == '\0') break;
-        char* end = NULL;
-        double v = strtod(p, &end);
-        if (end == p) { p++; continue; }
-        if (n == 0) first = v;
-        else second = v;
-        n++;
-        p = end;
+static int svg_serialize(const DomNode *n, StrBuf *sb)
+{
+    if (n->kind == DOM_TEXT)
+    {
+        char *enc = entities_encode(n->text ? n->text : "");
+        if (!enc)
+        {
+            return -1;
+        }
+        int rc = strbuf_append(sb, enc);
+        PLUTO_FREE(enc);
+        return rc;
     }
-    /* full pattern requires FOUR number groups before it matches */
-    if (n < 2) return;
-    int groups = 2;
-    while (*p != '\0') {
-        while (*p != '\0' && isspace((unsigned char)*p)) p++;
-        if (*p == '\0') break;
-        char* end = NULL;
-        (void)strtod(p, &end);
-        if (end == p) break;
-        groups++;
-        p = end;
+    if (n->kind == DOM_ELEMENT)
+    {
+        if (strbuf_append_char(sb, '<') != 0 ||
+            strbuf_append(sb, n->tag ? n->tag : "") != 0)
+        {
+            return -1;
+        }
+        for (int i = 0; i < n->attrCount; i++)
+        {
+            const char *v = n->attrs[i].value == PLUTO_TOK_ATTR_TRUE
+                                ? ""
+                                : (n->attrs[i].value ? n->attrs[i].value : "");
+            if (strbuf_append_char(sb, ' ') != 0 ||
+                strbuf_append(sb, n->attrs[i].key) != 0 ||
+                strbuf_append(sb, "=\"") != 0 ||
+                svg_append_escaped_attr(sb, v) != 0 ||
+                strbuf_append_char(sb, '"') != 0)
+            {
+                return -1;
+            }
+        }
+        if (n->childCount == 0)
+        {
+            return strbuf_append(sb, "/>") != 0 ? -1 : 0;
+        }
+        if (strbuf_append_char(sb, '>') != 0)
+        {
+            return -1;
+        }
+        for (int c = 0; c < n->childCount; c++)
+        {
+            if (svg_serialize(n->children[c], sb) != 0)
+            {
+                return -1;
+            }
+        }
+        if (strbuf_append(sb, "</") != 0 ||
+            strbuf_append(sb, n->tag ? n->tag : "") != 0 ||
+            strbuf_append_char(sb, '>') != 0)
+        {
+            return -1;
+        }
     }
-    if (groups < 4) return;
-    *wOut = first;
-    *hOut = second;
+    return 0; /* other kinds → "" */
 }
 
-/* mfenced attribute: entity-decoded with default; returns owned string */
-static char* d_mfenced_attr(StrMap* attrs, const char* key,
-                            const char* dflt) {
-    const char* raw = da_get(attrs, key);
-    if (raw == NULL || raw[0] == '\0') raw = dflt;
-    size_t outLen = 0;
-    char* dec = entities_decode(raw, strlen(raw), &outLen);
-    if (dec != NULL) {
-        dec[outLen] = '\0';
-        return dec;
+char *doc_serialize_svg_node(const DomNode *n)
+{
+    StrBuf sb;
+    if (strbuf_init(&sb) != 0)
+    {
+        return NULL;
     }
-    return pluto_strdup(dflt);
+    if (n && svg_serialize(n, &sb) != 0)
+    {
+        strbuf_free(&sb);
+        return NULL;
+    }
+    return strbuf_detach(&sb);
+}
+/* ── P19: element walker — port of document.lua lines 241–1443 ─────────────── */
+
+typedef struct DocChunk
+{
+    struct DocChunk *next;
+    size_t used;
+    size_t cap;
+} DocChunk;
+
+typedef struct
+{
+    DocChunk *head;
+} DocArena;
+
+typedef struct Walker Walker;
+
+static void *doc_arena_alloc(DocArena *a, size_t n)
+{
+    n = (n + 7u) & ~(size_t)7u;
+    if (a->head && a->head->used + n <= a->head->cap)
+    {
+        void *p = (char *)a->head + sizeof(DocChunk) + a->head->used;
+        a->head->used += n;
+        return p;
+    }
+    size_t c = n > 4096 ? n : 4096;
+    DocChunk *ch = (DocChunk *)PLUTO_MALLOC(sizeof(DocChunk) + c);
+    if (!ch)
+    {
+        return NULL;
+    }
+    ch->next = a->head;
+    ch->used = n;
+    ch->cap = c;
+    a->head = ch;
+    return (char *)ch + sizeof(DocChunk);
 }
 
-/* ── table row processing ─────────────────────────────────────────────── */
+static void doc_arena_free_all(DocArena *a)
+{
+    DocChunk *ch = a->head;
+    while (ch)
+    {
+        DocChunk *nx = ch->next;
+        PLUTO_FREE(ch);
+        ch = nx;
+    }
+    a->head = NULL;
+}
 
-static void d_handle_row(DocState* st, DomNode* trNode, DTableBuild* tbl);
+static int doc_ptrarr_push(void ***arr, int *count, int *cap, void *item)
+{
+    if (*count >= *cap)
+    {
+        int nc = *cap ? *cap * 2 : 8;
+        void **na = (void **)PLUTO_REALLOC(*arr, (size_t)nc * sizeof(void *));
+        if (!na)
+        {
+            return -1;
+        }
+        *arr = na;
+        *cap = nc;
+    }
+    (*arr)[(*count)++] = item;
+    return 0;
+}
 
-static void d_handle_row(DocState* st, DomNode* trNode, DTableBuild* tbl) {
-    DocTableRow row;
-    memset(&row, 0, sizeof(row));
-    for (size_t i = 0; i < trNode->nChildren; i++) {
-        DomNode* cellNode = trNode->children[i];
-        if (cellNode->kind != DOM_ELEMENT)
+/* ── Attribute access (DomAttr arrays) ────────────────────────────────────── */
+
+typedef struct
+{
+    const DomAttr *items;
+    int count;
+} AttrList;
+
+static AttrList attrs_of(const DomNode *n)
+{
+    AttrList a;
+    a.items = n ? n->attrs : NULL;
+    a.count = n ? n->attrCount : 0;
+    return a;
+}
+
+/* NULL when absent; "" for boolean attributes (PLUTO_TOK_ATTR_TRUE). */
+static const char *attr_val(AttrList a, const char *key)
+{
+    for (int i = 0; i < a.count; i++)
+    {
+        if (strcmp(a.items[i].key, key) == 0)
+        {
+            const char *v = a.items[i].value;
+            return (v == PLUTO_TOK_ATTR_TRUE || !v) ? "" : v;
+        }
+    }
+    return NULL;
+}
+
+/* Attribute PRESENCE ("" value still counts, matches Lua attrs[k] ~= nil). */
+static int attr_has(AttrList a, const char *key)
+{
+    for (int i = 0; i < a.count; i++)
+    {
+        if (strcmp(a.items[i].key, key) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *attr_or_d(AttrList a, const char *key, const char *dflt)
+{
+    const char *v = attr_val(a, key);
+    return v ? v : dflt;
+}
+
+/* Lua tonumber (strict, trailing space allowed). */
+static double strict_num(const char *s, double fb)
+{
+    if (!s)
+    {
+        return fb;
+    }
+    char *end;
+    double d = strtod(s, &end);
+    if (end == s)
+    {
+        return fb;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return fb;
+    }
+    return d;
+}
+
+/* ── Walker state ─────────────────────────────────────────────────────────── */
+
+typedef struct ListCtx
+{
+    int ordered;
+    int count;
+    int depth;
+    int start;
+    int reversed;
+    char markerType;
+} ListCtx;
+
+typedef struct FigureCtx
+{
+    StrBuf *cap; /* heap; freed at figure end / walker teardown */
+    DocBlock *image;
+} FigureCtx;
+
+/* Exit-frame actions (post-children work the Lua handler does inline). */
+enum
+{
+    WX_NONE = 0,
+    WX_FLUSH,        /* p/div/…/h1-h6/blockquote/center/marquee/li/dt/dd */
+    WX_STYLE,        /* b/i/u/code/mark/small/big/sub/sup/del/rt: restore style */
+    WX_LINK_END,     /* a: push doc.links, clear href/anchor/linkText */
+    WX_QUOTE_END,    /* q: closing quote */
+    WX_PRE_END,      /* pre/xmp/…: build code_block */
+    WX_FIGURE_END,   /* figure: caption merge + restore */
+    WX_LIST_END,     /* ul/ol/menu/dir: restore listCtx */
+    WX_DL_END,       /* dl: restore dlDepth */
+    WX_FORM_END,     /* form: restore formAction/method */
+    WX_TEXTAREA_END, /* textarea: build input_field */
+    WX_MATH_END,     /* math: build math block */
+    WX_FIELDSET_END, /* fieldset: box_close + restore disabledDepth */
+    WX_DETAILS_END,  /* details: box_close */
+    WX_DIALOG_END,   /* dialog: box_close */
+    WX_SPAN_END,     /* span/font/time/data/…: fallback + restore style */
+    WX_FIGCAP_END,   /* figcaption: restore figureCaptionDone */
+    WX_INERT_END     /* inert attribute: restore state.inert after the subtree */
+};
+
+typedef struct ExitCtx
+{
+    int kind;
+    unsigned flags; /* saved inline style */
+    char *href; /* saved currentHref (a) */
+    int anchorIndex;
+    char *title; /* a: attrs["title"] */
+    char *target; /* a: attrs["target"] */
+    int hadInlines; /* span: inline count at entry */
+    char *fallback; /* span: time datetime / data value */
+    void *listCtx; /* saved ListCtx* */
+    void *figure; /* saved FigureCtx* */
+    int inMath;
+    int disabledDepth;
+    int dlDepth;
+    int detailsIdx;
+    int toggleOpen;
+    char *formAction;
+    char *formMethod;
+    int inertSaved; /* inert attribute: state.inert at entry */
+} ExitCtx;
+
+typedef struct WFrame
+{
+    int kind; /* 0 enter node, 1 exit ctx, 2 separator */
+    const DomNode *node;
+    ExitCtx *ctx;
+    const char *sep;
+} WFrame;
+
+struct Walker
+{
+    DocParseResult *doc;
+    DocArena arena;
+    const DocParseOpts *opts;
+    WFrame *frames;
+    int frameCount;
+    int frameCap;
+
+    /* inline style flags */
+    unsigned flags;
+
+    /* link context */
+    char *currentHref; /* arena */
+    int currentAnchorIndex;
+    StrBuf linkText;
+
+    /* pre / textarea / math */
+    int inPre;
+    StrBuf preBuf;
+    int inTextarea;
+    char *textareaName; /* arena */
+    StrBuf textareaBuf;
+    int inMath;
+    StrBuf mathBuf;
+
+    /* lists */
+    ListCtx *listCtx; /* arena */
+    int dlDepth;
+
+    /* table cell */
+    DocCell *cell;
+    int cellFirstText;
+    DocTable *table; /* current table (stray <tr>) */
+
+    /* figure */
+    FigureCtx *figure;
+
+    /* misc */
+    int inert;
+    int disabledDepth;
+    int truncated;
+    int detailsIndex;
+    int anchorCounter;
+    int figureCaptionDone;
+    char *formAction; /* arena */
+    char *formMethod; /* arena "get"/"post" */
+
+    DocBlock *currentBlock;
+
+    /* heap StrBufs owned by this walker (figure captions); freed at teardown */
+    StrBuf **heapBufs;
+    int heapBufCount;
+    int heapBufCap;
+
+    int error;
+};
+
+static char *doc_arena_str(Walker *w, const char *s)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    size_t n = strlen(s);
+    char *p = (char *)doc_arena_alloc(&w->arena, n + 1);
+    if (!p)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memcpy(p, s, n + 1);
+    return p;
+}
+
+static char *doc_arena_strn(Walker *w, const char *s, size_t n)
+{
+    char *p = (char *)doc_arena_alloc(&w->arena, n + 1);
+    if (!p)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memcpy(p, s, n);
+    p[n] = '\0';
+    return p;
+}
+
+/* Lowercased copy into the arena. */
+static char *doc_arena_str_lower(Walker *w, const char *s)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    size_t n = strlen(s);
+    char *p = (char *)doc_arena_alloc(&w->arena, n + 1);
+    if (!p)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    for (size_t i = 0; i <= n; i++)
+    {
+        p[i] = lua_lower(s[i]);
+    }
+    return p;
+}
+
+/* Lua string.gsub(s, "^(%s*).-(%s*)$" → trimmed copy). NULL → NULL. */
+static char *doc_arena_trim(Walker *w, const char *s)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    const char *a = s;
+    const char *z = s + strlen(s);
+    while (a < z && is_lspace(*a))
+    {
+        a++;
+    }
+    while (z > a && is_lspace(*(z - 1)))
+    {
+        z--;
+    }
+    return doc_arena_strn(w, a, (size_t)(z - a));
+}
+
+/* Collapse Lua %s+ runs into a single space, then trim. */
+static char *doc_arena_collapse(Walker *w, const char *s)
+{
+    if (!s)
+    {
+        return NULL;
+    }
+    static char tmp[1024]; /* hoisted: device gameTask stack is tiny */
+    size_t o = 0;
+    for (const char *p = s; *p && o + 1 < sizeof(tmp); p++)
+    {
+        if (is_lspace(*p))
+        {
+            if (o > 0 && tmp[o - 1] != ' ')
+            {
+                tmp[o++] = ' ';
+            }
+            while (is_lspace(p[1]) && o + 3 < sizeof(tmp))
+            {
+                p++;
+            }
+        }
+        else
+        {
+            tmp[o++] = *p;
+        }
+    }
+    while (o > 0 && is_lspace(tmp[o - 1]))
+    {
+        o--;
+    }
+    tmp[o] = '\0';
+    return doc_arena_str(w, tmp);
+}
+
+/* ── Frame machinery ──────────────────────────────────────────────────────── */
+
+static int frame_push(Walker *w, WFrame f)
+{
+    if (w->frameCount >= w->frameCap)
+    {
+        int nc = w->frameCap ? w->frameCap * 2 : 64;
+        WFrame *na = (WFrame *)PLUTO_REALLOC(w->frames, (size_t)nc * sizeof(WFrame));
+        if (!na)
+        {
+            w->error = 1;
+            return -1;
+        }
+        w->frames = na;
+        w->frameCap = nc;
+    }
+    w->frames[w->frameCount++] = f;
+    return 0;
+}
+
+static int push_enter(Walker *w, const DomNode *node)
+{
+    WFrame f;
+    f.kind = 0;
+    f.node = node;
+    f.ctx = NULL;
+    f.sep = NULL;
+    return frame_push(w, f);
+}
+
+/* Push an exit frame with the given kind; returns ctx (NULL on OOM). */
+static ExitCtx *push_exit(Walker *w, int kind)
+{
+    ExitCtx *x = (ExitCtx *)doc_arena_alloc(&w->arena, sizeof(ExitCtx));
+    WFrame f;
+    if (!x)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memset(x, 0, sizeof(*x));
+    x->kind = kind;
+    f.kind = 1;
+    f.node = NULL;
+    f.ctx = x;
+    f.sep = NULL;
+    if (frame_push(w, f))
+    {
+        return NULL;
+    }
+    return x;
+}
+
+static int push_sep(Walker *w, const char *s)
+{
+    WFrame f;
+    f.kind = 2;
+    f.node = NULL;
+    f.ctx = NULL;
+    f.sep = s;
+    return frame_push(w, f);
+}
+
+/* Children enter-frames (reversed so they process in order). Push BEFORE any
+ * exit frame that must run after the children (exit runs last). */
+static int push_children(Walker *w, const DomNode *node)
+{
+    if (!node)
+    {
+        return 0;
+    }
+    for (int i = node->childCount - 1; i >= 0; i--)
+    {
+        if (push_enter(w, node->children[i]))
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Children except a given tag (fieldset skips legend, details skips summary). */
+static int push_children_except(Walker *w, const DomNode *node, const char *tag)
+{
+    if (!node)
+    {
+        return 0;
+    }
+    for (int i = node->childCount - 1; i >= 0; i--)
+    {
+        const DomNode *c = node->children[i];
+        if (c->kind == DOM_ELEMENT && c->tag && strcmp(c->tag, tag) == 0)
+        {
             continue;
-        int isTh = !strcmp(cellNode->tag, "th");
-        if (!isTh && strcmp(cellNode->tag, "td") != 0)
-            continue;
-
-        char* savedHref = st->currentHref;
-        long savedAnchor = st->currentAnchorIndex;
-
-        DCellBuild cellBuild;
-        memset(&cellBuild, 0, sizeof(cellBuild));
-        cellBuild.isHeader = isTh;
-        cellBuild.align = d_parse_align(cellNode->attrs);
-        st->cell = &cellBuild;
-        st->cellFirstText = 1;
-        st->currentHref = NULL;
-        st->currentAnchorIndex = -1;
-        d_walk_children(st, cellNode);
-        if (cellBuild.nInlines == 0) {
-            DocInline sp;
-            memset(&sp, 0, sizeof(sp));
-            sp.type = DIT_TEXT;
-            sp.text = pluto_strdup(" ");
-            sp.textLen = 1;
-            if (sp.text != NULL) d_cell_push_inline(st, &sp);
         }
-        st->cell = NULL;
-
-        DocTableCell* arr = pluto_realloc(
-            row.cells, (row.nCells + 1) * sizeof(DocTableCell));
-        if (arr == NULL) {
-            for (size_t j = 0; j < cellBuild.nInlines; j++)
-                di_free(&cellBuild.inlines[j]);
-            pluto_free(cellBuild.inlines);
-        } else {
-            DocTableCell* c = &arr[row.nCells++];
-            row.cells = arr;
-            row.capCells = row.nCells;
-            c->inlines = cellBuild.inlines;
-            c->nInlines = cellBuild.nInlines;
-            c->capInlines = cellBuild.capInlines;
-            c->isHeader = isTh;
-            int ok = 0;
-            double cs = d_tonum(da_get(cellNode->attrs, "colspan"), &ok);
-            c->colspan = (ok && cs >= 1) ? (int)cs : 1;
-            double rs = d_tonum(da_get(cellNode->attrs, "rowspan"), &ok);
-            c->rowspan = (ok && rs >= 1) ? (int)rs : 1;
-            const char* ab = da_get(cellNode->attrs, "abbr");
-            if (ab == NULL || ab[0] == '\0') ab = da_get(cellNode->attrs, "title");
-            c->abbr = pluto_strdup((ab != NULL) ? ab : "");
-            c->align = cellBuild.align;
+        if (push_enter(w, c))
+        {
+            return -1;
         }
-
-        st->currentHref = savedHref;
-        st->currentAnchorIndex = savedAnchor;
     }
-    DocTableRow* rarr =
-        pluto_realloc(tbl->rows, (tbl->nRows + 1) * sizeof(DocTableRow));
-    if (rarr == NULL) {
-        dtr_free(&row);
+    return 0;
+}
+
+/* ── Block/inline builders ────────────────────────────────────────────────── */
+
+static char *resolve_href(Walker *w, const char *raw); /* used by the image handler below; defined after URL glue */
+
+static DocBlock *new_block(Walker *w, int type)
+{
+    DocBlock *b = (DocBlock *)doc_arena_alloc(&w->arena, sizeof(DocBlock));
+    if (!b)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memset(b, 0, sizeof(*b));
+    b->type = type;
+    b->maxlength = -1;  /* Lua-nil sentinel: absent maxlength prints nothing */
+    b->fieldWidth = -1; /* Lua-nil sentinel */
+    b->fieldRows = -1;  /* Lua-nil sentinel */
+    return b;
+}
+
+static DocInline *new_inline(Walker *w, int type)
+{
+    DocInline *inl = (DocInline *)doc_arena_alloc(&w->arena, sizeof(DocInline));
+    if (!inl)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memset(inl, 0, sizeof(*inl));
+    inl->type = type;
+    return inl;
+}
+
+static int add_block(Walker *w, DocBlock *b)
+{
+    if (b && w->doc->blockCount < DOC_MAX_BLOCKS)
+    {
+        if (doc_ptrarr_push((void ***)&w->doc->blocks, &w->doc->blockCount,
+                            &w->doc->blockCap, b))
+        {
+            w->error = 1;
+            return 0;
+        }
+        return 1;
+    }
+    if (b)
+    {
+        w->truncated = 1;
+    }
+    return 0;
+}
+
+static void flush_current_block(Walker *w)
+{
+    if (w->currentBlock)
+    {
+        if (w->currentBlock->type != DOC_BLOCK_PARAGRAPH ||
+            w->currentBlock->inlineCount > 0)
+        {
+            add_block(w, w->currentBlock);
+        }
+        w->currentBlock = NULL;
+    }
+}
+
+static void ensure_block(Walker *w)
+{
+    if (!w->currentBlock)
+    {
+        w->currentBlock = new_block(w, DOC_BLOCK_PARAGRAPH);
+    }
+}
+
+static int add_inline(Walker *w, DocInline *inl)
+{
+    ensure_block(w);
+    if (!w->currentBlock || w->currentBlock->inlineCount >= DOC_MAX_INLINES)
+    {
+        return 0;
+    }
+    if (doc_ptrarr_push((void ***)&w->currentBlock->inlines,
+                        &w->currentBlock->inlineCount,
+                        &w->currentBlock->inlineCap, inl))
+    {
+        w->error = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static DocInline *make_text_inline(Walker *w, const char *text, size_t len)
+{
+    DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+    if (!inl)
+    {
+        return NULL;
+    }
+    inl->text = doc_arena_strn(w, text, len);
+    inl->flags = w->flags;
+    inl->anchorIndex = w->currentAnchorIndex;
+    if (w->currentHref)
+    {
+        inl->flags |= DOC_INF_UNDERLINE;
+        inl->href = doc_arena_str(w, w->currentHref);
+    }
+    if (w->inert > 0)
+    {
+        inl->flags |= DOC_INF_INERT;
+    }
+    return inl;
+}
+
+/* addInlineText (document.lua): collapse [\r\n\t]+ to space unless inPre;
+ * skip empty / all-whitespace runs; append to linkText inside a link. */
+static void add_inline_text(Walker *w, const char *raw)
+{
+    if (!raw || raw[0] == '\0')
+    {
         return;
     }
-    tbl->rows = rarr;
-    tbl->capRows = tbl->nRows + 1;
-    tbl->rows[tbl->nRows++] = row;
-}
-
-/* ── select options ───────────────────────────────────────────────────── */
-
-static void d_collect_select_options(DocState* st, DomNode* node,
-                                     DocBlock* b) {
-    for (size_t i = 0; i < node->nChildren; i++) {
-        DomNode* c = node->children[i];
-        if (c->kind != DOM_ELEMENT) continue;
-        if (!strcmp(c->tag, "option")) {
-            char* text = d_concat_node_text(c);
-            d_collapse_trim(text);
-            const char* labelAttr = da_get(c->attrs, "label");
-            char* finalText = text;
-            if (labelAttr != NULL && labelAttr[0] != '\0') {
-                pluto_free(text);
-                finalText = pluto_strdup(labelAttr);
+    char tmp[512];
+    const char *text = raw;
+    if (!w->inPre)
+    {
+        size_t o = 0;
+        size_t i = 0;
+        while (raw[i] && o + 1 < sizeof(tmp))
+        {
+            if (raw[i] == '\r' || raw[i] == '\n' || raw[i] == '\t')
+            {
+                tmp[o++] = ' ';
+                while ((raw[i + 1] == '\r' || raw[i + 1] == '\n' ||
+                        raw[i + 1] == '\t') &&
+                       i + 2 < sizeof(tmp))
+                {
+                    i++;
+                }
             }
-            const char* val = da_get(c->attrs, "value");
-            DocSelectOpt* arr = pluto_realloc(
-                b->options, (b->nOptions + 1) * sizeof(DocSelectOpt));
-            if (arr == NULL || finalText == NULL) {
-                pluto_free(finalText);
-                continue;
+            else
+            {
+                tmp[o++] = raw[i];
             }
-            b->options = arr;
-            b->capOptions = b->nOptions + 1;
-            DocSelectOpt* o = &b->options[b->nOptions++];
-            o->text = finalText;
-            o->value = pluto_strdup((val != NULL) ? val : finalText);
-            o->selected = (unsigned char)da_has(c->attrs, "selected");
-            o->disabled = (unsigned char)da_has(c->attrs, "disabled");
-            o->group = 0;
-        } else if (!strcmp(c->tag, "optgroup")) {
-            const char* gl = da_get(c->attrs, "label");
-            size_t childrenBefore = b->nOptions;
-            d_collect_select_options(st, c, b);
-            if (gl != NULL && gl[0] != '\0' &&
-                childrenBefore <= b->nOptions) {
-                DocSelectOpt* arr = pluto_realloc(
-                    b->options, (b->nOptions + 1) * sizeof(DocSelectOpt));
-                if (arr == NULL) continue;
-                b->options = arr;
-                b->capOptions = b->nOptions + 1;
-                memmove(&b->options[childrenBefore + 1],
-                        &b->options[childrenBefore],
-                        (b->nOptions - childrenBefore) *
-                            sizeof(DocSelectOpt));
-                DocSelectOpt* g = &b->options[childrenBefore];
-                g->text = pluto_strdup(gl);
-                g->value = pluto_strdup("");
-                g->group = 1;
-                g->disabled = 1;
-                g->selected = 0;
-                b->nOptions++;
+            i++;
+        }
+        tmp[o] = '\0';
+        text = tmp;
+    }
+    if (text[0] == '\0')
+    {
+        return;
+    }
+    {
+        const char *p;
+        int allSpace = 1;
+        for (p = text; *p; p++)
+        {
+            if (!is_lspace(*p))
+            {
+                allSpace = 0;
+                break;
             }
         }
+        if (allSpace)
+        {
+            return;
+        }
+    }
+    if (w->currentHref)
+    {
+        if (strbuf_append(&w->linkText, text))
+        {
+            w->error = 1;
+            return;
+        }
+    }
+    DocInline *inl = make_text_inline(w, text, strlen(text));
+    if (inl)
+    {
+        add_inline(w, inl);
     }
 }
 
-/* ── media placeholders ───────────────────────────────────────────────── */
+/* ── Style helpers on DomAttr lists (small stack; walker is sequential) ──── */
 
-static void d_handle_media_placeholder(DocState* st, const char* tag,
-                                       DomNode* n, StrMap* attrs) {
-    doc_flush_block(st);
-    const char* src = da_get(attrs, "src");
-    if (src == NULL || src[0] == '\0') src = da_get(attrs, "data");
-    if (src == NULL || src[0] == '\0') {
-        for (size_t i = 0; i < n->nChildren; i++) {
-            DomNode* c = n->children[i];
-            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "source")) {
-                const char* s = da_get(c->attrs, "src");
-                if (s != NULL && s[0] != '\0') {
-                    src = s;
-                    break;
+static const char *walk_align(Walker *w, AttrList a)
+{
+    const char *al = attr_val(a, "align");
+    const char *styleStr = attr_val(a, "style");
+    static DocStyle st; /* static: sees one style map at a time (walker is sequential) */
+    doc_parse_style(styleStr, &st);
+    const char *ta = style_get(&st, "text-align");
+    if (ta)
+    {
+        al = ta;
+    }
+    if (!al)
+    {
+        return NULL;
+    }
+    static char lbuf[16];
+    lua_lower_buf(lbuf, al, sizeof(lbuf));
+    if (strcmp(lbuf, "center") == 0 || strcmp(lbuf, "right") == 0 ||
+        strcmp(lbuf, "left") == 0)
+    {
+        return doc_arena_str(w, lbuf);
+    }
+    return NULL;
+}
+
+static int walk_display_none(AttrList a)
+{
+    if (a.count == 0)
+    {
+        return 0;
+    }
+    if (attr_has(a, "hidden") || attr_has(a, "popover"))
+    {
+        return 1;
+    }
+    const char *styleStr = attr_val(a, "style");
+    static DocStyle st;
+    doc_parse_style(styleStr, &st);
+    const char *d = style_get(&st, "display");
+    if (d && strstr(d, "none"))
+    {
+        return 1;
+    }
+    const char *v = style_get(&st, "visibility");
+    if (v && strstr(v, "hidden"))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static int walk_inverted(AttrList a)
+{
+    if (a.count == 0)
+    {
+        return 0;
+    }
+    const char *styleStr = attr_val(a, "style");
+    static DocStyle st;
+    doc_parse_style(styleStr, &st);
+    const char *c = style_get(&st, "color");
+    if (c)
+    {
+        if (strstr(c, "white") || strstr(c, "#fff") ||
+            (strncmp(c, "#ffff", 5) == 0 && c[5] != '\0'))
+        {
+            return 1;
+        }
+    }
+    const char *bg = style_get(&st, "background-color");
+    if (!bg)
+    {
+        bg = style_get(&st, "background");
+    }
+    if (bg && (strstr(bg, "black") || strstr(bg, "#000")))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static DocBoxSpacing walk_box_spacing(AttrList a)
+{
+    DocBoxSpacing out = {0, 0, 0, 0};
+    if (a.count == 0)
+    {
+        return out;
+    }
+    const char *styleStr = attr_val(a, "style");
+    static DocStyle st;
+    doc_parse_style(styleStr, &st);
+    const char *m = style_get(&st, "margin");
+    if (m)
+    {
+        char parts[4][32];
+        int n = split_parts(m, parts);
+        int t = 0, r = 0, b = 0, l = 0;
+        if (n == 1)
+        {
+            t = r = b = l = box_num(parts[0]);
+        }
+        else if (n == 2)
+        {
+            t = b = box_num(parts[0]);
+            r = l = box_num(parts[1]);
+        }
+        else if (n == 3)
+        {
+            t = box_num(parts[0]);
+            r = l = box_num(parts[1]);
+            b = box_num(parts[2]);
+        }
+        else if (n == 4)
+        {
+            t = box_num(parts[0]);
+            r = box_num(parts[1]);
+            b = box_num(parts[2]);
+            l = box_num(parts[3]);
+        }
+        out.top = t;
+        out.bottom = b;
+        out.left = l;
+        out.right = r;
+    }
+    else
+    {
+        const char *mt = style_get(&st, "margin-top");
+        if (mt)
+        {
+            out.top = box_num(mt);
+        }
+        const char *mb = style_get(&st, "margin-bottom");
+        if (mb)
+        {
+            out.bottom = box_num(mb);
+        }
+        const char *ml = style_get(&st, "margin-left");
+        if (ml)
+        {
+            out.left = box_num(ml);
+        }
+        const char *mr = style_get(&st, "margin-right");
+        if (mr)
+        {
+            out.right = box_num(mr);
+        }
+    }
+    const char *p = style_get(&st, "padding");
+    if (p)
+    {
+        char parts[4][32];
+        int n = split_parts(p, parts);
+        if (n == 1)
+        {
+            out.left += box_num(parts[0]);
+        }
+        else if (n == 2)
+        {
+            out.left += box_num(parts[1]);
+        }
+        else if (n == 4)
+        {
+            out.left += box_num(parts[3]);
+        }
+    }
+    else
+    {
+        const char *pl = style_get(&st, "padding-left");
+        if (pl)
+        {
+            out.left += box_num(pl);
+        }
+    }
+    return out;
+}
+
+/* ── Text node ─────────────────────────────────────────────────────────────── */
+
+static void handle_text_node(Walker *w, const DomNode *node)
+{
+    const char *text = node->text ? node->text : "";
+    if (w->inPre)
+    {
+        if (strbuf_append(&w->preBuf, text))
+        {
+            w->error = 1;
+        }
+    }
+    else if (w->inTextarea)
+    {
+        if (strbuf_append(&w->textareaBuf, text))
+        {
+            w->error = 1;
+        }
+    }
+    else if (w->cell)
+    {
+        static char tmp[1024]; /* hoisted: device gameTask stack is tiny */
+        const char *txt = text;
+        size_t o = 0;
+        if (w->cellFirstText)
+        {
+            w->cellFirstText = 0;
+            const char *p = txt;
+            while (*p && is_lspace(*p))
+            {
+                p++;
+            }
+            txt = p;
+        }
+        if (txt[0] != '\0')
+        {
+            for (const char *p = txt; *p && o + 1 < sizeof(tmp); p++)
+            {
+                if (*p == '\r' || *p == '\n' || *p == '\t')
+                {
+                    tmp[o++] = ' ';
+                    while ((p[1] == '\r' || p[1] == '\n' || p[1] == '\t') &&
+                           o + 1 < sizeof(tmp))
+                    {
+                        p++;
+                    }
+                }
+                else
+                {
+                    tmp[o++] = *p;
+                }
+            }
+            tmp[o] = '\0';
+            if (tmp[0] != '\0')
+            {
+                DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                if (inl)
+                {
+                    inl->text = doc_arena_str(w, tmp);
+                    inl->flags = w->flags & (DOC_INF_BOLD | DOC_INF_ITALIC |
+                                             DOC_INF_CODE | DOC_INF_INVERT);
+                    if (w->currentHref)
+                    {
+                        inl->flags |= DOC_INF_UNDERLINE;
+                        inl->href = doc_arena_str(w, w->currentHref);
+                    }
+                    inl->anchorIndex = w->currentAnchorIndex;
+                    if (w->inert > 0)
+                    {
+                        inl->flags |= DOC_INF_INERT;
+                    }
+                    if (doc_ptrarr_push((void ***)&w->cell->inlines,
+                                        &w->cell->inlineCount,
+                                        &w->cell->inlineCap, inl))
+                    {
+                        w->error = 1;
+                    }
+                    if (w->currentHref)
+                    {
+                        if (strbuf_append(&w->linkText, tmp))
+                        {
+                            w->error = 1;
+                        }
+                    }
                 }
             }
         }
     }
-
-    const char* label = da_get(attrs, "title");
-    if (label == NULL || label[0] == '\0') label = da_get(attrs, "alt");
-    char labelBuf[512];
-    int labelIsBuf = 0;
-    if ((label == NULL || label[0] == '\0')) {
-        if (src != NULL && src[0] != '\0') {
-            /* base = last path segment, tolerating one trailing slash */
-            const char* end = src + strlen(src);
-            if (end > src && end[-1] == '/') end--;
-            const char* seg = end;
-            while (seg > src && seg[-1] != '/') seg--;
-            snprintf(labelBuf, sizeof(labelBuf), "[%s: %.*s]", tag,
-                     (int)(end - seg), seg);
-        } else {
-            snprintf(labelBuf, sizeof(labelBuf), "[%s]", tag);
+    else if (w->figure && !w->figureCaptionDone)
+    {
+        if (strbuf_append(w->figure->cap, text))
+        {
+            w->error = 1;
         }
-        label = labelBuf;
-        labelIsBuf = 1;
     }
-    (void)labelIsBuf;
-
-    int okw = 0, okh = 0;
-    double wv = d_tonum(da_get(attrs, "width"), &okw);
-    double hv = d_tonum(da_get(attrs, "height"), &okh);
-    int w = okw ? (int)wv : 160;
-    int h = okh ? (int)hv : 60;
-    if (w > 360) w = 360;
-    if (h > 120) h = 120;
-
-    DocBlock* b = d_new_block(DB_PLACEHOLDER);
-    if (b == NULL) return;
-    b->phTag = pluto_strdup(tag);
-    b->boxLabel = pluto_strdup(label);
-    b->width = w;
-    b->height = h;
-    if ((!strcmp(tag, "iframe") || !strcmp(tag, "portal")) &&
-        src != NULL && src[0] != '\0' && d_valid_href(src)) {
-        StrBuf rb;
-        sb_init(&rb);
-        url_resolve(st->baseUrl, src, &rb);
-        b->phHref = sb_detach(&rb);
+    else if (w->inMath)
+    {
+        if (strbuf_append(&w->mathBuf, text))
+        {
+            w->error = 1;
+        }
     }
-    doc_add_block(st, b);
+    else
+    {
+        add_inline_text(w, text);
+    }
 }
 
-/* ── image maps ───────────────────────────────────────────────────────── */
+/* ── Image ─────────────────────────────────────────────────────────────────── */
 
-static void d_map_free(DocMap* m) {
-    pluto_free(m->name);
-    for (size_t i = 0; i < m->nRegions; i++) {
-        DocAreaRegion* r = &m->regions[i];
-        pluto_free(r->shape);
-        pluto_free(r->coords);
-        pluto_free(r->href);
-        pluto_free(r->alt);
+static void handle_image(Walker *w, AttrList a)
+{
+    const char *src = attr_val(a, "src");
+    if (!src)
+    {
+        src = attr_val(a, "data-src");
     }
-    pluto_free(m->regions);
+    if (!src)
+    {
+        src = "";
+    }
+    if (src[0] == '\0')
+    {
+        const char *ss = attr_val(a, "srcset");
+        if (ss)
+        {
+            size_t n = 0;
+            while (ss[n] && ss[n] != ' ' && ss[n] != '\t' && ss[n] != '\n' &&
+                   ss[n] != ',' && ss[n] != '\r')
+            {
+                n++;
+            }
+            src = n ? doc_arena_strn(w, ss, n) : "";
+        }
+    }
+    const char *alt = attr_val(a, "alt");
+    if (!alt)
+    {
+        alt = attr_val(a, "title");
+    }
+    if (!alt)
+    {
+        alt = "Image";
+    }
+    double wd = strict_num(attr_val(a, "width"), 160);
+    double ht = strict_num(attr_val(a, "height"), 80);
+    if (wd <= 0)
+    {
+        wd = 160;
+    }
+    if (ht <= 0)
+    {
+        ht = 80;
+    }
+    if (src[0] != '\0' && !strstr(src, "tracking") && !strstr(src, "beacon"))
+    {
+        if (wd > 360)
+        {
+            wd = 360;
+        }
+        if (ht > 180)
+        {
+            ht = 180;
+        }
+        const char *usemap = attr_or_d(a, "usemap", "");
+        if (usemap[0] == '#')
+        {
+            usemap++;
+        }
+        DocBlock *img = new_block(w, DOC_BLOCK_IMAGE);
+        if (img)
+        {
+            img->src = resolve_href(w, src); /* Lua: URL.resolve(baseUrl, src) */
+            img->alt = doc_arena_str(w, alt);
+            img->width = wd;
+            img->height = ht;
+            img->align = walk_align(w, a); /* Lua: align = parseAlign(attrs) */
+            img->usemap = doc_arena_str(w, usemap);
+            img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
+            img->inert = (w->inert > 0);
+            if (w->figure)
+            {
+                w->figure->image = img;
+            }
+            else
+            {
+                flush_current_block(w);
+                add_block(w, img);
+            }
+        }
+    }
 }
 
-static void d_collect_areas(DocState* st, DomNode* n, DocMap* m) {
-    for (size_t i = 0; i < n->nChildren; i++) {
-        DomNode* c = n->children[i];
-        if (c->kind != DOM_ELEMENT) continue;
-        if (!strcmp(c->tag, "area")) {
-            StrMap* a = c->attrs;
-            const char* shape = da_get(a, "shape");
-            const char* coordsRaw = da_get(a, "coords");
-            const char* alt = da_get(a, "alt");
+/* ── Select options (collectSelectOptions, iterative) ─────────────────────── */
 
-            DocAreaRegion r;
-            memset(&r, 0, sizeof(r));
-            r.shape = pluto_strdup((shape != NULL && shape[0] != '\0')
-                                       ? shape : "rect");
-
-            int* carr = NULL;
-            size_t cn = 0;
-            const char* p = (coordsRaw != NULL) ? coordsRaw : "";
-            while (*p != '\0') {
-                while (*p != '\0' && !isdigit((unsigned char)*p)) p++;
-                if (*p == '\0') break;
-                long v = strtol(p, (char**)&p, 10);
-                int* narr = pluto_realloc(carr, (cn + 1) * sizeof(int));
-                if (narr == NULL) break;
-                carr = narr;
-                carr[cn++] = (int)v;
+static void collect_options(Walker *w, const DomNode *node, DocBlock *into)
+{
+    typedef struct
+    {
+        const DomNode *n;
+        int phase; /* 0 = scan, 1 = post (insert group) */
+        int lenBefore;
+        const char *groupLabel;
+    } OF;
+    OF *stack;
+    int sc = 0, scap = 16;
+    stack = (OF *)PLUTO_MALLOC(sizeof(OF) * scap);
+    if (!stack)
+    {
+        w->error = 1;
+        return;
+    }
+    stack[sc].n = node;
+    stack[sc].phase = 0;
+    stack[sc].lenBefore = 0;
+    stack[sc].groupLabel = NULL;
+    sc++;
+    while (sc > 0)
+    {
+        OF top = stack[--sc];
+        if (top.phase == 1)
+        {
+            if (top.groupLabel && top.groupLabel[0] != '\0')
+            {
+                DocOption *go = (DocOption *)doc_arena_alloc(&w->arena, sizeof(DocOption));
+                if (go)
+                {
+                    memset(go, 0, sizeof(*go));
+                    go->text = doc_arena_str(w, top.groupLabel);
+                    go->value = doc_arena_str(w, "");
+                    go->group = 1;
+                    go->disabled = 1;
+                    /* Lua table.insert(out, childrenBefore + 1, group) — 1-based,
+                     * i.e. 0-based index == lenBefore. Append then shift right. */
+                    int at = top.lenBefore;
+                    if (doc_ptrarr_push((void ***)&into->options,
+                                        &into->optionCount, &into->optionCap, go))
+                    {
+                        w->error = 1;
+                    }
+                    else
+                    {
+                        for (int i = into->optionCount - 1; i > at; i--)
+                        {
+                            into->options[i] = into->options[i - 1];
+                        }
+                        into->options[at] = go;
+                    }
+                }
             }
-            r.coords = carr;
-            r.nCoords = cn;
-
-            if (d_valid_href(da_get(a, "href"))) {
-                StrBuf rb;
-                sb_init(&rb);
-                url_resolve(st->baseUrl, da_get(a, "href"), &rb);
-                r.href = sb_detach(&rb);
+            continue;
+        }
+        for (int i = 0; i < top.n->childCount; i++)
+        {
+            const DomNode *c = top.n->children[i];
+            if (c->kind != DOM_ELEMENT)
+            {
+                continue;
             }
-            r.alt = pluto_strdup((alt != NULL) ? alt : "");
+            if (strcmp(c->tag, "option") == 0)
+            {
+                char txtbuf[512];
+                size_t need = doc_concat_node_text(c, txtbuf, sizeof(txtbuf));
+                (void)need;
+                char *t = doc_arena_collapse(w, txtbuf);
+                AttrList ca = attrs_of(c);
+                const char *label = attr_val(ca, "label");
+                if (label && label[0] != '\0')
+                {
+                    t = doc_arena_str(w, label);
+                }
+                const char *val = attr_or_d(ca, "value", t ? t : "");
+                DocOption *o = (DocOption *)doc_arena_alloc(&w->arena, sizeof(DocOption));
+                if (o)
+                {
+                    memset(o, 0, sizeof(*o));
+                    o->text = t;
+                    o->value = doc_arena_str(w, val);
+                    o->selected = attr_has(ca, "selected");
+                    o->disabled = attr_has(ca, "disabled");
+                    if (doc_ptrarr_push((void ***)&into->options,
+                                        &into->optionCount, &into->optionCap, o))
+                    {
+                        w->error = 1;
+                    }
+                }
+            }
+            else if (strcmp(c->tag, "optgroup") == 0)
+            {
+                AttrList ca = attrs_of(c);
+                const char *gl = attr_val(ca, "label");
+                OF post;
+                post.n = c;
+                post.phase = 1;
+                post.lenBefore = into->optionCount;
+                post.groupLabel = gl ? doc_arena_str(w, gl) : doc_arena_str(w, "");
+                OF scan;
+                scan.n = c;
+                scan.phase = 0;
+                scan.lenBefore = 0;
+                scan.groupLabel = NULL;
+                /* Push the post frame first so the scan frame (on top) is
+                 * processed before the group label is inserted. */
+                if (sc + 2 > scap)
+                {
+                    int nc = scap * 2 + 2;
+                    OF *na = (OF *)PLUTO_REALLOC(stack, sizeof(OF) * nc);
+                    if (!na)
+                    {
+                        w->error = 1;
+                        break;
+                    }
+                    stack = na;
+                    scap = nc;
+                }
+                stack[sc++] = post;
+                stack[sc++] = scan;
+            }
+        }
+    }
+    if (stack)
+    {
+        PLUTO_FREE(stack);
+    }
+}
 
-            DocAreaRegion* arr = pluto_realloc(
-                m->regions, (m->nRegions + 1) * sizeof(DocAreaRegion));
-            if (arr == NULL) {
-                pluto_free(r.shape);
-                pluto_free(r.coords);
-                pluto_free(r.href);
-                pluto_free(r.alt);
+/* ── Forward declarations ──────────────────────────────────────────────────── */
+
+static void handle_element(Walker *w, const DomNode *node);
+static void run_exit(Walker *w, ExitCtx *x);
+static int walk_children(Walker *w, const DomNode *parent);
+static void handle_row(Walker *w, const DomNode *trNode, DocTable *tbl);
+static int refresh_from_content(DocParseResult *out, const char *content,
+                                const char *baseUrl);
+
+/* ── Small helpers ─────────────────────────────────────────────────────────── */
+
+/* Lua tonumber with an ok flag (distinguishes nil from 0). */
+static double tonum_or(const char *s, int *ok)
+{
+    *ok = 0;
+    if (!s)
+    {
+        return 0;
+    }
+    char *end;
+    double d = strtod(s, &end);
+    if (end == s)
+    {
+        return 0;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
+    {
+        end++;
+    }
+    if (*end != '\0')
+    {
+        return 0;
+    }
+    *ok = 1;
+    return d;
+}
+
+/* URL.resolve into the arena (NULL when resolve fails). */
+static char *resolve_href(Walker *w, const char *raw)
+{
+    if (!raw)
+    {
+        return NULL;
+    }
+    char *res = url_resolve(w->doc->baseUrl, raw);
+    if (!res)
+    {
+        return NULL;
+    }
+    char *a = doc_arena_str(w, res);
+    PLUTO_FREE(res);
+    return a;
+}
+
+static DocBlock *box_open_block(Walker *w, const char *label)
+{
+    DocBlock *b = new_block(w, DOC_BLOCK_BOX_OPEN);
+    if (b)
+    {
+        b->label = doc_arena_str(w, label);
+    }
+    return b;
+}
+
+/* qQuote (document.lua): literal '"' inline; cell variant carries href. */
+static void q_quote(Walker *w)
+{
+    DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+    if (!inl)
+    {
+        return;
+    }
+    inl->text = doc_arena_str(w, "\"");
+    inl->flags = w->flags & (DOC_INF_BOLD | DOC_INF_ITALIC);
+    if (w->cell)
+    {
+        if (w->currentHref)
+        {
+            inl->href = doc_arena_str(w, w->currentHref);
+            inl->anchorIndex = w->currentAnchorIndex;
+        }
+        if (doc_ptrarr_push((void ***)&w->cell->inlines, &w->cell->inlineCount,
+                            &w->cell->inlineCap, inl))
+        {
+            w->error = 1;
+        }
+    }
+    else
+    {
+        add_inline(w, inl);
+    }
+}
+
+/* First element child with the given tag (legend/summary lookup). */
+static const DomNode *first_child_tag(const DomNode *node, const char *tag)
+{
+    if (!node)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < node->childCount; i++)
+    {
+        const DomNode *c = node->children[i];
+        if (c->kind == DOM_ELEMENT && c->tag && strcmp(c->tag, tag) == 0)
+        {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+/* ── handleElement — the full dispatch (document.lua ~530–1395) ───────────── */
+
+static void handle_element(Walker *w, const DomNode *node)
+{
+    const char *tag = node->tag ? node->tag : "";
+    AttrList a = attrs_of(node);
+
+    /* ── Flow containers / paragraph-like blocks ── */
+    if ((tag[0] == 'h') && (tag[1] >= '1' && tag[1] <= '6') && tag[2] == '\0')
+    {
+        flush_current_block(w);
+        int level = tag[1] - '0';
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBlock *b = new_block(w, DOC_BLOCK_HEADING);
+        if (!b)
+        {
+            return;
+        }
+        b->level = level;
+        b->align = walk_align(w, a);
+        b->spacingTop = sp.top;
+        b->spacingBottom = sp.bottom;
+        b->indent = sp.left;
+        b->hasSpacing = 1;
+        b->invert = walk_inverted(a);
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "p") == 0 || strcmp(tag, "div") == 0 ||
+             strcmp(tag, "section") == 0 || strcmp(tag, "article") == 0 ||
+             strcmp(tag, "main") == 0 || strcmp(tag, "header") == 0 ||
+             strcmp(tag, "footer") == 0 || strcmp(tag, "nav") == 0 ||
+             strcmp(tag, "aside") == 0 || strcmp(tag, "address") == 0 ||
+             strcmp(tag, "hgroup") == 0 || strcmp(tag, "noindex") == 0 ||
+             strcmp(tag, "search") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (!b)
+        {
+            return;
+        }
+        b->align = walk_align(w, a);
+        b->spacingTop = sp.top;
+        b->spacingBottom = sp.bottom;
+        b->indent = sp.left;
+        b->hasSpacing = 1;
+        b->invert = walk_inverted(a);
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "blockquote") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBlock *b = new_block(w, DOC_BLOCK_BLOCKQUOTE);
+        if (!b)
+        {
+            return;
+        }
+        b->align = walk_align(w, a);
+        b->spacingTop = sp.top;
+        b->spacingBottom = sp.bottom;
+        b->indent = sp.left + 12;
+        b->hasSpacing = 1;
+        b->invert = walk_inverted(a);
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "center") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (!b)
+        {
+            return;
+        }
+        b->align = doc_arena_str(w, "center");
+        b->hasSpacing = 1; /* center/marquee: spacing keys present, all 0 */
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "marquee") == 0)
+    {
+        flush_current_block(w);
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (!b)
+        {
+            return;
+        }
+        b->align = doc_arena_str(w, "center");
+        b->hasSpacing = 1; /* spacing keys present, all 0 */
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
+    }
+
+    /* ── Line breaks & rules ── */
+    else if (strcmp(tag, "br") == 0)
+    {
+        if (w->inPre)
+        {
+            if (strbuf_append(&w->preBuf, "\n"))
+            {
+                w->error = 1;
+            }
+        }
+        else if (w->cell)
+        {
+            DocInline *inl = new_inline(w, DOC_INLINE_BR);
+            if (inl)
+            {
+                if (doc_ptrarr_push((void ***)&w->cell->inlines,
+                                    &w->cell->inlineCount, &w->cell->inlineCap, inl))
+                {
+                    w->error = 1;
+                }
+            }
+        }
+        else
+        {
+            DocInline *inl = new_inline(w, DOC_INLINE_BR);
+            if (inl)
+            {
+                add_inline(w, inl);
+            }
+        }
+    }
+    else if (strcmp(tag, "wbr") == 0)
+    {
+        DocInline *inl = new_inline(w, DOC_INLINE_WBR);
+        if (inl)
+        {
+            add_inline(w, inl);
+        }
+    }
+    else if (strcmp(tag, "hr") == 0)
+    {
+        if (!w->cell)
+        {
+            flush_current_block(w);
+            add_block(w, new_block(w, DOC_BLOCK_HR));
+        }
+    }
+
+    /* ── Preformatted text & inline code ── */
+    else if (strcmp(tag, "pre") == 0 || strcmp(tag, "xmp") == 0 ||
+             strcmp(tag, "listing") == 0 || strcmp(tag, "plaintext") == 0)
+    {
+        flush_current_block(w);
+        if (strcmp(tag, "pre") == 0)
+        {
+            ExitCtx *x = push_exit(w, WX_PRE_END);
+            (void)x;
+            push_children(w, node);
+            w->inPre = 1;
+            strbuf_reset(&w->preBuf);
+        }
+        else
+        {
+            /* Legacy raw-text blocks: concatenate all descendant text. */
+            static char big[2048]; /* hoisted: device gameTask stack is tiny */
+            doc_concat_node_text(node, big, sizeof(big));
+            w->inPre = 1;
+            strbuf_reset(&w->preBuf);
+            if (strbuf_append(&w->preBuf, big))
+            {
+                w->error = 1;
+            }
+            w->inPre = 0;
+            /* Build the code_block immediately (reference does the same). */
+            ExitCtx x;
+            memset(&x, 0, sizeof(x));
+            x.kind = WX_PRE_END;
+            run_exit(w, &x);
+        }
+    }
+
+    /* ── Script fallback / inert containers ── */
+    else if (strcmp(tag, "noscript") == 0 || strcmp(tag, "noembed") == 0 ||
+             strcmp(tag, "noframes") == 0 || strcmp(tag, "slot") == 0)
+    {
+        push_children(w, node);
+    }
+
+    /* ── Inline formatting ── */
+    else if (strcmp(tag, "b") == 0 || strcmp(tag, "strong") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_BOLD;
+    }
+    else if (strcmp(tag, "i") == 0 || strcmp(tag, "em") == 0 ||
+             strcmp(tag, "cite") == 0 || strcmp(tag, "var") == 0 ||
+             strcmp(tag, "dfn") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_ITALIC;
+    }
+    else if (strcmp(tag, "u") == 0 || strcmp(tag, "ins") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_UNDERLINE;
+    }
+    else if (strcmp(tag, "code") == 0 || strcmp(tag, "kbd") == 0 ||
+             strcmp(tag, "samp") == 0 || strcmp(tag, "tt") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_CODE;
+    }
+    else if (strcmp(tag, "mark") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_MARK | DOC_INF_BOLD;
+    }
+    else if (strcmp(tag, "small") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_SMALL;
+    }
+    else if (strcmp(tag, "big") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_BIG;
+    }
+    else if (strcmp(tag, "sub") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_SUB | DOC_INF_SMALL;
+    }
+    else if (strcmp(tag, "sup") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_SUP | DOC_INF_SMALL;
+    }
+    else if (strcmp(tag, "del") == 0 || strcmp(tag, "s") == 0 ||
+             strcmp(tag, "strike") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_STRIKE;
+    }
+    else if (strcmp(tag, "q") == 0)
+    {
+        push_exit(w, WX_QUOTE_END);
+        push_children(w, node);
+        q_quote(w);
+    }
+    else if (strcmp(tag, "abbr") == 0 || strcmp(tag, "acronym") == 0)
+    {
+        push_children(w, node);
+    }
+
+    /* Elements that carry style attributes */
+    else if (strcmp(tag, "span") == 0 || strcmp(tag, "font") == 0 ||
+             strcmp(tag, "time") == 0 || strcmp(tag, "data") == 0 ||
+             strcmp(tag, "bdi") == 0 || strcmp(tag, "bdo") == 0 ||
+             strcmp(tag, "label") == 0 || strcmp(tag, "output") == 0 ||
+             strcmp(tag, "legend") == 0 || strcmp(tag, "summary") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_SPAN_END);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        const char *styleStr = attr_val(a, "style");
+        static DocStyle st;
+        doc_parse_style(styleStr, &st);
+        const char *fw = style_get(&st, "font-weight");
+        if (fw && (strcmp(fw, "bold") == 0 || strcmp(fw, "bolder") == 0 ||
+                   strcmp(fw, "700") == 0))
+        {
+            w->flags |= DOC_INF_BOLD;
+        }
+        const char *fs = style_get(&st, "font-style");
+        if (fs && strcmp(fs, "italic") == 0)
+        {
+            w->flags |= DOC_INF_ITALIC;
+        }
+        const char *td = style_get(&st, "text-decoration");
+        if (td)
+        {
+            if (strstr(td, "underline"))
+            {
+                w->flags |= DOC_INF_UNDERLINE;
+            }
+            if (strstr(td, "line-through"))
+            {
+                w->flags |= DOC_INF_STRIKE;
+            }
+        }
+        if (strcmp(tag, "font") == 0)
+        {
+            const char *sz = attr_val(a, "size");
+            if (sz)
+            {
+                int isn;
+                double n = tonum_or(sz, &isn);
+                if (strcmp(sz, "+1") == 0 || (isn && n >= 5))
+                {
+                    w->flags |= DOC_INF_BIG;
+                }
+                else if (strcmp(sz, "-1") == 0 || strcmp(sz, "-2") == 0 ||
+                         (isn && n <= 3))
+                {
+                    w->flags |= DOC_INF_SMALL;
+                }
+            }
+        }
+        if (walk_inverted(a))
+        {
+            w->flags |= DOC_INF_INVERT;
+        }
+        if (x)
+        {
+            x->hadInlines = w->currentBlock ? w->currentBlock->inlineCount : 0;
+            const char *fb = NULL;
+            if (strcmp(tag, "time") == 0)
+            {
+                fb = attr_val(a, "datetime");
+            }
+            else if (strcmp(tag, "data") == 0)
+            {
+                fb = attr_val(a, "value");
+            }
+            x->fallback = fb ? doc_arena_str(w, fb) : NULL;
+        }
+    }
+    else if (strcmp(tag, "ruby") == 0 || strcmp(tag, "rp") == 0 ||
+             strcmp(tag, "rb") == 0 || strcmp(tag, "rtc") == 0)
+    {
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "rt") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_SMALL;
+    }
+
+    /* ── Links ── */
+    else if (strcmp(tag, "a") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_LINK_END);
+        if (x)
+        {
+            const char *ti = attr_val(a, "title");
+            const char *tg = attr_val(a, "target");
+            x->title = ti ? doc_arena_str(w, ti) : NULL;
+            x->target = tg ? doc_arena_str(w, tg) : NULL;
+        }
+        push_children(w, node);
+        const char *rawHref = attr_val(a, "href");
+        if (doc_valid_href(rawHref))
+        {
+            w->currentHref = resolve_href(w, rawHref);
+            w->anchorCounter++;
+            w->currentAnchorIndex = w->anchorCounter;
+            strbuf_reset(&w->linkText);
+        }
+    }
+
+    /* ── Lists ── */
+    else if (strcmp(tag, "ul") == 0 || strcmp(tag, "ol") == 0 ||
+             strcmp(tag, "menu") == 0 || strcmp(tag, "dir") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_LIST_END);
+        if (x)
+        {
+            x->listCtx = w->listCtx;
+        }
+        push_children(w, node);
+        ListCtx *nc = (ListCtx *)doc_arena_alloc(&w->arena, sizeof(ListCtx));
+        if (!nc)
+        {
+            w->error = 1;
+            return;
+        }
+        int ordered = (strcmp(tag, "ol") == 0);
+        nc->ordered = ordered;
+        nc->count = 0;
+        nc->depth = (w->listCtx ? w->listCtx->depth : 0) + 1;
+        if (ordered)
+        {
+            nc->start = (int)strict_num(attr_val(a, "start"), 1);
+            nc->reversed = attr_has(a, "reversed");
+            const char *t = attr_or_d(a, "type", "1");
+            char mt = t[0];
+            if (!(mt == 'a' || mt == 'A' || mt == 'i' || mt == 'I' || mt == '1') ||
+                t[1] != '\0')
+            {
+                mt = '1';
+            }
+            nc->markerType = mt;
+        }
+        else
+        {
+            nc->start = 1;
+            nc->reversed = 0;
+            nc->markerType = '1';
+        }
+        w->listCtx = nc;
+    }
+    else if (strcmp(tag, "li") == 0)
+    {
+        flush_current_block(w);
+        ListCtx *ctx = w->listCtx;
+        ListCtx tmp;
+        int haveCtx = 1;
+        if (!ctx)
+        {
+            /* Reference fallback: { ordered = false, count = 0, depth = 1 } —
+             * it has NO start field. With a value attr the or-1 fallback
+             * applies; without one the reference THROWS (documented quirk). */
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.ordered = 0;
+            tmp.count = 0;
+            tmp.depth = 1;
+            ctx = &tmp;
+            haveCtx = 0;
+        }
+        double number;
+        if (attr_has(a, "value"))
+        {
+            /* Lua: tonumber(v) or (ctx.start or 1) — 0 is truthy, so the
+             * fallback is 1 only when there is NO list context (nil start). */
+            number = strict_num(attr_val(a, "value"),
+                                haveCtx ? (double)ctx->start : 1.0);
+            ctx->start = (ctx->reversed) ? (int)(number - 1) : (int)(number + 1);
+            ctx->count = 0;
+        }
+        else
+        {
+            if (!haveCtx)
+            {
+                /* Mirror the reference's arithmetic-on-nil error. */
+                w->error = 1;
                 return;
             }
-            m->regions = arr;
-            m->capRegions = m->nRegions + 1;
-            m->regions[m->nRegions++] = r;
+            ctx->count++;
+            number = ctx->reversed ? (double)(ctx->start - (ctx->count - 1))
+                                   : (double)(ctx->start + ctx->count - 1);
         }
-        /* direct children only — matches the source collector */
-    }
-}
-
-/* ── datalists ────────────────────────────────────────────────────────── */
-
-static void d_datalist_free(DocDatalist* dl) {
-    pluto_free(dl->id);
-    for (size_t i = 0; i < dl->nOpts; i++) {
-        pluto_free(dl->opts[i].text);
-        pluto_free(dl->opts[i].value);
-    }
-    pluto_free(dl->opts);
-}
-
-
-/* ── old recursive walker (retained for cell content only) ──────────────── */
-
-static void d_handle_element(DocState* st, DomNode* n) {
-    const char* tag = n->tag;
-    StrMap* attrs = n->attrs;
-
-    /* metadata containers never render */
-    if (!strcmp(tag, "script") || !strcmp(tag, "style") ||
-        !strcmp(tag, "title"))
-        return;
-
-    if (!strcmp(tag, "img")) { d_handle_image(st, attrs); return; }
-
-    if (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6' && tag[2] == '\0') {
-        doc_flush_block(st);
-        if (st->cell != NULL) {
-            d_walk_children(st, n);
+        DocBlock *b = new_block(w, DOC_BLOCK_LIST_ITEM);
+        if (!b)
+        {
             return;
         }
-        DBox sp;
-        d_parse_box_spacing(attrs, &sp);
-        DocBlock* b = d_new_block(DB_HEADING);
-        if (b == NULL) return;
-        b->level = tag[1] - '0';
-        b->spacingTop = sp.top;
-        b->spacingBottom = sp.bottom;
-        b->align = d_parse_align(attrs);
-        b->indent = sp.left;
-        if (d_is_inverted_style(attrs)) b->invert = 1;
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
+        b->isOrdered = ctx->ordered;
+        b->hasNumber = 1;
+        b->number = (int)number;
+        b->markerType = ctx->markerType ? ctx->markerType : '1';
+        b->depth = ctx->depth;
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
     }
-
-    if (!strcmp(tag, "br")) { d_break_inline(st, DIT_BR); return; }
-    if (!strcmp(tag, "wbr")) { d_break_inline(st, DIT_WBR); return; }
-
-    if (!strcmp(tag, "hr")) {
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_HR);
-        if (b == NULL) return;
-        b->spacingTop = 6;
-        b->spacingBottom = 6;
-        doc_add_block(st, b);
-        return;
-    }
-
-    if (!strcmp(tag, "center") || !strcmp(tag, "marquee")) {
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_PARAGRAPH);
-        if (b == NULL) return;
-        b->align = "center";
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
-    }
-
-    if (!strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
-        !strcmp(tag, "article") || !strcmp(tag, "header") ||
-        !strcmp(tag, "footer") || !strcmp(tag, "main") ||
-        !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
-        !strcmp(tag, "address") || !strcmp(tag, "hgroup") ||
-        !strcmp(tag, "noindex") || !strcmp(tag, "search")) {
-        if (st->cell != NULL) {
-            d_walk_children(st, n);
-            return;
-        }
-        doc_flush_block(st);
-        DBox sp;
-        d_parse_box_spacing(attrs, &sp);
-        DocBlock* b = d_new_block(DB_PARAGRAPH);
-        if (b == NULL) return;
-        b->align = d_parse_align(attrs);
-        if (d_is_inverted_style(attrs)) b->invert = 1;
-        b->spacingTop = sp.top;
-        b->spacingBottom = sp.bottom;
-        b->indent = sp.left;
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
-    }
-
-    if (!strcmp(tag, "blockquote")) {
-        doc_flush_block(st);
-        DBox sp;
-        d_parse_box_spacing(attrs, &sp);
-        DocBlock* b = d_new_block(DB_BLOCKQUOTE);
-        if (b == NULL) return;
-        b->align = d_parse_align(attrs);
-        if (d_is_inverted_style(attrs)) b->invert = 1;
-        b->indent = sp.left + 12;
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
-    }
-
-    if (!strcmp(tag, "pre") || !strcmp(tag, "xmp") || !strcmp(tag, "listing") ||
-        !strcmp(tag, "plaintext")) {
-        doc_flush_block(st);
-        int savedPre = st->inPre;
-        StrBuf savedBuf = st->preBuffer;
-        sb_init(&st->preBuffer);
-        st->inPre = 1;
-        char* codeText;
-        if (!strcmp(tag, "pre")) {
-            d_walk_children(st, n);
-            codeText = sb_detach(&st->preBuffer);
-        } else {
-            codeText = d_concat_node_text(n);
-        }
-        DocBlock* b = d_new_block(DB_CODE_BLOCK);
-        if (b == NULL) {
-            pluto_free(codeText);
-        } else {
-            b->codeText = codeText;
-            d_split_code_lines(b);
-            doc_add_block(st, b);
-        }
-        sb_clear(&st->preBuffer);
-        st->preBuffer = savedBuf;
-        st->inPre = savedPre;
-        return;
-    }
-
+    else if (strcmp(tag, "dl") == 0)
     {
-        unsigned char* fld = NULL;
-        if (!strcmp(tag, "b") || !strcmp(tag, "strong")) fld = &st->f.bold;
-        else if (!strcmp(tag, "i") || !strcmp(tag, "em")) fld = &st->f.italic;
-        else if (!strcmp(tag, "u")) fld = &st->f.underline;
-        else if (!strcmp(tag, "s") || !strcmp(tag, "strike") ||
-                 !strcmp(tag, "del")) fld = &st->f.strike;
-        else if (!strcmp(tag, "mark")) fld = &st->f.mark;
-        else if (!strcmp(tag, "small")) fld = &st->f.small;
-        else if (!strcmp(tag, "big")) fld = &st->f.big;
-        else if (!strcmp(tag, "sub")) fld = &st->f.sub;
-        else if (!strcmp(tag, "sup")) fld = &st->f.sup;
-        else if (!strcmp(tag, "tt") || !strcmp(tag, "code") ||
-                 !strcmp(tag, "kbd") || !strcmp(tag, "samp"))
-            fld = &st->f.code;
-        if (fld != NULL) {
-            (*fld)++;
-            d_walk_children(st, n);
-            (*fld)--;
+        ExitCtx *x = push_exit(w, WX_DL_END);
+        if (x)
+        {
+            x->dlDepth = w->dlDepth;
+        }
+        push_children(w, node);
+        w->dlDepth++;
+    }
+    else if (strcmp(tag, "dt") == 0 || strcmp(tag, "dd") == 0)
+    {
+        flush_current_block(w);
+        DocBlock *b = new_block(w, DOC_BLOCK_LIST_ITEM);
+        if (!b)
+        {
             return;
         }
+        if (strcmp(tag, "dt") == 0)
+        {
+            b->dt = 1;
+        }
+        else
+        {
+            b->dd = 1;
+        }
+        b->depth = w->dlDepth;
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
     }
 
-    if (!strcmp(tag, "q")) {
-        d_quote_char(st);
-        d_walk_children(st, n);
-        d_quote_char(st);
-        return;
+    /* ── Images & figures ── */
+    else if (strcmp(tag, "img") == 0)
+    {
+        handle_image(w, a);
+    }
+    else if (strcmp(tag, "picture") == 0)
+    {
+        push_children(w, node);
+    }
+    else if (strcmp(tag, "figure") == 0)
+    {
+        flush_current_block(w);
+        ExitCtx *x = push_exit(w, WX_FIGURE_END);
+        if (x)
+        {
+            x->figure = w->figure;
+        }
+        push_children(w, node);
+        FigureCtx *f = (FigureCtx *)doc_arena_alloc(&w->arena, sizeof(FigureCtx));
+        if (!f)
+        {
+            w->error = 1;
+            return;
+        }
+        memset(f, 0, sizeof(*f));
+        StrBuf *cap = (StrBuf *)PLUTO_MALLOC(sizeof(StrBuf));
+        if (!cap || strbuf_init(cap))
+        {
+            w->error = 1;
+            return;
+        }
+        if (doc_ptrarr_push((void ***)&w->heapBufs, &w->heapBufCount,
+                            &w->heapBufCap, cap))
+        {
+            w->error = 1;
+            return;
+        }
+        f->cap = cap;
+        w->figure = f;
+        w->figureCaptionDone = 1;
+    }
+    else if (strcmp(tag, "figcaption") == 0)
+    {
+        push_exit(w, WX_FIGCAP_END);
+        push_children(w, node);
+        w->figureCaptionDone = 0;
     }
 
-    if (!strcmp(tag, "a")) {
-        const char* rawHref = da_get(attrs, "href");
-        int haveResolved = 0;
-        if (d_valid_href(rawHref)) {
-            StrBuf rb;
-            sb_init(&rb);
-            url_resolve(st->baseUrl, rawHref, &rb);
-            st->currentHref = sb_detach(&rb);
-            st->currentAnchorIndex = st->anchorCounter++;
-            haveResolved = 1;
+    /* ── Tables ── */
+    else if (strcmp(tag, "table") == 0)
+    {
+        flush_current_block(w);
+        if (w->cell)
+        {
+            return;
         }
-        sb_clear(&st->linkText);
-        d_walk_children(st, n);
-        if (haveResolved) {
-            char* lt = (st->linkText.len > 0) ? sb_detach(&st->linkText) : NULL;
-            const char* title = da_get(attrs, "title");
-            const char* txt =
-                (lt != NULL) ? lt : ((title != NULL && title[0]) ? title : rawHref);
-            doc_push_link(st->doc, st->currentHref, txt, da_get(attrs, "target"));
-            pluto_free(lt);
-        } else {
-            sb_clear(&st->linkText);
+        DocTable *tbl = (DocTable *)doc_arena_alloc(&w->arena, sizeof(DocTable));
+        if (!tbl)
+        {
+            w->error = 1;
+            return;
         }
-        pluto_free(st->currentHref);
-        st->currentHref = NULL;
-        st->currentAnchorIndex = -1;
-        return;
-    }
-
-    if (!strcmp(tag, "span") || !strcmp(tag, "font") || !strcmp(tag, "time") ||
-        !strcmp(tag, "data")) {
-        DFlags sv = st->f;
-        DStyle styl;
-        d_parse_style(&styl, da_get(attrs, "style"));
-        const char* fw = d_style_get(&styl, "font-weight");
-        if (fw != NULL && strstr(fw, "bold") != NULL) st->f.bold++;
-        const char* fsy = d_style_get(&styl, "font-style");
-        if (fsy != NULL && strstr(fsy, "italic") != NULL) st->f.italic++;
-        const char* td = d_style_get(&styl, "text-decoration");
-        if (td != NULL) {
-            if (strstr(td, "underline") != NULL) st->f.underline++;
-            if (strstr(td, "line-through") != NULL) st->f.strike++;
-        }
-        const char* col = d_style_get(&styl, "color");
-        if (col != NULL && (strstr(col, "#FFFF") != NULL ||
-                            strstr(col, "#fff") != NULL))
-            st->f.invert++;
-        const char* fsz = d_style_get(&styl, "font-size");
-        if (fsz != NULL) {
-            if (strstr(fsz, "large") != NULL) st->f.big++;
-            else if (strstr(fsz, "small") != NULL) st->f.small++;
-        }
-        const char* va = d_style_get(&styl, "vertical-align");
-        if (va != NULL && strcmp(va, "super") == 0) st->f.sup++;
-        else if (va != NULL && strcmp(va, "sub") == 0) st->f.sub++;
-        const char* bgc = d_style_get(&styl, "background-color");
-        if (bgc != NULL && bgc[0] != '\0') st->f.mark++;
-        if (!strcmp(tag, "font")) {
-            int ok = 0;
-            double szv = d_tonum(da_get(attrs, "size"), &ok);
-            if (ok) {
-                if (szv >= 5) st->f.big++;
-                else if (szv <= 2) st->f.small++;
+        memset(tbl, 0, sizeof(*tbl));
+        tbl->caption = doc_arena_str(w, "");
+        tbl->align = walk_align(w, a);
+        const char *bord = attr_val(a, "border");
+        tbl->border = (bord != NULL && strcmp(bord, "0") != 0);
+        const char *tw = attr_val(a, "width");
+        tbl->width = tw ? doc_arena_str(w, tw) : NULL;
+        w->table = tbl;
+        for (int i = 0; i < node->childCount; i++)
+        {
+            const DomNode *c = node->children[i];
+            if (c->kind != DOM_ELEMENT)
+            {
+                continue;
+            }
+            if (strcmp(c->tag, "caption") == 0)
+            {
+                static char cbuf[1024]; /* hoisted: device gameTask stack is tiny */
+                doc_concat_node_text(c, cbuf, sizeof(cbuf));
+                tbl->caption = doc_arena_collapse(w, cbuf);
+            }
+            else if (strcmp(c->tag, "tr") == 0)
+            {
+                handle_row(w, c, tbl);
+            }
+            else if (strcmp(c->tag, "thead") == 0 || strcmp(c->tag, "tbody") == 0 ||
+                     strcmp(c->tag, "tfoot") == 0)
+            {
+                for (int j = 0; j < c->childCount; j++)
+                {
+                    const DomNode *r = c->children[j];
+                    if (r->kind == DOM_ELEMENT && strcmp(r->tag, "tr") == 0)
+                    {
+                        handle_row(w, r, tbl);
+                    }
+                }
             }
         }
-        long countBefore =
-            (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
-        d_walk_children(st, n);
-        long countAfter =
-            (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
-        if (!strcmp(tag, "time") || !strcmp(tag, "data")) {
-            const char* fb = !strcmp(tag, "time")
-                                 ? da_get(attrs, "datetime")
-                                 : da_get(attrs, "value");
-            if (fb != NULL && fb[0] != '\0' && countBefore == countAfter)
-                doc_add_inline_text(st, fb);
-        }
-        st->f = sv;
-        return;
-    }
-
-    if (!strcmp(tag, "abbr") || !strcmp(tag, "acronym") ||
-        !strcmp(tag, "noscript") || !strcmp(tag, "noembed") ||
-        !strcmp(tag, "noframes") || !strcmp(tag, "ruby") ||
-        !strcmp(tag, "rt") || !strcmp(tag, "rp") || !strcmp(tag, "rb") ||
-        !strcmp(tag, "rtc") || !strcmp(tag, "picture") ||
-        !strcmp(tag, "slot")) {
-        d_walk_children(st, n);
-        return;
-    }
-
-    if (!strcmp(tag, "ul") || !strcmp(tag, "ol") || !strcmp(tag, "menu") ||
-        !strcmp(tag, "dir")) {
-        DListCtx nc;
-        memset(&nc, 0, sizeof(nc));
-        nc.depth = (st->listCtx != NULL) ? st->listCtx->depth + 1 : 1;
-        nc.count = 0;
-        nc.start = 1;
-        nc.markerType = "1";
-        nc.ordered = !strcmp(tag, "ol");
-        if (nc.ordered) {
-            int ok = 0;
-            double sv = d_tonum(da_get(attrs, "start"), &ok);
-            if (ok) nc.start = (int)sv;
-            nc.reversed = da_has(attrs, "reversed");
-            const char* ty = da_get(attrs, "type");
-            if (ty != NULL && (!strcmp(ty, "1") || !strcmp(ty, "a") ||
-                               !strcmp(ty, "A") || !strcmp(ty, "i") ||
-                               !strcmp(ty, "I")))
-                nc.markerType = ty;
-        }
-        DListCtx* old = st->listCtx;
-        st->listCtx = &nc;
-        d_walk_children(st, n);
-        st->listCtx = old;
-        return;
-    }
-
-    if (!strcmp(tag, "li")) {
-        static const char* const MARKERS[5] = {"1", "a", "A", "i", "I"};
-        DListCtx def;
-        memset(&def, 0, sizeof(def));
-        def.ordered = 0;
-        def.start = 1;
-        def.count = 0;
-        def.depth = 1;
-        def.markerType = "1";
-        DListCtx* cx = (st->listCtx != NULL) ? st->listCtx : &def;
-        long number;
-        int vok = 0;
-        double vv = d_tonum(da_get(attrs, "value"), &vok);
-        if (vok) {
-            number = (long)vv;
-            cx->start = cx->reversed ? number - 1 : number + 1;
-            cx->count = 0;
-        } else {
-            cx->count++;
-            number = cx->reversed
-                         ? (long)cx->start - ((long)cx->count - 1)
-                         : (long)cx->start + ((long)cx->count - 1);
-        }
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_LIST_ITEM);
-        if (b == NULL) return;
-        b->isOrdered = cx->ordered;
-        b->number = number;
-        /* markerType must stay valid after tokens are freed: normalize to
-         * a static literal */
-        for (int mi = 0; mi < 5; mi++)
-            if (cx->markerType != NULL &&
-                strcmp(cx->markerType, MARKERS[mi]) == 0) {
-                b->markerType = MARKERS[mi];
-                break;
+        w->table = NULL;
+        if (tbl->rowCount > 0)
+        {
+            DocBlock *tb = new_block(w, DOC_BLOCK_TABLE);
+            if (tb)
+            {
+                tb->table = tbl;
+                tb->align = tbl->align; /* Lua block IS tbl: align key lives on it */
+                add_block(w, tb);
             }
-        if (b->markerType == NULL) b->markerType = "1";
-        b->depth = cx->depth;
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
-    }
-
-    if (!strcmp(tag, "dl")) {
-        st->dlDepth++;
-        d_walk_children(st, n);
-        st->dlDepth--;
-        return;
-    }
-
-    if (!strcmp(tag, "dt") || !strcmp(tag, "dd")) {
-        int isDt = !strcmp(tag, "dt");
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_PARAGRAPH);
-        if (b == NULL) return;
-        if (isDt)
-            b->dtFlag = 1;
-        else {
-            b->ddFlag = 1;
-            b->indent = 20 * st->dlDepth;
         }
-        st->currentBlock = b;
-        d_walk_children(st, n);
-        doc_flush_block(st);
-        return;
+    }
+    else if (strcmp(tag, "tr") == 0)
+    {
+        if (w->table)
+        {
+            handle_row(w, node, w->table);
+        }
+    }
+    else if (strcmp(tag, "td") == 0 || strcmp(tag, "th") == 0)
+    {
+        /* Cells are processed by handleRow; stray cells are ignored. */
     }
 
-    if (!strcmp(tag, "figure")) {
-        doc_flush_block(st);
-        StrBuf savedCap = st->figCaption;
-        DocBlock* savedImg = st->figureImage;
-        int savedDone = st->figureCaptionDone;
-        int savedActive = st->figureActive;
-        sb_init(&st->figCaption);
-        st->figureImage = NULL;
-        st->figureCaptionDone = 0;
-        st->figureActive = 1;
-        d_walk_children(st, n);
-        DocBlock* img = st->figureImage;
-        st->figureImage = savedImg;
-        st->figureActive = savedActive;
-        st->figureCaptionDone = savedDone;
-        if (img != NULL) {
-            if (st->figCaption.len > 0)
-                img->caption = sb_detach(&st->figCaption);
+    /* ── Forms ── */
+    else if (strcmp(tag, "form") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_FORM_END);
+        if (x)
+        {
+            x->formAction = w->formAction;
+            x->formMethod = w->formMethod;
+        }
+        push_children(w, node);
+        const char *act = attr_val(a, "action");
+        w->formAction = resolve_href(w, act ? act : "");
+        const char *mth = attr_val(a, "method");
+        char mbuf[16];
+        lua_lower_buf(mbuf, mth ? mth : "get", sizeof(mbuf));
+        w->formMethod = doc_arena_str(w, mbuf);
+    }
+    else if (strcmp(tag, "input") == 0)
+    {
+        char tbuf[32];
+        lua_lower_buf(tbuf, attr_or_d(a, "type", "text"), sizeof(tbuf));
+        const char *inputName = attr_or_d(a, "name", "q");
+        const char *inputVal = attr_or_d(a, "value", "");
+        const char *ph = attr_val(a, "placeholder");
+        if (!ph)
+        {
+            ph = attr_val(a, "aria-label");
+        }
+        if (!ph)
+        {
+            ph = "";
+        }
+        int isChecked = attr_has(a, "checked");
+        int disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
+        int readonly = attr_has(a, "readonly") || disabled;
+        int required = attr_has(a, "required");
+        int hasMax;
+        double maxlen = tonum_or(attr_val(a, "maxlength"), &hasMax);
+        int hasSize;
+        double size = tonum_or(attr_val(a, "size"), &hasSize);
+        const char *formAction = w->formAction;
+        const char *formMethod = w->formMethod;
+        if (attr_val(a, "formaction"))
+        {
+            formAction = resolve_href(w, attr_val(a, "formaction"));
+        }
+        if (attr_val(a, "formmethod"))
+        {
+            char fm[16];
+            lua_lower_buf(fm, attr_val(a, "formmethod"), sizeof(fm));
+            formMethod = doc_arena_str(w, fm);
+        }
+
+#define P19_COMMON(b)                                    \
+    do                                                   \
+    {                                                    \
+        (b)->formAction = doc_arena_str(w, formAction ? formAction : "");  \
+        (b)->formMethod = doc_arena_str(w, formMethod ? formMethod : "get"); \
+        (b)->disabled = disabled;                        \
+        (b)->readonly = readonly;                        \
+        (b)->required = required;                        \
+        (b)->maxlength = hasMax ? (int)maxlen : -1;      \
+        (b)->inert = (w->inert > 0) || disabled;         \
+    } while (0)
+
+        if (strcmp(tbuf, "hidden") == 0)
+        {
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_HIDDEN_FIELD);
+            if (b)
+            {
+                b->name = doc_arena_str(w, inputName);
+                b->value = doc_arena_str(w, inputVal);
+                P19_COMMON(b);
+                add_block(w, b);
+            }
+            return;
+        }
+        else if (strcmp(tbuf, "checkbox") == 0 || strcmp(tbuf, "radio") == 0)
+        {
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_CHECKBOX_FIELD);
+            if (b)
+            {
+                b->radio = (strcmp(tbuf, "radio") == 0);
+                b->checked = isChecked;
+                b->name = doc_arena_str(w, inputName);
+                b->value = doc_arena_str(w, inputVal);
+                const char *lb = attr_val(a, "label");
+                if (!lb)
+                {
+                    lb = attr_val(a, "title");
+                }
+                if (!lb)
+                {
+                    lb = ph; /* Lua: placeholder or inputName — but placeholder
+                              * defaults to "" which is truthy, so inputName is
+                              * unreachable; the "" is kept. */
+                }
+                b->label = doc_arena_str(w, lb);
+                P19_COMMON(b);
+                add_block(w, b);
+            }
+        }
+        else if (strcmp(tbuf, "text") == 0 || strcmp(tbuf, "search") == 0 ||
+                 strcmp(tbuf, "email") == 0 || strcmp(tbuf, "url") == 0 ||
+                 strcmp(tbuf, "number") == 0 || strcmp(tbuf, "password") == 0 ||
+                 strcmp(tbuf, "tel") == 0 || strcmp(tbuf, "date") == 0 ||
+                 strcmp(tbuf, "time") == 0 || strcmp(tbuf, "month") == 0 ||
+                 strcmp(tbuf, "week") == 0 || strcmp(tbuf, "datetime-local") == 0 ||
+                 strcmp(tbuf, "color") == 0)
+        {
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_INPUT_FIELD);
+            if (b)
+            {
+                b->inputType = doc_arena_str(w, tbuf);
+                b->name = doc_arena_str(w, inputName);
+                b->value = doc_arena_str(w, inputVal);
+                b->placeholder = doc_arena_str(w, ph);
+                b->fieldWidth = hasSize ? (int)size : -1;
+                P19_COMMON(b);
+                add_block(w, b);
+            }
+        }
+        else if (strcmp(tbuf, "submit") == 0 || strcmp(tbuf, "button") == 0)
+        {
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_INPUT_SUBMIT);
+            if (b)
+            {
+                b->name = doc_arena_str(w, inputName);
+                b->value = doc_arena_str(w, inputVal);
+                const char *lb;
+                if (inputVal[0] != '\0')
+                {
+                    lb = inputVal;
+                }
+                else
+                {
+                    lb = (strcmp(tbuf, "button") == 0) ? "Button" : "Submit";
+                }
+                b->label = doc_arena_str(w, lb);
+                P19_COMMON(b);
+                add_block(w, b);
+            }
+        }
+        else if (strcmp(tbuf, "file") == 0 || strcmp(tbuf, "reset") == 0 ||
+                 strcmp(tbuf, "image") == 0)
+        {
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_INPUT_SUBMIT);
+            if (b)
+            {
+                b->name = doc_arena_str(w, inputName);
+                b->value = doc_arena_str(w, inputVal);
+                const char *lb;
+                if (inputVal[0] != '\0')
+                {
+                    lb = inputVal;
+                }
+                else if (strcmp(tbuf, "file") == 0)
+                {
+                    lb = "Choose File";
+                }
+                else if (strcmp(tbuf, "reset") == 0)
+                {
+                    lb = "Reset";
+                }
+                else
+                {
+                    lb = "Submit";
+                }
+                b->label = doc_arena_str(w, lb);
+                P19_COMMON(b);
+                add_block(w, b);
+            }
+        }
+#undef P19_COMMON
+    }
+    else if (strcmp(tag, "textarea") == 0)
+    {
+        flush_current_block(w);
+        /* Pre-create the block (all attr fields except the value, which the
+         * children fill into textareaBuf); carried through the exit ctx. */
+        DocBlock *b = new_block(w, DOC_BLOCK_INPUT_FIELD);
+        if (!b)
+        {
+            return;
+        }
+        b->inputType = doc_arena_str(w, "textarea");
+        b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
+        b->placeholder = doc_arena_str(w, attr_or_d(a, "placeholder", ""));
+        int hasC, hasR;
+        b->fieldWidth = attr_val(a, "cols")
+                            ? (int)tonum_or(attr_val(a, "cols"), &hasC)
+                            : -1;
+        b->fieldRows = attr_val(a, "rows")
+                           ? (int)tonum_or(attr_val(a, "rows"), &hasR)
+                           : -1;
+        int tdis = attr_has(a, "disabled") || (w->disabledDepth > 0);
+        b->disabled = tdis;
+        b->readonly = attr_has(a, "readonly") || tdis;
+        b->required = attr_has(a, "required");
+        int hasMv;
+        b->maxlength = attr_val(a, "maxlength")
+                           ? (int)tonum_or(attr_val(a, "maxlength"), &hasMv)
+                           : -1;
+        b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
+        b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
+        b->inert = (w->inert > 0) || tdis;
+        ExitCtx *x = push_exit(w, WX_TEXTAREA_END);
+        if (x)
+        {
+            x->figure = b; /* carry the block through the exit */
+        }
+        push_children(w, node);
+        w->inTextarea = 1;
+        w->textareaName = b->name;
+        strbuf_reset(&w->textareaBuf);
+    }
+    else if (strcmp(tag, "button") == 0)
+    {
+        char bbuf[16];
+        lua_lower_buf(bbuf, attr_or_d(a, "type", "submit"), sizeof(bbuf));
+        if (strcmp(bbuf, "submit") == 0 || strcmp(bbuf, "button") == 0)
+        {
+            static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
+            doc_concat_node_text(node, lbuf, sizeof(lbuf));
+            char *label = doc_arena_collapse(w, lbuf);
+            int disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_INPUT_SUBMIT);
+            if (b)
+            {
+                const char *nm = attr_val(a, "name");
+                const char *vl = attr_val(a, "value");
+                b->name = nm ? doc_arena_str(w, nm) : NULL;
+                b->value = vl ? doc_arena_str(w, vl) : NULL;
+                const char *lb;
+                if (label && label[0] != '\0')
+                {
+                    lb = label;
+                }
+                else
+                {
+                    lb = (strcmp(bbuf, "button") == 0) ? "Button" : "Submit";
+                }
+                b->label = doc_arena_str(w, lb);
+                b->disabled = disabled;
+                const char *fa = attr_val(a, "formaction");
+                b->formAction = fa ? resolve_href(w, fa) : doc_arena_str(w, w->formAction ? w->formAction : "");
+                const char *fm = attr_val(a, "formmethod");
+                if (fm)
+                {
+                    char fmb[16];
+                    lua_lower_buf(fmb, fm, sizeof(fmb));
+                    b->formMethod = doc_arena_str(w, fmb);
+                }
+                else
+                {
+                    b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
+                }
+                b->inert = (w->inert > 0) || disabled;
+                add_block(w, b);
+            }
+        }
+    }
+    else if (strcmp(tag, "select") == 0)
+    {
+        flush_current_block(w);
+        DocBlock *b = new_block(w, DOC_BLOCK_SELECT_FIELD);
+        if (b)
+        {
+            b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
+            collect_options(w, node, b);
+            int selIndex = 1;
+            for (int i = 0; i < b->optionCount; i++)
+            {
+                DocOption *o = b->options[i];
+                if (o->selected && !o->disabled)
+                {
+                    selIndex = i + 1;
+                }
+            }
+            if (b->optionCount > 0)
+            {
+                b->selectedIndex = selIndex;
+                b->multiple = attr_has(a, "multiple");
+                b->disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
+                b->required = attr_has(a, "required");
+                b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
+                b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
+                b->inert = (w->inert > 0) || attr_has(a, "disabled");
+                add_block(w, b);
+            }
+        }
+    }
+
+    /* ── Bordered boxes ── */
+    else if (strcmp(tag, "fieldset") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
+        lbuf[0] = '\0';
+        const DomNode *lg = first_child_tag(node, "legend");
+        if (lg)
+        {
+            doc_concat_node_text(lg, lbuf, sizeof(lbuf));
+        }
+        char *label = doc_arena_collapse(w, lbuf);
+        DocBlock *bo = box_open_block(w, label ? label : "");
+        if (bo)
+        {
+            add_block(w, bo);
+        }
+        ExitCtx *x = push_exit(w, WX_FIELDSET_END);
+        if (x)
+        {
+            x->disabledDepth = w->disabledDepth;
+        }
+        push_children_except(w, node, "legend");
+        if (attr_has(a, "disabled"))
+        {
+            w->disabledDepth++;
+        }
+    }
+    else if (strcmp(tag, "details") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        w->detailsIndex++;
+        int idx = w->detailsIndex;
+        static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
+        lbuf[0] = '\0';
+        const DomNode *sm = first_child_tag(node, "summary");
+        if (sm)
+        {
+            doc_concat_node_text(sm, lbuf, sizeof(lbuf));
+        }
+        char *label = doc_arena_collapse(w, lbuf);
+        int isOpen = attr_has(a, "open");
+        if (w->opts && w->opts->detailsOpen && (idx - 1) < w->opts->detailsOpenCount)
+        {
+            isOpen = w->opts->detailsOpen[idx - 1];
+        }
+        static char withPrefix[1100]; /* hoisted: device gameTask stack is tiny */
+        snprintf(withPrefix, sizeof(withPrefix), "%s%s",
+                 (label && label[0]) ? "> " : "", (label && label[0]) ? label : "");
+        DocBlock *bo = box_open_block(w, withPrefix);
+        if (bo)
+        {
+            char keybuf[16];
+            snprintf(keybuf, sizeof(keybuf), "d%d", idx);
+            bo->toggleKey = doc_arena_str(w, keybuf);
+            bo->toggleOpen = isOpen;
+            add_block(w, bo);
+        }
+        ExitCtx *x = push_exit(w, WX_DETAILS_END);
+        if (x)
+        {
+            x->detailsIdx = idx;
+            x->toggleOpen = isOpen;
+        }
+        if (isOpen)
+        {
+            push_children_except(w, node, "summary");
+        }
+    }
+    else if (strcmp(tag, "dialog") == 0)
+    {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
+        /* A dialog without the open attribute is not rendered at all. */
+        if (!attr_has(a, "open"))
+        {
+            return;
+        }
+        flush_current_block(w);
+        add_block(w, box_open_block(w, ""));
+        push_exit(w, WX_DIALOG_END);
+        push_children(w, node);
+    }
+
+    /* ── Media placeholders ── */
+    else if (strcmp(tag, "video") == 0 || strcmp(tag, "audio") == 0 ||
+             strcmp(tag, "iframe") == 0 || strcmp(tag, "canvas") == 0 ||
+             strcmp(tag, "object") == 0 || strcmp(tag, "embed") == 0 ||
+             strcmp(tag, "portal") == 0)
+    {
+        flush_current_block(w);
+        const char *src = attr_val(a, "src");
+        if (!src)
+        {
+            src = attr_val(a, "data");
+        }
+        if (!src || src[0] == '\0')
+        {
+            /* Look for the first <source src="..."> child. */
+            for (int i = 0; i < node->childCount; i++)
+            {
+                const DomNode *c = node->children[i];
+                if (c->kind == DOM_ELEMENT && c->tag &&
+                    strcmp(c->tag, "source") == 0)
+                {
+                    const char *ss = attr_val(attrs_of(c), "src");
+                    if (ss)
+                    {
+                        src = ss;
+                        break;
+                    }
+                }
+            }
+        }
+        const char *lbl = attr_val(a, "title");
+        if (!lbl)
+        {
+            lbl = attr_val(a, "alt");
+        }
+        if (!lbl)
+        {
+            lbl = "";
+        }
+        static char lbuf[512]; /* hoisted: device gameTask stack is tiny */
+        if (lbl[0] == '\0')
+        {
+            if (src && src[0])
+            {
+                /* Lua: string.match(src, "([^/]+)/?$") or src — one optional
+                 * trailing slash, then the trailing non-slash run. */
+                size_t slen = strlen(src);
+                size_t e = slen;
+                size_t s;
+                if (src[e - 1] == '/')
+                {
+                    e--;
+                }
+                s = e;
+                while (s > 0 && src[s - 1] != '/')
+                {
+                    s--;
+                }
+                if (e > s)
+                {
+                    snprintf(lbuf, sizeof(lbuf), "[%s: %.*s]", tag,
+                             (int)(e - s), src + s);
+                }
+                else
+                {
+                    snprintf(lbuf, sizeof(lbuf), "[%s: %s]", tag, src);
+                }
+            }
             else
-                sb_clear(&st->figCaption);
-            doc_add_block(st, img);
-        } else if (st->figCaption.len > 0) {
-            /* caption without an image becomes a centered italic paragraph */
-            char* capText = sb_detach(&st->figCaption);
-            DocBlock* b = d_new_block(DB_PARAGRAPH);
-            if (b != NULL) {
-                b->align = "center";
-                DocInline in;
-                memset(&in, 0, sizeof(in));
-                in.type = DIT_TEXT;
-                in.text = capText;
-                in.textLen = strlen(capText);
-                in.italic = 1;
-                db_push_inline(b, in);
-                doc_add_block(st, b);
-            } else {
-                pluto_free(capText);
+            {
+                snprintf(lbuf, sizeof(lbuf), "[%s]", tag);
             }
-        } else {
-            sb_clear(&st->figCaption);
+            lbl = lbuf;
         }
-        st->figCaption = savedCap;
-        return;
-    }
-
-    if (!strcmp(tag, "figcaption")) {
-        int saved = st->figureCaptionDone;
-        st->figureCaptionDone = 0;
-        d_walk_children(st, n);
-        st->figureCaptionDone = 1;
-        (void)saved;
-        return;
-    }
-
-    /* ── Tables ─────────────────────────────────────────────────────────── */
-
-    if (!strcmp(tag, "table")) {
-        if (st->cell != NULL) return;   /* nested table inside a cell: dropped */
-        doc_flush_block(st);
-        DTableBuild tbl;
-        memset(&tbl, 0, sizeof(tbl));
-        st->tbl = &tbl;
-        StrBuf caption;
-        sb_init(&caption);
-        for (size_t i = 0; i < n->nChildren; i++) {
-            DomNode* c = n->children[i];
-            if (c->kind != DOM_ELEMENT) continue;
-            if (!strcmp(c->tag, "caption")) {
-                char* t = d_concat_node_text(c);
-                d_collapse_trim(t);
-                if (t[0] != '\0') sb_append_str(&caption, t);
-                pluto_free(t);
-            } else if (!strcmp(c->tag, "tr")) {
-                d_handle_row(st, c, &tbl);
-            } else if (!strcmp(c->tag, "thead") || !strcmp(c->tag, "tbody") ||
-                       !strcmp(c->tag, "tfoot")) {
-                for (size_t j = 0; j < c->nChildren; j++) {
-                    DomNode* r = c->children[j];
-                    if (r->kind == DOM_ELEMENT && !strcmp(r->tag, "tr"))
-                        d_handle_row(st, r, &tbl);
-                }
+        double wd = strict_num(attr_val(a, "width"), 160);
+        double ht = strict_num(attr_val(a, "height"), 60);
+        if (wd > 360)
+        {
+            wd = 360;
+        }
+        if (ht > 120)
+        {
+            ht = 120;
+        }
+        DocBlock *ph = new_block(w, DOC_BLOCK_PLACEHOLDER);
+        if (ph)
+        {
+            ph->plabel = doc_arena_str(w, lbl);
+            ph->pwidth = wd;
+            ph->pheight = ht;
+            ph->ptag = doc_arena_str(w, tag);
+            if ((strcmp(tag, "iframe") == 0 || strcmp(tag, "portal") == 0) &&
+                src && src[0] && doc_valid_href(src))
+            {
+                ph->phref = resolve_href(w, src);
             }
+            add_block(w, ph);
         }
-        st->tbl = NULL;
-        int border = da_has(attrs, "border");
-        const char* bw = da_get(attrs, "border");
-        if (bw != NULL && strcmp(bw, "0") == 0) border = 0;
-        if (tbl.nRows > 0) {
-            DocBlock* b = d_new_block(DB_TABLE);
-            if (b != NULL) {
-                b->rows = tbl.rows;
-                b->nRows = tbl.nRows;
-                b->capRows = tbl.capRows;
-                b->tableCaption = (caption.len > 0) ? sb_detach(&caption)
-                                                    : NULL;
-                if (caption.len == 0) sb_clear(&caption);
-                b->tableBorder = border;
-                const char* tw = da_get(attrs, "width");
-                if (tw != NULL && tw[0] != '\0')
-                    b->tableWidth = pluto_strdup(tw);
-                b->align = d_parse_align(attrs);
-                doc_add_block(st, b);
-            } else {
-                for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
-                pluto_free(tbl.rows);
-                sb_clear(&caption);
-            }
-        } else {
-            for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
-            pluto_free(tbl.rows);
-            sb_clear(&caption);
-        }
-        return;
     }
-
-    if (!strcmp(tag, "tr")) {
-        if (st->tbl != NULL && st->cell == NULL)
-            d_handle_row(st, n, st->tbl);   /* stray <tr> directly in flow */
-        return;
+    else if (strcmp(tag, "progress") == 0 || strcmp(tag, "meter") == 0)
+    {
+        flush_current_block(w);
+        double value = strict_num(attr_val(a, "value"), 0);
+        double max = strict_num(attr_val(a, "max"), 1);
+        if (max <= 0)
+        {
+            max = 1;
+        }
+        DocBlock *b = new_block(w, DOC_BLOCK_METER);
+        if (b)
+        {
+            b->mvalue = value;
+            b->mmax = max;
+            b->mmin = strict_num(attr_val(a, "min"), 0);
+            b->mlow = strict_num(attr_val(a, "low"), 0);
+            b->mhigh = strict_num(attr_val(a, "high"), max);
+            b->moptimum = strict_num(attr_val(a, "optimum"), 0);
+            b->label = doc_arena_str(w, attr_or_d(a, "title", ""));
+            add_block(w, b);
+        }
     }
-
-    if (!strcmp(tag, "td") || !strcmp(tag, "th"))
-        return;   /* cells are handled by row processing; strays ignored */
-
-    /* ── Forms ──────────────────────────────────────────────────────────── */
-
-    if (!strcmp(tag, "form")) {
-        char* savedAction = st->formAction;
-        char* savedMethod = st->formMethod;
-        StrBuf rb;
-        sb_init(&rb);
-        url_resolve(st->baseUrl, da_get(attrs, "action"), &rb);
-        st->formAction = sb_detach(&rb);
-        const char* m = da_get(attrs, "method");
-        st->formMethod = (m != NULL && m[0] != '\0') ? d_lower_dup(m)
-                                                     : pluto_strdup("get");
-        d_walk_children(st, n);
-        pluto_free(st->formAction);
-        pluto_free(st->formMethod);
-        st->formAction = savedAction;
-        st->formMethod = savedMethod;
-        return;
-    }
-
-    if (!strcmp(tag, "input")) {
-        char* ty = d_lower_dup(da_get(attrs, "type"));
-        const char* inputType = (ty != NULL) ? ty : "text";
-        const char* ph = da_get(attrs, "placeholder");
-        if (ph == NULL || ph[0] == '\0') ph = da_get(attrs, "aria-label");
-
-        if (!strcmp(inputType, "hidden")) {
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_INPUT_FIELD);
-            if (b != NULL) {
-                b->inputType = pluto_strdup("hidden");
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                d_form_overrides(st, attrs, b);
-                doc_add_block(st, b);
-            }
-        } else if (!strcmp(inputType, "checkbox") ||
-                   !strcmp(inputType, "radio")) {
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_CHECKBOX_FIELD);
-            if (b != NULL) {
-                b->inputType = pluto_strdup(inputType);
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                d_form_overrides(st, attrs, b);
-                b->radioFlag = !strcmp(inputType, "radio");
-                b->checkedFlag = (unsigned char)da_has(attrs, "checked");
-                const char* lb = da_get(attrs, "label");
-                if (lb == NULL || lb[0] == '\0') lb = da_get(attrs, "title");
-                if (lb == NULL || lb[0] == '\0') lb = ph;
-                if (lb == NULL || lb[0] == '\0') {
-                    const char* nm = da_get(attrs, "name");
-                    lb = (nm != NULL) ? nm : "";
-                }
-                b->checkboxLabel = pluto_strdup(lb);
-                doc_add_block(st, b);
-            }
-        } else if (!strcmp(inputType, "text") ||
-                   !strcmp(inputType, "search") ||
-                   !strcmp(inputType, "email") ||
-                   !strcmp(inputType, "url") ||
-                   !strcmp(inputType, "number") ||
-                   !strcmp(inputType, "password") ||
-                   !strcmp(inputType, "tel") ||
-                   !strcmp(inputType, "date") ||
-                   !strcmp(inputType, "time") ||
-                   !strcmp(inputType, "month") ||
-                   !strcmp(inputType, "week") ||
-                   !strcmp(inputType, "datetime-local") ||
-                   !strcmp(inputType, "color")) {
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_INPUT_FIELD);
-            if (b != NULL) {
-                b->inputType = pluto_strdup(inputType);
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                d_form_overrides(st, attrs, b);
-                b->placeholder = pluto_strdup((ph != NULL) ? ph : "");
-                int ok = 0;
-                double sv = d_tonum(da_get(attrs, "size"), &ok);
-                b->fieldWidth = ok ? (int)sv : -1;
-                doc_add_block(st, b);
-            }
-        } else if (!strcmp(inputType, "submit") ||
-                   !strcmp(inputType, "button")) {
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-            if (b != NULL) {
-                b->inputType = pluto_strdup(inputType);
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                d_form_overrides(st, attrs, b);
-                const char* val = da_get(attrs, "value");
-                if (val != NULL && val[0] != '\0')
-                    b->submitLabel = pluto_strdup(val);
-                else
-                    b->submitLabel = pluto_strdup(
-                        !strcmp(inputType, "button") ? "Button" : "Submit");
-                doc_add_block(st, b);
-            }
-        } else if (!strcmp(inputType, "file") ||
-                   !strcmp(inputType, "reset") ||
-                   !strcmp(inputType, "image")) {
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-            if (b != NULL) {
-                b->inputType = pluto_strdup(inputType);
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                d_form_overrides(st, attrs, b);
-                const char* val = da_get(attrs, "value");
-                if (val != NULL && val[0] != '\0')
-                    b->submitLabel = pluto_strdup(val);
-                else
-                    b->submitLabel = pluto_strdup(
-                        !strcmp(inputType, "file")     ? "Choose File"
-                        : !strcmp(inputType, "reset")  ? "Reset"
-                                                       : "Submit");
-                doc_add_block(st, b);
-            }
-        }
-        pluto_free(ty);
-        return;
-    }
-
-    if (!strcmp(tag, "textarea")) {
-        doc_flush_block(st);
-        int savedIn = st->inTextarea;
-        char* savedName = st->textareaName;
-        StrBuf savedBuf = st->textareaBuffer;
-        sb_init(&st->textareaBuffer);
-        const char* nm = da_get(attrs, "name");
-        st->textareaName =
-            pluto_strdup((nm != NULL && nm[0] != '\0') ? nm : "q");
-        st->inTextarea = 1;
-        d_walk_children(st, n);
-        st->inTextarea = 0;
-        int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
-        DocBlock* b = d_new_block(DB_INPUT_FIELD);
-        if (b != NULL) {
-            b->inputType = pluto_strdup("textarea");
-            DInputCommon c;
-            d_input_common(st, attrs, &c);
-            d_block_set_common(b, &c, st);
-            b->inName = st->textareaName;
-            st->textareaName = NULL;
-            b->inValue = sb_detach(&st->textareaBuffer);
-            const char* ph2 = da_get(attrs, "placeholder");
-            b->placeholder = pluto_strdup((ph2 != NULL) ? ph2 : "");
-            int ok = 0;
-            double cv = d_tonum(da_get(attrs, "cols"), &ok);
-            b->fieldWidth = ok ? (int)cv : -1;
-            double rv = d_tonum(da_get(attrs, "rows"), &ok);
-            b->fieldRows = ok ? (int)rv : -1;
-            b->readonlyFlag =
-                (unsigned char)(da_has(attrs, "readonly") || dis);
-            b->blockInert = (unsigned char)((st->inert > 0) || dis);
-            doc_add_block(st, b);
-        }
-        sb_clear(&st->textareaBuffer);
-        st->textareaBuffer = savedBuf;
-        pluto_free(st->textareaName);
-        st->textareaName = savedName;
-        st->inTextarea = savedIn;
-        return;
-    }
-
-    if (!strcmp(tag, "button")) {
-        char* bt = d_lower_dup(da_get(attrs, "type"));
-        const char* btype = (bt != NULL) ? bt : "submit";
-        if (!strcmp(btype, "submit") || !strcmp(btype, "button")) {
-            char* raw = d_concat_node_text(n);
-            d_collapse_trim(raw);
-            int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
-            doc_flush_block(st);
-            DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-            if (b != NULL) {
-                b->inputType = pluto_strdup(btype);
-                DInputCommon c;
-                d_input_common(st, attrs, &c);
-                d_block_set_common(b, &c, st);
-                if (raw[0] != '\0')
-                    b->submitLabel = pluto_strdup(raw);
-                else
-                    b->submitLabel = pluto_strdup(
-                        !strcmp(btype, "button") ? "Button" : "Submit");
-                const char* fa = da_get(attrs, "formaction");
-                if (fa != NULL && fa[0] != '\0') {
-                    StrBuf fb;
-                    sb_init(&fb);
-                    url_resolve(st->baseUrl, fa, &fb);
-                    pluto_free(b->formAction);
-                    b->formAction = sb_detach(&fb);
-                }
-                const char* fm = da_get(attrs, "formmethod");
-                if (fm != NULL && fm[0] != '\0') {
-                    pluto_free(b->formMethod);
-                    b->formMethod = d_lower_dup(fm);
-                }
-                b->disabledFlag = (unsigned char)dis;
-                b->blockInert = (unsigned char)((st->inert > 0) || dis);
-                doc_add_block(st, b);
-            }
-            pluto_free(raw);
-        }
-        pluto_free(bt);
-        return;
-    }
-
-    if (!strcmp(tag, "select")) {
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_SELECT_FIELD);
-        if (b != NULL) {
-            DInputCommon c;
-            d_input_common(st, attrs, &c);
-            d_collect_select_options(st, n, b);
-            long sel = 1;
-            for (size_t i = 0; i < b->nOptions; i++)
-                if (b->options[i].selected && !b->options[i].disabled)
-                    sel = (long)i + 1;
-            b->selectedIndex = (int)sel;
-            b->multipleFlag = (unsigned char)da_has(attrs, "multiple");
-            d_block_set_common(b, &c, st);
-            if (b->nOptions > 0)
-                doc_add_block(st, b);
-            else
-                db_free(b);
-        }
-        return;
-    }
-
-    /* ── Bordered boxes ─────────────────────────────────────────────────── */
-
-    if (!strcmp(tag, "fieldset")) {
-        if (st->cell != NULL) {
-            d_walk_children(st, n);
-            return;
-        }
-        doc_flush_block(st);
-        char* label = NULL;
-        for (size_t i = 0; i < n->nChildren; i++) {
-            DomNode* c = n->children[i];
-            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")) {
-                label = d_concat_node_text(c);
-                d_collapse_trim(label);
-                break;
-            }
-        }
-        DocBlock* b = d_new_block(DB_BOX_OPEN);
-        if (b != NULL) {
-            b->boxLabel = (label != NULL && label[0] != '\0')
-                              ? pluto_strdup(label) : NULL;
-            doc_add_block(st, b);
-        }
-        pluto_free(label);
-        int wasDisabled = st->disabledDepth;
-        if (da_has(attrs, "disabled")) st->disabledDepth++;
-        for (size_t i = 0; i < n->nChildren; i++) {
-            DomNode* c = n->children[i];
-            if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")))
-                d_walk(st, c);
-        }
-        st->disabledDepth = wasDisabled;
-        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-        if (cb != NULL) doc_add_block(st, cb);
-        return;
-    }
-
-    if (!strcmp(tag, "details")) {
-        if (st->cell != NULL) {
-            d_walk_children(st, n);
-            return;
-        }
-        doc_flush_block(st);
-        st->detailsIndex++;
-        char dkey[24];
-        snprintf(dkey, sizeof(dkey), "d%d", st->detailsIndex);
-        char* label = NULL;
-        for (size_t i = 0; i < n->nChildren; i++) {
-            DomNode* c = n->children[i];
-            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")) {
-                label = d_concat_node_text(c);
-                d_collapse_trim(label);
-                break;
-            }
-        }
-        int isOpen = da_has(attrs, "open");
-        isOpen = d_details_override(st, dkey, isOpen);
-        DocBlock* b = d_new_block(DB_BOX_OPEN);
-        if (b != NULL) {
-            if (label != NULL && label[0] != '\0') {
-                StrBuf bl;
-                sb_init(&bl);
-                sb_append_str(&bl, "> ");
-                sb_append_str(&bl, label);
-                b->boxLabel = sb_detach(&bl);
-            }
-            b->toggleKey = pluto_strdup(dkey);
-            b->toggleOpen = isOpen;
-            doc_add_block(st, b);
-        }
-        pluto_free(label);
-        if (isOpen) {
-            for (size_t i = 0; i < n->nChildren; i++) {
-                DomNode* c = n->children[i];
-                if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")))
-                    d_walk(st, c);
-            }
-        }
-        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-        if (cb != NULL) {
-            cb->toggleKey = pluto_strdup(dkey);
-            cb->toggleOpen = isOpen;
-            doc_add_block(st, cb);
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "dialog")) {
-        if (st->cell != NULL) {
-            d_walk_children(st, n);
-            return;
-        }
-        if (!da_has(attrs, "open")) return;  /* closed dialog: not rendered */
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_BOX_OPEN);
-        if (b != NULL) doc_add_block(st, b);
-        d_walk_children(st, n);
-        DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-        if (cb != NULL) doc_add_block(st, cb);
-        return;
-    }
-
-    /* ── Media placeholders ─────────────────────────────────────────────── */
-
-    if (!strcmp(tag, "video") || !strcmp(tag, "audio") ||
-        !strcmp(tag, "iframe") || !strcmp(tag, "canvas") ||
-        !strcmp(tag, "object") || !strcmp(tag, "embed") ||
-        !strcmp(tag, "portal")) {
-        d_handle_media_placeholder(st, tag, n, attrs);
-        return;
-    }
-
-    if (!strcmp(tag, "progress") || !strcmp(tag, "meter")) {
-        doc_flush_block(st);
-        DocBlock* b = d_new_block(DB_METER);
-        if (b != NULL) {
-            int ok = 0;
-            double v;
-            v = d_tonum(da_get(attrs, "value"), &ok);
-            b->mValue = ok ? v : 0;
-            v = d_tonum(da_get(attrs, "max"), &ok);
-            b->mMax = ok ? v : 1;
-            if (b->mMax <= 0) b->mMax = 1;
-            v = d_tonum(da_get(attrs, "min"), &ok);
-            b->mMin = ok ? v : 0;
-            v = d_tonum(da_get(attrs, "low"), &ok);
-            b->mLow = ok ? v : 0;
-            v = d_tonum(da_get(attrs, "high"), &ok);
-            b->mHigh = ok ? v : b->mMax;
-            v = d_tonum(da_get(attrs, "optimum"), &ok);
-            b->mOptimum = ok ? v : 0;
-            const char* lb = da_get(attrs, "title");
-            b->boxLabel = pluto_strdup((lb != NULL) ? lb : "");
-            doc_add_block(st, b);
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "map")) {
-        const char* nameAttr = da_get(attrs, "name");
-        const char* name = nameAttr;
-        if (name != NULL && name[0] == '#') name++;
-        if (name != NULL && name[0] != '\0') {
-            DocMap m;
-            memset(&m, 0, sizeof(m));
-            m.name = pluto_strdup(name);
-            d_collect_areas(st, n, &m);
-            if (m.name != NULL) {
-                DocDocument* doc = st->doc;
-                DocMap* arr = pluto_realloc(
-                    doc->maps, (doc->nMaps + 1) * sizeof(DocMap));
-                if (arr != NULL) {
-                    doc->maps = arr;
-                    doc->capMaps = doc->nMaps + 1;
-                    doc->maps[doc->nMaps++] = m;
-                } else {
-                    d_map_free(&m);
-                }
-            } else {
-                d_map_free(&m);
-            }
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "datalist")) {
-        const char* id = da_get(attrs, "id");
-        if (id != NULL && id[0] != '\0') {
-            DocDatalist dl;
-            memset(&dl, 0, sizeof(dl));
-            dl.id = pluto_strdup(id);
-            for (size_t i = 0; i < n->nChildren; i++) {
-                DomNode* c = n->children[i];
-                if (c->kind != DOM_ELEMENT || strcmp(c->tag, "option") != 0)
-                    continue;
-                char* text = d_concat_node_text(c);
-                d_collapse_trim(text);
-                const char* val = da_get(c->attrs, "value");
-                DocDatalistOpt* arr = pluto_realloc(
-                    dl.opts, (dl.nOpts + 1) * sizeof(DocDatalistOpt));
-                if (arr == NULL) {
-                    pluto_free(text);
+    else if (strcmp(tag, "map") == 0)
+    {
+        /* Image map: not rendered, but its <area> regions are collected. */
+        const char *nm0 = attr_or_d(a, "name", "");
+        const char *nm = nm0[0] == '#' ? nm0 + 1 : nm0;
+        if (nm[0] != '\0')
+        {
+            DocMap *mp = NULL;
+            for (int i = 0; i < w->doc->mapCount; i++)
+            {
+                if (w->doc->maps[i]->name && strcmp(w->doc->maps[i]->name, nm) == 0)
+                {
+                    mp = w->doc->maps[i];
                     break;
                 }
-                dl.opts = arr;
-                dl.capOpts = dl.nOpts + 1;
-                dl.opts[dl.nOpts].text = text;
-                dl.opts[dl.nOpts].value = pluto_strdup(
-                    (val != NULL) ? val : text);
-                dl.nOpts++;
             }
-            if (dl.id != NULL) {
-                DocDocument* doc = st->doc;
-                DocDatalist* arr = pluto_realloc(
-                    doc->datalists,
-                    (doc->nDatalists + 1) * sizeof(DocDatalist));
-                if (arr != NULL) {
-                    doc->datalists = arr;
-                    doc->capDatalists = doc->nDatalists + 1;
-                    doc->datalists[doc->nDatalists++] = dl;
-                } else {
-                    d_datalist_free(&dl);
-                }
-            } else {
-                d_datalist_free(&dl);
-            }
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "template") || !strcmp(tag, "menuitem") ||
-        !strcmp(tag, "content") || !strcmp(tag, "shadow") ||
-        !strcmp(tag, "geolocation"))
-        return;   /* inert / obsolete: children never rendered */
-
-    if (!strcmp(tag, "fencedframe")) {
-        doc_flush_block(st);
-        int okw = 0, okh = 0;
-        double wv = d_tonum(da_get(attrs, "width"), &okw);
-        double hv = d_tonum(da_get(attrs, "height"), &okh);
-        int w = okw ? (int)wv : 160;
-        int h = okh ? (int)hv : 60;
-        if (w > 360) w = 360;
-        if (h > 120) h = 120;
-        DocBlock* b = d_new_block(DB_PLACEHOLDER);
-        if (b != NULL) {
-            b->phTag = pluto_strdup("fencedframe");
-            b->boxLabel = pluto_strdup("[fencedframe]");
-            b->width = w;
-            b->height = h;
-            doc_add_block(st, b);
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "svg")) {
-        doc_flush_block(st);
-        char* xml = d_serialize_svg_node(n);
-        int okw = 0, okh = 0;
-        double wv = d_tonum(da_get(attrs, "width"), &okw);
-        double hv = d_tonum(da_get(attrs, "height"), &okh);
-        int w = (okw && wv > 0) ? (int)wv : 0;
-        int h = (okh && hv > 0) ? (int)hv : 0;
-        if (w <= 0 || h <= 0) {
-            double vbW = 0, vbH = 0;
-            d_parse_viewbox(da_get(attrs, "viewBox"), &vbW, &vbH);
-            if (w <= 0 && vbW > 0) w = (int)vbW;
-            if (h <= 0 && vbH > 0) h = (int)vbH;
-        }
-        if (w <= 0) w = 120;
-        if (h <= 0) h = 40;
-        if (w > 360) w = 360;
-        if (h > 180) h = 180;
-        const char* alt = "";
-        if (d_str_eq_ci(da_get(attrs, "role"), "img")) {
-            const char* al = da_get(attrs, "aria-label");
-            if (al == NULL || al[0] == '\0') al = da_get(attrs, "title");
-            alt = (al != NULL) ? al : "";
-        }
-        DocBlock* b = d_new_block(DB_IMAGE);
-        if (b != NULL) {
-            b->imgIsSvg = 1;
-            b->svgXml = xml;
-            b->width = w;
-            b->height = h;
-            b->alt = pluto_strdup(alt);
-            b->imgHref = (st->currentHref != NULL)
-                             ? pluto_strdup(st->currentHref) : NULL;
-            b->align = d_parse_align(attrs);
-            b->imgInert = st->inert > 0;
-            doc_add_block(st, b);
-        } else {
-            pluto_free(xml);
-        }
-        return;
-    }
-
-    /* MathML linearization */
-
-    if (!strcmp(tag, "math")) {
-        doc_flush_block(st);
-        int wasMath = st->inMath;
-        StrBuf savedMath = st->mathParts;
-        sb_init(&st->mathParts);
-        st->inMath = 1;
-        d_walk_children(st, n);
-        st->inMath = wasMath;
-        if (st->mathParts.len > 0 && st->mathParts.data != NULL) {
-            /* StrBuf contents are not NUL-terminated until detach */
-            if (sb_reserve(&st->mathParts, 1))
-                st->mathParts.data[st->mathParts.len] = '\0';
-            d_collapse_trim(st->mathParts.data);
-        }
-        if (st->mathParts.len > 0 && st->mathParts.data != NULL &&
-            st->mathParts.data[0] != '\0') {
-            DocBlock* b = d_new_block(DB_MATH);
-            if (b != NULL) {
-                b->codeText = sb_detach(&st->mathParts);
-                doc_add_block(st, b);
-            } else {
-                sb_clear(&st->mathParts);
-            }
-        } else {
-            sb_clear(&st->mathParts);
-        }
-        st->mathParts = savedMath;
-        return;
-    }
-
-    if (st->inMath && !strcmp(tag, "mfrac")) {
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (i > 0) sb_append_str(&st->mathParts, " / ");
-            d_walk(st, n->children[i]);
-        }
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "msup")) {
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (i > 0) sb_append_char(&st->mathParts, '^');
-            d_walk(st, n->children[i]);
-        }
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "msub")) {
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (i > 0) sb_append_char(&st->mathParts, '_');
-            d_walk(st, n->children[i]);
-        }
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "msubsup")) {
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (i == 1) sb_append_char(&st->mathParts, '_');
-            if (i == 2) sb_append_char(&st->mathParts, '^');
-            d_walk(st, n->children[i]);
-        }
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "msqrt")) {
-        sb_append_str(&st->mathParts, "sqrt(");
-        d_walk_children(st, n);
-        sb_append_char(&st->mathParts, ')');
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "mroot")) {
-        sb_append_str(&st->mathParts, "sqrt(");
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (i > 0) sb_append_str(&st->mathParts, "^(1/");
-            if (i + 1 == n->nChildren) sb_append_char(&st->mathParts, ')');
-            d_walk(st, n->children[i]);
-        }
-        sb_append_char(&st->mathParts, ')');
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "mfenced")) {
-        char* openCh = d_mfenced_attr(attrs, "open", "(");
-        char* closeCh = d_mfenced_attr(attrs, "close", ")");
-        char* sep = d_mfenced_attr(attrs, "separators", ",");
-        sb_append_str(&st->mathParts, openCh);
-        size_t count = 0;
-        for (size_t i = 0; i < n->nChildren; i++) {
-            if (count > 0) sb_append_str(&st->mathParts, sep);
-            d_walk(st, n->children[i]);
-            count++;
-        }
-        sb_append_str(&st->mathParts, closeCh);
-        pluto_free(openCh);
-        pluto_free(closeCh);
-        pluto_free(sep);
-        return;
-    }
-    if (st->inMath && !strcmp(tag, "mspace")) {
-        sb_append_char(&st->mathParts, ' ');
-        return;
-    }
-
-    if (!strcmp(tag, "meta")) {
-        const char* he = da_get(attrs, "http-equiv");
-        const char* ct = da_get(attrs, "content");
-        if (he != NULL && ct != NULL && strcasecmp(he, "refresh") == 0) {
-            double delay = 0;
-            char* u = NULL;
-            if (d_parse_meta_content(ct, &delay, &u)) {
-                st->hasMetaRefresh = 1;
-                st->metaDelay = delay;
-                pluto_free(st->metaUrl);
-                st->metaUrl = u;
-            }
-        }
-        return;
-    }
-
-    if (!strcmp(tag, "base") || !strcmp(tag, "link") ||
-        !strcmp(tag, "col") || !strcmp(tag, "colgroup") ||
-        !strcmp(tag, "source") || !strcmp(tag, "track") ||
-        !strcmp(tag, "param") || !strcmp(tag, "frameset") ||
-        !strcmp(tag, "frame"))
-        return;
-
-    d_walk_children(st, n);
-}
-
-/* ── iterative walker ────────────────────────────────────────────────── */
-
-static void d_walk_iterative(DocState* st, DomNode* root) {
-    walk_init();
-    g_walkSp = 0;
-    walk_push();
-    g_walkStack[0].kind = WENTRY_NODE;
-    g_walkStack[0].node = root;
-
-    while (g_walkSp > 0) {
-        WalkEntry* e = walk_pop();
-
-        if (e->kind == WENTRY_MATHTEXT) {
-            if (e->savedPtr != NULL) {
-                sb_append_str(&st->mathParts, (const char*)e->savedPtr);
-                pluto_free(e->savedPtr);
-            }
-            continue;
-        }
-        if (e->kind == WENTRY_NODE) {
-            DomNode* n = e->node;
-            if (n == NULL) continue;
-            tasks_yield_check();
-            if (n->kind == DOM_TEXT) {
-                d_handle_text_node(st, n);
-                continue;
-            }
-            if (n->kind != DOM_ELEMENT) continue;
-            if (d_is_display_none(n->attrs)) continue;
-            int inertHere = da_has(n->attrs, "inert");
-            if (inertHere) {
-                st->inert++;
-                /* Push inert-decrement EXIT FIRST so it pops LAST, after this
-                   element's children and its own tag EXIT. The inline
-                   `` sites were removed: they ran
-                   before children were walked, so inert never applied below. */
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].node = NULL;
-                g_walkStack[g_walkSp - 1].postType = WPOST_INERT_DEC;
-                g_walkStack[g_walkSp - 1].clientX = 0;
-                g_walkStack[g_walkSp - 1].clientY = 0;
-                g_walkStack[g_walkSp - 1].lmStyle = 0;
-                g_walkStack[g_walkSp - 1].baseline = 0;
-                g_walkStack[g_walkSp - 1].fx = 0.f;
-                g_walkStack[g_walkSp - 1].savedPtr = NULL;
-            }
-
-            const char* tag = n->tag;
-            StrMap* attrs = n->attrs;
-
-            /* ── leaf tags: no children ─────────────────────────── */
-
-            if (!strcmp(tag, "script") || !strcmp(tag, "style") ||
-                !strcmp(tag, "title"))
-                {  continue; }
-
-            if (!strcmp(tag, "template") || !strcmp(tag, "menuitem") ||
-                !strcmp(tag, "content") || !strcmp(tag, "shadow") ||
-                !strcmp(tag, "geolocation"))
-                {  continue; }
-
-            if (!strcmp(tag, "base") || !strcmp(tag, "link") ||
-                !strcmp(tag, "col") || !strcmp(tag, "colgroup") ||
-                !strcmp(tag, "source") || !strcmp(tag, "track") ||
-                !strcmp(tag, "param") || !strcmp(tag, "frameset") ||
-                !strcmp(tag, "frame"))
-                {  continue; }
-
-            if (!strcmp(tag, "img")) {
-                d_handle_image(st, attrs);
-                
-                continue;
-            }
-            if (!strcmp(tag, "br")) {
-                d_break_inline(st, DIT_BR);
-                
-                continue;
-            }
-            if (!strcmp(tag, "wbr")) {
-                d_break_inline(st, DIT_WBR);
-                
-                continue;
-            }
-            if (!strcmp(tag, "hr")) {
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_HR);
-                if (b != NULL) { b->spacingTop = 6; b->spacingBottom = 6; doc_add_block(st, b); }
-                
-                continue;
-            }
-
-            if (!strcmp(tag, "video") || !strcmp(tag, "audio") ||
-                !strcmp(tag, "iframe") || !strcmp(tag, "canvas") ||
-                !strcmp(tag, "object") || !strcmp(tag, "embed") ||
-                !strcmp(tag, "portal")) {
-                d_handle_media_placeholder(st, tag, n, attrs);
-                
-                continue;
-            }
-
-            if (!strcmp(tag, "progress") || !strcmp(tag, "meter")) {
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_METER);
-                if (b != NULL) {
-                    int ok = 0; double v;
-                    v = d_tonum(da_get(attrs, "value"), &ok); b->mValue = ok ? v : 0;
-                    v = d_tonum(da_get(attrs, "max"), &ok); b->mMax = ok ? v : 1;
-                    if (b->mMax <= 0) b->mMax = 1;
-                    v = d_tonum(da_get(attrs, "min"), &ok); b->mMin = ok ? v : 0;
-                    v = d_tonum(da_get(attrs, "low"), &ok); b->mLow = ok ? v : 0;
-                    v = d_tonum(da_get(attrs, "high"), &ok); b->mHigh = ok ? v : b->mMax;
-                    v = d_tonum(da_get(attrs, "optimum"), &ok); b->mOptimum = ok ? v : 0;
-                    const char* lb = da_get(attrs, "title");
-                    b->boxLabel = pluto_strdup((lb != NULL) ? lb : "");
-                    doc_add_block(st, b);
-                }
-                
-                continue;
-            }
-
-            if (!strcmp(tag, "fencedframe")) {
-                doc_flush_block(st);
-                int okw = 0, okh = 0;
-                double wv = d_tonum(da_get(attrs, "width"), &okw);
-                double hv = d_tonum(da_get(attrs, "height"), &okh);
-                int w = okw ? (int)wv : 160;
-                int h = okh ? (int)hv : 60;
-                if (w > 360) w = 360;
-                if (h > 120) h = 120;
-                DocBlock* b = d_new_block(DB_PLACEHOLDER);
-                if (b != NULL) {
-                    b->phTag = pluto_strdup("fencedframe");
-                    b->boxLabel = pluto_strdup("[fencedframe]");
-                    b->width = w; b->height = h;
-                    doc_add_block(st, b);
-                }
-                
-                continue;
-            }
-
-            if (!strcmp(tag, "meta")) {
-                const char* he = da_get(attrs, "http-equiv");
-                const char* ct = da_get(attrs, "content");
-                if (he != NULL && ct != NULL && strcasecmp(he, "refresh") == 0) {
-                    double delay = 0; char* u = NULL;
-                    if (d_parse_meta_content(ct, &delay, &u)) {
-                        st->hasMetaRefresh = 1; st->metaDelay = delay;
-                        pluto_free(st->metaUrl); st->metaUrl = u;
-                    }
-                }
-                
-                continue;
-            }
-
-            if (!strcmp(tag, "td") || !strcmp(tag, "th"))
-                {  continue; }
-
-            if (!strcmp(tag, "tr")) {
-                if (st->tbl != NULL && st->cell == NULL)
-                    d_handle_row(st, n, st->tbl);
-                
-                continue;
-            }
-
-            /* ── inline formatting tags: increment flag, push EXIT + children ── */
+            if (!mp)
             {
-                int flagIdx = d_flag_index_for_tag(tag);
-                if (flagIdx >= 0) {
-                    unsigned char* fld = d_flag_by_index(st, flagIdx);
-                    if (fld) (*fld)++;
-                    /* push EXIT first so it runs after children */
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].node = NULL;
-                    g_walkStack[g_walkSp - 1].postType = flagIdx;
-                    /* push children in reverse */
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                    
+                mp = (DocMap *)doc_arena_alloc(&w->arena, sizeof(DocMap));
+                if (!mp)
+                {
+                    w->error = 1;
+                    return;
+                }
+                memset(mp, 0, sizeof(*mp));
+                mp->name = doc_arena_str(w, nm);
+                if (doc_ptrarr_push((void ***)&w->doc->maps, &w->doc->mapCount,
+                                    &w->doc->mapCap, mp))
+                {
+                    w->error = 1;
+                    return;
+                }
+            }
+            /* Replace regions (Lua doc.maps[name] = regions). */
+            if (mp->areas)
+            {
+                PLUTO_FREE(mp->areas);
+                mp->areas = NULL;
+                mp->areaCount = 0;
+                mp->areaCap = 0;
+            }
+            for (int i = 0; i < node->childCount; i++)
+            {
+                const DomNode *c = node->children[i];
+                if (c->kind != DOM_ELEMENT || strcmp(c->tag, "area") != 0)
+                {
                     continue;
                 }
-            }
-
-            /* ── simple block tags: ENTER creates block + pushes EXIT, EXIT flushes ── */
-
-            /* h1-h6 */
-            if (tag[0] == 'h' && tag[1] >= '1' && tag[1] <= '6' && tag[2] == '\0') {
-                doc_flush_block(st);
-                if (st->cell != NULL) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                    
-                    continue;
+                AttrList aa = attrs_of(c);
+                DocArea *ar = (DocArea *)doc_arena_alloc(&w->arena, sizeof(DocArea));
+                if (!ar)
+                {
+                    w->error = 1;
+                    return;
                 }
-                DBox sp;
-                d_parse_box_spacing(attrs, &sp);
-                DocBlock* b = d_new_block(DB_HEADING);
-                if (b != NULL) {
-                    b->level = tag[1] - '0';
-                    b->spacingTop = sp.top;
-                    b->spacingBottom = sp.bottom;
-                    b->align = d_parse_align(attrs);
-                    b->indent = sp.left;
-                    if (d_is_inverted_style(attrs)) b->invert = 1;
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* p/div/section/article/header/footer/main/nav/aside/address/hgroup/noindex/search */
-            if (!strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
-                !strcmp(tag, "article") || !strcmp(tag, "header") ||
-                !strcmp(tag, "footer") || !strcmp(tag, "main") ||
-                !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
-                !strcmp(tag, "address") || !strcmp(tag, "hgroup") ||
-                !strcmp(tag, "noindex") || !strcmp(tag, "search")) {
-                if (st->cell != NULL) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                    
-                    continue;
-                }
-                doc_flush_block(st);
-                DBox sp;
-                d_parse_box_spacing(attrs, &sp);
-                DocBlock* b = d_new_block(DB_PARAGRAPH);
-                if (b != NULL) {
-                    b->align = d_parse_align(attrs);
-                    if (d_is_inverted_style(attrs)) b->invert = 1;
-                    b->spacingTop = sp.top;
-                    b->spacingBottom = sp.bottom;
-                    b->indent = sp.left;
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* center/marquee */
-            if (!strcmp(tag, "center") || !strcmp(tag, "marquee")) {
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_PARAGRAPH);
-                if (b != NULL) {
-                    b->align = "center";
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* blockquote */
-            if (!strcmp(tag, "blockquote")) {
-                doc_flush_block(st);
-                DBox sp;
-                d_parse_box_spacing(attrs, &sp);
-                DocBlock* b = d_new_block(DB_BLOCKQUOTE);
-                if (b != NULL) {
-                    b->align = d_parse_align(attrs);
-                    if (d_is_inverted_style(attrs)) b->invert = 1;
-                    b->indent = sp.left + 12;
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* ── list tags ──────────────────────────────────────────────── */
-
-            /* ul/ol/menu/dir */
-            if (!strcmp(tag, "ul") || !strcmp(tag, "ol") || !strcmp(tag, "menu") ||
-                !strcmp(tag, "dir")) {
-                DListCtx* nc = (DListCtx*)pluto_malloc(sizeof(DListCtx));
-                if (nc != NULL) {
-                    memset(nc, 0, sizeof(*nc));
-                    nc->depth = (st->listCtx != NULL) ? st->listCtx->depth + 1 : 1;
-                    nc->count = 0;
-                    nc->start = 1;
-                    nc->markerType = "1";
-                    nc->ordered = !strcmp(tag, "ol");
-                    if (nc->ordered) {
-                        int ok = 0;
-                        double sv = d_tonum(da_get(attrs, "start"), &ok);
-                        if (ok) nc->start = (int)sv;
-                        nc->reversed = da_has(attrs, "reversed");
-                        const char* ty = da_get(attrs, "type");
-                        if (ty != NULL && (!strcmp(ty, "1") || !strcmp(ty, "a") ||
-                                           !strcmp(ty, "A") || !strcmp(ty, "i") ||
-                                           !strcmp(ty, "I")))
-                            nc->markerType = ty;
-                    }
-                    DListCtx* old = st->listCtx;
-                    st->listCtx = nc;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_UL;
-                    g_walkStack[g_walkSp - 1].savedPtr = old;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* li */
-            if (!strcmp(tag, "li")) {
-                static const char* const MARKERS[5] = {"1", "a", "A", "i", "I"};
-                DListCtx def;
-                memset(&def, 0, sizeof(def));
-                def.ordered = 0; def.start = 1; def.count = 0;
-                def.depth = 1; def.markerType = "1";
-                DListCtx* cx = (st->listCtx != NULL) ? st->listCtx : &def;
-                long number;
-                int vok = 0;
-                double vv = d_tonum(da_get(attrs, "value"), &vok);
-                if (vok) {
-                    number = (long)vv;
-                    cx->start = cx->reversed ? number - 1 : number + 1;
-                    cx->count = 0;
-                } else {
-                    cx->count++;
-                    number = cx->reversed
-                        ? (long)cx->start - ((long)cx->count - 1)
-                        : (long)cx->start + ((long)cx->count - 1);
-                }
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_LIST_ITEM);
-                if (b != NULL) {
-                    b->isOrdered = cx->ordered;
-                    b->number = number;
-                    for (int mi = 0; mi < 5; mi++)
-                        if (cx->markerType != NULL && strcmp(cx->markerType, MARKERS[mi]) == 0) {
-                            b->markerType = MARKERS[mi]; break;
+                memset(ar, 0, sizeof(*ar));
+                ar->shape = doc_arena_str(w, attr_or_d(aa, "shape", "rect"));
+                const char *co = attr_or_d(aa, "coords", "");
+                int *coords = NULL;
+                int cc = 0, ccap = 0;
+                for (const char *p = co; *p;)
+                {
+                    if (*p >= '0' && *p <= '9')
+                    {
+                        long v = 0;
+                        while (*p >= '0' && *p <= '9')
+                        {
+                            v = v * 10 + (*p - '0');
+                            p++;
                         }
-                    if (b->markerType == NULL) b->markerType = "1";
-                    b->depth = cx->depth;
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* dl */
-            if (!strcmp(tag, "dl")) {
-                st->dlDepth++;
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_NONE;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* dt/dd */
-            if (!strcmp(tag, "dt") || !strcmp(tag, "dd")) {
-                int isDt = !strcmp(tag, "dt");
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_PARAGRAPH);
-                if (b != NULL) {
-                    if (isDt) b->dtFlag = 1;
-                    else { b->ddFlag = 1; b->indent = 20 * st->dlDepth; }
-                    st->currentBlock = b;
-                }
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_FLUSH;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* q */
-            if (!strcmp(tag, "q")) {
-                d_quote_char(st);
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_Q;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* span/font/time/data */
-            if (!strcmp(tag, "span") || !strcmp(tag, "font") ||
-                !strcmp(tag, "time") || !strcmp(tag, "data")) {
-                SpanSave* sv = (SpanSave*)pluto_malloc(sizeof(SpanSave));
-                if (sv != NULL) {
-                    sv->savedFlags = st->f;
-                    sv->tagKind = !strcmp(tag, "time") ? 1 : (!strcmp(tag, "data") ? 2 : 0);
-                    DStyle styl;
-                    d_parse_style(&styl, da_get(attrs, "style"));
-                    const char* fw = d_style_get(&styl, "font-weight");
-                    if (fw != NULL && strstr(fw, "bold") != NULL) st->f.bold++;
-                    const char* fsy = d_style_get(&styl, "font-style");
-                    if (fsy != NULL && strstr(fsy, "italic") != NULL) st->f.italic++;
-                    const char* td = d_style_get(&styl, "text-decoration");
-                    if (td != NULL) {
-                        if (strstr(td, "underline") != NULL) st->f.underline++;
-                        if (strstr(td, "line-through") != NULL) st->f.strike++;
-                    }
-                    const char* col = d_style_get(&styl, "color");
-                    if (col != NULL && (strstr(col, "#FFFF") != NULL || strstr(col, "#fff") != NULL))
-                        st->f.invert++;
-                    const char* fsz = d_style_get(&styl, "font-size");
-                    if (fsz != NULL) {
-                        if (strstr(fsz, "large") != NULL) st->f.big++;
-                        else if (strstr(fsz, "small") != NULL) st->f.small++;
-                    }
-                    const char* va = d_style_get(&styl, "vertical-align");
-                    if (va != NULL && strcmp(va, "super") == 0) st->f.sup++;
-                    else if (va != NULL && strcmp(va, "sub") == 0) st->f.sub++;
-                    const char* bgc = d_style_get(&styl, "background-color");
-                    if (bgc != NULL && bgc[0] != '\0') st->f.mark++;
-                    if (!strcmp(tag, "font")) {
-                        int ok = 0;
-                        double szv = d_tonum(da_get(attrs, "size"), &ok);
-                        if (ok) {
-                            if (szv >= 5) st->f.big++;
-                            else if (szv <= 2) st->f.small++;
-                        }
-                    }
-                    sv->countBefore = (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_SPAN;
-                    g_walkStack[g_walkSp - 1].savedPtr = sv;
-                    g_walkStack[g_walkSp - 1].node = n;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* a */
-            if (!strcmp(tag, "a")) {
-                const char* rawHref = da_get(attrs, "href");
-                int haveResolved = 0;
-                if (d_valid_href(rawHref)) {
-                    StrBuf rb;
-                    sb_init(&rb);
-                    url_resolve(st->baseUrl, rawHref, &rb);
-                    st->currentHref = sb_detach(&rb);
-                    st->currentAnchorIndex = st->anchorCounter++;
-                    haveResolved = 1;
-                }
-                sb_clear(&st->linkText);
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                g_walkStack[g_walkSp - 1].postType = WPOST_A;
-                g_walkStack[g_walkSp - 1].node = n;
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* pre/xmp/listing/plaintext */
-            if (!strcmp(tag, "pre") || !strcmp(tag, "xmp") || !strcmp(tag, "listing") ||
-                !strcmp(tag, "plaintext")) {
-                doc_flush_block(st);
-                PreSave* sv = (PreSave*)pluto_malloc(sizeof(PreSave));
-                if (sv != NULL) {
-                    sv->savedPreBuffer = st->preBuffer;
-                    sv->savedInPre = st->inPre;
-                    sb_init(&st->preBuffer);
-                    st->inPre = 1;
-                    if (!strcmp(tag, "pre")) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                        g_walkStack[g_walkSp - 1].postType = WPOST_PRE;
-                        g_walkStack[g_walkSp - 1].savedPtr = sv;
-                        for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                            g_walkStack[g_walkSp - 1].node = n->children[i];
-                        }
-                    } else {
-                        char* codeText = d_concat_node_text(n);
-                        DocBlock* b = d_new_block(DB_CODE_BLOCK);
-                        if (b == NULL) {
-                            pluto_free(codeText);
-                        } else {
-                            b->codeText = codeText;
-                            d_split_code_lines(b);
-                            doc_add_block(st, b);
-                        }
-                        sb_clear(&st->preBuffer);
-                        st->preBuffer = sv->savedPreBuffer;
-                        st->inPre = sv->savedInPre;
-                        pluto_free(sv);
-                    }
-                }
-                
-                continue;
-            }
-
-            /* figure */
-            if (!strcmp(tag, "figure")) {
-                doc_flush_block(st);
-                FigureSave* sv = (FigureSave*)pluto_malloc(sizeof(FigureSave));
-                if (sv != NULL) {
-                    sv->savedFigCaption = st->figCaption;
-                    sv->savedFigureImage = st->figureImage;
-                    sv->savedFigureCaptionDone = st->figureCaptionDone;
-                    sv->savedFigureActive = st->figureActive;
-                    sb_init(&st->figCaption);
-                    st->figureImage = NULL;
-                    st->figureCaptionDone = 0;
-                    st->figureActive = 1;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_FIGURE;
-                    g_walkStack[g_walkSp - 1].savedPtr = sv;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* figcaption */
-            if (!strcmp(tag, "figcaption")) {
-                int* savedDone = (int*)pluto_malloc(sizeof(int));
-                if (savedDone != NULL) {
-                    *savedDone = st->figureCaptionDone;
-                    st->figureCaptionDone = 0;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_FIGURE_CAPTION;
-                    g_walkStack[g_walkSp - 1].savedPtr = savedDone;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* form */
-            if (!strcmp(tag, "form")) {
-                FormSave* sv = (FormSave*)pluto_malloc(sizeof(FormSave));
-                if (sv != NULL) {
-                    sv->savedFormAction = st->formAction;
-                    sv->savedFormMethod = st->formMethod;
-                    StrBuf rb;
-                    sb_init(&rb);
-                    url_resolve(st->baseUrl, da_get(attrs, "action"), &rb);
-                    st->formAction = sb_detach(&rb);
-                    const char* m = da_get(attrs, "method");
-                    st->formMethod = (m != NULL && m[0] != '\0') ? d_lower_dup(m)
-                                                                 : pluto_strdup("get");
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_FORM;
-                    g_walkStack[g_walkSp - 1].savedPtr = sv;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* textarea */
-            if (!strcmp(tag, "textarea")) {
-                doc_flush_block(st);
-                TextareaSave* sv = (TextareaSave*)pluto_malloc(sizeof(TextareaSave));
-                if (sv != NULL) {
-                    sv->savedInTextarea = st->inTextarea;
-                    sv->savedTextareaName = st->textareaName;
-                    sv->savedTextareaBuffer = st->textareaBuffer;
-                    sb_init(&st->textareaBuffer);
-                    const char* nm = da_get(attrs, "name");
-                    st->textareaName =
-                        pluto_strdup((nm != NULL && nm[0] != '\0') ? nm : "q");
-                    st->inTextarea = 1;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_TEXTAREA;
-                    g_walkStack[g_walkSp - 1].savedPtr = sv;
-                    g_walkStack[g_walkSp - 1].node = n;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* button */
-            if (!strcmp(tag, "button")) {
-                char* bt = d_lower_dup(da_get(attrs, "type"));
-                const char* btype = (bt != NULL) ? bt : "submit";
-                if (!strcmp(btype, "submit") || !strcmp(btype, "button")) {
-                    char* raw = d_concat_node_text(n);
-                    d_collapse_trim(raw);
-                    int dis = da_has(attrs, "disabled") || st->disabledDepth > 0;
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup(btype);
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        if (raw[0] != '\0')
-                            b->submitLabel = pluto_strdup(raw);
-                        else
-                            b->submitLabel = pluto_strdup(
-                                !strcmp(btype, "button") ? "Button" : "Submit");
-                        const char* fa = da_get(attrs, "formaction");
-                        if (fa != NULL && fa[0] != '\0') {
-                            StrBuf fb;
-                            sb_init(&fb);
-                            url_resolve(st->baseUrl, fa, &fb);
-                            pluto_free(b->formAction);
-                            b->formAction = sb_detach(&fb);
-                        }
-                        const char* fm = da_get(attrs, "formmethod");
-                        if (fm != NULL && fm[0] != '\0') {
-                            pluto_free(b->formMethod);
-                            b->formMethod = d_lower_dup(fm);
-                        }
-                        b->disabledFlag = (unsigned char)dis;
-                        b->blockInert = (unsigned char)((st->inert > 0) || dis);
-                        doc_add_block(st, b);
-                    }
-                    pluto_free(raw);
-                }
-                pluto_free(bt);
-                
-                continue;
-            }
-
-            /* table */
-            if (!strcmp(tag, "table")) {
-                if (st->cell != NULL) {
-                    
-                    continue;
-                }
-                doc_flush_block(st);
-                DTableBuild tbl;
-                memset(&tbl, 0, sizeof(tbl));
-                st->tbl = &tbl;
-                StrBuf caption;
-                sb_init(&caption);
-                for (size_t i = 0; i < n->nChildren; i++) {
-                    DomNode* c = n->children[i];
-                    if (c->kind != DOM_ELEMENT) continue;
-                    if (!strcmp(c->tag, "caption")) {
-                        char* t = d_concat_node_text(c);
-                        d_collapse_trim(t);
-                        if (t[0] != '\0') sb_append_str(&caption, t);
-                        pluto_free(t);
-                    } else if (!strcmp(c->tag, "tr")) {
-                        d_handle_row(st, c, &tbl);
-                    } else if (!strcmp(c->tag, "thead") || !strcmp(c->tag, "tbody") ||
-                               !strcmp(c->tag, "tfoot")) {
-                        for (size_t j = 0; j < c->nChildren; j++) {
-                            DomNode* r = c->children[j];
-                            if (r->kind == DOM_ELEMENT && !strcmp(r->tag, "tr"))
-                                d_handle_row(st, r, &tbl);
-                        }
-                    }
-                }
-                st->tbl = NULL;
-                int border = da_has(attrs, "border");
-                const char* bw = da_get(attrs, "border");
-                if (bw != NULL && strcmp(bw, "0") == 0) border = 0;
-                if (tbl.nRows > 0) {
-                    DocBlock* b = d_new_block(DB_TABLE);
-                    if (b != NULL) {
-                        b->rows = tbl.rows;
-                        b->nRows = tbl.nRows;
-                        b->capRows = tbl.capRows;
-                        b->tableCaption = (caption.len > 0) ? sb_detach(&caption) : NULL;
-                        if (caption.len == 0) sb_clear(&caption);
-                        b->tableBorder = border;
-                        const char* tw = da_get(attrs, "width");
-                        if (tw != NULL && tw[0] != '\0')
-                            b->tableWidth = pluto_strdup(tw);
-                        b->align = d_parse_align(attrs);
-                        doc_add_block(st, b);
-                    } else {
-                        for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
-                        pluto_free(tbl.rows);
-                        sb_clear(&caption);
-                    }
-                } else {
-                    for (size_t i = 0; i < tbl.nRows; i++) dtr_free(&tbl.rows[i]);
-                    pluto_free(tbl.rows);
-                    sb_clear(&caption);
-                }
-                
-                continue;
-            }
-
-            /* fieldset */
-            if (!strcmp(tag, "fieldset")) {
-                if (st->cell != NULL) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                } else {
-                    doc_flush_block(st);
-                    char* label = NULL;
-                    for (size_t i = 0; i < n->nChildren; i++) {
-                        DomNode* c = n->children[i];
-                        if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend")) {
-                            label = d_concat_node_text(c);
-                            d_collapse_trim(label);
-                            break;
-                        }
-                    }
-                    DocBlock* b = d_new_block(DB_BOX_OPEN);
-                    if (b != NULL) {
-                        b->boxLabel = (label != NULL && label[0] != '\0')
-                                          ? pluto_strdup(label) : NULL;
-                        doc_add_block(st, b);
-                    }
-                    pluto_free(label);
-                    FieldsetSave* sv = (FieldsetSave*)pluto_malloc(sizeof(FieldsetSave));
-                    if (sv != NULL) {
-                        sv->savedDisabledDepth = st->disabledDepth;
-                        if (da_has(attrs, "disabled")) st->disabledDepth++;
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                        g_walkStack[g_walkSp - 1].postType = WPOST_FIELDSET;
-                        g_walkStack[g_walkSp - 1].savedPtr = sv;
-                    }
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        DomNode* c = n->children[i];
-                        if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "legend"))) {
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                            g_walkStack[g_walkSp - 1].node = c;
-                        }
-                    }
-                }
-                
-                continue;
-            }
-
-            /* details */
-            if (!strcmp(tag, "details")) {
-                if (st->cell != NULL) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                } else {
-                    doc_flush_block(st);
-                    st->detailsIndex++;
-                    DetailsSave* sv = (DetailsSave*)pluto_malloc(sizeof(DetailsSave));
-                    if (sv != NULL) {
-                        snprintf(sv->dkey, sizeof(sv->dkey), "d%d", st->detailsIndex);
-                        char* label = NULL;
-                        for (size_t i = 0; i < n->nChildren; i++) {
-                            DomNode* c = n->children[i];
-                            if (c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary")) {
-                                label = d_concat_node_text(c);
-                                d_collapse_trim(label);
+                        if (cc >= ccap)
+                        {
+                            int nc = ccap ? ccap * 2 : 8;
+                            int *na = (int *)PLUTO_REALLOC(coords,
+                                                           (size_t)nc * sizeof(int));
+                            if (!na)
+                            {
+                                w->error = 1;
                                 break;
                             }
+                            coords = na;
+                            ccap = nc;
                         }
-                        sv->isOpen = da_has(attrs, "open");
-                        sv->isOpen = d_details_override(st, sv->dkey, sv->isOpen);
-                        DocBlock* b = d_new_block(DB_BOX_OPEN);
-                        if (b != NULL) {
-                            if (label != NULL && label[0] != '\0') {
-                                StrBuf bl;
-                                sb_init(&bl);
-                                sb_append_str(&bl, "> ");
-                                sb_append_str(&bl, label);
-                                b->boxLabel = sb_detach(&bl);
-                            }
-                            b->toggleKey = pluto_strdup(sv->dkey);
-                            b->toggleOpen = sv->isOpen;
-                            doc_add_block(st, b);
-                        }
-                        pluto_free(label);
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                        g_walkStack[g_walkSp - 1].postType = WPOST_DETAILS;
-                        g_walkStack[g_walkSp - 1].savedPtr = sv;
-                        if (sv->isOpen) {
-                            for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                                DomNode* c = n->children[i];
-                                if (!(c->kind == DOM_ELEMENT && !strcmp(c->tag, "summary"))) {
-                                    walk_push();
-                                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                                    g_walkStack[g_walkSp - 1].node = c;
-                                }
-                            }
-                        }
+                        coords[cc++] = (int)v;
                     }
-                }
-                
-                continue;
-            }
-
-            /* dialog */
-            if (!strcmp(tag, "dialog")) {
-                if (st->cell != NULL) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                } else if (!da_has(attrs, "open")) {
-                    /* closed dialog: not rendered */
-                } else {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_BOX_OPEN);
-                    if (b != NULL) doc_add_block(st, b);
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_DIALOG;
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                }
-                
-                continue;
-            }
-
-            /* math */
-            if (!strcmp(tag, "math")) {
-                doc_flush_block(st);
-                MathSave* sv = (MathSave*)pluto_malloc(sizeof(MathSave));
-                if (sv != NULL) {
-                    sv->savedInMath = st->inMath;
-                    sv->savedMathParts = st->mathParts;
-                    sb_init(&st->mathParts);
-                    st->inMath = 1;
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_EXIT;
-                    g_walkStack[g_walkSp - 1].postType = WPOST_MATH;
-                    g_walkStack[g_walkSp - 1].savedPtr = sv;
-                }
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* math sub-tags (only when inMath) */
-            if (st->inMath) {
-                if (!strcmp(tag, "mfrac") || !strcmp(tag, "msup") || !strcmp(tag, "msub")) {
-                    const char* sep = !strcmp(tag, "mfrac") ? " / "
-                                    : !strcmp(tag, "msup") ? "^" : "_";
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                        if (i > 0) {
-                            char* sp = pluto_strdup(sep);
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                            g_walkStack[g_walkSp - 1].savedPtr = sp;
-                        }
-                    }
-                    
-                    continue;
-                }
-                if (!strcmp(tag, "msubsup")) {
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                        if (i == 2) {
-                            char* sp = pluto_strdup("^");
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                            g_walkStack[g_walkSp - 1].savedPtr = sp;
-                        }
-                        if (i == 1) {
-                            char* sp = pluto_strdup("_");
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                            g_walkStack[g_walkSp - 1].savedPtr = sp;
-                        }
-                    }
-                    
-                    continue;
-                }
-                if (!strcmp(tag, "msqrt")) {
-                    sb_append_str(&st->mathParts, "sqrt(");
-                    {
-                        char* close = pluto_strdup(")");
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                        g_walkStack[g_walkSp - 1].savedPtr = close;
-                    }
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                    
-                    continue;
-                }
-                if (!strcmp(tag, "mroot")) {
-                    sb_append_str(&st->mathParts, "sqrt(");
-                    {
-                        char* close = pluto_strdup(")");
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                        g_walkStack[g_walkSp - 1].savedPtr = close;
-                    }
-                    {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[n->nChildren - 1];
-                    }
-                    {
-                        char* cp = pluto_strdup(")");
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                        g_walkStack[g_walkSp - 1].savedPtr = cp;
-                    }
-                    for (int i = (int)n->nChildren - 2; i >= 0; i--) {
-                        char* ip = pluto_strdup("^(1/");
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                        g_walkStack[g_walkSp - 1].savedPtr = ip;
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                    }
-                    
-                    continue;
-                }
-                if (!strcmp(tag, "mfenced")) {
-                    char* openCh = d_mfenced_attr(attrs, "open", "(");
-                    char* closeCh = d_mfenced_attr(attrs, "close", ")");
-                    char* sepStr = d_mfenced_attr(attrs, "separators", ",");
-                    sb_append_str(&st->mathParts, openCh);
-                    {
-                        char* cl = pluto_strdup(closeCh);
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                        g_walkStack[g_walkSp - 1].savedPtr = cl;
-                    }
-                    for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                        walk_push();
-                        g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                        g_walkStack[g_walkSp - 1].node = n->children[i];
-                        if (i > 0) {
-                            char* sp = pluto_strdup(sepStr);
-                            walk_push();
-                            g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                            g_walkStack[g_walkSp - 1].savedPtr = sp;
-                        }
-                    }
-                    pluto_free(openCh);
-                    pluto_free(closeCh);
-                    pluto_free(sepStr);
-                    
-                    continue;
-                }
-                if (!strcmp(tag, "mspace")) {
-                    char* sp = pluto_strdup(" ");
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_MATHTEXT;
-                    g_walkStack[g_walkSp - 1].savedPtr = sp;
-                    
-                    continue;
-                }
-            }
-
-            /* input */
-            if (!strcmp(tag, "input")) {
-                char* ty = d_lower_dup(da_get(attrs, "type"));
-                const char* inputType = (ty != NULL) ? ty : "text";
-                const char* ph = da_get(attrs, "placeholder");
-                if (ph == NULL || ph[0] == '\0') ph = da_get(attrs, "aria-label");
-
-                if (!strcmp(inputType, "hidden")) {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup("hidden");
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        d_form_overrides(st, attrs, b);
-                        doc_add_block(st, b);
-                    }
-                } else if (!strcmp(inputType, "checkbox") ||
-                           !strcmp(inputType, "radio")) {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_CHECKBOX_FIELD);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup(inputType);
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        d_form_overrides(st, attrs, b);
-                        b->radioFlag = !strcmp(inputType, "radio");
-                        b->checkedFlag = (unsigned char)da_has(attrs, "checked");
-                        const char* lb = da_get(attrs, "label");
-                        if (lb == NULL || lb[0] == '\0') lb = da_get(attrs, "title");
-                        if (lb == NULL || lb[0] == '\0') lb = ph;
-                        if (lb == NULL || lb[0] == '\0') {
-                            const char* nm = da_get(attrs, "name");
-                            lb = (nm != NULL) ? nm : "";
-                        }
-                        b->checkboxLabel = pluto_strdup(lb);
-                        doc_add_block(st, b);
-                    }
-                } else if (!strcmp(inputType, "text") ||
-                           !strcmp(inputType, "search") ||
-                           !strcmp(inputType, "email") ||
-                           !strcmp(inputType, "url") ||
-                           !strcmp(inputType, "number") ||
-                           !strcmp(inputType, "password") ||
-                           !strcmp(inputType, "tel") ||
-                           !strcmp(inputType, "date") ||
-                           !strcmp(inputType, "time") ||
-                           !strcmp(inputType, "month") ||
-                           !strcmp(inputType, "week") ||
-                           !strcmp(inputType, "datetime-local") ||
-                           !strcmp(inputType, "color")) {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup(inputType);
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        d_form_overrides(st, attrs, b);
-                        b->placeholder = pluto_strdup((ph != NULL) ? ph : "");
-                        int ok = 0;
-                        double sv = d_tonum(da_get(attrs, "size"), &ok);
-                        b->fieldWidth = ok ? (int)sv : -1;
-                        doc_add_block(st, b);
-                    }
-                } else if (!strcmp(inputType, "submit") ||
-                           !strcmp(inputType, "button")) {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup(inputType);
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        d_form_overrides(st, attrs, b);
-                        const char* val = da_get(attrs, "value");
-                        if (val != NULL && val[0] != '\0')
-                            b->submitLabel = pluto_strdup(val);
-                        else
-                            b->submitLabel = pluto_strdup(
-                                !strcmp(inputType, "button") ? "Button" : "Submit");
-                        doc_add_block(st, b);
-                    }
-                } else if (!strcmp(inputType, "file") ||
-                           !strcmp(inputType, "reset") ||
-                           !strcmp(inputType, "image")) {
-                    doc_flush_block(st);
-                    DocBlock* b = d_new_block(DB_INPUT_SUBMIT);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup(inputType);
-                        DInputCommon c;
-                        d_input_common(st, attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        d_form_overrides(st, attrs, b);
-                        const char* val = da_get(attrs, "value");
-                        if (val != NULL && val[0] != '\0')
-                            b->submitLabel = pluto_strdup(val);
-                        else
-                            b->submitLabel = pluto_strdup(
-                                !strcmp(inputType, "file")     ? "Choose File"
-                                : !strcmp(inputType, "reset")  ? "Reset"
-                                                               : "Submit");
-                        doc_add_block(st, b);
-                    }
-                }
-                pluto_free(ty);
-                
-                continue;
-            }
-
-            /* select */
-            if (!strcmp(tag, "select")) {
-                doc_flush_block(st);
-                DocBlock* b = d_new_block(DB_SELECT_FIELD);
-                if (b != NULL) {
-                    DInputCommon c;
-                    d_input_common(st, attrs, &c);
-                    d_collect_select_options(st, n, b);
-                    long sel = 1;
-                    for (size_t i = 0; i < b->nOptions; i++)
-                        if (b->options[i].selected && !b->options[i].disabled)
-                            sel = (long)i + 1;
-                    b->selectedIndex = (int)sel;
-                    b->multipleFlag = (unsigned char)da_has(attrs, "multiple");
-                    d_block_set_common(b, &c, st);
-                    if (b->nOptions > 0)
-                        doc_add_block(st, b);
                     else
-                        db_free(b);
-                }
-                
-                continue;
-            }
-
-            /* map */
-            if (!strcmp(tag, "map")) {
-                const char* nameAttr = da_get(attrs, "name");
-                const char* name = nameAttr;
-                if (name != NULL && name[0] == '#') name++;
-                if (name != NULL && name[0] != '\0') {
-                    DocMap m;
-                    memset(&m, 0, sizeof(m));
-                    m.name = pluto_strdup(name);
-                    d_collect_areas(st, n, &m);
-                    if (m.name != NULL) {
-                        DocDocument* doc = st->doc;
-                        DocMap* arr = pluto_realloc(
-                            doc->maps, (doc->nMaps + 1) * sizeof(DocMap));
-                        if (arr != NULL) {
-                            doc->maps = arr;
-                            doc->capMaps = doc->nMaps + 1;
-                            doc->maps[doc->nMaps++] = m;
-                        } else {
-                            d_map_free(&m);
-                        }
-                    } else {
-                        d_map_free(&m);
+                    {
+                        p++;
                     }
                 }
-                
-                continue;
+                ar->coords = coords;
+                ar->coordCount = cc;
+                const char *h = attr_val(aa, "href");
+                ar->href = (h && doc_valid_href(h)) ? resolve_href(w, h) : NULL;
+                ar->alt = doc_arena_str(w, attr_or_d(aa, "alt", ""));
+                if (doc_ptrarr_push((void ***)&mp->areas, &mp->areaCount,
+                                    &mp->areaCap, ar))
+                {
+                    w->error = 1;
+                }
             }
+        }
+    }
+    else if (strcmp(tag, "datalist") == 0)
+    {
+        const char *id = attr_or_d(a, "id", "");
+        if (id[0] != '\0')
+        {
+            DocDatalist *dl = (DocDatalist *)doc_arena_alloc(&w->arena, sizeof(DocDatalist));
+            if (!dl)
+            {
+                w->error = 1;
+                return;
+            }
+            memset(dl, 0, sizeof(*dl));
+            dl->id = doc_arena_str(w, id);
+            for (int i = 0; i < node->childCount; i++)
+            {
+                const DomNode *c = node->children[i];
+                if (c->kind == DOM_ELEMENT && strcmp(c->tag, "option") == 0)
+                {
+                    static char tbuf2[512]; /* hoisted: device gameTask stack is tiny */
+                    doc_concat_node_text(c, tbuf2, sizeof(tbuf2));
+                    AttrList ca = attrs_of(c);
+                    DocOption *o = (DocOption *)doc_arena_alloc(&w->arena, sizeof(DocOption));
+                    if (!o)
+                    {
+                        w->error = 1;
+                        return;
+                    }
+                    memset(o, 0, sizeof(*o));
+                    o->text = doc_arena_collapse(w, tbuf2);
+                    o->value = doc_arena_str(w, attr_or_d(ca, "value", o->text ? o->text : ""));
+                    if (doc_ptrarr_push((void ***)&dl->options, &dl->optionCount,
+                                        &dl->optionCap, o))
+                    {
+                        w->error = 1;
+                    }
+                }
+            }
+            if (doc_ptrarr_push((void ***)&w->doc->datalists, &w->doc->datalistCount,
+                                &w->doc->datalistCap, dl))
+            {
+                w->error = 1;
+            }
+        }
+    }
+    else if (strcmp(tag, "template") == 0 || strcmp(tag, "menuitem") == 0 ||
+             strcmp(tag, "content") == 0 || strcmp(tag, "shadow") == 0 ||
+             strcmp(tag, "geolocation") == 0)
+    {
+        /* Inert / non-rendered. */
+    }
+    else if (strcmp(tag, "fencedframe") == 0)
+    {
+        flush_current_block(w);
+        double wd = strict_num(attr_val(a, "width"), 160);
+        double ht = strict_num(attr_val(a, "height"), 60);
+        if (wd > 360)
+        {
+            wd = 360;
+        }
+        if (ht > 120)
+        {
+            ht = 120;
+        }
+        DocBlock *ph = new_block(w, DOC_BLOCK_PLACEHOLDER);
+        if (ph)
+        {
+            ph->plabel = doc_arena_str(w, "[fencedframe]");
+            ph->pwidth = wd;
+            ph->pheight = ht;
+            add_block(w, ph);
+        }
+    }
+    else if (strcmp(tag, "source") == 0 || strcmp(tag, "track") == 0 ||
+             strcmp(tag, "col") == 0 || strcmp(tag, "colgroup") == 0 ||
+             strcmp(tag, "area") == 0 || strcmp(tag, "param") == 0 ||
+             strcmp(tag, "frameset") == 0 || strcmp(tag, "frame") == 0)
+    {
+        /* Void / non-rendered. */
+    }
+    else if (strcmp(tag, "svg") == 0)
+    {
+        /* Inline SVG: serialize the subtree and rasterize it on-device. */
+        flush_current_block(w);
+        char *xml = doc_serialize_svg_node(node);
+        double wd = strict_num(attr_val(a, "width"), 0);
+        double ht = strict_num(attr_val(a, "height"), 0);
+        if (wd <= 0 || ht <= 0)
+        {
+            /* viewBox: ^%s*([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+) */
+            const char *vb = attr_or_d(a, "viewBox", "");
+            const char *p = vb;
+            double nums[4] = {0, 0, 0, 0};
+            int got = 1;
+            for (int k = 0; k < 4 && got; k++)
+            {
+                while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+                {
+                    p++;
+                }
+                const char *st2 = p;
+                while (*p == '-' || *p == '.' || (*p >= '0' && *p <= '9'))
+                {
+                    p++;
+                }
+                if (p == st2 || (k < 3 && *p == '\0'))
+                {
+                    got = 0;
+                }
+                else
+                {
+                    char nb[64];
+                    size_t nl = (size_t)(p - st2);
+                    if (nl >= sizeof(nb))
+                    {
+                        nl = sizeof(nb) - 1;
+                    }
+                    memcpy(nb, st2, nl);
+                    nb[nl] = '\0';
+                    int okn;
+                    nums[k] = tonum_or(nb, &okn);
+                    if (!okn)
+                    {
+                        got = 0;
+                    }
+                    /* %s+ requires at least one space between numbers */
+                    if (k < 3 && *p != '\0' && !is_lspace(*p))
+                    {
+                        got = 0;
+                    }
+                }
+            }
+            if (got)
+            {
+                if (wd <= 0)
+                {
+                    wd = nums[0];
+                }
+                if (ht <= 0)
+                {
+                    ht = nums[1];
+                }
+            }
+        }
+        if (wd <= 0)
+        {
+            wd = 120;
+        }
+        if (ht <= 0)
+        {
+            ht = 40;
+        }
+        if (wd > 360)
+        {
+            wd = 360;
+        }
+        if (ht > 180)
+        {
+            ht = 180;
+        }
+        void *bmp = NULL;
+        int ok = 0;
+        if (xml && w->opts && w->opts->svgDecoder)
+        {
+            ok = (w->opts->svgDecoder(xml, (int)wd, (int)ht, &bmp) == 0 && bmp);
+        }
+        if (xml)
+        {
+            PLUTO_FREE(xml);
+        }
+        if (ok && bmp)
+        {
+            DocBlock *b = new_block(w, DOC_BLOCK_IMAGE);
+            if (b)
+            {
+                b->img = bmp;
+                b->width = wd;
+                b->height = ht;
+                const char *role = attr_val(a, "role");
+                if (role && strcmp(role, "img") == 0)
+                {
+                    const char *al = attr_val(a, "aria-label");
+                    if (!al)
+                    {
+                        al = attr_val(a, "title");
+                    }
+                    b->alt = doc_arena_str(w, al ? al : "");
+                }
+                else
+                {
+                    b->alt = doc_arena_str(w, "");
+                }
+                b->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
+                b->align = walk_align(w, a);
+                b->inert = (w->inert > 0);
+                add_block(w, b);
+            }
+        }
+    }
 
-            /* datalist */
-            if (!strcmp(tag, "datalist")) {
-                const char* id = da_get(attrs, "id");
-                if (id != NULL && id[0] != '\0') {
-                    DocDatalist dl;
-                    memset(&dl, 0, sizeof(dl));
-                    dl.id = pluto_strdup(id);
-                    for (size_t i = 0; i < n->nChildren; i++) {
-                        DomNode* c = n->children[i];
-                        if (c->kind != DOM_ELEMENT || strcmp(c->tag, "option") != 0)
-                            continue;
-                        char* text = d_concat_node_text(c);
-                        d_collapse_trim(text);
-                        const char* val = da_get(c->attrs, "value");
-                        DocDatalistOpt* arr = pluto_realloc(
-                            dl.opts, (dl.nOpts + 1) * sizeof(DocDatalistOpt));
-                        if (arr == NULL) {
-                            pluto_free(text);
+    /* ── MathML ── */
+    else if (strcmp(tag, "math") == 0)
+    {
+        flush_current_block(w);
+        ExitCtx *x = push_exit(w, WX_MATH_END);
+        if (x)
+        {
+            x->inMath = w->inMath;
+        }
+        push_children(w, node);
+        w->inMath = 1;
+        strbuf_reset(&w->mathBuf);
+    }
+    else if (strcmp(tag, "mfrac") == 0 || strcmp(tag, "msup") == 0 ||
+             strcmp(tag, "msub") == 0)
+    {
+        const char *sep = (strcmp(tag, "mfrac") == 0) ? " / "
+                          : (strcmp(tag, "msup") == 0) ? "^"
+                                                       : "_";
+        int n = node->childCount;
+        if (n > 0)
+        {
+            for (int i = n - 1; i >= 1; i--)
+            {
+                push_enter(w, node->children[i]);
+                push_sep(w, sep);
+            }
+            push_enter(w, node->children[0]);
+        }
+    }
+    else if (strcmp(tag, "msubsup") == 0)
+    {
+        int n = node->childCount;
+        if (n > 0)
+        {
+            for (int i = n - 1; i >= 1; i--)
+            {
+                push_enter(w, node->children[i]);
+                if (i == 2)
+                {
+                    push_sep(w, "_");
+                }
+                if (i == 3)
+                {
+                    push_sep(w, "^");
+                }
+            }
+            push_enter(w, node->children[0]);
+        }
+    }
+    else if (strcmp(tag, "msqrt") == 0)
+    {
+        push_sep(w, ")");
+        push_children(w, node);
+        push_sep(w, "sqrt(");
+    }
+    else if (strcmp(tag, "mroot") == 0)
+    {
+        int n = node->childCount;
+        push_sep(w, ")"); /* final close */
+        for (int i = n; i >= 1; i--)
+        {
+            push_enter(w, node->children[i - 1]);
+            if (i == n)
+            {
+                push_sep(w, ")");
+            }
+            if (i > 1)
+            {
+                push_sep(w, "^(1/");
+            }
+        }
+        push_sep(w, "sqrt(");
+    }
+    else if (strcmp(tag, "mfenced") == 0)
+    {
+        char *openS = entities_decode(attr_or_d(a, "open", "("));
+        char *closeS = entities_decode(attr_or_d(a, "close", ")"));
+        char *sepS = entities_decode(attr_or_d(a, "separators", ","));
+        push_sep(w, doc_arena_str(w, closeS ? closeS : ")"));
+        int n = node->childCount;
+        for (int i = n; i >= 1; i--)
+        {
+            push_enter(w, node->children[i - 1]);
+            if (i > 1)
+            {
+                push_sep(w, doc_arena_str(w, sepS ? sepS : ","));
+            }
+        }
+        push_sep(w, doc_arena_str(w, openS ? openS : "("));
+        if (openS)
+        {
+            PLUTO_FREE(openS);
+        }
+        if (closeS)
+        {
+            PLUTO_FREE(closeS);
+        }
+        if (sepS)
+        {
+            PLUTO_FREE(sepS);
+        }
+    }
+    else if (strcmp(tag, "mspace") == 0)
+    {
+        if (strbuf_append(&w->mathBuf, " "))
+        {
+            w->error = 1;
+        }
+    }
+
+    else if (strcmp(tag, "script") == 0 || strcmp(tag, "style") == 0 ||
+             strcmp(tag, "title") == 0)
+    {
+        /* Non-rendered: content stripped by the tokenizer; must not walk. */
+    }
+    else if (strcmp(tag, "meta") == 0)
+    {
+        const char *httpEquiv = attr_val(a, "http-equiv");
+        if (httpEquiv)
+        {
+            char le[64];
+            lua_lower_buf(le, httpEquiv, sizeof(le));
+            if (strcmp(le, "refresh") == 0)
+            {
+                refresh_from_content(w->doc, attr_or_d(a, "content", ""),
+                                     w->doc->baseUrl);
+            }
+        }
+    }
+    else
+    {
+        /* Unknown element: render its children in normal flow. */
+        push_children(w, node);
+    }
+}
+
+/* ── Exit actions (post-children work) ─────────────────────────────────────── */
+
+static void run_exit(Walker *w, ExitCtx *x)
+{
+    switch (x->kind)
+    {
+    case WX_FLUSH:
+        flush_current_block(w);
+        break;
+    case WX_STYLE:
+        w->flags = x->flags;
+        break;
+    case WX_LINK_END:
+        if (w->currentHref)
+        {
+            DocLink *lk = (DocLink *)doc_arena_alloc(&w->arena, sizeof(DocLink));
+            if (lk)
+            {
+                memset(lk, 0, sizeof(*lk));
+                const char *lt = w->linkText.data;
+                const char *text = (lt && lt[0] != '\0') ? lt : x->title;
+                lk->href = w->currentHref;
+                lk->text = doc_arena_str(w, (text && text[0]) ? text : w->currentHref);
+                lk->target = x->target;
+                if (doc_ptrarr_push((void ***)&w->doc->links, &w->doc->linkCount,
+                                    &w->doc->linkCap, lk))
+                {
+                    w->error = 1;
+                }
+            }
+        }
+        w->currentHref = NULL;
+        w->currentAnchorIndex = 0;
+        strbuf_reset(&w->linkText);
+        break;
+    case WX_QUOTE_END:
+        q_quote(w);
+        w->flags = x->flags;
+        break;
+    case WX_PRE_END:
+    {
+        const char *txt = w->preBuf.data;
+        if (txt && txt[0] != '\0')
+        {
+            DocBlock *b = new_block(w, DOC_BLOCK_CODE_BLOCK);
+            if (b)
+            {
+                size_t len = w->preBuf.len;
+                b->text = doc_arena_strn(w, txt, len);
+                /* lines = gmatch(preBuffer .. "\\n", "(.-)\r?\n") — the final
+                 * (appended) newline always terminates one more line. */
+                size_t p = 0;
+                while (p <= len)
+                {
+                    size_t q = p;
+                    while (q < len && txt[q] != '\n')
+                    {
+                        q++;
+                    }
+                    size_t e = q;
+                    if (e > p && txt[e - 1] == '\r')
+                    {
+                        e--;
+                    }
+                    char *l = doc_arena_strn(w, txt + p, e - p);
+                    if (!l || doc_ptrarr_push((void ***)&b->lines, &b->lineCount,
+                                              &b->lineCap, l))
+                    {
+                        w->error = 1;
+                        break;
+                    }
+                    p = q + 1;
+                    if (q == len)
+                    {
+                        break; /* consumed the appended newline */
+                    }
+                }
+                add_block(w, b);
+            }
+        }
+        w->inPre = 0;
+        strbuf_reset(&w->preBuf);
+        break;
+    }
+    case WX_FIGURE_END:
+    {
+        FigureCtx *f = w->figure;
+        if (f)
+        {
+            if (f->image)
+            {
+                char *cap = doc_arena_collapse(w, f->cap->data ? f->cap->data : "");
+                if (cap && cap[0] != '\0')
+                {
+                    f->image->alt = cap;
+                    f->image->caption = cap;
+                }
+                flush_current_block(w);
+                add_block(w, f->image);
+            }
+            else if (f->cap->len > 0)
+            {
+                /* caption has non-whitespace? */
+                const char *cd = f->cap->data ? f->cap->data : "";
+                int hasNonSpace = 0;
+                for (const char *p = cd; *p; p++)
+                {
+                    if (!is_lspace(*p))
+                    {
+                        hasNonSpace = 1;
+                        break;
+                    }
+                }
+                if (hasNonSpace)
+                {
+                    flush_current_block(w);
+                    DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+                    if (b)
+                    {
+                        b->align = doc_arena_str(w, "center");
+                        DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                        if (inl)
+                        {
+                            inl->text = doc_arena_str(w, cd);
+                            inl->flags = DOC_INF_ITALIC;
+                            if (doc_ptrarr_push((void ***)&b->inlines,
+                                                &b->inlineCount, &b->inlineCap, inl))
+                            {
+                                w->error = 1;
+                            }
+                        }
+                        add_block(w, b);
+                    }
+                }
+            }
+            /* restore */
+            w->figure = (FigureCtx *)x->figure;
+            strbuf_free(f->cap);
+            for (int i = 0; i < w->heapBufCount; i++)
+            {
+                if (w->heapBufs[i] == f->cap)
+                {
+                    w->heapBufs[i] = NULL;
+                    break;
+                }
+            }
+        }
+        break;
+    }
+    case WX_LIST_END:
+        w->listCtx = (ListCtx *)x->listCtx;
+        break;
+    case WX_DL_END:
+        w->dlDepth = x->dlDepth;
+        break;
+    case WX_FORM_END:
+        w->formAction = x->formAction;
+        w->formMethod = x->formMethod;
+        break;
+    case WX_TEXTAREA_END:
+    {
+        DocBlock *b = (DocBlock *)x->figure;
+        if (b)
+        {
+            b->value = doc_arena_str(w, w->textareaBuf.data ? w->textareaBuf.data : "");
+            add_block(w, b);
+        }
+        w->inTextarea = 0;
+        strbuf_reset(&w->textareaBuf);
+        break;
+    }
+    case WX_MATH_END:
+    {
+        char *s = doc_arena_collapse(w, w->mathBuf.data ? w->mathBuf.data : "");
+        if (s && s[0] != '\0')
+        {
+            DocBlock *b = new_block(w, DOC_BLOCK_MATH);
+            if (b)
+            {
+                b->text = s;
+                add_block(w, b);
+            }
+        }
+        w->inMath = x->inMath;
+        strbuf_reset(&w->mathBuf);
+        break;
+    }
+    case WX_FIELDSET_END:
+        add_block(w, new_block(w, DOC_BLOCK_BOX_CLOSE));
+        w->disabledDepth = x->disabledDepth;
+        break;
+    case WX_DETAILS_END:
+    {
+        DocBlock *bc = new_block(w, DOC_BLOCK_BOX_CLOSE);
+        if (bc)
+        {
+            char keybuf[16];
+            snprintf(keybuf, sizeof(keybuf), "d%d", x->detailsIdx);
+            bc->toggleKey = doc_arena_str(w, keybuf);
+            bc->toggleOpen = x->toggleOpen;
+            add_block(w, bc);
+        }
+        break;
+    }
+    case WX_DIALOG_END:
+        add_block(w, new_block(w, DOC_BLOCK_BOX_CLOSE));
+        break;
+    case WX_INERT_END:
+        w->inert = x->inertSaved;
+        break;
+    case WX_SPAN_END:
+        if (x->fallback &&
+            (!w->currentBlock || w->currentBlock->inlineCount == x->hadInlines))
+        {
+            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+            if (inl)
+            {
+                inl->text = x->fallback;
+                inl->flags = w->flags & (DOC_INF_BOLD | DOC_INF_ITALIC);
+                add_inline(w, inl);
+            }
+        }
+        w->flags = x->flags;
+        break;
+    case WX_FIGCAP_END:
+        w->figureCaptionDone = 1;
+        break;
+    default:
+        break;
+    }
+}
+
+/* ── Recursive walker → explicit frame loop ────────────────────────────────── */
+
+static void walk_node(Walker *w, const DomNode *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    if (node->kind == DOM_TEXT)
+    {
+        handle_text_node(w, node);
+        return;
+    }
+    AttrList a = attrs_of(node);
+    /* hidden/popover/display:none suppress the element AND its subtree */
+    if (walk_display_none(a))
+    {
+        return;
+    }
+    int wasInert = w->inert;
+    if (attr_has(a, "inert"))
+    {
+        /* Lua: wasInert = state.inert; state.inert += 1; walk(node);
+         * state.inert = wasInert — the scope covers the whole subtree, so the
+         * restore must run AFTER the children (exit frame, pushed first). */
+        w->inert++;
+        ExitCtx *x = push_exit(w, WX_INERT_END);
+        if (x)
+        {
+            x->inertSaved = wasInert;
+        }
+    }
+    handle_element(w, node);
+}
+
+static int walk_children(Walker *w, const DomNode *parent)
+{
+    if (w->error)
+    {
+        return -1;
+    }
+    int base = w->frameCount; /* re-entrant calls only unwind their own frames */
+    if (parent)
+    {
+        for (int i = parent->childCount - 1; i >= 0; i--)
+        {
+            if (push_enter(w, parent->children[i]))
+            {
+                return -1;
+            }
+        }
+    }
+    while (!w->error && w->frameCount > base)
+    {
+        WFrame f = w->frames[--w->frameCount];
+        if (f.kind == 1)
+        {
+            run_exit(w, f.ctx);
+        }
+        else if (f.kind == 2)
+        {
+            if (strbuf_append(&w->mathBuf, f.sep))
+            {
+                w->error = 1;
+            }
+        }
+        else
+        {
+            walk_node(w, f.node);
+        }
+    }
+    return w->error ? -1 : 0;
+}
+
+/* Finalize: truncated marker + empty-page fallback (top-level only). */
+static void walker_finish(Walker *w)
+{
+    flush_current_block(w);
+    if (w->truncated)
+    {
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (b)
+        {
+            b->align = doc_arena_str(w, "center");
+            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+            if (inl)
+            {
+                inl->text = doc_arena_str(w, "(Page too large - rest not rendered)");
+                inl->flags = DOC_INF_BOLD;
+                if (doc_ptrarr_push((void ***)&b->inlines, &b->inlineCount,
+                                    &b->inlineCap, inl))
+                {
+                    w->error = 1;
+                }
+            }
+            /* unconditional insert (reference table.insert) */
+            if (doc_ptrarr_push((void ***)&w->doc->blocks, &w->doc->blockCount,
+                                &w->doc->blockCap, b))
+            {
+                w->error = 1;
+            }
+        }
+    }
+    if (w->doc->blockCount == 0)
+    {
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (b)
+        {
+            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+            if (inl)
+            {
+                inl->text = doc_arena_str(w, "(Empty Web Page)");
+                inl->flags = DOC_INF_ITALIC;
+                if (doc_ptrarr_push((void ***)&b->inlines, &b->inlineCount,
+                                    &b->inlineCap, inl))
+                {
+                    w->error = 1;
+                }
+            }
+            if (doc_ptrarr_push((void ***)&w->doc->blocks, &w->doc->blockCount,
+                                &w->doc->blockCap, b))
+            {
+                w->error = 1;
+            }
+        }
+    }
+}
+
+/* ── Free helpers ──────────────────────────────────────────────────────────── */
+
+static void doc_free_walk_output(DocParseResult *out)
+{
+    for (int i = 0; i < out->blockCount; i++)
+    {
+        DocBlock *b = out->blocks[i];
+        if (b->inlines)
+        {
+            PLUTO_FREE(b->inlines);
+        }
+        if (b->lines)
+        {
+            PLUTO_FREE(b->lines);
+        }
+        if (b->options)
+        {
+            PLUTO_FREE(b->options);
+        }
+        if (b->table)
+        {
+            DocTable *t = b->table;
+            for (int r = 0; r < t->rowCount; r++)
+            {
+                DocRow *row = t->rows[r];
+                for (int c = 0; c < row->cellCount; c++)
+                {
+                    if (row->cells[c]->inlines)
+                    {
+                        PLUTO_FREE(row->cells[c]->inlines);
+                    }
+                }
+                if (row->cells)
+                {
+                    PLUTO_FREE(row->cells);
+                }
+            }
+            if (t->rows)
+            {
+                PLUTO_FREE(t->rows);
+            }
+        }
+    }
+    if (out->blocks)
+    {
+        PLUTO_FREE(out->blocks);
+        out->blocks = NULL;
+    }
+    if (out->links)
+    {
+        PLUTO_FREE(out->links);
+        out->links = NULL;
+    }
+    for (int i = 0; i < out->mapCount; i++)
+    {
+        DocMap *m = out->maps[i];
+        for (int j = 0; j < m->areaCount; j++)
+        {
+            if (m->areas[j]->coords)
+            {
+                PLUTO_FREE(m->areas[j]->coords);
+            }
+        }
+        if (m->areas)
+        {
+            PLUTO_FREE(m->areas);
+        }
+    }
+    if (out->maps)
+    {
+        PLUTO_FREE(out->maps);
+        out->maps = NULL;
+    }
+    for (int i = 0; i < out->datalistCount; i++)
+    {
+        if (out->datalists[i]->options)
+        {
+            PLUTO_FREE(out->datalists[i]->options);
+        }
+    }
+    if (out->datalists)
+    {
+        PLUTO_FREE(out->datalists);
+        out->datalists = NULL;
+    }
+    out->blockCount = out->blockCap = 0;
+    out->linkCount = out->linkCap = 0;
+    out->mapCount = out->mapCap = 0;
+    out->datalistCount = out->datalistCap = 0;
+}
+
+/* ── meta refresh content parser (shared by token scan + <meta> handler) ──── */
+
+static int refresh_from_content(DocParseResult *out, const char *content,
+                                const char *baseUrl)
+{
+    /* Lua pattern 1: "^(%d+%.?%d*)%s*;%s*[Uu][Rr][Ll]=%s*(.+)$"
+     * Lua pattern 2: "^(%d+%.?%d*)%s*$" */
+    const char *p = content;
+    while (*p >= '0' && *p <= '9')
+    {
+        p++;
+    }
+    if (*p == '.')
+    {
+        /* %d+%.?%d* consumes the dot even without following digits. */
+        p++;
+        while (*p >= '0' && *p <= '9')
+        {
+            p++;
+        }
+    }
+    if (p == content)
+    {
+        return 0;
+    }
+    char delayStr[32];
+    size_t dn = (size_t)(p - content);
+    if (dn >= sizeof(delayStr))
+    {
+        dn = sizeof(delayStr) - 1;
+    }
+    memcpy(delayStr, content, dn);
+    delayStr[dn] = '\0';
+
+    const char *urlPart = NULL;
+    int matched = 0;
+    const char *q = p;
+    while (*q == ' ' || *q == '\t')
+    {
+        q++;
+    }
+    if (*q == ';')
+    {
+        q++;
+        while (*q == ' ' || *q == '\t')
+        {
+            q++;
+        }
+        if (ci_prefix(q, "url=", 4) == 0)
+        {
+            q += 4;
+            while (*q == ' ' || *q == '\t')
+            {
+                q++;
+            }
+            if (*q) /* (.+)$ — non-empty required */
+            {
+                urlPart = q;
+                matched = 1;
+            }
+        }
+    }
+    else if (*q == '\0')
+    {
+        matched = 1; /* pattern 2: delay only */
+    }
+    if (!matched)
+    {
+        return 0;
+    }
+
+    out->metaRefresh.present = 1;
+    out->metaRefresh.delay = (float)atof(delayStr);
+    if (urlPart)
+    {
+        const char *a2 = urlPart;
+        const char *z = urlPart + strlen(urlPart);
+        while (a2 < z && (*a2 == ' ' || *a2 == '\t'))
+        {
+            a2++;
+        }
+        while (z > a2 && (*(z - 1) == ' ' || *(z - 1) == '\t'))
+        {
+            z--;
+        }
+        char trimmed[512];
+        size_t tn = (size_t)(z - a2);
+        if (tn >= sizeof(trimmed))
+        {
+            tn = sizeof(trimmed) - 1;
+        }
+        memcpy(trimmed, a2, tn);
+        trimmed[tn] = '\0';
+        out->metaRefresh.url[0] = '\0';
+        if (trimmed[0] != '\0')
+        {
+            char *resolved = url_resolve(baseUrl, trimmed);
+            if (resolved)
+            {
+                snprintf(out->metaRefresh.url, sizeof(out->metaRefresh.url), "%s",
+                         resolved);
+                PLUTO_FREE(resolved);
+            }
+        }
+    }
+    return 1;
+}
+
+/* ── Table row helper (handleRow) ──────────────────────────────────────────── */
+
+static void handle_row(Walker *w, const DomNode *trNode, DocTable *tbl)
+{
+    DocRow *row = (DocRow *)doc_arena_alloc(&w->arena, sizeof(DocRow));
+    if (!row)
+    {
+        w->error = 1;
+        return;
+    }
+    memset(row, 0, sizeof(*row));
+    for (int i = 0; i < trNode->childCount; i++)
+    {
+        const DomNode *cellNode = trNode->children[i];
+        if (cellNode->kind != DOM_ELEMENT)
+        {
+            continue;
+        }
+        if (strcmp(cellNode->tag, "td") != 0 && strcmp(cellNode->tag, "th") != 0)
+        {
+            continue;
+        }
+        AttrList ca = attrs_of(cellNode);
+        char *savedHref = w->currentHref;
+        int savedAnchor = w->currentAnchorIndex;
+        size_t savedLinkLen = w->linkText.len;
+
+        DocCell *cell = (DocCell *)doc_arena_alloc(&w->arena, sizeof(DocCell));
+        if (!cell)
+        {
+            w->error = 1;
+            return;
+        }
+        memset(cell, 0, sizeof(*cell));
+        cell->header = (strcmp(cellNode->tag, "th") == 0);
+        cell->colspan = (int)strict_num(attr_val(ca, "colspan"), 1);
+        cell->rowspan = (int)strict_num(attr_val(ca, "rowspan"), 1);
+        const char *ab = attr_val(ca, "abbr");
+        if (!ab)
+        {
+            ab = attr_val(ca, "title");
+        }
+        cell->abbr = doc_arena_str(w, ab ? ab : "");
+        cell->align = walk_align(w, ca);
+
+        w->cell = cell;
+        w->cellFirstText = 1;
+        w->currentHref = NULL;
+        w->currentAnchorIndex = 0;
+        strbuf_reset(&w->linkText);
+        walk_children(w, cellNode);
+        if (cell->inlineCount == 0)
+        {
+            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+            if (inl)
+            {
+                inl->text = doc_arena_str(w, " ");
+                if (doc_ptrarr_push((void ***)&cell->inlines,
+                                    &cell->inlineCount, &cell->inlineCap, inl))
+                {
+                    w->error = 1;
+                }
+            }
+        }
+        if (doc_ptrarr_push((void ***)&row->cells, &row->cellCount, &row->cellCap, cell))
+        {
+            w->error = 1;
+        }
+
+        w->cell = NULL;
+        w->currentHref = savedHref;
+        w->currentAnchorIndex = savedAnchor;
+        /* Restore the saved linkText prefix (cell text is discarded). */
+        if (w->linkText.len > savedLinkLen)
+        {
+            w->linkText.len = savedLinkLen;
+            if (w->linkText.data)
+            {
+                w->linkText.data[savedLinkLen] = '\0';
+            }
+        }
+    }
+    if (doc_ptrarr_push((void ***)&tbl->rows, &tbl->rowCount, &tbl->rowCap, row))
+    {
+        w->error = 1;
+    }
+}
+
+/* ── Document.parse (full HTML-mode pipeline) ───────────────────────────────── */
+
+static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
+{
+    for (int i = 0; i < tok->attrCount; i++)
+    {
+        if (strcmp(tok->attrs[i].key, key) == 0)
+        {
+            const char *v = tok->attrs[i].value;
+            *outVal = (v == PLUTO_TOK_ATTR_TRUE) ? "" : v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int document_parse(const char *htmlString, const char *baseUrl, int mode,
+                   const DocParseOpts *opts, DocParseResult *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    if (!htmlString || htmlString[0] == '\0')
+    {
+        snprintf(out->title, sizeof(out->title), "Blank Page");
+        snprintf(out->baseUrl, sizeof(out->baseUrl), "%s",
+                 baseUrl ? baseUrl : "about:blank");
+        out->rawHtml = (char *)PLUTO_MALLOC(1);
+        if (!out->rawHtml)
+        {
+            return -1;
+        }
+        out->rawHtml[0] = '\0';
+        out->isReaderMode = 0;
+        return 0;
+    }
+
+    /* 1. Tokenize. */
+    TokenizeResult tr;
+    if (tokenizer_tokenize(htmlString, &tr) != 0)
+    {
+        return -1;
+    }
+    snprintf(out->title, sizeof(out->title), "%s",
+             tr.pageTitle[0] ? tr.pageTitle : "Web Page");
+
+    /* 2. Reader mode → Readability.distill. */
+    if (mode == MODE_READER)
+    {
+        int rc = readability_distill(&tr, out->title, baseUrl, out);
+        tokenizer_free_result(&tr);
+        if (rc != 0)
+        {
+            return -1;
+        }
+        out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+        if (!out->rawHtml)
+        {
+            return -1;
+        }
+        strcpy(out->rawHtml, htmlString);
+        out->mode = mode;
+        return 0;
+    }
+
+    /* 3. Base href override (absolute URLs only) + meta refresh scan. */
+    {
+        char base[512];
+        snprintf(base, sizeof(base), "%s", baseUrl ? baseUrl : "");
+        const char *tokenBase = NULL;
+        for (int i = 0; i < tr.tokens.count; i++)
+        {
+            const Token *tok = &tr.tokens.items[i];
+            if (tok->type == TOK_TAG && strcmp(tok->name, "base") == 0 && !tok->isClosing)
+            {
+                const char *href = NULL;
+                doc_get_attr(tok, "href", &href);
+                if (href && href[0] != '\0')
+                {
+                    tokenBase = href;
+                    break;
+                }
+            }
+        }
+        if (tokenBase)
+        {
+            /* Lua: string.match(baseHref, "^[a-zA-Z][%w+%-%.]*://") */
+            int schemeOk = 0;
+            const char *p = tokenBase;
+            if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+            {
+                p++;
+                while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                       (*p >= '0' && *p <= '9') || *p == '+' || *p == '-' || *p == '.')
+                {
+                    p++;
+                }
+                if (strncmp(p, "://", 3) == 0)
+                {
+                    schemeOk = 1;
+                }
+            }
+            if (schemeOk)
+            {
+                snprintf(base, sizeof(base), "%s", tokenBase);
+            }
+        }
+        snprintf(out->baseUrl, sizeof(out->baseUrl), "%s", base);
+
+        for (int i = 0; i < tr.tokens.count; i++)
+        {
+            const Token *tok = &tr.tokens.items[i];
+            if (tok->type == TOK_TAG && strcmp(tok->name, "meta") == 0 && !tok->isClosing)
+            {
+                const char *httpEquiv = NULL;
+                if (doc_get_attr(tok, "http-equiv", &httpEquiv) && httpEquiv)
+                {
+                    char le[64];
+                    lua_lower_buf(le, httpEquiv, sizeof(le));
+                    if (strcmp(le, "refresh") == 0)
+                    {
+                        const char *content = NULL;
+                        doc_get_attr(tok, "content", &content);
+                        if (refresh_from_content(out, content ? content : "", base))
+                        {
                             break;
                         }
-                        dl.opts = arr;
-                        dl.capOpts = dl.nOpts + 1;
-                        dl.opts[dl.nOpts].text = text;
-                        dl.opts[dl.nOpts].value = pluto_strdup(
-                            (val != NULL) ? val : text);
-                        dl.nOpts++;
                     }
-                    if (dl.id != NULL) {
-                        DocDocument* doc = st->doc;
-                        DocDatalist* arr = pluto_realloc(
-                            doc->datalists,
-                            (doc->nDatalists + 1) * sizeof(DocDatalist));
-                        if (arr != NULL) {
-                            doc->datalists = arr;
-                            doc->capDatalists = doc->nDatalists + 1;
-                            doc->datalists[doc->nDatalists++] = dl;
-                        } else {
-                            d_datalist_free(&dl);
-                        }
-                    } else {
-                        d_datalist_free(&dl);
-                    }
-                }
-                
-                continue;
-            }
-
-            /* svg */
-            if (!strcmp(tag, "svg")) {
-                doc_flush_block(st);
-                char* xml = d_serialize_svg_node(n);
-                int okw = 0, okh = 0;
-                double wv = d_tonum(da_get(attrs, "width"), &okw);
-                double hv = d_tonum(da_get(attrs, "height"), &okh);
-                int w = (okw && wv > 0) ? (int)wv : 0;
-                int h = (okh && hv > 0) ? (int)hv : 0;
-                if (w <= 0 || h <= 0) {
-                    double vbW = 0, vbH = 0;
-                    d_parse_viewbox(da_get(attrs, "viewBox"), &vbW, &vbH);
-                    if (w <= 0 && vbW > 0) w = (int)vbW;
-                    if (h <= 0 && vbH > 0) h = (int)vbH;
-                }
-                if (w <= 0) w = 120;
-                if (h <= 0) h = 40;
-                if (w > 360) w = 360;
-                if (h > 180) h = 180;
-                const char* alt = "";
-                if (d_str_eq_ci(da_get(attrs, "role"), "img")) {
-                    const char* al = da_get(attrs, "aria-label");
-                    if (al == NULL || al[0] == '\0') al = da_get(attrs, "title");
-                    alt = (al != NULL) ? al : "";
-                }
-                DocBlock* b = d_new_block(DB_IMAGE);
-                if (b != NULL) {
-                    b->imgIsSvg = 1;
-                    b->svgXml = xml;
-                    b->width = w;
-                    b->height = h;
-                    b->alt = pluto_strdup(alt);
-                    b->imgHref = (st->currentHref != NULL)
-                                     ? pluto_strdup(st->currentHref) : NULL;
-                    b->align = d_parse_align(attrs);
-                    b->imgInert = st->inert > 0;
-                    doc_add_block(st, b);
-                } else {
-                    pluto_free(xml);
-                }
-                
-                continue;
-            }
-
-            /* ── passthrough tags: just push children, no pre/post work ── */
-            if (!strcmp(tag, "abbr") || !strcmp(tag, "acronym") ||
-                !strcmp(tag, "noscript") || !strcmp(tag, "noembed") ||
-                !strcmp(tag, "noframes") || !strcmp(tag, "ruby") ||
-                !strcmp(tag, "rt") || !strcmp(tag, "rp") ||
-                !strcmp(tag, "rb") || !strcmp(tag, "rtc") ||
-                !strcmp(tag, "picture") || !strcmp(tag, "slot")) {
-                for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                    walk_push();
-                    g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                    g_walkStack[g_walkSp - 1].node = n->children[i];
-                }
-                
-                continue;
-            }
-
-            /* ── fall through: push children for remaining tags ──── */
-            for (int i = (int)n->nChildren - 1; i >= 0; i--) {
-                walk_push();
-                g_walkStack[g_walkSp - 1].kind = WENTRY_NODE;
-                g_walkStack[g_walkSp - 1].node = n->children[i];
-            }
-
-            
-        } else if (e->kind == WENTRY_ENTER) {
-            /* ENTER dispatch — tag-specific pre-work */
-        } else if (e->kind == WENTRY_EXIT) {
-            /* EXIT dispatch — tag-specific post-work */
-            if (e->postType >= 0 && e->postType < FLAG_COUNT) {
-                unsigned char* fld = d_flag_by_index(st, e->postType);
-                if (fld && *fld > 0) (*fld)--;
-            } else if (e->postType == WPOST_FLUSH) {
-                doc_flush_block(st);
-            } else if (e->postType == WPOST_UL) {
-                DListCtx* nc = (DListCtx*)st->listCtx;
-                st->listCtx = (DListCtx*)e->savedPtr;
-                pluto_free(nc);
-            } else if (e->postType == WPOST_NONE) {
-                st->dlDepth--;
-            } else if (e->postType == WPOST_INERT_DEC) {
-                if (st->inert > 0) st->inert--;
-            } else if (e->postType == WPOST_Q) {
-                d_quote_char(st);
-            } else if (e->postType == WPOST_SPAN) {
-                SpanSave* sv = (SpanSave*)e->savedPtr;
-                if (sv != NULL) {
-                    if (sv->tagKind != 0) {
-                        long countAfter = (st->currentBlock != NULL) ? (long)st->currentBlock->nInlines : 0;
-                        if (sv->countBefore == countAfter && e->node != NULL) {
-                            const char* fb = sv->tagKind == 1
-                                ? da_get(e->node->attrs, "datetime")
-                                : da_get(e->node->attrs, "value");
-                            if (fb != NULL && fb[0] != '\0')
-                                doc_add_inline_text(st, fb);
-                        }
-                    }
-                    st->f = sv->savedFlags;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_A) {
-                if (st->currentHref != NULL) {
-                    char* lt = (st->linkText.len > 0) ? sb_detach(&st->linkText) : NULL;
-                    const char* rawHref = da_get(e->node->attrs, "href");
-                    const char* title = da_get(e->node->attrs, "title");
-                    const char* txt =
-                        (lt != NULL) ? lt : ((title != NULL && title[0]) ? title : rawHref);
-                    doc_push_link(st->doc, st->currentHref, txt, da_get(e->node->attrs, "target"));
-                    pluto_free(lt);
-                } else {
-                    sb_clear(&st->linkText);
-                }
-                pluto_free(st->currentHref);
-                st->currentHref = NULL;
-                st->currentAnchorIndex = -1;
-            } else if (e->postType == WPOST_PRE) {
-                PreSave* sv = (PreSave*)e->savedPtr;
-                if (sv != NULL) {
-                    char* codeText = sb_detach(&st->preBuffer);
-                    DocBlock* b = d_new_block(DB_CODE_BLOCK);
-                    if (b == NULL) {
-                        pluto_free(codeText);
-                    } else {
-                        b->codeText = codeText;
-                        d_split_code_lines(b);
-                        doc_add_block(st, b);
-                    }
-                    sb_clear(&st->preBuffer);
-                    st->preBuffer = sv->savedPreBuffer;
-                    st->inPre = sv->savedInPre;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_FIGURE) {
-                FigureSave* sv = (FigureSave*)e->savedPtr;
-                if (sv != NULL) {
-                    DocBlock* img = st->figureImage;
-                    st->figureImage = sv->savedFigureImage;
-                    st->figureActive = sv->savedFigureActive;
-                    st->figureCaptionDone = sv->savedFigureCaptionDone;
-                    if (img != NULL) {
-                        if (st->figCaption.len > 0)
-                            img->caption = sb_detach(&st->figCaption);
-                        else
-                            sb_clear(&st->figCaption);
-                        doc_add_block(st, img);
-                    } else if (st->figCaption.len > 0) {
-                        char* capText = sb_detach(&st->figCaption);
-                        DocBlock* b = d_new_block(DB_PARAGRAPH);
-                        if (b != NULL) {
-                            b->align = "center";
-                            DocInline in;
-                            memset(&in, 0, sizeof(in));
-                            in.type = DIT_TEXT;
-                            in.text = capText;
-                            in.textLen = strlen(capText);
-                            in.italic = 1;
-                            db_push_inline(b, in);
-                            doc_add_block(st, b);
-                        } else {
-                            pluto_free(capText);
-                        }
-                    } else {
-                        sb_clear(&st->figCaption);
-                    }
-                    st->figCaption = sv->savedFigCaption;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_FIGURE_CAPTION) {
-                int* savedDone = (int*)e->savedPtr;
-                if (savedDone != NULL) {
-                    st->figureCaptionDone = 1;
-                    pluto_free(savedDone);
-                }
-            } else if (e->postType == WPOST_FORM) {
-                FormSave* sv = (FormSave*)e->savedPtr;
-                if (sv != NULL) {
-                    pluto_free(st->formAction);
-                    pluto_free(st->formMethod);
-                    st->formAction = sv->savedFormAction;
-                    st->formMethod = sv->savedFormMethod;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_TEXTAREA) {
-                TextareaSave* sv = (TextareaSave*)e->savedPtr;
-                if (sv != NULL) {
-                    st->inTextarea = 0;
-                    int dis = da_has(e->node->attrs, "disabled") || st->disabledDepth > 0;
-                    DocBlock* b = d_new_block(DB_INPUT_FIELD);
-                    if (b != NULL) {
-                        b->inputType = pluto_strdup("textarea");
-                        DInputCommon c;
-                        d_input_common(st, e->node->attrs, &c);
-                        d_block_set_common(b, &c, st);
-                        b->inName = st->textareaName;
-                        st->textareaName = NULL;
-                        b->inValue = sb_detach(&st->textareaBuffer);
-                        const char* ph2 = da_get(e->node->attrs, "placeholder");
-                        b->placeholder = pluto_strdup((ph2 != NULL) ? ph2 : "");
-                        int ok = 0;
-                        double cv = d_tonum(da_get(e->node->attrs, "cols"), &ok);
-                        b->fieldWidth = ok ? (int)cv : -1;
-                        double rv = d_tonum(da_get(e->node->attrs, "rows"), &ok);
-                        b->fieldRows = ok ? (int)rv : -1;
-                        b->readonlyFlag =
-                            (unsigned char)(da_has(e->node->attrs, "readonly") || dis);
-                        b->blockInert = (unsigned char)((st->inert > 0) || dis);
-                        doc_add_block(st, b);
-                    }
-                    sb_clear(&st->textareaBuffer);
-                    st->textareaBuffer = sv->savedTextareaBuffer;
-                    pluto_free(st->textareaName);
-                    st->textareaName = sv->savedTextareaName;
-                    st->inTextarea = sv->savedInTextarea;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_FIELDSET) {
-                FieldsetSave* sv = (FieldsetSave*)e->savedPtr;
-                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-                if (cb != NULL) doc_add_block(st, cb);
-                if (sv != NULL) {
-                    st->disabledDepth = sv->savedDisabledDepth;
-                    pluto_free(sv);
-                }
-            } else if (e->postType == WPOST_DETAILS) {
-                DetailsSave* sv = (DetailsSave*)e->savedPtr;
-                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-                if (cb != NULL) {
-                    if (sv != NULL) {
-                        cb->toggleKey = pluto_strdup(sv->dkey);
-                        cb->toggleOpen = sv->isOpen;
-                    }
-                    doc_add_block(st, cb);
-                }
-                if (sv != NULL) pluto_free(sv);
-            } else if (e->postType == WPOST_DIALOG) {
-                DocBlock* cb = d_new_block(DB_BOX_CLOSE);
-                if (cb != NULL) doc_add_block(st, cb);
-            } else if (e->postType == WPOST_MATH) {
-                MathSave* sv = (MathSave*)e->savedPtr;
-                st->inMath = (sv != NULL) ? sv->savedInMath : 0;
-                if (st->mathParts.len > 0 && st->mathParts.data != NULL) {
-                    if (sb_reserve(&st->mathParts, 1))
-                        st->mathParts.data[st->mathParts.len] = '\0';
-                    d_collapse_trim(st->mathParts.data);
-                }
-                if (st->mathParts.len > 0 && st->mathParts.data != NULL &&
-                    st->mathParts.data[0] != '\0') {
-                    DocBlock* b = d_new_block(DB_MATH);
-                    if (b != NULL) {
-                        b->codeText = sb_detach(&st->mathParts);
-                        doc_add_block(st, b);
-                    } else {
-                        sb_clear(&st->mathParts);
-                    }
-                } else {
-                    sb_clear(&st->mathParts);
-                }
-                if (sv != NULL) {
-                    st->mathParts = sv->savedMathParts;
-                    pluto_free(sv);
                 }
             }
         }
     }
-    walk_shutdown();
+
+    /* 4. Build DOM and run the element walker. */
+    DomResult dom;
+    if (dom_build(&tr, &dom) != 0)
+    {
+        tokenizer_free_result(&tr);
+        return -1;
+    }
+
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.doc = out;
+    w.opts = opts;
+    w.formAction = NULL;
+    w.formMethod = doc_arena_str_lower(&w, "get");
+    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
+                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
+    int werr = sbFail;
+
+    /* formMethod default: "get" (reference state.formMethod = "get"). */
+    if (!werr && walk_children(&w, dom.root) != 0)
+    {
+        werr = 1;
+    }
+    if (!werr)
+    {
+        walker_finish(&w);
+        werr = w.error;
+    }
+
+    /* Walker teardown (buffers + frames; arena kept on success). */
+    strbuf_free(&w.linkText);
+    strbuf_free(&w.preBuf);
+    strbuf_free(&w.textareaBuf);
+    strbuf_free(&w.mathBuf);
+    for (int i = 0; i < w.heapBufCount; i++)
+    {
+        if (w.heapBufs[i])
+        {
+            strbuf_free(w.heapBufs[i]);
+            PLUTO_FREE(w.heapBufs[i]);
+        }
+    }
+    if (w.heapBufs)
+    {
+        PLUTO_FREE(w.heapBufs);
+    }
+    if (w.frames)
+    {
+        PLUTO_FREE(w.frames);
+    }
+    dom_free_result(&dom);
+    tokenizer_free_result(&tr);
+
+    out->mode = mode;
+    out->isReaderMode = 0;
+    out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+    if (out->rawHtml)
+    {
+        strcpy(out->rawHtml, htmlString);
+    }
+
+    if (werr || !out->rawHtml)
+    {
+        /* The reference throws out of Document.parse (bare <li> etc); the
+         * caller gets no doc. Mirror with parseError + an emptied result. */
+        doc_free_walk_output(out);
+        out->parseError = 1;
+        if (out->rawHtml)
+        {
+            /* keep the copy for the error path */
+        }
+        /* arena still holds objects; free it now */
+        doc_arena_free_all(&w.arena);
+        return 0;
+    }
+
+    /* Keep the arena (blocks/links/strings live in it). */
+    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+    if (!keep)
+    {
+        doc_free_walk_output(out);
+        doc_arena_free_all(&w.arena);
+        return -1;
+    }
+    *keep = w.arena;
+    w.arena.head = NULL;
+    out->_arena = keep;
+    return 0;
 }
 
-/* ── walker (old recursive) ──────────────────────────────────────────── */
-
-static void d_walk_children(DocState* st, DomNode* node) {
-    for (size_t i = 0; i < node->nChildren; i++)
-        d_walk(st, node->children[i]);
-}
-
-static void d_walk(DocState* st, DomNode* n) {
-    tasks_yield_check();
-    if (n->kind == DOM_TEXT) {
-        d_handle_text_node(st, n);
+void document_free(DocParseResult *doc)
+{
+    if (!doc)
+    {
         return;
     }
-    if (n->kind != DOM_ELEMENT) return;
-    if (d_is_display_none(n->attrs)) return;
-    int inertHere = da_has(n->attrs, "inert");
-    if (inertHere) st->inert++;
-    d_handle_element(st, n);
-    if (inertHere) st->inert--;
+    doc_free_walk_output(doc);
+    if (doc->rawHtml)
+    {
+        PLUTO_FREE(doc->rawHtml);
+        doc->rawHtml = NULL;
+    }
+    if (doc->_arena)
+    {
+        doc_arena_free_all((DocArena *)doc->_arena);
+        PLUTO_FREE(doc->_arena);
+        doc->_arena = NULL;
+    }
 }
-
-/* ── finalization ─────────────────────────────────────────────────────── */
-
-static void d_push_notice(DocState* st, const char* text, int italic) {
-    DocBlock* b = d_new_block(DB_PARAGRAPH);
-    if (b == NULL) return;
-    b->align = "center";
-    DocInline in;
-    memset(&in, 0, sizeof(in));
-    in.type = DIT_TEXT;
-    in.text = pluto_strdup(text);
-    if (italic)
-        in.italic = 1;
-    else
-        in.bold = 1;
-    db_push_inline(b, in);
-    DocDocument* doc = st->doc;
-    DocBlock* arr = pluto_realloc(doc->blocks,
-                                  (doc->nBlocks + 1) * sizeof(DocBlock));
-    if (arr == NULL) {
-        db_free(b);
-        return;
-    }
-    doc->blocks = arr;
-    doc->capBlocks = doc->nBlocks + 1;
-    doc->blocks[doc->nBlocks++] = *b;
-    pluto_free(b);
-}
-
-static char* d_resolve_meta_url(const char* baseUrl, const char* raw) {
-    if (raw == NULL || raw[0] == '\0') return NULL;
-    StrBuf r;
-    sb_init(&r);
-    url_resolve(baseUrl, raw, &r);
-    return sb_detach(&r);
-}
-
-static void d_finalize(DocState* st, int scannedHas, double scannedDelay,
-                       char* scannedUrl) {
-    DocDocument* doc = st->doc;
-    doc_flush_block(st);
-
-    if (st->truncated)
-        d_push_notice(st, "(Page too large - rest not rendered)", 0);
-
-    if (doc->nBlocks == 0)
-        d_push_notice(st, "(Empty Web Page)", 1);
-
-    if (st->hasMetaRefresh) {
-        doc->hasMetaRefresh = 1;
-        doc->metaDelay = st->metaDelay;
-        doc->metaUrl = d_resolve_meta_url(doc->baseUrl, st->metaUrl);
-        pluto_free(st->metaUrl);
-        st->metaUrl = NULL;
-        pluto_free(scannedUrl);
-    } else if (scannedHas) {
-        doc->hasMetaRefresh = 1;
-        doc->metaDelay = scannedDelay;
-        doc->metaUrl = d_resolve_meta_url(doc->baseUrl, scannedUrl);
-        pluto_free(scannedUrl);
-    } else {
-        pluto_free(scannedUrl);
-    }
-    pluto_free(st->metaUrl);
-    st->metaUrl = NULL;
-}
-
-/* ── base-href validation: ^[a-zA-Z][%w+%-.]*:// ──────────────────────── */
-
-static int d_valid_absolute_url(const char* s) {
-    if (s == NULL) return 0;
-    unsigned char c0 = (unsigned char)s[0];
-    if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'))) return 0;
-    size_t i = 1;
-    while (isalnum((unsigned char)s[i]) || s[i] == '+' || s[i] == '-' ||
-           s[i] == '.')
-        i++;
-    return s[i] == ':' && s[i + 1] == '/' && s[i + 2] == '/';
-}
-
-/* ── entry point ──────────────────────────────────────────────────────── */
-
-DocDocument* doc_parse_opts(const char* html, const char* baseUrl, int mode,
-                            const DocParseOpts* opts) {
-    tasks_yield_check();
-
-    if (html == NULL || html[0] == '\0') {
-        DocDocument* d = pluto_malloc(sizeof(DocDocument));
-        if (d == NULL) return NULL;
-        memset(d, 0, sizeof(*d));
-        d->title = pluto_strdup("Blank Page");
-        d->baseUrl = pluto_strdup((baseUrl != NULL && baseUrl[0]) ? baseUrl
-                                                                  : "about:blank");
-        d->rawHtml = pluto_strdup("");
-        return d;
-    }
-
-    HttTokens* tokens = htt_tokenize(html, strlen(html));
-    if (tokens == NULL) return NULL;
-
-    if (mode == PLUTO_MODE_READER) {
-        /* Lua document.lua: pageTitle = extractedTitle or "Web Page";
-         * the reader branch uses the caller baseUrl (no <base> override) */
-        const char* pageTitle = (tokens->pageTitle != NULL)
-                                    ? tokens->pageTitle : "Web Page";
-        DocDocument* rd = readability_distill(tokens, pageTitle,
-                                              (baseUrl != NULL) ? baseUrl : "");
-        htt_free(tokens);
-        if (rd != NULL) rd->rawHtml = pluto_strdup(html);
-        return rd;
-    }
-
-    /* token-level scans run BEFORE dom_build(): dom_build transfers
-     * ownership of token attrs/text, so scans must read them first */
-    const char* effBase = (baseUrl != NULL && baseUrl[0]) ? baseUrl
-                                                          : "about:blank";
-    char* baseOverride = NULL;
-    for (size_t i = 0; i < tokens->count; i++) {
-        HttToken* t = &tokens->items[i];
-        if (t->type != HTT_TAG || t->isClosing || t->name == NULL ||
-            strcmp(t->name, "base") != 0)
-            continue;
-        const char* href = da_get(t->attrs, "href");
-        if (href != NULL && href[0] != '\0') {
-            if (d_valid_absolute_url(href)) baseOverride = pluto_strdup(href);
-            break;
-        }
-    }
-    if (baseOverride != NULL) effBase = baseOverride;
-
-    int scannedHas = 0;
-    double scannedDelay = 0.0;
-    char* scannedUrl = NULL;
-    for (size_t i = 0; i < tokens->count && !scannedHas; i++) {
-        HttToken* t = &tokens->items[i];
-        if (t->type != HTT_TAG || t->isClosing || t->name == NULL ||
-            strcmp(t->name, "meta") != 0)
-            continue;
-        const char* he = da_get(t->attrs, "http-equiv");
-        const char* ct = da_get(t->attrs, "content");
-        if (he == NULL || ct == NULL || strcasecmp(he, "refresh") != 0)
-            continue;
-        double delay = 0;
-        char* u = NULL;
-        if (d_parse_meta_content(ct, &delay, &u)) {
-            scannedHas = 1;
-            scannedDelay = delay;
-            scannedUrl = u;
-        }
-    }
-
-    DomDiag diag;
-    memset(&diag, 0, sizeof(diag));
-    DomNode* root = dom_build(tokens, &diag);
-
-    DocDocument* doc = pluto_malloc(sizeof(DocDocument));
-    if (doc == NULL) {
-        pluto_free(baseOverride);
-        pluto_free(scannedUrl);
-        if (root != NULL) dom_free(root);
-        htt_free(tokens);
-        return NULL;
-    }
-    memset(doc, 0, sizeof(*doc));
-    doc->title = pluto_strdup((tokens->pageTitle != NULL) ? tokens->pageTitle
-                                                          : "Web Page");
-    doc->baseUrl = pluto_strdup(effBase);
-    doc->rawHtml = pluto_strdup(html);
-    if (doc->title == NULL || doc->baseUrl == NULL || doc->rawHtml == NULL) {
-        doc_free(doc);
-        pluto_free(baseOverride);
-        pluto_free(scannedUrl);
-        if (root != NULL) dom_free(root);
-        htt_free(tokens);
-        return NULL;
-    }
-
-    DocState st;
-    memset(&st, 0, sizeof(st));
-    st.doc = doc;
-    st.baseUrl = doc->baseUrl;
-    st.currentAnchorIndex = -1;
-    st.opts = opts;
-    sb_init(&st.linkText);
-    sb_init(&st.preBuffer);
-    sb_init(&st.figCaption);
-    sb_init(&st.mathParts);
-    sb_init(&st.textareaBuffer);
-
-    if (root != NULL) d_walk_iterative(&st, root);
-
-    d_finalize(&st, scannedHas, scannedDelay, scannedUrl);
-
-    sb_clear(&st.linkText);
-    sb_clear(&st.preBuffer);
-    sb_clear(&st.figCaption);
-    sb_clear(&st.mathParts);
-    sb_clear(&st.textareaBuffer);
-    pluto_free(st.textareaName);
-    pluto_free(baseOverride);
-    if (root != NULL) dom_free(root);
-    htt_free(tokens);
-    return doc;
-}
-
-void doc_init(struct PlaydateAPI* pd) {
-    (void)pd;
-}
-
-void doc_free_block_fields(DocBlock* b) { db_free_fields(b); }
-
-void doc_free(DocDocument* doc) {
-    if (doc == NULL) return;
-    pluto_free(doc->title);
-    pluto_free(doc->baseUrl);
-    pluto_free(doc->rawHtml);
-    pluto_free(doc->metaUrl);
-    for (size_t i = 0; i < doc->nBlocks; i++) db_free_fields(&doc->blocks[i]);
-    pluto_free(doc->blocks);
-    for (size_t i = 0; i < doc->nLinks; i++) {
-        pluto_free(doc->links[i].href);
-        pluto_free(doc->links[i].text);
-        pluto_free(doc->links[i].target);
-    }
-    pluto_free(doc->links);
-    for (size_t i = 0; i < doc->nMaps; i++) d_map_free(&doc->maps[i]);
-    pluto_free(doc->maps);
-    for (size_t i = 0; i < doc->nDatalists; i++)
-        d_datalist_free(&doc->datalists[i]);
-    pluto_free(doc->datalists);
-    pluto_free(doc->readerTime);
-    pluto_free(doc);
-}
-

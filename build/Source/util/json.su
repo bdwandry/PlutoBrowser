@@ -1,0 +1,11 @@
+json.c:136:12:sb_put	24	static
+json.c:70:12:read_hex4.isra.0	20	static
+json.c:225:14:parse_string_raw	48	static
+json.c:328:12:container_add	32	static
+json.c:34:6:json_free	0	static
+json.c:34:6:json_free.part.0	16	static
+json.c:461:19:parse_value	32	static
+json.c:535:12:json_decode	32	static
+json.c:556:12:json_get	32	static
+json.c:572:5:json_as_string	0	static
+json.c:582:5:json_as_number	0	static

@@ -1,0 +1,6 @@
+error_page.c:33:6:error_page_show	8	static
+error_page.c:42:5:error_page_selected_index	0	static
+error_page.c:47:13:error_page_message	0	static
+error_page.c:52:13:error_page_failed_url	0	static
+error_page.c:57:7:error_page_handle_input	16	static
+error_page.c:94:6:error_page_draw	184	static

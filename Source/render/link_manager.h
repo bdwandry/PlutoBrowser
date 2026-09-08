@@ -1,87 +1,92 @@
-#ifndef PLUTO_RENDER_LINK_MANAGER_H
-#define PLUTO_RENDER_LINK_MANAGER_H
-
-#include <stddef.h>
-
-struct PlaydateAPI;
-/* device/sim only: installs the API pointer used for highlight drawing */
-void lm_init(struct PlaydateAPI* pd);
-
-/* C port of Source/render/link_manager.lua (LinkManager).
+/*
+ * PlutoBrowser — link_manager.h
+ * Port of Source/render/link_manager.lua (reference, 181 lines).
  *
- * Faithful parity notes:
- *  - addLinkRect merges into the LAST link when href+text match AND the
- *    NEW anchorIndex is -1 (Lua nil) or equals the stored one; a nil new
- *    anchor therefore merges across differing stored anchors.
- *  - findInitialSelection pass 1 = primary-rect center inside
- *    [scrollY, scrollY+CONTENT_HEIGHT], closest to viewport center;
- *    pass 2 = closest anywhere (caller scrolls it into view).
- *  - selectNext/Prev: simple wrap-around (the "skip logic" once mentioned
- *    in planning notes is not present in the current Lua source).
- *  - getHoveredLink hit-test falls back to w=60/h=14 for unset rect
- *    fields (stored here as -1).
+ * Lua → C function map (one-to-one):
+ *   LinkManager.clear()                 → lm_clear()
+ *   LinkManager.clearSelection()        → lm_clear_selection()
+ *   LinkManager.addLinkRect(h,t,r,ai)   → lm_add_link_rect()   [ai 0 = Lua nil]
+ *   LinkManager.getCount()              → lm_get_count()
+ *   LinkManager.getSelectedLink()       → lm_get_selected_link() (+ _index)
+ *   LinkManager.selectNext(scrollY)     → lm_select_next()
+ *   LinkManager.selectPrev(scrollY)     → lm_select_prev()
+ *   LinkManager.drawSelectedHighlight() → lm_draw_selected_highlight()
+ *   LinkManager.isHighlighted(h,x,y)    → lm_is_highlighted()
+ *   LinkManager.addLink(link)           → lm_add_link() (flat fields)
+ *   LinkManager.getHoveredLink(x,pageY) → lm_get_hovered_link()
+ *   (local) findInitialSelection        → lm_find_initial_selection() (static)
+ *
+ * Preserved reference quirks (verified against the Lua source):
+ *   - Merge requires the PASSED text to be non-nil and equal to the stored
+ *     text: `lastLink.text == text` with text=nil never matches (nil ≠
+ *     string), so addLinkRect(href, nil, ...) always creates a new link.
+ *   - anchorIndex merge is skipped only when the PASSED anchorIndex is nil
+ *     (C 0 = Lua nil): pass 0 to ignore, pass N to require last.anchorIndex==N.
+ *   - getHoveredLink hit-tests use raw w/h: `(r.w or 60)` fires only on
+ *     nil in Lua, and C rects always carry numeric values (0 hit-tests as 0).
+ *   - selectNext/Prev with no selection pick the link closest to the
+ *     viewport center (two passes: in-view first, then nearest anywhere).
  */
+#ifndef PLUTO_LINK_MANAGER_H
+#define PLUTO_LINK_MANAGER_H
 
-typedef struct {
-    int x, y, w, h;   /* w or h == -1 means "unset" (hit-test default) */
-    /* Per-rect extras carried opaquely inside Lua rect tables (layout.c
-     * passes them through addLinkRect; link_manager.lua stores them
-     * verbatim). All zero/NULL when absent. Strings are BORROWED from the
-     * Layout render items / document and must outlive the link. */
-    int   isToggle;          /* <summary> tap target */
-    int   toggleOpen;
-    const char* toggleKey;   /* "dN" */
-    int   isImage;
-    const char* src;
-    const char* alt;
-    int   inert;
-    int   isFormInput;       /* layout.lua registers these per-rect */
-    void* inputBlock;        /* borrowed LItem */
-} LmRect;
+#include <stdbool.h>
 
-typedef struct {
-    char* href;       /* owned; NULL for form-input links (Lua nil) */
-    char* text;       /* owned (defaults to href); NULL for form inputs */
-    int   hasAnchor;
-    long  anchorIndex;
-    LmRect* rects;
-    size_t nRects, capRects;
-    LmRect primaryRect;
-    /* Lua links are plain tables, so CloudLayout form-input links carry
-     * two extra optional fields (both zero for regular links). */
-    int   isFormInput;
-    void* inputBlock;   /* borrowed; owned by CloudLayout render items */
-} LmLink;
+typedef struct
+{
+    int x, y, w, h;
+} LMRect;
 
-void   lm_clear(void);
-void   lm_clear_selection(void);
+/* Per-rect metadata the Lua reference attached to rect tables (isImage/src,
+ * isFormInput/inputBlock, isToggle/toggleKey/toggleOpen, inert). inputItem
+ * points at a LayoutItem owned by the layout module. */
+typedef struct LMRectAux
+{
+    int isImage;
+    const char *src;
+    const char *alt;
+    int isFormInput;
+    const void *inputItem;
+    int isToggle;
+    const char *toggleKey;
+    int toggleOpen;
+    int inert;
+} LMRectAux;
 
-void   lm_add_link_rect(const char* href, const char* text, LmRect rect,
-                        long anchorIndex);
-/* convenience wrapper mirroring LinkManager.addLink(link) */
-void   lm_add_link(const char* href, int x, int y, int w, int h);
+typedef struct
+{
+    int index;      /* 1-based, Lua parity */
+    char *href;     /* heap copy */
+    char *text;     /* heap copy; Lua `text or href` */
+    int anchorIndex; /* 0 = none (Lua nil) */
+    int rectCount;
+    LMRect *rects;  /* heap-grown (Lua table.insert parity) */
+    int rectCap;
+    LMRectAux *aux;  /* parallel metadata per rect (NULL entries when absent) */
+    int auxCap;
+    LMRect primaryRect; /* first rect */
+} LMLink;
 
-/* CloudLayout parity: form-input links carry no href/text (Lua nil) but
- * point back at their render item so later phases can activate forms
- * from a selection. Rect uses -1 "unset" semantics like everywhere else. */
-void   lm_add_form_input(int x, int y, int w, int h, void* inputBlock);
+void lm_clear(void);
+void lm_clear_selection(void);
+void lm_add_link_rect(const char *href, const char *text, const LMRect *rect, int anchorIndex);
+/* Same, with per-rect metadata (Lua rect table extras). aux may be NULL;
+ * strings are borrowed (must outlive the link table — layout strings do). */
+void lm_add_link_rect_ex(const char *href, const char *text, const LMRect *rect,
+                         int anchorIndex, const LMRectAux *aux);
+/* Metadata for a link's rect (index into the link's rect array); NULL if absent. */
+const LMRectAux *lm_rect_aux(int linkIndex, int rectIndex);
+/* 1-based access for tests/navigation; NULL if out of range. */
+const LMLink *lm_link_at(int linkIndex);
+int lm_get_link_count(void);
+int lm_get_count(void);
+int lm_get_selected_index(void); /* 0 = none */
+const LMLink *lm_get_selected_link(void); /* NULL = none */
+const LMLink *lm_select_next(int currentScrollY);
+const LMLink *lm_select_prev(int currentScrollY);
+void lm_draw_selected_highlight(int scrollY);
+bool lm_is_highlighted(const char *href, int x, int y);
+void lm_add_link(const char *href, int x, int y, int w, int h);
+const LMLink *lm_get_hovered_link(int screenX, int pageY);
 
-size_t lm_get_count(void);
-size_t lm_selected_index(void);      /* 0 == none; else 1-based */
-
-/* returns selected link or NULL when out of range / none */
-LmLink* lm_get_selected_link(void);
-
-long    lm_find_initial_selection(int currentScrollY); /* 0 == none */
-
-LmLink* lm_select_next(int currentScrollY);
-LmLink* lm_select_prev(int currentScrollY);
-
-/* device/sim only: draws the focus outline + side tab inside the content
- * clip rect; no-op on host builds */
-void    lm_draw_selected_highlight(int scrollY);
-
-int     lm_is_highlighted(const char* href, int x, int y);
-LmLink* lm_get_hovered_link(int screenX, int pageY);
-
-#endif
+#endif /* PLUTO_LINK_MANAGER_H */
