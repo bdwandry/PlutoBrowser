@@ -122,6 +122,11 @@ void layout_clear(void)
 {
     for (int i = 0; i < g_itemCount; i++)
     {
+        if (g_items[i]->ownedValue)
+        {
+            free(g_items[i]->ownedValue);
+            g_items[i]->ownedValue = NULL;
+        }
         free(g_items[i]);
     }
     free(g_items);
@@ -1606,6 +1611,30 @@ const LayoutItem *layout_get_selected_input(void) { return g_selectedInput; }
 void layout_set_selected_input(const LayoutItem *item)
 {
     g_selectedInput = (LayoutItem *)item;
+}
+
+/* ── layout_set_input_value ──────────────────────────────────────────────── */
+/* Port of the Lua reference's activeInputField.value = entered: in Lua the
+ * render item IS the block, so a single assignment made typed text visible to
+ * the renderer and the submit path. In C the LayoutItem and DocBlock are
+ * separate, so the item keeps its own owned copy of the value. The item's
+ * value pointer is replaced (old owned copy freed); block->value stays
+ * untouched — form submission reads through form_item_value() which prefers
+ * the live item value. */
+void layout_set_input_value(const LayoutItem *item, const char *text)
+{
+    if (!item)
+    {
+        return;
+    }
+    LayoutItem *it = (LayoutItem *)item;
+    char *owned = text ? strdup(text) : NULL;
+    if (it->ownedValue)
+    {
+        free(it->ownedValue);
+    }
+    it->ownedValue = owned;
+    it->value = owned ? owned : "";
 }
 int layout_get_on_demand_consumed(void) { return g_onDemandConsumed; }
 void layout_clear_on_demand_consumed(void) { g_onDemandConsumed = 0; }

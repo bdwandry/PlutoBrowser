@@ -126,6 +126,11 @@ typedef struct LayoutItem
      * the block table; form interaction mutates block.value/checked/
      * selectedIndex through it). Borrowed; NULL for non-input items. */
     void *block;
+
+    /* Owned live value for input fields (layout_set_input_value). Heap copy
+     * replacing the borrowed block->value while the keyboard is open; freed
+     * in layout_clear(). NULL when the item still shows the block value. */
+    char *ownedValue;
 } LayoutItem;
 
 /* ── Lifecycle ───────────────────────────────────────────────────────────── */
@@ -157,6 +162,13 @@ int layout_test_break_lines_probe(const DocInline **inlines, int inlineCount,
 int layout_build_failed(void);
 int layout_get_item_count(void);
 const LayoutItem *layout_item_at(int index); /* 0-based; NULL if out of range */
+
+/* Set the visible text of a form input item (port of Lua's direct
+ * activeInputField.value = entered mutation, which the C port must do through
+ * an accessor because LayoutItem and DocBlock are separate structs). The value
+ * is owned by the item and freed on layout_clear(); the renderer and
+ * form_item_value() both see it immediately. Pass NULL to clear. */
+void layout_set_input_value(const LayoutItem *item, const char *text);
 const LayoutItem *layout_get_selected_input(void);
 void layout_set_selected_input(const LayoutItem *item);
 int layout_get_on_demand_consumed(void);

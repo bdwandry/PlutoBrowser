@@ -270,8 +270,6 @@ static void form_kb_did_hide(void *ud);
 static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
 static void form_set_block_value(const LayoutItem *item, const char *text);
-static const char *form_item_value(const LayoutItem *item);
-static void form_overrides_clear(void);
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap);
 static void http_on_progress(int cur, int total);
 static void http_on_success(int status, char **headerKeys, char **headerVals,
@@ -643,10 +641,11 @@ static void navigate_to(const char *urlString)
     snprintf(urlBuf, sizeof(urlBuf), "%s", trimmed ? trimmed : urlString);
     pluto_free(trimmed);
 
-    /* Reset per-navigation state (Lua runNavigation). */
+    /* Reset per-navigation state (Lua runNavigation). The old layout items
+     * (with their owned values) are freed by layout_clear during the render
+     * task, so no form-value cleanup is needed here. */
     formInputItem = NULL;
     formKeyboardOpen = 0;
-    form_overrides_clear();
     imgdec_clear_cache();
 
     if (strcmp(urlBuf, "about:home") == 0)
@@ -802,66 +801,21 @@ static void toggle_details(const char *dkey)
     tasks_run(render_step, rt, render_done, render_error, rt);
 }
 
-/* ── Form input value override table ──────────────────────────────────────
- * Lua input items alias the block table, so writing item.value mutates the
- * block. C strings are borrowed const arena pointers, so the value override
- * lives in a side table keyed by block pointer; layout's draw and submit
- * consult it through form_item_value(). */
-typedef struct
-{
-    const void *block;
-    char *value; /* heap (pluto allocator) */
-} FormValueOverride;
-
-#define FORM_OVERRIDE_MAX 32
-static FormValueOverride g_formOverrides[FORM_OVERRIDE_MAX];
-static int g_formOverrideCount = 0;
-
-static void form_overrides_clear(void)
-{
-    for (int i = 0; i < g_formOverrideCount; i++)
-    {
-        pluto_free(g_formOverrides[i].value);
-    }
-    g_formOverrideCount = 0;
-}
-
+/* ── Form input values ─────────────────────────────────────────────────────
+ * Lua input items alias the block table, so openKeyboardForInput's
+ * activeInputField.value = entered made typed text visible to BOTH the
+ * renderer and the submit path. In C the LayoutItem and DocBlock are separate
+ * structs, so the typed text lives on the item itself (owned heap copy set
+ * through layout_set_input_value; freed by layout_clear). form_item_value()
+ * therefore just reads the item's current value. */
 static void form_set_block_value(const LayoutItem *item, const char *text)
 {
-    if (!item || !item->block)
-    {
-        return;
-    }
-    for (int i = 0; i < g_formOverrideCount; i++)
-    {
-        if (g_formOverrides[i].block == item->block)
-        {
-            pluto_free(g_formOverrides[i].value);
-            g_formOverrides[i].value = pluto_strdup(text ? text : "");
-            return;
-        }
-    }
-    if (g_formOverrideCount < FORM_OVERRIDE_MAX)
-    {
-        g_formOverrides[g_formOverrideCount].block = item->block;
-        g_formOverrides[g_formOverrideCount].value = pluto_strdup(text ? text : "");
-        g_formOverrideCount++;
-    }
+    layout_set_input_value(item, text);
 }
 
-/* Effective value for an input item (override > block value). */
+/* Effective value for an input item (live typed value > block value). */
 static const char *form_item_value(const LayoutItem *item)
 {
-    if (item && item->block)
-    {
-        for (int i = 0; i < g_formOverrideCount; i++)
-        {
-            if (g_formOverrides[i].block == item->block)
-            {
-                return g_formOverrides[i].value ? g_formOverrides[i].value : "";
-            }
-        }
-    }
     return item && item->value ? item->value : "";
 }
 
@@ -874,6 +828,7 @@ static void open_keyboard_for_input(const LayoutItem *item)
     }
     formInputItem = item;
     formKeyboardOpen = 1;
+    layout_set_selected_input(item); /* Lua: Layout.selectedInputItem = block */
     keyboardApi.setKeyboardWillHideCallback(g_kb, form_kb_will_hide, NULL);
     keyboardApi.setKeyboardDidHideCallback(g_kb, form_kb_did_hide, NULL);
     keyboardApi.setTextChangedCallback(g_kb, form_kb_text_changed, NULL);
@@ -1957,6 +1912,7 @@ static int updateFrame(void *userdata)
     {
         logger_log("updateFrame: first frame executed");
     }
+
 
     /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
     if (frameCount % 300 == 0)
