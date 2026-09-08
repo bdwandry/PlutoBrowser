@@ -7,7 +7,7 @@
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
 > **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
-> **CURRENT TASK:** Beta Bug Fix #8 — COMPLETE (Simulator + device verified). Home-page banner rebranded "COMET BROWSER" → "PLUTO BROWSER" (plus address-bar pill and about:home page text); zero functional changes.
+> **CURRENT TASK:** Beta Change #9d — COMPLETE (Simulator + device verified). Launcher art v3: hand-drawn circle replaced with the REAL New Horizons photo (images.jpeg, disc-masked, Bayer-dithered, black bg removed, outline ring); twinkle made subtle: 7 card stars / 3 icon stars, ≥60px apart, gentle 3-phase. Power-cycle device to refresh launcher cache.
 > (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
@@ -1649,3 +1649,172 @@ reference here — branding only, no behavior change).
   EXPECT identical. ACT: 500/500 control pixels identical. PASS
 - TC3 device boot: launch on Playdate, run ≥30 s, check errorlog/crashlog.
   EXPECT stable run, empty logs. ACT: 186 frames, clean terminate, both empty. PASS
+
+## Beta Change #9 — Custom PlutoBrowser launcher icon
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** The launcher showed the old comet icon (Source/icon.png was carried
+over from the reference). User requested a Pluto-themed icon: black & white,
+"Pluto Browser" text, planet Pluto, shooting stars — using the reference icon
+only as a format/size example.
+
+**Design (32x32, 1-bit, matches reference format exactly):**
+- Pluto planet: filled disc with its signature white heart region
+  (Tombaugh Regio) carved out
+- Two shooting stars top-right with dashed tails, small streak upper-left
+  (echoes the reference comet's diagonal tail composition)
+- "PLUTO" / "BROWSER" two-line 3x5 pixel-font text at the bottom
+- Pure black & white (1-bit), 1px margins on all sides
+
+**Implementation:**
+- Source/icon.png replaced (generated programmatically; generator preserved at
+  /tmp/gen_icon.py concept — grid + pixel font + PNG writer, no PIL needed)
+- pdc compiles it to PlutoBrowser.pdx/icon.pdi; verified the compiled PDI
+  decodes back to the exact design grid (magic/w/h + zlib pixel data checked)
+- No code changes; pdex.bin unchanged (same MD5 as BF8 build)
+
+**Verification:**
+- Compiled icon.pdi content decoded and compared against the design grid: exact
+  match (planet, heart, stars, both text lines legible)
+- Simulator: clean boot, first frame + heartbeat, stable (icon is launcher-side
+  so the in-game run proves no packaging regression)
+- Device: MD5-verified deploy (00b333512d4fd10a…), icon.pdi byte-identical on
+  device (cmp), app ran 1,352 frames with stable heartbeats, clean terminate,
+  errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 icon format: EXPECT 32x32 1-bit PNG in Source, compiled to valid icon.pdi
+  in PDX root. ACT: file(1) reports 32x32 1-bit; PDI decodes w=32 h=32. PASS
+- TC2 icon content: EXPECT planet+heart, shooting stars, PLUTO/BROWSER text.
+  ACT: ASCII render of compiled PDI matches design pixel-for-pixel. PASS
+- TC3 device packaging: EXPECT icon.pdi deployed byte-identical, app stable.
+  ACT: cmp identical; 1,352-frame clean run; logs empty. PASS
+
+## Beta Change #9b — Launcher home-screen art was missing (text-only tile)
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** The Playdate HOME SCREEN (launcher) tile still showed plain text
+"PlutoBrowser" — no art. User clarified: the launcher card/icon, not the in-app
+home page. Re-review of the Lua reference found the missing link.
+
+**Root cause:** Both pdxinfo files declare `imagePath=assets/launcher`, and
+CometBrowser ships Source/assets/launcher/{card.png (350x155), icon.png (32x32)}.
+PlutoBrowser declared the imagePath but NEVER CREATED the folder — pdc had no
+assets to compile, so the launcher fell back to text-only rendering.
+(The earlier #9 icon work replaced Source/icon.png — the PDX-root icon used by
+some launcher contexts — but the card path was the one the home screen reads.)
+
+**Fix:**
+- Source/assets/launcher/card.png: new 350x155 1-bit card — deterministic
+  starfield, Pluto planet with white heart region, 4 shooting stars with dashed
+  tails, "PLUTO BROWSER" scaled pixel-font title
+- Source/assets/launcher/icon.png: 32x32 copy of the #9 Pluto icon
+- pdc now compiles both to PlutoBrowser.pdx/assets/launcher/{card.pdi,icon.pdi}
+- No code changes (pdex.bin MD5 unchanged from BF8/9)
+
+**Verification:**
+- Compiled card.pdi decoded: 350x155, planet-edge pixel ink=1, heart-region
+  pixel carve=0 (white), title band contains 3,083 ink pixels — all correct
+- Simulator: clean boot, 4 heartbeats, stable (assets packaged, app runs)
+- Device: MD5-verified deploy (00b333512d4fd10a…), card.pdi byte-identical on
+  device (cmp), clean 1,352-frame run, errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 packaging: EXPECT assets/launcher/{card,icon}.pdi present in PDX.
+  ACT: both present, valid 'Playdate IMG' PDIs. PASS
+- TC2 card content: EXPECT planet+heart+stars+title. ACT: pixel spot-checks
+  and ASCII render all match design. PASS
+- TC3 device: EXPECT card.pdi on device identical, app stable. ACT: cmp match,
+  clean run, empty logs. PASS
+
+**Note:** the Playdate launcher caches art per bundleID; after sideload the
+device may need a full power cycle (or settings>reboot) for the card to refresh.
+
+## Beta Change #9c — Launcher art v2: raised cratered Pluto + twinkle animation
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported (user feedback on #9b):** (1) planet too close to the PLUTO BROWSER
+text — raise it for a clear gap; (2) remove the heart, add crater detail instead
+(reference: New Horizons B&W photo provided); (3) animate the stars so the art
+twinkles; (4) consult the official pdxinfo docs (link provided).
+
+**Docs study (sdk.play.date 2.6.0, §4.6 Game metadata):** launcher animation is
+native — card-highlighted/ (frames 1.png,2.png,... 350x155 + optional
+animation.txt with loopCount/frames) plays in a loop while the game is selected
+in card view; icon-highlighted/ (32x32 frames) does the same in list view. No
+app code involved.
+
+**Redesign:**
+- Planet center moved up (cy 62->55, r 41): planet bottom y=96, title top
+  y=112 → verified zero-ink gap band (only background stars cross it)
+- Heart REMOVED; surface now: 6 fixed craters (white pits + ink rims, biased
+  lower-left like the photo) + 10 seeded small craters + 2 speckled bright
+  equatorial patches
+- 32x32 icon redesigned to match (craters, no heart, text kept at bottom)
+- Twinkle animation: 14 star cells on the card / 5 on the icon cycle
+  off -> bright(plus) -> dim; 3 distinct frames each (6-frame attempt produced
+  only 3 unique phases — fixed); animation.txt: loopCount=0, frames=1,2,3
+
+**Verification:**
+- Compiled PDX contains card.pdi, card-highlighted/{1,2,3}.pdi + animation.txt,
+  icon.pdi, icon-highlighted/{1,2,3}.pdi + animation.txt
+- Compiled frames differ pairwise (f1 vs f2: 34 bytes, f1 vs f3: 32) → twinkle
+  survives pdc compilation
+- Gap check: rows 97-111 contain only starfield speckle, no planet/text ink
+- Simulator: clean boot, 3 heartbeats, stable
+- Device: MD5-verified deploy (00b333512d4fd10a…), launcher asset tree copied
+  (incl. animation.txt), clean 963-frame run, errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 gap: EXPECT no planet/text ink between planet bottom and title top.
+  ACT: clean band. PASS
+- TC2 no heart / craters present: EXPECT heart cells inked over, crater pits
+  visible. ACT: ASCII render shows cratered surface. PASS
+- TC3 animation packaging: EXPECT card-highlighted + icon-highlighted frames in
+  PDX with pairwise pixel differences. ACT: verified in compiled PDIs. PASS
+- TC4 device: EXPECT full asset tree on device, app stable. ACT: verified, logs
+  empty. PASS
+
+**Note:** twinkle animation plays while the game tile is SELECTED in the
+launcher (that is when the launcher shows card-highlighted/icon-highlighted) —
+that is the platform's designed behavior per the official docs.
+
+## Beta Change #9d — Launcher art v3: real-photo Pluto + subtle twinkle
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported (user feedback on #9c):** the drawn circle "looks like crap"; the
+twinkle stars were too dense/too busy. User supplied the actual New Horizons
+photo (/Users/bwandrych/Desktop/images.jpeg, 554x554) and asked to use it
+directly, black background removed, in place of the circle.
+
+**Implementation (generator v3, /tmp/gen_art_v3.py):**
+- ffmpeg extracts the JPEG to raw grayscale; disc detected (center 284,282,
+  r≈236)
+- planet = area-averaged downsample (82px card / 24px icon) + 8x8 Bayer
+  ordered dither to 1-bit; only pixels inside the disc (r*0.985) are kept —
+  black background fully removed
+- luminance analysis: disc median 172 (bright body, dark lower-left terrain) —
+  dither alone reads weakly on the white card, so a crisp 1px circle outline
+  was added around the disc edge; result: clear sphere with crescent lighting
+  (bright upper-right, dark Cthulhu terrain lower-left) exactly like the photo
+- twinkle: 7 stars on the card with ≥60px enforced separation (was 14 random),
+  3 on the icon; phases per star: off -> single px -> small plus. Much subtler.
+- title, shooting stars, gap band, animation.txt format unchanged
+
+**Verification:**
+- 1:1 ASCII render of the compiled card planet region: proper circular
+  silhouette, crescent shading, surface texture — reads as Pluto
+- compiled card-highlighted frames differ pairwise (15/19 bytes) → animation
+  survives pdc
+- Simulator: clean boot, 3 heartbeats, stable
+- Device: MD5-verified deploy (00b333512d4fd10a…), card.pdi byte-identical on
+  device, clean 1,352-frame run, errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 photo usage: EXPECT dithered real-photo planet, no black background box.
+  ACT: disc-masked dither verified pixel-wise; only disc pixels present. PASS
+- TC2 silhouette: EXPECT recognizable circular planet. ACT: outline ring +
+  82px disc confirmed in ASCII render. PASS
+- TC3 subtle twinkle: EXPECT fewer, well-separated twinklers, 3-phase.
+  ACT: 7 stars ≥60px apart (card), 3 (icon); pairwise frame diffs small. PASS
+- TC4 device: EXPECT stable deploy. ACT: clean 1,352-frame run, logs empty. PASS
