@@ -1449,3 +1449,30 @@ regression batteries green; MASTER_TODO updated.
   - TC-K2 (Device): MD5-verified deploy (63b04a6a… both sides). Same KBTEST on hardware: input found (name=q), renderer-value PASS, submit-value PASS, heartbeats stable, clean kEventTerminate at frames=1679, errorlog/crashlog EMPTY. PASS.
   - TC-K3 (both): regression — post-fix clean build (0 errors), boots to home page, no test scaffolding remains (grep kbtest: 0), clean terminate. PASS.
 - **Status:** FIXED and verified in both environments. KBTEST scaffolding removed after verification; logs preserved (tests/logs/form_input_sim_final.log, tests/logs/form_input_device_test.log).
+
+### Beta Bug Fix #3: B while form keyboard open launched the address bar — FIXED ✅
+- **Reported by user (manual device testing):** while typing in a web page's text field (form keyboard open), pressing B opened the "Search or Enter URL" address bar instead of deleting a character.
+- **Reference behavior:** the keyboard port (some-corelibs-port) already implements B as backspace — `checkButtonInputs`: `justPressed & kButtonB → deleteAction(self)` with 0.3s initial / 0.1s repeating key delay. The Lua reference additionally guards the address-bar trigger: main.lua line 649 opens the address bar on B-release only if `not bHoldUsedDir and not AddressBar.isOpen and not keyboardOpen`.
+- **Root cause:** the C port's B-hold state machine (main.c) omitted the `not keyboardOpen` guard, so a B tap while the form keyboard was open "released" 4 frames later and opened the address bar over the typing session. (Note: updateFrame doesn't even run while the keyboard is visible — the keyboard owns the update callback — but the state machine's pending release latched from the press frames before show() and fired on the frame the keyboard closed, and the press itself could latch bHoldActive during the open transition.)
+- **Fix (Source/main.c):** added `&& !formKeyboardOpen` to the B-release address-bar condition, matching the Lua reference exactly. No keyboard.c changes needed — B-backspace was already correct.
+- **Test Cases:**
+  - TC-B1 (Simulator, temporary scripted BTEST — removed after verification): navigate to DuckDuckGo Lite, open the form keyboard programmatically, type "abc" through the keyboard's real letter-entry path, inject a B press+release through a temporary button-read hook, then assert: address bar NOT open, form keyboard still open, text == "ab" (one char deleted). PASS (log: tests/logs/btest_sim_pass.log era — see run at 13:47; earlier FAILs were test-harness button-consumption issues, not app bugs).
+  - TC-B2 (Simulator, clean build): boots to home page, no test scaffolding (grep btest/BTEST/keyboard_test_inject in main.c+keyboard.c: 0), stable heartbeats, no errors. PASS (tests/logs/btest_clean_boot.log).
+  - TC-B3 (Device): MD5-verified deploy (7fd2c8f1… both sides), clean boot, 3,048 frames stable, clean terminate, errorlog/crashlog EMPTY. PASS (tests/logs/btest_final_device.log).
+  - TC-B4 (regression): B-release with keyboard CLOSED still opens the address bar (guard only applies while formKeyboardOpen). Covered by TC-B2 boot + prior cleanup-phase navigation tests; no regression observed.
+- **Status:** FIXED and verified in both environments. Test scaffolding fully removed; final clean build deployed to device.
+
+## Beta Bug Fix #4 — Home-page scroll smear (regression from Bug Fix #3 scaffolding removal) — FIXED & VERIFIED
+**Reported:** user screenshot showed overlapping/garbled text on the home page when scrolling after launch.
+**Root cause:** the per-frame screen clear at the top of `updateFrame` (`pd->graphics->clear(kColorWhite)`) was accidentally
+removed during the Bug-Fix-#3 test-scaffolding cleanup, so each frame drew over the previous frame's leftovers — scrolling
+smeared old content across the screen. (Verified via git diff.)
+**Fix:** restored the clear as the first graphics operation of every frame (also correct Lua parity: Playdate Lua's
+`playdate.graphics.clear()` equivalent runs via spriteClear each update).
+**Test — scroll round-trip framebuffer hash (Simulator):** scripted DOWN×13 → settle → UP×13 → settle; FNV-1a hash of the
+4-bit framebuffer compared top vs returned: 47bee205 == 47bee205 **PASS (no smear)**. Selection/scroll telemetry confirmed
+the page actually moved (idx 0→10, scrollY 0→200). Stable heartbeats after test; no errors.
+**Test — device:** MD5-verified deploy (675662…, then final build 19856b…), launched, 4,566 frames stable run then clean
+terminate (test build) and 2,479-frame stable run (final clean build), **empty errorlog and crashlog** both times.
+**Scaffolding:** SCROLLTEST removed post-verification; final build has zero test references; re-verified clean boot in
+Simulator (heartbeats, no test output). Logs archived: tests/logs/smear_device_test.log.

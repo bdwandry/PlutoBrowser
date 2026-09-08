@@ -21,7 +21,7 @@ main.c:961:13:submit_form	3272	static
 main.c:733:13:http_on_success	48	static
 main.c:319:13:menu_history	8	static
 main.c:342:13:view_menu_callback	16	static
-main.c:1942:38:pluto_event_handler.isra.0	24	static
+main.c:1947:38:pluto_event_handler.isra.0	24	static
 main.c:893:13:activate_form_block.part.0	32	static
 main.c:767:13:toggle_details	56	static
 main.c:170:13:push_history.part.0	32	static
@@ -32,4 +32,4 @@ main.c:68:14:pluto_pd	0	static
 main.c:75:6:pluto_free	0	static
 main.c:102:7:pluto_realloc	0	static
 main.c:122:13:app_keyboard	0	static
-main.c:2006:5:eventHandler	0	static
+main.c:2011:5:eventHandler	0	static
