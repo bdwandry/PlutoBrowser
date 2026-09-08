@@ -257,11 +257,14 @@ void home_page_draw(float crankChange)
         g_scrollY = 0;
     }
 
-    int startY = CONTENT_Y + 12 - (int)g_scrollY;
+    int startY = CONTENT_Y + 4 - (int)g_scrollY; /* BF10: was +12 — banner sat 8px below the chrome leaving a white strip; shifting the whole page up puts the banner flush under the chrome */
 
     /* 1. Pluto Browser logo header (BF8: rebranded from the Lua reference's
-     *    "COMET BROWSER" per user request — same 13-char layout envelope). */
-    pd->graphics->fillRect(0, startY - 4, SCREEN_WIDTH, 54, kColorBlack);
+     *    "COMET BROWSER" per user request — same 13-char layout envelope).
+     * BF10: rect top returns to startY-4 (= chrome bottom after the page
+     * shift) and height 54->62 so ~12px of black pad sits below the
+     * subtitle (was ~0px). */
+    pd->graphics->fillRect(0, startY - 4, SCREEN_WIDTH, 62, kColorBlack);
 
     /* comet icon: nucleus + tail */
     int cx = 30;
@@ -289,17 +292,18 @@ void home_page_draw(float crankChange)
                            startY + 32);
     pd->graphics->setDrawMode(kDrawModeCopy);
 
-    /* Address bar prompt pill */
-    pd->graphics->fillRoundRect(20, startY + 56, SCREEN_WIDTH - 40, 24, 4,
+    /* Address bar prompt pill — BF10: banner bottom is now startY+58, so the
+     * pill moved 56->68 to leave a clear white gap below the banner. */
+    pd->graphics->fillRoundRect(20, startY + 68, SCREEN_WIDTH - 40, 24, 4,
                                 kColorBlack);
     pd->graphics->setDrawMode(kDrawModeFillWhite);
     pd->graphics->setFont(fontBold);
     const char *prompt = "Press (B) to Type URL or Search Web";
-    pd->graphics->drawText(prompt, strlen(prompt), kUTF8Encoding, 32, startY + 60);
+    pd->graphics->drawText(prompt, strlen(prompt), kUTF8Encoding, 32, startY + 72);
     pd->graphics->setDrawMode(kDrawModeCopy);
 
     /* Settings button */
-    int settingsBtnY = startY + 88;
+    int settingsBtnY = startY + 100; /* BF10: +12 with the pill to keep its 8px gap */
     int settingsBtnH = 22;
     int isSettingsSelected = (g_selectedIndex == 0);
     int settingsBtnW = SCREEN_WIDTH - 40;
