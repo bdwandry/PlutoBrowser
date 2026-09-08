@@ -504,6 +504,9 @@ static void apply_view_mode(int newMode) {
 static void menu_activate(int row);
 
 static void menu_rebuild(void) {
+    /* rows are frozen while the popup is open: a page landing underneath
+     * (br_boot's auto-launch, background loads) must not shift indices */
+    if (s_br.menuOpen) return;
     memset(s_menu.present, 0, sizeof(s_menu.present));
     s_menu.count = 0;
     s_menu.present[BR_MI_HOME]     = 1;
@@ -988,11 +991,26 @@ static void home_settings_cb(void) {
     s_br.state = PLUTO_STATE_SETTINGS;
 }
 
+static int s_appliedProtocol = -1; // hc backend pref applied from Settings
+
 static void settings_changed_cb(void) {
     int mode = storage_settings()->mode;
-    PLUTO_LOG("[P32] SettingsPage.onChangeCallback: mode=%d", mode);
+    int protocol = storage_settings()->protocol;
+    enum HcBackend pref = (protocol == PLUTO_PROTOCOL_TCP)
+                              ? HC_BACKEND_TCP
+                              : HC_BACKEND_HTTP;
+    hc_set_backend_pref(pref);
+    PLUTO_LOG("[P32] SettingsPage.onChangeCallback: mode=%d protocol=%d",
+              mode, protocol);
     s_br.browseMode = mode;
     if (s_br.hasUrl) {
+        /* Protocol switch needs a fresh download over the new backend; a
+         * mode change just re-renders the cached doc from the raw HTML. */
+        if (protocol != s_appliedProtocol) {
+            s_appliedProtocol = protocol;
+            navigate_to(s_br.curUrl.normalized);
+            return;
+        }
         if (s_br.currentDoc != NULL &&
             s_br.currentDoc->rawHtml != NULL &&
             s_br.currentDoc->rawHtml[0] != '\0')
@@ -1060,10 +1078,16 @@ void br_boot(void) {
     s_br.state       = PLUTO_STATE_HOME;
     s_br.browseMode  = storage_settings()->mode;
     str_copy(s_br.pageTitle, sizeof(s_br.pageTitle), "CometBrowser");
+    s_appliedProtocol = storage_settings()->protocol;
+    hc_set_backend_pref(s_appliedProtocol == PLUTO_PROTOCOL_TCP
+                            ? HC_BACKEND_TCP
+                            : HC_BACKEND_HTTP);
     hp_set_settings_callback(home_settings_cb);
     sp_set_on_change(settings_changed_cb);
     menu_rebuild();
     br_system_menu_refresh();
+    /* Auto-launch google.com on boot for device crash testing. */
+    br_navigate_to("https://google.com");
 }
 
 /* ── loading screen (mirrors main.lua STATE_LOADING branch) ───────────── */
@@ -1502,7 +1526,8 @@ compose:
     ch_draw(s_br.hasUrl ? &s_br.curUrl : NULL, s_br.pageTitle,
             s_br.state == PLUTO_STATE_LOADING,
             s_br.progressCur, s_br.progressTot,
-            s_br.browseMode == PLUTO_MODE_READER);
+            s_br.browseMode == PLUTO_MODE_READER,
+            hc_backend_label());
     ab_draw_overlay();
 
     /* HTML-mode hover status bar (cursor itself arrives in P33) */

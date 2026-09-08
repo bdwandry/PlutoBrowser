@@ -117,6 +117,16 @@ static void case_cycles(void) {
     for (int i = 0; i < 5; i++) sp_handle_input(SP_BTN_LEFT);
     ck("C.image_wrap_left",
        strcmp(sp_staged_image_label(), imgStart) == 0);
+
+    /* protocol (row 6): toggles HTTP <-> TCP, round-trips */
+    nav_to_row(6);
+    const char* protoBefore = sp_staged_protocol_label();
+    sp_handle_input(SP_BTN_LEFT);
+    const char* protoMid = sp_staged_protocol_label();
+    sp_handle_input(SP_BTN_RIGHT);
+    ck("C.protocol_toggles",
+       strcmp(protoBefore, protoMid) != 0 &&
+           strcmp(sp_staged_protocol_label(), protoBefore) == 0);
 }
 
 /* ── nav clamps ───────────────────────────────────────────────────────── */
@@ -174,6 +184,26 @@ static void case_save(void) {
                              st->searchEngine == 2);
     st = storage_settings();
     ck("S.reload_pointer_same_values", st != NULL && st->searchEngine == 2);
+
+    /* protocol persists to storage + survives reload */
+    sp_open(NULL);
+    nav_to_row(6);
+    sp_handle_input(SP_BTN_LEFT); /* HTTP -> TCP */
+    s_changeFired = 0;
+    act = sp_handle_input(SP_BTN_A);
+    st = storage_settings();
+    ck("S.protocol_saved", act == SP_ACT_SAVED && st != NULL &&
+                               st->protocol == PLUTO_PROTOCOL_TCP);
+    ck("S.protocol_reload", storage_load() == 1 &&
+                                storage_settings()->protocol ==
+                                    PLUTO_PROTOCOL_TCP);
+    /* restore default protocol for other tests/sessions */
+    sp_open(NULL);
+    nav_to_row(6);
+    sp_handle_input(SP_BTN_RIGHT); /* TCP -> HTTP */
+    sp_handle_input(SP_BTN_A);
+    ck("S.protocol_restored", storage_settings()->protocol ==
+                                  PLUTO_PROTOCOL_HTTP);
 
     /* restore default engine for other tests/sessions */
     sp_open(NULL);
