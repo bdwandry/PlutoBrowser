@@ -72,7 +72,7 @@ typedef struct
     const char *desc;
 } DefaultBookmark;
 
-#define DEFAULT_BOOKMARK_COUNT 9
+#define DEFAULT_BOOKMARK_COUNT 10
 extern const DefaultBookmark DEFAULT_BOOKMARKS[DEFAULT_BOOKMARK_COUNT];
 
 /* ── User-Agent (constants.lua value; HTTP client sends a shorter header
