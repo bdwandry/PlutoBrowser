@@ -259,7 +259,8 @@ void home_page_draw(float crankChange)
 
     int startY = CONTENT_Y + 12 - (int)g_scrollY;
 
-    /* 1. Comet Browser logo header */
+    /* 1. Pluto Browser logo header (BF8: rebranded from the Lua reference's
+     *    "COMET BROWSER" per user request — same 13-char layout envelope). */
     pd->graphics->fillRect(0, startY - 4, SCREEN_WIDTH, 54, kColorBlack);
 
     /* comet icon: nucleus + tail */
@@ -280,7 +281,7 @@ void home_page_draw(float crankChange)
     /* Title text */
     pd->graphics->setDrawMode(kDrawModeFillWhite);
     pd->graphics->setFont(fontHeading);
-    const char *title = "COMET BROWSER";
+    const char *title = "PLUTO BROWSER"; /* BF8: was "COMET BROWSER" */
     pd->graphics->drawText(title, strlen(title), kUTF8Encoding, 48, startY + 4);
     pd->graphics->setFont(fontSmall);
     const char *subtitle = "The Web on Playdate";
