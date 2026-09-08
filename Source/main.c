@@ -694,7 +694,7 @@ static void navigate_to(const char *urlString)
         }
         else
         {
-            char withScheme[648 + 8];
+            char withScheme[648 + 16];
             snprintf(withScheme, sizeof(withScheme), "https://%s", urlBuf);
             snprintf(urlBuf, sizeof(urlBuf), "%s", withScheme);
         }
@@ -1920,6 +1920,31 @@ static int updateFrame(void *userdata)
     chrome_draw(currentUrlObj, NULL, currentState == STATE_LOADING, 0, 0,
                 currentBrowseMode == 0);
     address_bar_draw_overlay();
+
+    /* Hover status bar: show URL under cursor (like desktop browsers). */
+    if (currentState == STATE_PAGE && currentBrowseMode == MODE_RAW_HTML)
+    {
+        const LMLink *hovLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
+        if (hovLink && hovLink->href)
+        {
+            hud_draw_hover_status(hovLink->href);
+        }
+    }
+
+    /* Draw mouse cursor as the very last thing so nothing can draw over it
+     * (Lua main.lua: white-filled triangle + black outline + inner line). */
+    if (currentState == STATE_PAGE && currentBrowseMode == MODE_RAW_HTML)
+    {
+        int mx = mouseX, my = mouseY;
+        pd->graphics->fillTriangle(mx, my, mx + 10, my + 4, mx + 4, my + 10,
+                                   kColorWhite);
+        /* Lua gfx.drawTriangle has no C equivalent: draw the 3 edges with
+         * width 1 (Lua's default line width) via drawLine. */
+        pd->graphics->drawLine(mx, my, mx + 10, my + 4, 1, kColorBlack);
+        pd->graphics->drawLine(mx + 10, my + 4, mx + 4, my + 10, 1, kColorBlack);
+        pd->graphics->drawLine(mx + 4, my + 10, mx, my, 1, kColorBlack);
+        pd->graphics->drawLine(mx, my, mx + 4, my + 10, 1, kColorBlack);
+    }
 
     /* State-transition log (first entry to each state). */
     if (currentState != g_lastLoggedState)
