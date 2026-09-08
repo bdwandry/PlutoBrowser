@@ -65,7 +65,7 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     pd->graphics->setFont(font);
     pd->graphics->setDrawMode(kDrawModeFillWhite);
 
-    char displayHost[128 + 8] = "CometBrowser"; /* host ≤127 + "about:" */
+    char displayHost[128 + 8] = "PlutoBrowser"; /* BF8 rebrand; host ≤127 + "about:" */
     if (urlObj)
     {
         if (strcmp(urlObj->scheme, "about") == 0)

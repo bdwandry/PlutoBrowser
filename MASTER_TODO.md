@@ -7,7 +7,7 @@
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
 > **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
-> **CURRENT TASK:** Beta Bug Fix #5 — COMPLETE (Simulator + device verified). url.c/keyboard.c allocator fixes fix text boxes on ALL sites; HTML mode now the default (fresh data). Final clean build deployed (MD5 beba15… both sides), device run 3,081 frames clean terminate, empty errorlog/crashlog, fresh device data file confirms S|mode=1.
+> **CURRENT TASK:** Beta Bug Fix #8 — COMPLETE (Simulator + device verified). Home-page banner rebranded "COMET BROWSER" → "PLUTO BROWSER" (plus address-bar pill and about:home page text); zero functional changes.
 > (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
@@ -1614,3 +1614,38 @@ User requirement: KEEP the left-right marquee scrolling; only fix the clipping.
 **Note:** an initial word-wrap reimplementation was incorrectly attempted first
 (user clarified: keep scrolling, fix clipping only) and fully reverted before
 this fix; the shipped change is the minimal marquee-clip fix.
+
+## Beta Bug Fix #8 — Home-page banner still said "COMET BROWSER"
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** The browser is now PlutoBrowser, but the home-page hero banner read
+"COMET BROWSER" (user explicitly requested a deliberate deviation from the Lua
+reference here — branding only, no behavior change).
+
+**Fix (user-visible strings only):**
+- Source/ui/home_page.c: banner title "COMET BROWSER" → "PLUTO BROWSER"
+  (same 13-char layout envelope; comment updated to document the intentional
+  deviation from the reference).
+- Source/ui/chrome.c: top address-bar pill default text "CometBrowser" →
+  "PlutoBrowser" (visible when no page is loaded).
+- Source/core/http_client.c: about:home internal page title text rebranded to
+  match. (HTTP User-Agent string intentionally NOT changed — server-visible
+  identity kept faithful to the reference.)
+
+**Verification:**
+- Simulator: temporary in-game framebuffer PBM dump at frame 120; pixel-level
+  glyph comparison against the prior build's capture proves the first banner
+  glyphs changed C→P and O→L ("PLUTO BROWSER" rendering); control region
+  (500/500 px) identical → no other pixels moved. Dump scaffolding removed.
+- Build: clean (0 errors/warnings).
+- Simulator run: clean boot, first frame + heartbeats, stable.
+- Device: MD5-verified deploy (00b333512d4fd10a…), run captured 186 frames with
+  clean kEventTerminate; errorlog + crashlog EMPTY. Data-Disk eject confirmed.
+
+**Test Cases:**
+- TC1 banner text: START home screen → read banner via framebuffer dump.
+  EXPECT "PLUTO BROWSER". ACT: P/L glyph shapes confirmed. PASS
+- TC2 no collateral changes: diff frame vs previous build outside banner band.
+  EXPECT identical. ACT: 500/500 control pixels identical. PASS
+- TC3 device boot: launch on Playdate, run ≥30 s, check errorlog/crashlog.
+  EXPECT stable run, empty logs. ACT: 186 frames, clean terminate, both empty. PASS

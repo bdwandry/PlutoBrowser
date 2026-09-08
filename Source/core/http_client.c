@@ -189,8 +189,8 @@ static const char ACIDTEST_HTML[] =
     "</body></html>";
 
 static const InternalPage INTERNAL_PAGES[] = {
-    { "about:home", "CometBrowser",
-      "<html><head><title>CometBrowser</title></head><body><h1>CometBrowser</h1><p>Ready.</p></body></html>" },
+    { "about:home", "PlutoBrowser",
+      "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
     { "about:blank", "Blank",
       "<html><body></body></html>" },
     { "about:acidtest", "HTML Acid Test", ACIDTEST_HTML },
