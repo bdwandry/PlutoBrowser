@@ -7783,7 +7783,7 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_abbrev  0x000000000000d3d1      0x3cd build/Source/util/pdtimer.o
  .debug_abbrev  0x000000000000d79e      0x342 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_loc      0x0000000000000000    0x5ed63
+.debug_loc      0x0000000000000000    0x5ed62
  .debug_loc     0x0000000000000000     0x3133 build/Source/main.o
  .debug_loc     0x0000000000003133      0x253 build/Source/core/logger.o
  .debug_loc     0x0000000000003386       0x8c build/Source/core/constants.o
@@ -7811,22 +7811,22 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_loc     0x00000000000403b3      0x5dc build/Source/ui/chrome.o
  .debug_loc     0x000000000004098f      0x50e build/Source/ui/hud.o
  .debug_loc     0x0000000000040e9d      0x345 build/Source/ui/error_page.o
- .debug_loc     0x00000000000411e2      0xdea build/Source/ui/home_page.o
- .debug_loc     0x0000000000041fcc      0x4b3 build/Source/ui/bookmarks_page.o
- .debug_loc     0x000000000004247f      0x4b3 build/Source/ui/history_page.o
- .debug_loc     0x0000000000042932      0xa9f build/Source/ui/settings_page.o
- .debug_loc     0x00000000000433d1      0x908 build/Source/ui/address_bar.o
- .debug_loc     0x0000000000043cd9      0xf2b build/Source/html/entities.o
- .debug_loc     0x0000000000044c04     0x1c37 build/Source/html/tokenizer.o
- .debug_loc     0x000000000004683b     0x1664 build/Source/html/dom.o
- .debug_loc     0x0000000000047e9f     0xda59 build/Source/html/document.o
- .debug_loc     0x00000000000558f8     0x4495 build/Source/html/readability.o
- .debug_loc     0x0000000000059d8d     0x2f71 build/Source/keyboard/keyboard.o
- .debug_loc     0x000000000005ccfe      0x478 build/Source/core/tasks.o
- .debug_loc     0x000000000005d176      0x663 build/Source/util/strbuf.o
- .debug_loc     0x000000000005d7d9     0x10b3 build/Source/util/strutil.o
- .debug_loc     0x000000000005e88c      0x2bb build/Source/util/pdtimer.o
- .debug_loc     0x000000000005eb47      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_loc     0x00000000000411e2      0xde9 build/Source/ui/home_page.o
+ .debug_loc     0x0000000000041fcb      0x4b3 build/Source/ui/bookmarks_page.o
+ .debug_loc     0x000000000004247e      0x4b3 build/Source/ui/history_page.o
+ .debug_loc     0x0000000000042931      0xa9f build/Source/ui/settings_page.o
+ .debug_loc     0x00000000000433d0      0x908 build/Source/ui/address_bar.o
+ .debug_loc     0x0000000000043cd8      0xf2b build/Source/html/entities.o
+ .debug_loc     0x0000000000044c03     0x1c37 build/Source/html/tokenizer.o
+ .debug_loc     0x000000000004683a     0x1664 build/Source/html/dom.o
+ .debug_loc     0x0000000000047e9e     0xda59 build/Source/html/document.o
+ .debug_loc     0x00000000000558f7     0x4495 build/Source/html/readability.o
+ .debug_loc     0x0000000000059d8c     0x2f71 build/Source/keyboard/keyboard.o
+ .debug_loc     0x000000000005ccfd      0x478 build/Source/core/tasks.o
+ .debug_loc     0x000000000005d175      0x663 build/Source/util/strbuf.o
+ .debug_loc     0x000000000005d7d8     0x10b3 build/Source/util/strutil.o
+ .debug_loc     0x000000000005e88b      0x2bb build/Source/util/pdtimer.o
+ .debug_loc     0x000000000005eb46      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
 .debug_aranges  0x0000000000000000     0x1558
  .debug_aranges

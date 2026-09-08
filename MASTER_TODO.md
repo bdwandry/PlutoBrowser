@@ -7,7 +7,7 @@
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
 > **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
-> **CURRENT TASK:** Beta Change #9d — COMPLETE (Simulator + device verified). Launcher art v3: hand-drawn circle replaced with the REAL New Horizons photo (images.jpeg, disc-masked, Bayer-dithered, black bg removed, outline ring); twinkle made subtle: 7 card stars / 3 icon stars, ≥60px apart, gentle 3-phase. Power-cycle device to refresh launcher cache.
+> **CURRENT TASK:** Beta Bug Fix #10 — COMPLETE (Simulator + device verified). Home-page header layout: whole content moved up 8px so the banner sits flush under the chrome (white strip gone, content moved — not painted over); banner height 54->62 giving 9px black pad below "The Web on Playdate" (12px top pad, measured); "Press (B)..." pill moved +12px creating a 10px white gap below the banner, Settings and lower sections shifted to keep spacing.
 > (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
@@ -1818,3 +1818,42 @@ directly, black background removed, in place of the circle.
 - TC3 subtle twinkle: EXPECT fewer, well-separated twinklers, 3-phase.
   ACT: 7 stars ≥60px apart (card), 3 (icon); pairwise frame diffs small. PASS
 - TC4 device: EXPECT stable deploy. ACT: clean 1,352-frame run, logs empty. PASS
+
+## Beta Bug Fix #10 — Home-page banner: no bottom pad, white strip above
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** (1) black space below "The Web on Playdate" was missing while the
+title had headroom above it; (2) an 8px white strip sat between the chrome and
+the banner top. User explicitly corrected an interim approach: move the CONTENT
+up (do not paint the strip black) and ADD black below the subtitle.
+
+**Root cause:** home_page_draw used startY = CONTENT_Y+12: the banner rect
+(y=startY-4) began 8px below the chrome bottom, and its 54px height ended
+exactly at the subtitle's glyph bottoms (0px bottom pad).
+
+**Fix (Source/ui/home_page.c only):**
+- startY: CONTENT_Y+12 -> CONTENT_Y+4 (whole page up 8px; banner top = chrome
+  bottom; gaps INSIDE the page preserved)
+- banner rect: height 54 -> 62 (same top formula) -> measured ~12px top pad /
+  ~9px bottom pad around the two text lines
+- pill "Press (B) to Type URL or Search Web": y 56 -> 68 (+12), text +12 ->
+  10px white gap below the banner (user: "create a new line after the banner")
+- settings button +88 -> +100 (keeps its spacing to the pill); sections below
+  flow from settingsBtnY so they shift with it
+
+**Verification (framebuffer PBM dump at frame 120, then scaffolding removed):**
+- banner starts at y=24 exactly (chrome bottom) — white strip GONE
+- banner text padding: top 12px, bottom 9px
+- banner -> pill gap: 10px clean white
+- Simulator: clean boot, 3 heartbeats stable
+- Device: MD5-verified deploy (bfee545086198575…), 1,346-frame run incl. a live
+  benchmark fetch, clean terminate, errorlog + crashlog EMPTY
+
+**Test Cases:**
+- TC1 flush banner: EXPECT banner top == chrome bottom (y=24). ACT: dark row 24
+  confirmed. PASS
+- TC2 bottom pad: EXPECT black rows below subtitle glyphs. ACT: 9px measured. PASS
+- TC3 banner->pill gap: EXPECT clear white gap. ACT: 10px measured. PASS
+- TC4 no layout regressions below: EXPECT settings/bookmark sections shifted
+  uniformly, spacing intact. ACT: flow positions derived from settingsBtnY,
+  verified in dump bands. PASS

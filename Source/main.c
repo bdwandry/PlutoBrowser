@@ -1933,6 +1933,7 @@ static int updateFrame(void *userdata)
     }
 
 
+
     /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
     if (frameCount % 300 == 0)
     {
