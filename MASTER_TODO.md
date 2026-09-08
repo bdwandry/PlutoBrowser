@@ -1545,3 +1545,36 @@ param name and '=') came from pass 2 scanning an unterminated 1-char name buffer
 
 **Lesson:** host-heap-zeroing masks read-uninitialized bugs in Simulator; device heap is
 recycled. Any two-pass encode/size scheme must terminate between passes.
+
+## Beta Bug Fix #6 — App reacted to buttons while keyboard was open
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** Home screen → B → keyboard opens → typing/scrolling keys also drove the
+background home page; an A press while typing launched a bookmark/website. Requested:
+NO background interaction in ANY state while the keyboard is active.
+
+**Root cause:** The Kuroobi keyboard port reads the hardware buttons directly inside its
+own update pump, while the app separately read `getButtonState` every frame and fed
+every state machine (home-page input, page links/cursor, etc.) with no keyboard gating.
+Two independent consumers of the same physical presses.
+
+**Fix (one choke point, all states):** in updateFrame, after the single button read,
+zero btnCurrent/btnPushed/btnReleased whenever the keyboard owns input:
+`formKeyboardOpen || address_bar_is_open() || keyboardApi.isVisible(g_kb)`.
+The isVisible term also covers the show/hide animation window. The keyboard keeps its
+own button stream; the app goes deaf until the keyboard closes. Covers home page AND
+website pages AND all other states.
+
+**Verification (scripted KBGATE battery, evidence: tests/logs/sim_kbgate_battery_*.log):**
+- TC-A (HOME): address bar + keyboard open, virtual A injected → state stayed HOME (0),
+  no bookmark launched → PASS
+- TC-B (HOME): virtual DOWN then A injected with bar closed but keyboard hide animating →
+  no navigation/selection side effects → PASS
+- TC-C (PAGE): on a live page, keyboard open, virtual A injected → state stayed on page
+  (2), keyboard text unchanged (prefilled URL only) → PASS
+- Final clean build (all test scaffolding removed): Simulator boot + 3 heartbeats clean;
+  device MD5-verified deploy (ef7956c7…), boot + heartbeats stable, errorlog/crashlog empty.
+
+**Note:** a Simulator-only double-getButtonState instability was found during test
+development (two SDK button reads per frame → SIGTRAP/bus error); the final build uses
+the single-read contract. Test injection seams were removed post-verification.
