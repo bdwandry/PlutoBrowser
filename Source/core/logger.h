@@ -1,40 +1,28 @@
-// logger.h — full C port of CometBrowser Source/core/logger.lua
-//
-// File-based crash/event logger. Writes to the game's data folder:
-//   Simulator: ~/Documents/Playdate DATA/com.bryanwandrych.plutobrowser/pluto.log
-//   Device:    /Data/com.bryanwandrych.plutobrowser/pluto.log
-// Every line is written and the file closed immediately, so the log survives
-// even a hard crash (same policy as the Lua original).
-//
-// Diagnostic logging is PERMANENT infrastructure: these calls must never be
-// removed from the codebase until the user explicitly authorizes removal in
-// the final cleanup phase (MASTER_TODO P36).
-
+/*
+ * PlutoBrowser — logger.h
+ * File-based crash/event logger (port of Source/core/logger.lua).
+ *
+ * Phase 2 implements the full module; Phase 0 provides the minimal init/log
+ * needed by main.c. The Lua reference wrote to "comet.log"; per the project
+ * deployment instructions (AGENTS.md) PlutoBrowser writes "pluto.log" —
+ *   Simulator: <SDK>/Disk/Data/com.bryanwandrych.plutobrowser/pluto.log
+ *   Device:    /Data/com.bryanwandrych.plutobrowser/pluto.log
+ * Every call opens, writes and closes the file so logs survive a hard crash,
+ * exactly like the Lua implementation.
+ */
 #ifndef PLUTO_LOGGER_H
 #define PLUTO_LOGGER_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "pd_api.h"
 
-struct PlaydateAPI;
+/* Initialize (truncate) the log file and write the header line. */
+void logger_init(PlaydateAPI *playdate);
 
-// Mirrors Logger.init(): truncates the log and writes the banner + gamePath.
-void logger_init(struct PlaydateAPI* playdate);
+/* Append a printf-style event line. */
+void logger_log(const char *fmt, ...);
 
-// Mirrors Logger.log(msg): "[HH:MM:SS #seq] msg" appended per line.
-void logger_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+/* Append an ERROR line including the reporting source location. */
+#define logger_error(...) logger_error_at(__FILE__, __LINE__, __VA_ARGS__)
+void logger_error_at(const char *file, int line, const char *fmt, ...);
 
-// Mirrors Logger.error(msg): prefixes "ERROR: " and appends "|| stack: <loc>"
-// where <loc> is the C equivalent of Lua's where() (file:line of caller).
-void logger_error_loc(const char* file, int line, const char* fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-
-#define PLUTO_LOG(...)      logger_log(__VA_ARGS__)
-#define PLUTO_ERROR(...)    logger_error_loc(__FILE__, __LINE__, __VA_ARGS__)
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // PLUTO_LOGGER_H
+#endif /* PLUTO_LOGGER_H */

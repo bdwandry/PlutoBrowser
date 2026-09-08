@@ -28,11 +28,6 @@ build/Source/main.o: Source/main.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/sched.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
@@ -46,55 +41,37 @@ build/Source/main.o: Source/main.c \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- Source/core/constants.h Source/core/cookie_jar.h \
- Source/core/../util/strbuf.h Source/core/storage_data.h \
- Source/core/encoding.h Source/core/http_client.h \
- Source/core/../util/strmap.h Source/core/logger.h \
- Source/core/selftest_encoding.h Source/core/selftest_http.h \
- Source/html/tokenizer.h Source/util/strmap.h Source/html/dom.h \
- Source/html/tokenizer.h Source/html/selftest_tokenizer.h \
- Source/html/selftest_dom.h Source/html/selftest_document.h \
- Source/html/selftest_readability.h Source/render/style.h \
- Source/render/selftest_style.h Source/render/link_manager.h \
- Source/render/selftest_link_manager.h \
- Source/render/decoders/selftest_decoders.h \
- Source/render/decoders/selftest_inflate.h Source/render/decoders/png.h \
- Source/render/decoders/selftest_png.h \
- Source/render/decoders/selftest_png_fixtures.h \
- Source/render/decoders/bmp.h Source/render/decoders/selftest_bmp.h \
- Source/render/decoders/selftest_bmp_fixtures.h \
- Source/render/decoders/gif.h Source/render/decoders/selftest_gif.h \
- Source/render/decoders/selftest_jpeg.h Source/render/decoders/jpeg.h \
- Source/render/decoders/selftest_jpeg_fixtures.h \
- Source/render/decoders/webp.h Source/render/decoders/selftest_webp.h \
- Source/render/decoders/selftest_webp_fixtures.h \
- Source/render/decoders/ico.h Source/render/decoders/selftest_ico.h \
- Source/render/decoders/selftest_ico_fixtures.h \
- Source/render/decoders/svg.h Source/render/decoders/selftest_svg.h \
- Source/render/decoders/selftest_svg_fixtures.h \
- Source/render/image_decoder.h Source/render/selftest_image_decoder.h \
- Source/render/cloud_layout.h Source/render/selftest_cloud_layout.h \
- Source/render/layout.h Source/render/selftest_layout.h \
- Source/ui/chrome.h Source/ui/../core/url.h \
- Source/ui/../core/../util/strbuf.h Source/ui/hud.h \
- Source/ui/selftest_ui.h Source/ui/home_page.h \
- Source/ui/selftest_home_page.h Source/ui/address_bar.h \
- Source/vendor/keyboard/keyboard.h Source/ui/selftest_address_bar.h \
- Source/ui/error_page.h Source/ui/bookmarks_page.h Source/ui/list_core.h \
- Source/ui/history_page.h Source/ui/selftest_pages.h \
- Source/ui/settings_page.h Source/ui/selftest_settings.h \
- Source/core/browser.h Source/core/url.h Source/core/selftest_browser.h \
- Source/render/decoders/selftest_gif_fixtures.h Source/html/document.h \
- Source/core/selftest_storage.h Source/core/selftest_tasks.h \
- Source/core/selftest_url.h Source/core/storage.h \
- Source/core/../util/dynarray.h Source/core/tasks.h \
- Source/html/entities.h Source/util/mem.h Source/util/selftest_util.h
+ Source/core/logger.h Source/core/encoding.h Source/core/cookie_jar.h \
+ Source/core/http_client.h Source/core/storage.h Source/core/constants.h \
+ Source/render/style.h Source/render/link_manager.h \
+ Source/render/layout.h Source/html/document.h Source/html/dom.h \
+ Source/html/tokenizer.h Source/render/link_manager.h \
+ Source/render/image_decoder.h Source/render/cloud_layout.h \
+ Source/util/json.h Source/render/decoders/scale.h \
+ Source/render/decoders/dither.h Source/render/decoders/inflate.h \
+ Source/render/decoders/png.h Source/render/decoders/jpeg.h \
+ Source/render/decoders/svg.h Source/render/decoders/webp.h \
+ Source/render/decoders/webp-internal.h Source/render/decoders/webp.h \
+ Source/render/decoders/webp_vp8_data.h Source/render/decoders/bmp.h \
+ Source/render/decoders/gif.h Source/render/decoders/ico.h \
+ Source/ui/chrome.h Source/core/url.h Source/ui/hud.h \
+ Source/ui/error_page.h Source/ui/home_page.h Source/ui/bookmarks_page.h \
+ Source/ui/history_page.h Source/ui/settings_page.h \
+ Source/ui/address_bar.h Source/html/entities.h Source/html/tokenizer.h \
+ Source/html/dom.h Source/html/document.h Source/html/readability.h \
+ Source/keyboard/keyboard.h Source/core/url.h Source/core/tasks.h \
+ Source/util/pdtimer.h Source/util/strbuf.h Source/util/strutil.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
@@ -154,16 +131,6 @@ build/Source/main.o: Source/main.c \
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h:
 
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
-
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
@@ -190,9 +157,19 @@ build/Source/main.o: Source/main.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h:
 
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/string.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
+
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h:
 
@@ -202,164 +179,100 @@ build/Source/main.o: Source/main.c \
 
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
 
-Source/core/constants.h:
-
-Source/core/cookie_jar.h:
-
-Source/core/../util/strbuf.h:
-
-Source/core/storage_data.h:
+Source/core/logger.h:
 
 Source/core/encoding.h:
 
+Source/core/cookie_jar.h:
+
 Source/core/http_client.h:
 
-Source/core/../util/strmap.h:
+Source/core/storage.h:
 
-Source/core/logger.h:
+Source/core/constants.h:
 
-Source/core/selftest_encoding.h:
+Source/render/style.h:
 
-Source/core/selftest_http.h:
+Source/render/link_manager.h:
 
-Source/html/tokenizer.h:
+Source/render/layout.h:
 
-Source/util/strmap.h:
+Source/html/document.h:
 
 Source/html/dom.h:
 
 Source/html/tokenizer.h:
 
-Source/html/selftest_tokenizer.h:
-
-Source/html/selftest_dom.h:
-
-Source/html/selftest_document.h:
-
-Source/html/selftest_readability.h:
-
-Source/render/style.h:
-
-Source/render/selftest_style.h:
-
 Source/render/link_manager.h:
-
-Source/render/selftest_link_manager.h:
-
-Source/render/decoders/selftest_decoders.h:
-
-Source/render/decoders/selftest_inflate.h:
-
-Source/render/decoders/png.h:
-
-Source/render/decoders/selftest_png.h:
-
-Source/render/decoders/selftest_png_fixtures.h:
-
-Source/render/decoders/bmp.h:
-
-Source/render/decoders/selftest_bmp.h:
-
-Source/render/decoders/selftest_bmp_fixtures.h:
-
-Source/render/decoders/gif.h:
-
-Source/render/decoders/selftest_gif.h:
-
-Source/render/decoders/selftest_jpeg.h:
-
-Source/render/decoders/jpeg.h:
-
-Source/render/decoders/selftest_jpeg_fixtures.h:
-
-Source/render/decoders/webp.h:
-
-Source/render/decoders/selftest_webp.h:
-
-Source/render/decoders/selftest_webp_fixtures.h:
-
-Source/render/decoders/ico.h:
-
-Source/render/decoders/selftest_ico.h:
-
-Source/render/decoders/selftest_ico_fixtures.h:
-
-Source/render/decoders/svg.h:
-
-Source/render/decoders/selftest_svg.h:
-
-Source/render/decoders/selftest_svg_fixtures.h:
 
 Source/render/image_decoder.h:
 
-Source/render/selftest_image_decoder.h:
-
 Source/render/cloud_layout.h:
 
-Source/render/selftest_cloud_layout.h:
+Source/util/json.h:
 
-Source/render/layout.h:
+Source/render/decoders/scale.h:
 
-Source/render/selftest_layout.h:
+Source/render/decoders/dither.h:
+
+Source/render/decoders/inflate.h:
+
+Source/render/decoders/png.h:
+
+Source/render/decoders/jpeg.h:
+
+Source/render/decoders/svg.h:
+
+Source/render/decoders/webp.h:
+
+Source/render/decoders/webp-internal.h:
+
+Source/render/decoders/webp.h:
+
+Source/render/decoders/webp_vp8_data.h:
+
+Source/render/decoders/bmp.h:
+
+Source/render/decoders/gif.h:
+
+Source/render/decoders/ico.h:
 
 Source/ui/chrome.h:
 
-Source/ui/../core/url.h:
-
-Source/ui/../core/../util/strbuf.h:
+Source/core/url.h:
 
 Source/ui/hud.h:
 
-Source/ui/selftest_ui.h:
+Source/ui/error_page.h:
 
 Source/ui/home_page.h:
 
-Source/ui/selftest_home_page.h:
-
-Source/ui/address_bar.h:
-
-Source/vendor/keyboard/keyboard.h:
-
-Source/ui/selftest_address_bar.h:
-
-Source/ui/error_page.h:
-
 Source/ui/bookmarks_page.h:
-
-Source/ui/list_core.h:
 
 Source/ui/history_page.h:
 
-Source/ui/selftest_pages.h:
-
 Source/ui/settings_page.h:
 
-Source/ui/selftest_settings.h:
-
-Source/core/browser.h:
-
-Source/core/url.h:
-
-Source/core/selftest_browser.h:
-
-Source/render/decoders/selftest_gif_fixtures.h:
-
-Source/html/document.h:
-
-Source/core/selftest_storage.h:
-
-Source/core/selftest_tasks.h:
-
-Source/core/selftest_url.h:
-
-Source/core/storage.h:
-
-Source/core/../util/dynarray.h:
-
-Source/core/tasks.h:
+Source/ui/address_bar.h:
 
 Source/html/entities.h:
 
-Source/util/mem.h:
+Source/html/tokenizer.h:
 
-Source/util/selftest_util.h:
+Source/html/dom.h:
+
+Source/html/document.h:
+
+Source/html/readability.h:
+
+Source/keyboard/keyboard.h:
+
+Source/core/url.h:
+
+Source/core/tasks.h:
+
+Source/util/pdtimer.h:
+
+Source/util/strbuf.h:
+
+Source/util/strutil.h:

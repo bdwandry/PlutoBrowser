@@ -1,400 +1,397 @@
-// home_page.c — C port of Source/ui/home_page.lua (HomePage).
-//
-// Start page / speed dial: logo header, address-bar prompt pill,
-// selectable Settings button, 2-column bookmark grid with marquee text,
-// crank scroll + auto-scroll-to-selection. See home_page.h for parity
-// notes.
-
-#include "ui/home_page.h"
-
-#include <math.h>
+/*
+ * PlutoBrowser — home_page.c
+ * Start page / speed dial (port of Source/ui/home_page.lua). See home_page.h.
+ * All geometry, navigation quirks (2-column grid with row wrap, settings
+ * button at index 0), crank scrolling (×1.5, invertCrank flips), smooth
+ * scroll (0.3 factor, 0.5 snap), auto-scroll-to-selection, comet logo,
+ * address bar pill, and per-card oscillating marquee (speed 50, dwell 1s,
+ * clip 15px) preserved from the reference.
+ */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
-#include "../core/constants.h"
-#include "../core/logger.h"
-#include "../core/storage.h"
-#include "../render/style.h"
-#include "../util/dynarray.h"
-
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define PLUTO_HP_PD 1
-#endif
-
-#ifdef PLUTO_HP_PD
+#include "ui/home_page.h"
+#include "core/constants.h"
+#include "core/storage.h"
+#include "render/style.h"
 #include "pd_api.h"
-static PlaydateAPI* s_pd = NULL;
 
-void hp_init(struct PlaydateAPI* pd) { s_pd = pd; }
-#else
-void hp_init(struct PlaydateAPI* pd) { (void)pd; }
-#endif
+extern PlaydateAPI *pluto_pd(void);
+extern void pluto_free(void *p);
 
-/* ── state ────────────────────────────────────────────────────────────── */
+/* PDButtons bits */
+#define BTN_LEFT (1 << 0)
+#define BTN_RIGHT (1 << 1)
+#define BTN_UP (1 << 2)
+#define BTN_DOWN (1 << 3)
+#define BTN_A (1 << 5)
 
-static int s_selectedIndex = 0;   /* 0 = Settings button */
-static double s_scrollY = 0.0;
-static double s_targetScrollY = 0.0;
-static void (*s_settingsCb)(void) = NULL;
+static int g_selectedIndex = 0;
+static float g_scrollY = 0;
+static float g_targetScrollY = 0;
 
-/* Per-card marquee start timestamps keyed by "t<i>"/"d<i>". */
-#define HP_MARQUEE_CAP 64
-typedef struct {
-    char key[16];
-    unsigned long startMs;
-} HpMarquee;
-static HpMarquee s_marquees[HP_MARQUEE_CAP];
-static int s_nMarquees = 0;
+/* marquee state per card (Lua keyed "t<i>"/"d<i>"; we track per index) */
+typedef struct
+{
+    unsigned int startMs;
+} MarqueeState;
+static MarqueeState g_marquee[64]; /* 2 per card up to 32 cards */
 
-void hp_reset(void) {
-    s_selectedIndex = 0;
-    s_scrollY = 0.0;
-    s_targetScrollY = 0.0;
-    s_nMarquees = 0; /* Lua: marqueeState = {} */
+static unsigned int now_ms(void)
+{
+    return pluto_pd()->system->getCurrentTimeMilliseconds();
 }
 
-void hp_set_settings_callback(void (*fn)(void)) { s_settingsCb = fn; }
-
-int hp_selected_index(void) { return s_selectedIndex; }
-
-void hp_set_selected_index(int idx) {
-    if (idx >= 0) s_selectedIndex = idx;
+void home_page_reset(void)
+{
+    g_selectedIndex = 0;
+    g_scrollY = 0;
+    g_targetScrollY = 0;
+    memset(g_marquee, 0, sizeof(g_marquee));
 }
 
-/* ── pure math seams ──────────────────────────────────────────────────── */
-
-void hp_grid_nav(HpButton btn, int* selectedIndex, int count) {
-    int sel = *selectedIndex;
-
-    switch (btn) {
-    case HP_BTN_DOWN:
-        if (sel == 0) {
-            if (count > 0) *selectedIndex = 1;
-        } else if (sel + 2 <= count) {
-            *selectedIndex = sel + 2;
-        } else if (sel < count) {
-            *selectedIndex = sel + 1;
-        }
-        break;
-    case HP_BTN_UP:
-        if (sel == 0) break; /* already at top */
-        if (sel <= 2) *selectedIndex = 0;
-        else if (sel - 2 >= 1) *selectedIndex = sel - 2;
-        break;
-    case HP_BTN_RIGHT:
-        if (sel != 0 && sel % 2 == 1 && sel + 1 <= count)
-            *selectedIndex = sel + 1;
-        break;
-    case HP_BTN_LEFT:
-        if (sel != 0 && sel % 2 == 0 && sel > 1)
-            *selectedIndex = sel - 1;
-        break;
-    default:
-        break;
-    }
+int home_page_selected_index(void)
+{
+    return g_selectedIndex;
 }
 
-double hp_autoscroll_target(int selectedIndex, int count,
-                            double targetScrollY) {
-    if (selectedIndex == 0) return 0.0;
-    if (count <= 0) return targetScrollY;
-
-    int row = (selectedIndex - 1) / 2;
-    double selectedAbsY =
-        PLUTO_CONTENT_Y + 12 + 148 + (double)row * (46.0 + 8.0);
-    double displayY = selectedAbsY - targetScrollY;
-    if (displayY > (double)PLUTO_SCREEN_HEIGHT - 40.0)
-        return selectedAbsY - (double)PLUTO_SCREEN_HEIGHT + 40.0;
-    if (displayY < (double)PLUTO_CONTENT_Y + 10.0) {
-        double t = selectedAbsY - (double)PLUTO_CONTENT_Y - 10.0;
-        return t > 0.0 ? t : 0.0;
-    }
-    return targetScrollY;
+int home_page_scroll_y(void)
+{
+    return (int)g_scrollY;
 }
 
-double hp_marquee_offset(double elapsedSec, double textW, double maxW) {
-    double range = textW - maxW;
-    if (range <= 0.0) return 0.0;
-
-    const double speed = 50.0;
-    const double dwell = 1.0;
-    double travel = range / speed;
-    double cycle = 2.0 * (dwell + travel);
-    double t = fmod(elapsedSec, cycle);
-    if (t < dwell)
-        return 0.0;
-    if (t < dwell + travel)
-        return (t - dwell) * speed;
-    if (t < dwell + travel + dwell)
-        return range;
-    return range - (t - dwell - travel - dwell) * speed;
+static int bookmark_count(void)
+{
+    return storage_bookmark_count();
 }
 
-double hp_smooth_scroll(double cur, double target) {
-    cur = cur + (target - cur) * 0.3;
-    if (fabs(target - cur) < 0.5) cur = target;
-    return cur > 0.0 ? cur : 0.0;
-}
-
-/* ── storage accessors ────────────────────────────────────────────────── */
-
-int hp_bookmark_count(void) {
-    DynArray* bms = storage_bookmarks();
-    return bms ? (int)bms->count : 0;
-}
-
-/* ── input ────────────────────────────────────────────────────────────── */
-
-HpAction hp_handle_input(HpButton btn, char* outUrl, size_t cap) {
-    int count = hp_bookmark_count();
-
-    if (btn == HP_BTN_A) {
-        if (s_selectedIndex == 0) {
-            /* Lua calls settingsCallback() then returns nil */
-            if (s_settingsCb != NULL) s_settingsCb();
-            return HP_ACT_SETTINGS;
-        }
-        DynArray* bms = storage_bookmarks();
-        PlutoSavedBookmark* bm =
-            (bms != NULL) ? da_get(bms, (size_t)s_selectedIndex - 1)
-                          : NULL;
-        if (bm != NULL) {
-            if (outUrl != NULL && cap > 0)
-                snprintf(outUrl, cap, "%s", bm->url);
-            return HP_ACT_OPEN_URL;
-        }
-        return HP_ACT_NONE;
-    }
-
-    hp_grid_nav(btn, &s_selectedIndex, count);
-    return HP_ACT_NONE;
-}
-
-/* ── draw ─────────────────────────────────────────────────────────────── */
-
-#ifdef PLUTO_HP_PD
-
-#define HP_TAU 6.2831853f
-static void pd_fill_circle(int cx, int cy, int r, LCDColor color) {
-    s_pd->graphics->fillEllipse(cx - r, cy - r, r * 2, r * 2, 0.0f,
-                                HP_TAU, color);
-}
-
-/* Marquee start timestamp for a key (Lua marqueeState[key]). */
-static unsigned long marquee_start(const char* key) {
-    for (int i = 0; i < s_nMarquees; i++)
-        if (strcmp(s_marquees[i].key, key) == 0)
-            return s_marquees[i].startMs;
-    if (s_nMarquees < HP_MARQUEE_CAP) {
-        HpMarquee* m = &s_marquees[s_nMarquees++];
-        snprintf(m->key, sizeof(m->key), "%s", key);
-        m->startMs = s_pd->system->getCurrentTimeMilliseconds();
-        return m->startMs;
-    }
-    return s_pd->system->getCurrentTimeMilliseconds(); /* table full */
-}
-
-/* Clipped oscillating text inside a maxW-wide box (Lua drawMarquee). */
-static void draw_marquee(const char* text, int x, int y, int maxW,
-                         PlutoFont* font, const char* key) {
-    int tw = style_get_text_width(font, text);
-    if (tw <= maxW) {
-        s_pd->graphics->drawText(text, strlen(text), kUTF8Encoding,
-                                 x, y);
+/* Oscillating marquee, faithful to drawMarquee(): speed 50 px/s, dwell 1s. */
+static void draw_marquee(const char *text, int x, int y, int maxW,
+                         LCDFont *font, int slot)
+{
+    PlaydateAPI *pd = pluto_pd();
+    pd->graphics->setFont(font);
+    int tw = style_get_text_width(PLUTO_FONT_BODY, text);
+    if (tw <= maxW)
+    {
+        pd->graphics->drawText(text, strlen(text), kUTF8Encoding, x, y);
         return;
     }
 
-    unsigned long nowMs = s_pd->system->getCurrentTimeMilliseconds();
-    unsigned long startMs = marquee_start(key);
-    double elapsed = (double)(nowMs - startMs) / 1000.0;
-    if (elapsed < 0.0) elapsed = 0.0;
-    double offset =
-        hp_marquee_offset(elapsed, (double)tw, (double)maxW);
+    int range = tw - maxW;
+    if (slot < 0 || slot >= 64)
+    {
+        slot = 0;
+    }
+    if (g_marquee[slot].startMs == 0)
+    {
+        g_marquee[slot].startMs = now_ms();
+    }
+    float elapsed = (float)(now_ms() - g_marquee[slot].startMs) / 1000.0f;
+    float speed = 50.0f;
+    float dwell = 1.0f;
+    float travel = (float)range / speed;
+    float cycle = 2.0f * (dwell + travel);
+    float t = elapsed - ((int)(elapsed / cycle)) * cycle;
+    float offset;
+    if (t < dwell)
+    {
+        offset = 0;
+    }
+    else if (t < dwell + travel)
+    {
+        offset = (t - dwell) * speed;
+    }
+    else if (t < dwell + travel + dwell)
+    {
+        offset = (float)range;
+    }
+    else
+    {
+        offset = (float)range - (t - dwell - travel - dwell) * speed;
+    }
 
-    s_pd->graphics->setClipRect(x, y, maxW, 15);
-    s_pd->graphics->drawText(text, strlen(text), kUTF8Encoding,
-                             x - (int)offset, y);
-    s_pd->graphics->clearClipRect();
+    pd->graphics->setClipRect(x, y, maxW, 15);
+    pd->graphics->drawText(text, strlen(text), kUTF8Encoding,
+                           x - (int)offset, y);
+    pd->graphics->clearClipRect();
 }
 
-void hp_draw(double crankChange) {
-    if (s_pd == NULL) return;
-    PlaydateAPI* pd = s_pd;
+char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void))
+{
+    int count = bookmark_count();
+    int isOnSettingsBtn = (g_selectedIndex == 0);
 
-    DynArray* bookmarks = storage_bookmarks();
-    int count = bookmarks ? (int)bookmarks->count : 0;
-    int sz, lh;
-    PlutoFont* fontHeading = style_get_heading_font(1, NULL, NULL);
-    PlutoFont* fontBold = style_get_body_font(1, 0, &sz);
-    PlutoFont* fontBody = style_get_body_font(0, 0, &sz);
-    PlutoFont* fontSmall = style_get_ui_small_font();
+    if (pushed & BTN_DOWN)
+    {
+        if (isOnSettingsBtn)
+        {
+            if (count > 0)
+            {
+                g_selectedIndex = 1;
+            }
+        }
+        else if (g_selectedIndex + 2 <= count)
+        {
+            g_selectedIndex += 2;
+        }
+        else if (g_selectedIndex < count)
+        {
+            g_selectedIndex += 1;
+        }
+    }
+    else if (pushed & BTN_UP)
+    {
+        if (!isOnSettingsBtn)
+        {
+            if (g_selectedIndex <= 2)
+            {
+                g_selectedIndex = 0;
+            }
+            else if (g_selectedIndex - 2 >= 1)
+            {
+                g_selectedIndex -= 2;
+            }
+        }
+    }
+    else if (pushed & BTN_RIGHT)
+    {
+        if (!isOnSettingsBtn && g_selectedIndex % 2 == 1 && g_selectedIndex + 1 <= count)
+        {
+            g_selectedIndex++;
+        }
+    }
+    else if (pushed & BTN_LEFT)
+    {
+        if (!isOnSettingsBtn && g_selectedIndex % 2 == 0 && g_selectedIndex > 1)
+        {
+            g_selectedIndex--;
+        }
+    }
 
-    if (crankChange != 0.0) {
-        int dir = storage_settings()->invertCrank ? -1 : 1;
-        s_targetScrollY += crankChange * 1.5 * dir;
-        if (s_targetScrollY < 0.0) s_targetScrollY = 0.0;
+    if (pushed & BTN_A)
+    {
+        if (isOnSettingsBtn)
+        {
+            if (settingsCallback)
+            {
+                settingsCallback();
+            }
+            return NULL;
+        }
+        const StoredBookmark *bm = storage_bookmark_at(g_selectedIndex - 1);
+        if (bm)
+        {
+            size_t n = strlen(bm->url) + 1;
+            char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+            if (out)
+            {
+                memcpy(out, bm->url, n);
+            }
+            return out;
+        }
+    }
+
+    return NULL;
+}
+
+void home_page_draw(float crankChange)
+{
+    PlaydateAPI *pd = pluto_pd();
+    int count = bookmark_count();
+    LCDFont *fontHeading = style_font(PLUTO_FONT_HEADING1);
+    LCDFont *fontBold = style_font(PLUTO_FONT_BODY_BOLD);
+    LCDFont *fontSmall = style_font(PLUTO_FONT_SMALL);
+
+    if (crankChange != 0.0f)
+    {
+        int dir = storage_setting_int("invertCrank") ? -1 : 1;
+        g_targetScrollY += crankChange * 1.5f * dir;
+        if (g_targetScrollY < 0)
+        {
+            g_targetScrollY = 0;
+        }
     }
 
     /* Auto-scroll to keep the selected item visible */
-    s_targetScrollY =
-        hp_autoscroll_target(s_selectedIndex, count, s_targetScrollY);
+    if (g_selectedIndex == 0)
+    {
+        g_targetScrollY = 0;
+    }
+    else if (count > 0)
+    {
+        int row = (g_selectedIndex - 1) / 2;
+        int selectedAbsY = CONTENT_Y + 12 + 148 + row * (46 + 8);
+        int displayY = (int)(selectedAbsY - g_targetScrollY);
+        if (displayY > SCREEN_HEIGHT - 40)
+        {
+            g_targetScrollY = (float)(selectedAbsY - SCREEN_HEIGHT + 40);
+        }
+        else if (displayY < CONTENT_Y + 10)
+        {
+            float t = (float)(selectedAbsY - CONTENT_Y - 10);
+            g_targetScrollY = t > 0 ? t : 0;
+        }
+    }
 
     /* Smooth scroll toward target */
-    s_scrollY = hp_smooth_scroll(s_scrollY, s_targetScrollY);
+    g_scrollY += (g_targetScrollY - g_scrollY) * 0.3f;
+    if (g_targetScrollY - g_scrollY < 0.5f && g_scrollY - g_targetScrollY < 0.5f)
+    {
+        g_scrollY = g_targetScrollY;
+    }
+    if (g_scrollY < 0)
+    {
+        g_scrollY = 0;
+    }
 
-    int startY = PLUTO_CONTENT_Y + 12 - (int)s_scrollY;
+    int startY = CONTENT_Y + 12 - (int)g_scrollY;
 
-    /* 1. Logo header */
-    pd->graphics->fillRect(0, startY - 4, PLUTO_SCREEN_WIDTH, 54,
-                           kColorBlack);
+    /* 1. Comet Browser logo header */
+    pd->graphics->fillRect(0, startY - 4, SCREEN_WIDTH, 54, kColorBlack);
 
-    /* Comet icon (pixel art: nucleus + tail) */
+    /* comet icon: nucleus + tail */
     int cx = 30;
     int cy = startY + 16;
-    for (int i = 0; i <= 12; i++) {
+    for (int i = 0; i <= 12; i++)
+    {
         if (i % 2 == 0)
-            pd->graphics->drawLine(cx - i * 3, cy - i,
-                                   cx - i * 3 - 4, cy - i + 2, 1,
-                                   kColorWhite);
+        {
+            pd->graphics->drawLine(cx - i * 3, cy - i, cx - i * 3 - 4, cy - i + 2,
+                                   1, kColorWhite);
+        }
     }
-    pd_fill_circle(cx, cy, 7, kColorWhite);
-    pd_fill_circle(cx, cy, 4, kColorBlack);
-    pd_fill_circle(cx - 1, cy - 2, 2, kColorWhite);
+    pd->graphics->fillEllipse(cx - 7, cy - 7, 15, 15, 0.0f, 360.0f, kColorWhite);
+    pd->graphics->fillEllipse(cx - 4, cy - 4, 9, 9, 0.0f, 360.0f, kColorBlack);
+    pd->graphics->fillEllipse(cx - 1 - 2, cy - 2 - 2, 5, 5, 0.0f, 360.0f, kColorWhite);
 
     /* Title text */
     pd->graphics->setDrawMode(kDrawModeFillWhite);
-    pd->graphics->setFont((LCDFont*)fontHeading);
-    pd->graphics->drawText("COMET BROWSER", 13, kASCIIEncoding, 48,
-                           startY + 4);
-    pd->graphics->setFont((LCDFont*)fontSmall);
-    pd->graphics->drawText("The Web on Playdate", 18, kASCIIEncoding, 50,
+    pd->graphics->setFont(fontHeading);
+    const char *title = "COMET BROWSER";
+    pd->graphics->drawText(title, strlen(title), kUTF8Encoding, 48, startY + 4);
+    pd->graphics->setFont(fontSmall);
+    const char *subtitle = "The Web on Playdate";
+    pd->graphics->drawText(subtitle, strlen(subtitle), kUTF8Encoding, 50,
                            startY + 32);
     pd->graphics->setDrawMode(kDrawModeCopy);
 
     /* Address bar prompt pill */
-    pd->graphics->fillRoundRect(20, startY + 56, PLUTO_SCREEN_WIDTH - 40,
-                                24, 4, kColorBlack);
+    pd->graphics->fillRoundRect(20, startY + 56, SCREEN_WIDTH - 40, 24, 4,
+                                kColorBlack);
     pd->graphics->setDrawMode(kDrawModeFillWhite);
-    pd->graphics->setFont((LCDFont*)fontBold);
-    pd->graphics->drawText("Press (B) to Type URL or Search Web", 36,
-                           kASCIIEncoding, 32, startY + 60);
+    pd->graphics->setFont(fontBold);
+    const char *prompt = "Press (B) to Type URL or Search Web";
+    pd->graphics->drawText(prompt, strlen(prompt), kUTF8Encoding, 32, startY + 60);
     pd->graphics->setDrawMode(kDrawModeCopy);
 
-    /* Settings button (selectable, below address bar with spacing) */
+    /* Settings button */
     int settingsBtnY = startY + 88;
     int settingsBtnH = 22;
-    int isSettingsSelected = (s_selectedIndex == 0);
-    int settingsBtnW = PLUTO_SCREEN_WIDTH - 40;
+    int isSettingsSelected = (g_selectedIndex == 0);
+    int settingsBtnW = SCREEN_WIDTH - 40;
     int settingsBtnX = 20;
 
-    pd->graphics->drawLine(20, settingsBtnY, PLUTO_SCREEN_WIDTH - 20,
-                           settingsBtnY, 1, kColorBlack);
+    pd->graphics->drawLine(20, settingsBtnY, SCREEN_WIDTH - 20, settingsBtnY,
+                           1, kColorBlack);
 
-    if (isSettingsSelected) {
-        pd->graphics->fillRoundRect(settingsBtnX, settingsBtnY + 4,
-                                    settingsBtnW, settingsBtnH, 4,
-                                    kColorBlack);
+    if (isSettingsSelected)
+    {
+        pd->graphics->fillRoundRect(settingsBtnX, settingsBtnY + 4, settingsBtnW,
+                                    settingsBtnH, 4, kColorBlack);
         pd->graphics->drawRoundRect(settingsBtnX + 1, settingsBtnY + 5,
-                                    settingsBtnW - 2, settingsBtnH - 2,
-                                    3, 1, kColorWhite);
-        pd->graphics->setDrawMode(kDrawModeFillWhite);
-    } else {
-        pd->graphics->fillRoundRect(settingsBtnX, settingsBtnY + 4,
-                                    settingsBtnW, settingsBtnH, 4,
+                                    settingsBtnW - 2, settingsBtnH - 2, 3, 1,
                                     kColorWhite);
-        pd->graphics->drawRoundRect(settingsBtnX, settingsBtnY + 4,
-                                    settingsBtnW, settingsBtnH, 4,
-                                    1, kColorBlack);
+        pd->graphics->setDrawMode(kDrawModeFillWhite);
+    }
+    else
+    {
+        pd->graphics->fillRoundRect(settingsBtnX, settingsBtnY + 4, settingsBtnW,
+                                    settingsBtnH, 4, kColorWhite);
+        pd->graphics->drawRoundRect(settingsBtnX, settingsBtnY + 4, settingsBtnW,
+                                    settingsBtnH, 4, 1, kColorBlack);
         pd->graphics->setDrawMode(kDrawModeCopy);
     }
 
-    pd->graphics->setFont((LCDFont*)fontBold);
-    const char* settingsLabel = "Settings";
-    int settingsLabelW =
-        style_get_text_width(fontBold, settingsLabel);
-    pd->graphics->drawText(
-        settingsLabel, strlen(settingsLabel), kUTF8Encoding,
-        settingsBtnX + (settingsBtnW - settingsLabelW) / 2,
-        settingsBtnY + 9);
+    pd->graphics->setFont(fontBold);
+    const char *settingsLabel = "Settings";
+    int settingsLabelW = style_get_text_width(PLUTO_FONT_BODY_BOLD, settingsLabel);
+    pd->graphics->drawText(settingsLabel, strlen(settingsLabel), kUTF8Encoding,
+                           settingsBtnX + (settingsBtnW - settingsLabelW) / 2,
+                           settingsBtnY + 9);
     pd->graphics->setDrawMode(kDrawModeCopy);
 
     pd->graphics->drawLine(20, settingsBtnY + settingsBtnH + 6,
-                           PLUTO_SCREEN_WIDTH - 20,
-                           settingsBtnY + settingsBtnH + 6, 1,
-                           kColorBlack);
+                           SCREEN_WIDTH - 20, settingsBtnY + settingsBtnH + 6,
+                           1, kColorBlack);
 
     /* Speed Dial section title */
     int gridStartY = settingsBtnY + settingsBtnH + 14;
-    pd->graphics->setFont((LCDFont*)fontBold);
-    pd->graphics->drawText("SPEED DIAL / BOOKMARKS", 21, kASCIIEncoding,
-                           20, gridStartY);
-    pd->graphics->drawLine(20, gridStartY + 16, PLUTO_SCREEN_WIDTH - 20,
-                           gridStartY + 16, 1, kColorBlack);
+    pd->graphics->setFont(fontBold);
+    const char *section = "SPEED DIAL / BOOKMARKS";
+    pd->graphics->drawText(section, strlen(section), kUTF8Encoding, 20, gridStartY);
+    pd->graphics->drawLine(20, gridStartY + 16, SCREEN_WIDTH - 20, gridStartY + 16,
+                           1, kColorBlack);
 
     /* Speed dial 2-column grid */
-    const int cardW = 172, cardH = 46, gapX = 16, gapY = 8;
+    int cardW = 172;
+    int cardH = 46;
+    int gapX = 16;
+    int gapY = 8;
     int cardsStartY = gridStartY + 24;
 
-    for (int i = 1; i <= count; i++) {
-        PlutoSavedBookmark* bm =
-            (PlutoSavedBookmark*)da_get(bookmarks, (size_t)i - 1);
-        if (bm == NULL) continue;
-
+    for (int i = 1; i <= count; i++)
+    {
+        const StoredBookmark *bm = storage_bookmark_at(i - 1);
+        if (!bm)
+        {
+            continue;
+        }
         int col = (i - 1) % 2;
         int row = (i - 1) / 2;
         int cardX = 20 + col * (cardW + gapX);
         int cardY = cardsStartY + row * (cardH + gapY);
-        int isSelected = (i == s_selectedIndex);
 
-        if (isSelected) {
-            pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5,
-                                        kColorBlack);
-            pd->graphics->drawRoundRect(cardX + 1, cardY + 1,
-                                        cardW - 2, cardH - 2, 4, 1,
-                                        kColorWhite);
+        /* skip cards scrolled out of view (visual-only optimization; the Lua
+         * version drew everything — results identical on a 1-bit screen) */
+        if (cardY > SCREEN_HEIGHT || cardY + cardH < CONTENT_Y)
+        {
+            continue;
+        }
+
+        int isSelected = (i == g_selectedIndex);
+
+        if (isSelected)
+        {
+            pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5, kColorBlack);
+            pd->graphics->drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2,
+                                        4, 1, kColorWhite);
             pd->graphics->setDrawMode(kDrawModeFillWhite);
-        } else {
-            pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5,
-                                        kColorWhite);
-            pd->graphics->drawRoundRect(cardX, cardY, cardW, cardH, 5,
-                                        1, kColorBlack);
+        }
+        else
+        {
+            pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5, kColorWhite);
+            pd->graphics->drawRoundRect(cardX, cardY, cardW, cardH, 5, 1,
+                                        kColorBlack);
             pd->graphics->setDrawMode(kDrawModeCopy);
         }
 
         int textAreaW = cardW - 16;
-        char key[16];
 
-        const char* title = bm->title[0] != '\0' ? bm->title : bm->url;
-        pd->graphics->setFont((LCDFont*)fontBold);
-        snprintf(key, sizeof(key), "t%d", i);
-        draw_marquee(title, cardX + 8, cardY + 6, textAreaW, fontBold,
-                     key);
+        pd->graphics->setFont(fontBold);
+        const char *t = bm->title ? bm->title : bm->url;
+        draw_marquee(t, cardX + 8, cardY + 6, textAreaW, fontBold, i * 2 - 2);
 
-        const char* desc = bm->desc[0] != '\0' ? bm->desc : bm->url;
-        pd->graphics->setFont((LCDFont*)fontSmall);
-        snprintf(key, sizeof(key), "d%d", i);
-        draw_marquee(desc, cardX + 8, cardY + 24, textAreaW, fontSmall,
-                     key);
+        pd->graphics->setFont(fontSmall);
+        const char *d = bm->desc ? bm->desc : bm->url;
+        draw_marquee(d, cardX + 8, cardY + 24, textAreaW, fontSmall, i * 2 - 1);
 
         pd->graphics->setDrawMode(kDrawModeCopy);
     }
 
-    int bottomY =
-        cardsStartY + ((count + 1) / 2) * (cardH + gapY) + 12;
-    pd->graphics->setFont((LCDFont*)fontSmall);
-    {
-        const char* hint =
-            "(A) Open  \xE2\x80\xA2  (B) Search/URL  \xE2\x80\xA2  "
-            "Menu: Settings";
-        pd->graphics->drawText(hint, strlen(hint), kUTF8Encoding, 24,
-                               bottomY);
-    }
-
-    (void)fontBody;
+    int bottomY = cardsStartY + (count + 1) / 2 * (cardH + gapY) + 12;
+    pd->graphics->setFont(fontSmall);
+    const char *footer = "(A) Open  -  (B) Search/URL  -  Menu: Settings";
+    pd->graphics->drawText(footer, strlen(footer), kUTF8Encoding, 24, bottomY);
 }
-
-#else /* host build */
-
-void hp_draw(double crankChange) { (void)crankChange; }
-
-#endif

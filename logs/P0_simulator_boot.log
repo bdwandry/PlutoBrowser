@@ -1,0 +1,8 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[13:48:45 #1] === PlutoBrowser boot (Phase 0 scaffold) ===
+[13:48:45 #2] eventHandler: kEventInit, osversion=30101
+[13:48:45 #3] updateFrame: first frame executed
+[13:48:55 #4] updateFrame: heartbeat frame=300
+[13:49:05 #5] updateFrame: heartbeat frame=600
+[13:49:15 #6] updateFrame: heartbeat frame=900

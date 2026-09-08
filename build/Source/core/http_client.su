@@ -1,0 +1,12 @@
+http_client.c:231:13:reset_state	24	static
+http_client.c:631:12:start_request	1136	static
+http_client.c:605:13:about_timer_cb	40	static
+http_client.c:282:14:decode_chunked	88	static
+http_client.c:532:13:tcp_closed_cb	0	static
+http_client.c:573:13:access_cb	12	static
+http_client.c:543:13:tcp_open_cb	16	static
+http_client.c:843:6:http_client_init	8	static
+http_client.c:850:5:http_get	16	static
+http_client.c:860:6:http_cancel	0	static
+http_client.c:866:5:http_is_loading	0	static
+http_client.c:874:6:http_update	888	static

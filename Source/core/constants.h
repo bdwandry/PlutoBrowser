@@ -1,120 +1,93 @@
-// constants.h — full C port of CometBrowser Source/core/constants.lua
-// Values and strings are transcribed verbatim; behavior parity is mandatory.
-
+/*
+ * PlutoBrowser — constants.h
+ * Screen geometry, view states, search engines, bookmarks, image modes.
+ * Port of Source/core/constants.lua (reference values preserved exactly).
+ */
 #ifndef PLUTO_CONSTANTS_H
 #define PLUTO_CONSTANTS_H
+
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// ---------------------------------------------------------------------------
-// Display & Screen Geometry  (Constants.SCREEN_* / CHROME_* / CONTENT_* ...)
-// ---------------------------------------------------------------------------
+/* ── Display & Screen Geometry ─────────────────────────────────────────── */
+#define SCREEN_WIDTH     400
+#define SCREEN_HEIGHT    240
+#define CHROME_HEIGHT    24
+#define CONTENT_Y        24
+#define CONTENT_HEIGHT   216
+#define CONTENT_WIDTH    400
+#define CONTENT_MARGIN   8
+#define CONTENT_TEXT_WIDTH 384
+#define SCROLLBAR_WIDTH  5
 
-#define PLUTO_SCREEN_WIDTH        400
-#define PLUTO_SCREEN_HEIGHT       240
-#define PLUTO_CHROME_HEIGHT       24
-#define PLUTO_CONTENT_Y           24   // Constants.CONTENT_Y
-#define PLUTO_CONTENT_HEIGHT      216  // Constants.CONTENT_HEIGHT
-#define PLUTO_CONTENT_WIDTH       400  // Constants.CONTENT_WIDTH
-#define PLUTO_CONTENT_MARGIN      8    // Constants.CONTENT_MARGIN
-#define PLUTO_CONTENT_TEXT_WIDTH  384  // Constants.CONTENT_TEXT_WIDTH
-#define PLUTO_SCROLLBAR_WIDTH     5    // Constants.SCROLLBAR_WIDTH
+/* ── View States ───────────────────────────────────────────────────────── */
+typedef enum
+{
+    STATE_HOME = 0,
+    STATE_LOADING,
+    STATE_PAGE,
+    STATE_ERROR,
+    STATE_BOOKMARKS,
+    STATE_HISTORY,
+    STATE_SETTINGS
+} BrowserState;
 
-// ---------------------------------------------------------------------------
-// View States  (Constants.STATE_*)
-// Lua stored these as strings ("home", "loading", ...); the C port uses an
-// enum plus pluto_state_name() which returns the identical strings so that
-// persisted data and log output match the Lua implementation.
-// ---------------------------------------------------------------------------
+/* ── Browsing Modes (100% Pure On-Device) ──────────────────────────────── */
+typedef enum
+{
+    MODE_READER = 0,   /* Constants.MODE_READER   = "reader" */
+    MODE_RAW_HTML,     /* Constants.MODE_RAW_HTML = "html"   */
+    MODE_OPERA_DS      /* Constants.MODE_OPERA_DS = "ds"     */
+} BrowseMode;
 
-typedef enum PlutoState {
-    PLUTO_STATE_HOME      = 0,  // "home"
-    PLUTO_STATE_LOADING   = 1,  // "loading"
-    PLUTO_STATE_PAGE      = 2,  // "page"
-    PLUTO_STATE_ERROR     = 3,  // "error"
-    PLUTO_STATE_BOOKMARKS = 4,  // "bookmarks"
-    PLUTO_STATE_HISTORY   = 5,  // "history"
-    PLUTO_STATE_SETTINGS  = 6,  // "settings"
-} PlutoState;
+/* ── Image Rendering Modes ─────────────────────────────────────────────── */
+typedef enum
+{
+    IMAGE_MODE_ALL = 0,      /* Constants.IMAGE_MODE_ALL      = "all"      */
+    IMAGE_MODE_VIEWPORT,     /* Constants.IMAGE_MODE_VIEWPORT = "viewport" */
+    IMAGE_MODE_ONDEMAND,     /* Constants.IMAGE_MODE_ONDEMAND = "ondemand" */
+    IMAGE_MODE_HOVER,        /* Constants.IMAGE_MODE_HOVER    = "hover"    */
+    IMAGE_MODE_DISABLED,     /* Constants.IMAGE_MODE_DISABLED = "disabled" */
+    IMAGE_MODE_COUNT
+} ImageMode;
 
-const char* pluto_state_name(PlutoState state);
+/* ── Search Engine entry ───────────────────────────────────────────────── */
+typedef struct
+{
+    const char *name;
+    const char *url;
+} SearchEngine;
 
-// ---------------------------------------------------------------------------
-// Browsing Modes  (Constants.MODE_READER / MODE_RAW_HTML / MODE_OPERA_DS)
-// ---------------------------------------------------------------------------
+#define SEARCH_ENGINE_COUNT 4
+extern const SearchEngine SEARCH_ENGINES[SEARCH_ENGINE_COUNT];
 
-typedef enum PlutoMode {
-    PLUTO_MODE_READER   = 0,  // "reader"
-    PLUTO_MODE_RAW_HTML = 1,  // "html"
-    PLUTO_MODE_OPERA_DS = 2,  // "ds"
-} PlutoMode;
+/* ── Default Start Page Speed Dials ────────────────────────────────────── */
+typedef struct
+{
+    const char *title;
+    const char *url;
+    const char *desc;
+} DefaultBookmark;
 
-const char* pluto_mode_name(PlutoMode mode);
+#define DEFAULT_BOOKMARK_COUNT 9
+extern const DefaultBookmark DEFAULT_BOOKMARKS[DEFAULT_BOOKMARK_COUNT];
 
-// ---------------------------------------------------------------------------
-// Search Engines  (Constants.SEARCH_ENGINES)
-// ---------------------------------------------------------------------------
+/* ── User-Agent (constants.lua value; HTTP client sends a shorter header
+ *    string built in http_client.c exactly like the Lua reference) ──────── */
+#define USER_AGENT "Mozilla/5.0 (Playdate OS 2.7; 400x240; 1-bit Mono) CometBrowser/1.0"
 
-typedef struct PlutoSearchEngine {
-    const char* name;
-    const char* url;
-} PlutoSearchEngine;
+/* ── Image mode label/names (settings UI + persistence) ────────────────── */
+extern const char *IMAGE_MODE_NAMES[IMAGE_MODE_COUNT];   /* keys stored in storage */
+const char *image_mode_label(ImageMode mode);            /* Constants.IMAGE_MODE_LABELS */
 
-#define PLUTO_SEARCH_ENGINE_COUNT 4
-extern const PlutoSearchEngine PLUTO_SEARCH_ENGINES[PLUTO_SEARCH_ENGINE_COUNT];
-
-// ---------------------------------------------------------------------------
-// Default Start Page Speed Dials  (Constants.DEFAULT_BOOKMARKS)
-// ---------------------------------------------------------------------------
-
-typedef struct PlutoBookmark {
-    const char* title;
-    const char* url;
-    const char* desc;
-} PlutoBookmark;
-
-#define PLUTO_DEFAULT_BOOKMARK_COUNT 9
-extern const PlutoBookmark PLUTO_DEFAULT_BOOKMARKS[PLUTO_DEFAULT_BOOKMARK_COUNT];
-
-// ---------------------------------------------------------------------------
-// User-Agent  (Constants.USER_AGENT)
-// ---------------------------------------------------------------------------
-
-#define PLUTO_USER_AGENT \
-    "Mozilla/5.0 (Playdate OS 2.7; 400x240; 1-bit Mono) CometBrowser/1.0"
-
-// ---------------------------------------------------------------------------
-// Image Rendering Modes  (Constants.IMAGE_MODE_*)
-// ---------------------------------------------------------------------------
-
-typedef enum PlutoImageMode {
-    PLUTO_IMAGE_MODE_ALL      = 0,  // "all"
-    PLUTO_IMAGE_MODE_VIEWPORT = 1,  // "viewport"
-    PLUTO_IMAGE_MODE_ONDEMAND = 2,  // "ondemand"
-    PLUTO_IMAGE_MODE_HOVER    = 3,  // "hover"
-    PLUTO_IMAGE_MODE_DISABLED = 4,  // "disabled"
-} PlutoImageMode;
-
-const char* pluto_image_mode_name(PlutoImageMode mode);   // IMAGE_MODE_NAMES order
-const char* pluto_image_mode_label(PlutoImageMode mode);  // IMAGE_MODE_LABELS map
-
-// ---------------------------------------------------------------------------
-// Network Protocol  (Constants.PROTOCOL_*)
-// ---------------------------------------------------------------------------
-
-typedef enum PlutoProtocol {
-    PLUTO_PROTOCOL_HTTP = 0,  // "http"
-    PLUTO_PROTOCOL_TCP  = 1,  // "tcp"
-} PlutoProtocol;
-
-#define PLUTO_PROTOCOL_COUNT 2
-const char* pluto_protocol_name(PlutoProtocol mode);      // "http"/"tcp"
-const char* pluto_protocol_label(PlutoProtocol mode);     // "HTTP"/"TCP"
+/* Map a persisted name ("all"/"viewport"/...) to its enum; -1 if unknown. */
+int image_mode_from_name(const char *name);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // PLUTO_CONSTANTS_H
+#endif /* PLUTO_CONSTANTS_H */

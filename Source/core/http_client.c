@@ -1,1150 +1,1194 @@
-// http_client.c — Multi-protocol HTTP/HTTPS client for PlutoBrowser.
-//
-// Supports two networking backends:
-//  1. Native HTTP API (pd->network->http): preferred for HTTP/HTTPS. Handles
-//     TLS, HTTP request formatting, and status/header parsing internally.
-//  2. Raw TCP API (pd->network->tcp): fallback for HTTP/HTTPS if the HTTP API
-//     is unavailable or fails. Also used for non-HTTP TCP connections.
-//
-// Protocol selection: HTTP/HTTPS URLs attempt the native HTTP API first. If
-// the HTTP API is unavailable or the connection fails, falls back to raw TCP.
-// The browser receives responses through the same PlutoHttpCallbacks interface
-// regardless of which backend succeeded — the protocol is an implementation
-// detail of content retrieval.
-//
-// Testability: hc_set_http_for_tests()/hc_set_tcp_for_tests()/hc_set_clock_fn()
-// swap the vtables and clock so selftest_http.c can replay the oracle
-// scenarios offline.
-
-#include "http_client.h"
-
-#include <ctype.h>
-#include <stdarg.h>
-#include <stdio.h>
+/*
+ * PlutoBrowser — http_client.c
+ * Port of Source/core/http_client.lua (reference, 538 lines).
+ * Raw-TCP HTTP/1.1 GET engine; see http_client.h for the Lua→C map,
+ * preserved semantics, and the C networking API mapping.
+ */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include "core/http_client.h"
+#include "core/url.h"
+#include "core/cookie_jar.h"
+#include "core/logger.h"
+#include "util/strbuf.h"
+#include "util/pdtimer.h"
 
-#include "pd_api.h"
-#include "../util/mem.h"
-#include "cookie_jar.h"
-#include "internal_pages.h"
-#include "logger.h"
-#include "url.h"
+extern PlaydateAPI *pluto_pd(void);
+extern void pluto_free(void *p);
 
-#define HC_MAX_RESPONSE_SIZE ((size_t)2097152)
-#define HC_REQUEST_TIMEOUT_MS ((unsigned)60000)
-#define HC_MAX_REDIRECTS 5
-#define HC_READ_CHUNK 32768
-#define HC_CONNECT_TIMEOUT_MS 10000
-#define HC_READ_TIMEOUT_MS 10000
-#define HC_SOCKET_BUFFER_BYTES 16384
-#define HC_ABOUT_DELAY_MS 20
-#define HC_URL_MAX 2048
-#define HC_ERR_MAX 256
-#define HC_MAX_HDRS 128
-#define HC_MAX_SET_COOKIES 64
-#define HC_NET_PURPOSE "CometBrowser Web Browsing"
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
 
-enum {
-    HC_IDLE = 0,
-    HC_CONNECTING,
-    HC_READING,
-    HC_DONE,
-    HC_ERROR,
+/* ── Constants (verbatim from the reference) ─────────────────────────────── */
+#define MAX_RESPONSE_SIZE  2097152 /* 2 MB hard cap to prevent memory growth */
+#define REQUEST_TIMEOUT_MS 60000   /* 60 seconds total                       */
+#define MAX_REDIRECTS      5
+#define READ_CHUNK         16384
+
+/* Read buffer lives in BSS, not on the update-loop stack: the device
+ * game-task stack is small, and a 32KB local was the P22-class hazard
+ * this file must not repeat. */
+static char g_readChunk[READ_CHUNK];
+#define SDK_READ_BUFFER    16384   /* Lua setReadBufferSize(16384)           */
+#define SDK_TIMEOUT_MS     10000   /* Lua passed 10 (seconds); C takes ms    */
+
+/* ── State ────────────────────────────────────────────────────────────────── */
+typedef enum
+{
+    HS_IDLE = 0,
+    HS_CONNECTING,
+    HS_ACCESS_WAIT,
+    HS_READING,
+    HS_DONE,
+    HS_ERROR
+} HttpState;
+
+static PlaydateAPI *g_pd = NULL;
+
+static TCPConnection *g_tcp = NULL;
+static HttpCallbacks g_cb;
+static char g_url[1024];
+static UrlParsed *g_parsed = NULL; /* heap: UrlParsed is ~1.7KB */
+
+static HttpState g_state = HS_IDLE;
+static int g_status = 200;
+static StrBuf g_buf;               /* raw response (headers + body) */
+static size_t g_bodyStart = 0;     /* 0 = headers not parsed yet    */
+static int g_isChunked = 0;
+static long g_contentLength = -1;
+static int g_connOpen = 0;         /* open callback fired, connected */
+static int g_openFailed = 0;
+static int g_connClosed = 0;
+static char g_error[256];
+static unsigned int g_requestStart = 0;
+static unsigned int g_requestId = 0; /* bumped on every reset */
+static unsigned int g_accessRequestId = 0; /* generation owning the pending access reply */
+
+/* ── Connection lifecycle (SDK TCP/TLS crash workarounds) ───────────────────
+ * Two documented-by-experiment SDK hazards shape this design:
+ *   (1) Releasing a connection while its async DNS/connect is still in flight
+ *       segfaults the SDK event loop (P33 pool build: the DNS-failed t:80
+ *       connection was released in a later host-switch → SEGV).
+ *   (2) Closing+releasing a COMPLETED TLS connection and setting up a new TLS
+ *       connection shortly after traps the SDK (P33b probe, P33 svg fetch).
+ * The TCP docs bless reuse: close() "The connection may be used again for
+ * another request". Therefore:
+ *   - g_pooledTcp: the most recent connection whose open RESOLVED (success or
+ *     open-callback failure). Reused via close()+open() for the same host —
+ *     skipping the TLS handshake for same-host image fetches entirely.
+ *   - g_orphanTcp: a still-connecting connection handed off at cancel/reset.
+ *     Its (stale) open callback closes and releases it — never us.
+ *   - g_graveTcp: a pooled connection dropped on host switch — closed now,
+ *     RELEASED only after GRAVE_FRAMES frames (http_update tick), long after
+ *     the SDK's event loop has drained any pending state for it. */
+static TCPConnection *g_pooledTcp = NULL;
+static char g_pooledHost[256];
+static int g_pooledPort = 0;
+static int g_pooledSsl = 0;
+static TCPConnection *g_orphanTcp = NULL;  /* open callback owns close+release */
+static TCPConnection *g_graveTcp = NULL;   /* closed; release after the delay */
+static int g_graveTimer = 0;
+#define GRAVE_FRAMES 120  /* ~4s at 30fps */
+
+/* Saved response for the done path (reset() clears live state before the
+ * user callback fires — Lua saved locals for the same reason). */
+static int g_savedStatus;
+static StrBuf g_savedBuf;
+static size_t g_savedBodyStart;
+static int g_savedIsChunked;
+/* Header-line scratch lives in BSS, not on the update-loop stack (P22
+ * lesson: the device game-task stack is small). */
+static char g_hdrLine[768];
+
+/* Set-Cookie collection buffer — BSS (P22 stack rule). */
+static char g_setCookies[16][512];
+
+static char g_savedHeaders[64][2][256]; /* [i][0]=key [i][1]=value */
+static int g_savedHeaderCount;
+
+/* Redirects: deferred to a later update tick (reference parity). */
+static char g_pendingRedirectUrl[1024];
+static HttpCallbacks g_pendingRedirectCb;
+static int g_hasPendingRedirect = 0;
+static int g_redirectDepth = 0;
+
+static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
+
+/* ── Internal about: pages (verbatim from the reference) ─────────────────── */
+typedef struct
+{
+    const char *name;
+    const char *title;
+    const char *html;
+} InternalPage;
+
+static const char ACIDTEST_HTML[] =
+    "<html><head><title>HTML Renderer Test Suite</title></head><body>\n"
+    "\n"
+    "<h1>HTML Renderer Test</h1>\n"
+    "<p>Every block &amp; inline element the renderer understands, in one page. Some <b>bold</b>, <i>italic</i>, <u>underlined</u>, <s>struck</s>, <code>code</code>, <mark>marked</mark>, <small>small</small>, <big>big</big> and <sub>sub</sub>/<sup>sup</sup> text, plus an <a href=\"https://example.com\">example link</a> and a <q>short quote</q>.</p>\n"
+    "\n"
+    "<h2>Headings &amp; Alignment</h2>\n"
+    "<h3>Left</h3>\n"
+    "<div align=\"center\"><p>This paragraph is centered via align.</p></div>\n"
+    "<p style=\"text-align:right\">This paragraph is right-aligned via inline style.</p>\n"
+    "\n"
+    "<h2>Lists</h2>\n"
+    "<ul><li>Unordered item one</li><li>Item two with a nested list:<ul><li>Nested item A</li><li>Nested item B</li></ul></li><li>Item three</li></ul>\n"
+    "<ol><li>First ordered</li><li>Second ordered</li><li>Third ordered</li></ol>\n"
+    "<dl><dt>Definition term</dt><dd>Definition description that runs on for a bit so we can see wrapping work.</dd><dt>Another term</dt><dd>Another description.</dd></dl>\n"
+    "\n"
+    "<h2>Quotes &amp; Code</h2>\n"
+    "<blockquote>This is a block quotation with a left rail, the way desktop browsers draw them.</blockquote>\n"
+    "<pre>function hello()\n"
+    "  print(\"Hello, Playdate\")\n"
+    "end</pre>\n"
+    "\n"
+    "<h2>Tables</h2>\n"
+    "<table>\n"
+    "<caption>Sample Caption</caption>\n"
+    "<thead><tr><th>Name</th><th>Score</th><th>Level</th></tr></thead>\n"
+    "<tbody>\n"
+    "<tr><td>Bryan</td><td align=\"right\">98</td><td>5</td></tr>\n"
+    "<tr><td>Comet</td><td align=\"right\">87</td><td>4</td></tr>\n"
+    "</tbody>\n"
+    "</table>\n"
+    "\n"
+    "<h2>Figures</h2>\n"
+    "<figure><img src=\"https://example.com/test.png\" width=\"160\" height=\"80\" alt=\"Alt text placeholder\"><figcaption>A figure with a caption</figcaption></figure>\n"
+    "\n"
+    "<h2>Forms</h2>\n"
+    "<form action=\"https://example.com/search\" method=\"get\">\n"
+    "<label>Search:</label> <input type=\"text\" name=\"q\" placeholder=\"type here\">\n"
+    "<input type=\"submit\" value=\"Search\">\n"
+    "<fieldset><legend>Preferences</legend>\n"
+    "<input type=\"checkbox\" name=\"opt1\" checked> Option one (checked)<br>\n"
+    "<input type=\"checkbox\" name=\"opt2\"> Option two<br>\n"
+    "<input type=\"radio\" name=\"grp\" value=\"a\" checked> Radio A\n"
+    "<input type=\"radio\" name=\"grp\" value=\"b\"> Radio B\n"
+    "<select name=\"color\"><option selected>Red</option><option>Green</option><option>Blue</option></select>\n"
+    "</fieldset>\n"
+    "<textarea name=\"msg\" rows=\"2\">Hello textarea</textarea>\n"
+    "</form>\n"
+    "\n"
+    "<h2>Boxes</h2>\n"
+    "<details><summary>Clickable summary line</summary><p>Hidden-until-open body content is shown inline on Playdate.</p></details>\n"
+    "<dialog open><p>A dialog box with an open attribute.</p></dialog>\n"
+    "\n"
+    "<h2>Media &amp; Meters</h2>\n"
+    "<p>Progress: <progress value=\"70\" max=\"100\"></progress>  Meter: <meter value=\"0.6\" max=\"1\"></meter></p>\n"
+    "<video controls width=\"300\" height=\"120\"><source src=\"movie.mp4\"></video>\n"
+    "<iframe width=\"200\" height=\"100\"></iframe>\n"
+    "\n"
+    "<h2>Horizontal Rule &amp; Misc</h2>\n"
+    "<hr>\n"
+    "<p>Entities: &amp; &lt; &gt; &quot; &apos; &nbsp; &copy; &mdash; &hellip; 5 &lt; 6 &amp; 4 = 9</p>\n"
+    "<p>Unicode fallbacks: &Auml; &ouml; &eacute; &nbsp;</p>\n"
+    "\n"
+    "</body></html>";
+
+static const InternalPage INTERNAL_PAGES[] = {
+    { "about:home", "CometBrowser",
+      "<html><head><title>CometBrowser</title></head><body><h1>CometBrowser</h1><p>Ready.</p></body></html>" },
+    { "about:blank", "Blank",
+      "<html><body></body></html>" },
+    { "about:acidtest", "HTML Acid Test", ACIDTEST_HTML },
 };
 
-static struct PlaydateAPI* s_pd;
-// pd->network->tcp is a const vtable; tests inject a non-const fake.
-static const struct playdate_tcp* s_tcp;
-static const struct playdate_http* s_http;
-static unsigned (*s_clockfn)(void);
+/* ── Helpers ──────────────────────────────────────────────────────────────── */
 
-// Which networking backend is active for the current request.
-enum HcBackend s_backend;
-
-// User-selected preference (from Settings): HTTP API or raw TCP. Defaults to
-// HTTP for fresh installs. do_get() falls back to the other backend when the
-// preferred one is unavailable.
-static enum HcBackend s_backendPref = HC_BACKEND_HTTP;
-
-static TCPConnection* s_conn;
-static HTTPConnection* s_http_conn;
-static int s_state;
-static PlutoHttpCallbacks s_cbs;
-static char s_url[HC_URL_MAX];
-static PlutoUrl s_parsed;
-static StrBuf s_buf;
-static int s_status;
-
-static StrMap* s_headers;
-static char* s_hdrVals[HC_MAX_HDRS]; // owned header values
-static size_t s_nHdrVals;
-static char* s_setCookies[HC_MAX_SET_COOKIES]; // owned Set-Cookie values
-static size_t s_nSetCookies;
-
-static size_t s_bodyStart; // 0-based index of first body byte
-static int s_hasBodyStart;
-static int s_chunked;
-static long s_contentLength;
-
-static int s_connOpen;
-static int s_openFailed;
-static int s_connClosed;
-static char s_error[HC_ERR_MAX];
-static unsigned s_startMs;
-static unsigned s_reqId;
-
-static char s_pendingUrl[HC_URL_MAX];
-static PlutoHttpCallbacks s_pendingCbs;
-static int s_hasPendingRedirect;
-static int s_redirectDepth;
-
-static int s_aboutPending;
-static unsigned s_aboutDueMs;
-static const HcInternalPage* s_aboutPage;
-
-static int s_accessWaiting;
-static unsigned s_accessReqId;
-static char s_grantHost[PLUTO_URL_HOST_MAX];
-
-static const PlutoHttpCallbacks HC_NO_CBS;
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-static unsigned hc_now(void)
+/* Lua closeTcp: only close once the open has resolved; a still-connecting
+ * socket is left to its open callback, which detects staleness via requestId
+ * and closes itself (closing-while-connecting crashed the WX Simulator). */
+static void close_tcp(void)
 {
-    if (s_clockfn) return s_clockfn();
-    return (unsigned)s_pd->system->getCurrentTimeMilliseconds();
-}
-
-static const char* memfind(const char* hay, size_t hayLen, const char* needle,
-                           size_t nLen)
-{
-    if (nLen == 0) return hay;
-    if (hay == NULL || hayLen < nLen) return NULL;
-    for (size_t i = 0; i + nLen <= hayLen; i++)
-        if (hay[i] == needle[0] && memcmp(hay + i, needle, nLen) == 0)
-            return hay + i;
-    return NULL;
-}
-
-// Lua plain tonumber(str): full-string decimal parse (whitespace allowed),
-// optional sign, >= 1 digit. "12abc" fails.
-static int luatonum10(const char* str, long* out)
-{
-    if (!str) return 0;
-    const char* p = str;
-    while (*p && isspace((unsigned char)*p)) p++;
-    char* end = NULL;
-    long v = strtol(p, &end, 10);
-    if (end == p) return 0;
-    while (*end && isspace((unsigned char)*end)) end++;
-    if (*end != '\0') return 0;
-    *out = v;
-    return 1;
-}
-
-// Lua tonumber(trimmed, 16): full-string hex parse, optional leading '-'.
-// "5x", "", "0x10" fail; " ff " -> 255; "-4" -> -4.
-static int luatonum16(const char* str, size_t len, long* out)
-{
-    size_t i = 0;
-    while (i < len && isspace((unsigned char)str[i])) i++;
-    int neg = 0;
-    if (i < len && (str[i] == '+' || str[i] == '-')) {
-        neg = (str[i] == '-');
-        i++;
-    }
-    if (i >= len) return 0;
-    long v = 0;
-    for (; i < len; i++) {
-        unsigned char c = (unsigned char)str[i];
-        int d;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        else return 0;
-        v = v * 16 + d;
-    }
-    *out = neg ? -v : v;
-    return 1;
-}
-
-static const char* neterr_name(PDNetErr err)
-{
-    switch (err) {
-    case NET_OK: return "ok";
-    case NET_NO_DEVICE: return "NET_NO_DEVICE";
-    case NET_BUSY: return "NET_BUSY";
-    case NET_WRITE_ERROR: return "NET_WRITE_ERROR";
-    case NET_WRITE_BUSY: return "NET_WRITE_BUSY";
-    case NET_WRITE_TIMEOUT: return "NET_WRITE_TIMEOUT";
-    case NET_READ_ERROR: return "NET_READ_ERROR";
-    case NET_READ_BUSY: return "NET_READ_BUSY";
-    case NET_READ_TIMEOUT: return "NET_READ_TIMEOUT";
-    case NET_READ_OVERFLOW: return "NET_READ_OVERFLOW";
-    case NET_FRAME_ERROR: return "NET_FRAME_ERROR";
-    case NET_BAD_RESPONSE: return "NET_BAD_RESPONSE";
-    case NET_ERROR_RESPONSE: return "NET_ERROR_RESPONSE";
-    case NET_RESET_TIMEOUT: return "NET_RESET_TIMEOUT";
-    case NET_BUFFER_TOO_SMALL: return "NET_BUFFER_TOO_SMALL";
-    case NET_UNEXPECTED_RESPONSE: return "NET_UNEXPECTED_RESPONSE";
-    case NET_NOT_CONNECTED_TO_AP: return "NET_NOT_CONNECTED_TO_AP";
-    case NET_NOT_IMPLEMENTED: return "NET_NOT_IMPLEMENTED";
-    case NET_CONNECTION_CLOSED: return "NET_CONNECTION_CLOSED";
-    default: return "NET_UNKNOWN";
-    }
-}
-
-static void set_error(const char* fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(s_error, sizeof(s_error), fmt, ap);
-    va_end(ap);
-}
-
-// ── Header storage ────────────────────────────────────────────────────────────
-
-static void clear_headers(void)
-{
-    sm_destroy(s_headers);
-    s_headers = NULL;
-    for (size_t i = 0; i < s_nHdrVals; i++) pluto_free(s_hdrVals[i]);
-    s_nHdrVals = 0;
-    for (size_t i = 0; i < s_nSetCookies; i++) pluto_free(s_setCookies[i]);
-    s_nSetCookies = 0;
-}
-
-static void store_header(const char* key, size_t keyLen, const char* val,
-                         size_t valLen)
-{
-    char lower[128];
-    if (keyLen >= sizeof(lower)) keyLen = sizeof(lower) - 1;
-    for (size_t i = 0; i < keyLen; i++)
-        lower[i] = (char)tolower((unsigned char)key[i]);
-    lower[keyLen] = '\0';
-
-    char* v = (char*)pluto_malloc(valLen + 1);
-    if (!v) return;
-    memcpy(v, val, valLen);
-    v[valLen] = '\0';
-
-    if (strcmp(lower, "set-cookie") == 0) {
-        if (s_nSetCookies < HC_MAX_SET_COOKIES) {
-            s_setCookies[s_nSetCookies++] = v;
-            return;
+    if (g_tcp)
+    {
+        TCPConnection *t = g_tcp;
+        g_tcp = NULL;
+        if (g_connOpen || g_openFailed)
+        {
+            /* Open RESOLVED (success or failure): safe to close. Keep the
+             * object pooled — never release a TLS connection the SDK may
+             * still have event-loop state for (hazard 2). */
+            g_pd->network->tcp->close(t);
         }
-    } else if (s_nHdrVals < HC_MAX_HDRS && s_headers) {
-        sm_put(s_headers, lower, v); // map keeps latest value per key
-        s_hdrVals[s_nHdrVals++] = v; // we free every stored value ourselves
-        return;
-    }
-    pluto_free(v);
-}
-
-// ── Request building ──────────────────────────────────────────────────────────
-
-static void build_request(const PlutoUrl* parsed, StrBuf* out)
-{
-    sb_printf(out, "GET %s HTTP/1.1\r\n", parsed->fullPath);
-    // Lua rule verbatim (port 0 is truthy there): any port other than
-    // 80/443 is shown — including the parse("") -> blank:0 quirk.
-    if (parsed->port != 80 && parsed->port != 443)
-        sb_printf(out, "Host: %s:%d\r\n", parsed->host, parsed->port);
-    else
-        sb_printf(out, "Host: %s\r\n", parsed->host);
-    sb_append_str(out, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
-    sb_append_str(out, "Accept: text/html,text/plain;q=0.8\r\n");
-    sb_append_str(out, "Accept-Language: en-US,en;q=0.9\r\n");
-    StrBuf cookie;
-    sb_init(&cookie);
-    cj_get_header(parsed->host, parsed->path, parsed->isSsl, &cookie);
-    if (cookie.len > 0) {
-        sb_append_str(out, "Cookie: ");
-        sb_append(out, cookie.data, cookie.len);
-        sb_append_str(out, "\r\n");
-    }
-    sb_free(&cookie);
-    sb_append_str(out, "Connection: close\r\n");
-    sb_append_str(out, "\r\n");
-}
-
-// ── Chunked decoding ──────────────────────────────────────────────────────────
-
-// Returns a heap StrBuf with the decoded body, or NULL while incomplete /
-// malformed (caller keeps buffering, exactly like the Lua version).
-static StrBuf* decode_chunked(const char* str, size_t len)
-{
-    StrBuf* out = (StrBuf*)pluto_malloc(sizeof(StrBuf));
-    if (!out) return NULL;
-    sb_init(out);
-    size_t pos = 0;
-    for (;;) {
-        const char* le = memfind(str + pos, len - pos, "\r\n", 2);
-        if (!le) goto fail;
-        size_t lineEnd = (size_t)(le - str);
-        size_t sizeEnd = lineEnd;
-        for (size_t i = pos; i < lineEnd; i++)
-            if (str[i] == ';') { sizeEnd = i; break; }
-        long size = 0;
-        if (!luatonum16(str + pos, sizeEnd - pos, &size)) goto fail;
-        pos = lineEnd + 2;
-        if (size == 0) return out;
-        if ((long)len < (long)pos + size + 2) goto fail;
-        if (!sb_append(out, str + pos, (size_t)size)) goto fail;
-        pos += (size_t)size + 2;
-    }
-fail:
-    sb_free(out);
-    pluto_free(out);
-    return NULL;
-}
-
-// ── Header parsing ────────────────────────────────────────────────────────────
-
-static void parse_headers(size_t hEnd)
-{
-    size_t headLen = hEnd; // bytes up to (not including) the first \r
-    s_bodyStart = hEnd + 4;
-    s_hasBodyStart = 1;
-
-    clear_headers();
-    s_headers = sm_create(16);
-
-    // Status line: first [^\r\n] run, pattern "HTTP/%d+.%d+ (%d+)".
-    size_t slEnd = headLen;
-    for (size_t i = 0; i < headLen; i++)
-        if (s_buf.data[i] == '\r' || s_buf.data[i] == '\n') { slEnd = i; break; }
-    if (slEnd > 5 && strncmp(s_buf.data, "HTTP/", 5) == 0) {
-        size_t i = 5;
-        while (i < slEnd && isdigit((unsigned char)s_buf.data[i])) i++;
-        if (i < slEnd && s_buf.data[i] == '.') {
-            i++;
-            while (i < slEnd && isdigit((unsigned char)s_buf.data[i])) i++;
-            if (i < slEnd && s_buf.data[i] == ' ') {
-                i++;
-                long st = 0;
-                size_t digits = 0;
-                while (i < slEnd && isdigit((unsigned char)s_buf.data[i])) {
-                    st = st * 10 + (s_buf.data[i] - '0');
-                    i++;
-                    digits++;
-                    if (digits > 10) break;
-                }
-                if (digits > 0) s_status = (int)st;
+        else
+        {
+            /* Still connecting: touching it here crashed the WX Simulator.
+             * Hand it to the orphan slot — its (stale) open callback will
+             * close AND release it when the async open settles (hazard 1). */
+            g_orphanTcp = t;
+            if (g_pooledTcp == t)
+            {
+                g_pooledTcp = NULL; /* pool entry now owned by the orphan */
             }
         }
     }
+}
 
-    // Header lines: split on '\n', virtual terminator at headLen (mirrors
-    // gmatch(headPart .. "\n", "([^\n]+)\n")). Key capture is everything
-    // after leading whitespace up to ':' INCLUDING trailing spaces (greedy
-    // [^:]+); value trims both ends.
-    size_t segStart = 0;
-    for (size_t i = 0; i <= headLen; i++) {
-        int atEnd = (i == headLen);
-        if (!atEnd && s_buf.data[i] != '\n') continue;
-        size_t s = segStart, e = i;
-        segStart = i + 1;
-        if (e <= s) continue; // ([^\n]+) requires >= 1 char
-        while (s < e && isspace((unsigned char)s_buf.data[s])) s++; // ^%s*
-        const char* colon =
-            (const char*)memchr(s_buf.data + s, ':', e - s);
-        if (!colon) continue;
-        size_t colonOff = (size_t)(colon - s_buf.data);
-        if (colonOff == s) continue; // ([^:]+) needs >= 1 char
-        size_t v = colonOff + 1;
-        while (v < e && isspace((unsigned char)s_buf.data[v])) v++;  // :%s*
-        size_t ve = e;
-        while (ve > v && isspace((unsigned char)s_buf.data[ve - 1])) ve--;
-        store_header(s_buf.data + s, colonOff - s, s_buf.data + v, ve - v);
+static void reset_state(void)
+{
+    close_tcp();
+    g_requestId++;
+    memset(&g_cb, 0, sizeof(g_cb));
+    g_url[0] = '\0';
+    if (g_parsed)
+    {
+        pluto_free(g_parsed);
+        g_parsed = NULL;
     }
+    strbuf_reset(&g_buf);
+    g_status = 200;
+    g_bodyStart = 0;
+    g_isChunked = 0;
+    g_contentLength = -1;
+    g_connOpen = 0;
+    g_openFailed = 0;
+    g_connClosed = 0;
+    g_error[0] = '\0';
+    g_state = HS_IDLE;
+}
 
-    if (s_parsed.host[0] != '\0' && s_nSetCookies > 0)
-        cj_process_set_cookies(s_parsed.host,
-                               (const char* const*)s_setCookies,
-                               s_nSetCookies);
-
-    const char* te =
-        s_headers ? (const char*)sm_get(s_headers, "transfer-encoding") : NULL;
-    char teLow[64] = "";
-    if (te) {
-        size_t n = strlen(te);
-        if (n >= sizeof(teLow)) n = sizeof(teLow) - 1;
-        for (size_t i = 0; i < n; i++)
-            teLow[i] = (char)tolower((unsigned char)te[i]);
-        teLow[n] = '\0';
+/* Build a minimal HTTP/1.1 GET request (reference buildRequest). */
+static void build_request(StrBuf *out)
+{
+    strbuf_reset(out);
+    strbuf_appendf(out, "GET %s HTTP/1.1\r\n", g_parsed->fullPath);
+    if (g_parsed->port != 80 && g_parsed->port != 443)
+    {
+        strbuf_appendf(out, "Host: %s:%d\r\n", g_parsed->host, g_parsed->port);
     }
-    if (strstr(teLow, "chunked")) {
-        s_chunked = 1;
-        s_contentLength = -1;
-    } else {
-        const char* clStr = s_headers
-                                ? (const char*)sm_get(s_headers,
-                                                      "content-length")
-                                : NULL;
-        long cl;
-        s_contentLength = luatonum10(clStr, &cl) ? cl : -1;
+    else
+    {
+        strbuf_appendf(out, "Host: %s\r\n", g_parsed->host);
+    }
+    strbuf_appendf(out, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
+    strbuf_appendf(out, "Accept: text/html,text/plain;q=0.8\r\n");
+    strbuf_appendf(out, "Accept-Language: en-US,en;q=0.9\r\n");
+    char cookie[768];
+    cookie_jar_get_header(g_parsed->host, g_parsed->path, g_parsed->isSsl,
+                          cookie, sizeof(cookie));
+    if (cookie[0] != '\0')
+    {
+        strbuf_appendf(out, "Cookie: %s\r\n", cookie);
+    }
+    strbuf_appendf(out, "Connection: close\r\n\r\n");
+}
+
+/* Decode a chunked-encoded body. Returns a malloc'd string while the chunk
+ * stream is complete, NULL while still incomplete (caller keeps buffering). */
+static char *decode_chunked(const char *str, size_t len, size_t *outLen)
+{
+    StrBuf body;
+    if (strbuf_init(&body) != 0)
+    {
+        return NULL;
+    }
+    if (outLen)
+    {
+        *outLen = 0;
+    }
+    size_t pos = 0;
+    for (;;)
+    {
+        const char *crlf = NULL;
+        for (size_t i = pos; i + 1 < len; i++)
+        {
+            if (str[i] == '\r' && str[i + 1] == '\n')
+            {
+                crlf = &str[i];
+                break;
+            }
+        }
+        if (!crlf)
+        {
+            strbuf_free(&body);
+            return NULL; /* incomplete size line */
+        }
+        char sizeStr[32];
+        size_t n = (size_t)(crlf - &str[pos]);
+        if (n >= sizeof(sizeStr))
+        {
+            n = sizeof(sizeStr) - 1;
+        }
+        memcpy(sizeStr, &str[pos], n);
+        sizeStr[n] = '\0';
+        char *semi = strchr(sizeStr, ';');
+        if (semi)
+        {
+            *semi = '\0';
+        }
+        /* Lua ^%s*(.-)%s*$ trim */
+        char *s = sizeStr;
+        while (*s == ' ' || *s == '\t') s++;
+        char *e = s + strlen(s);
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        *e = '\0';
+
+        long size = strtol(s, NULL, 16);
+        if (size < 0)
+        {
+            strbuf_free(&body);
+            return NULL;
+        }
+        pos = (size_t)(crlf - str) + 2;
+        if (size == 0)
+        {
+            if (outLen)
+            {
+                *outLen = body.len;
+            }
+            return strbuf_detach(&body);
+        }
+        if (len < pos + (size_t)size + 2)
+        {
+            strbuf_free(&body);
+            return NULL; /* incomplete chunk */
+        }
+        strbuf_append_n(&body, &str[pos], (size_t)size);
+        pos += (size_t)size + 2;
     }
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
-
-static void hc_open_cb(TCPConnection* conn, PDNetErr err, void* ud);
-static void hc_closed_cb(TCPConnection* conn, PDNetErr err);
-static int connect_now(void);
-static int http_connect_now(void);
-static void http_connect_failed(void);
-static void http_access_cb(bool allowed, void* userdata);
-
-static void close_tcp(void)
+/* Case-insensitive header lookup over the saved set. */
+static const char *saved_header(const char *key)
 {
-    if (!s_conn) return;
-    TCPConnection* conn = s_conn;
-    s_conn = NULL;
-    // Only close once open has resolved; a still-connecting socket is closed
-    // by its own open callback when it notices it is stale (WX sim crash).
-    if (s_connOpen || s_openFailed) s_tcp->close(conn);
-}
-
-static void close_http(void)
-{
-    if (!s_http_conn) return;
-    HTTPConnection* conn = s_http_conn;
-    s_http_conn = NULL;
-    // Note: do NOT call s_http->close() here. The server will close the
-    // connection (we send "Connection: close") and calling close() inside
-    // a callback can confuse the SDK on the simulator.  The connection
-    // will be cleaned up by the SDK when connectionClosed fires.
-}
-
-static void reset(void)
-{
-    if (s_backend == HC_BACKEND_TCP) {
-        close_tcp();
-    } else if (s_backend == HC_BACKEND_HTTP) {
-        close_http();
-    } else {
-        close_tcp();
-        close_http();
+    for (int i = 0; i < g_savedHeaderCount; i++)
+    {
+        if (strcasecmp(g_savedHeaders[i][0], key) == 0)
+        {
+            return g_savedHeaders[i][1];
+        }
     }
-    s_reqId++;
-    s_cbs = HC_NO_CBS;
-    s_url[0] = '\0';
-    sb_clear(&s_buf);
-    s_status = 200;
-    clear_headers();
-    s_bodyStart = 0;
-    s_hasBodyStart = 0;
-    s_chunked = 0;
-    s_contentLength = -1;
-    s_connOpen = 0;
-    s_openFailed = 0;
-    s_connClosed = 0;
-    s_error[0] = '\0';
-    s_state = HC_IDLE;
-    s_aboutPending = 0;
-    s_aboutPage = NULL;
-    // Deliberately untouched (Lua parity): pendingRedirectUrl/-Callbacks,
-    // redirectDepth, accessWaiting/grant cache.
+    return NULL;
 }
 
-static int connect_now(void)
+/* Parse the status line and headers once "\r\n\r\n" has arrived.
+ * Fills the SAVED header table (the done path consumes it after reset). */
+static int parse_headers_saved(void)
 {
-    TCPConnection* conn =
-        s_tcp->newConnection(s_parsed.host, s_parsed.port, s_parsed.isSsl != 0);
-    if (!conn) return 0;
-    s_conn = conn;
-    s_tcp->setUserdata(conn, (void*)(uintptr_t)s_reqId);
-    s_tcp->setConnectTimeout(conn, HC_CONNECT_TIMEOUT_MS);
-    s_tcp->setReadTimeout(conn, HC_READ_TIMEOUT_MS);
-    s_tcp->setReadBufferSize(conn, HC_SOCKET_BUFFER_BYTES);
-    s_tcp->setConnectionClosedCallback(conn, hc_closed_cb);
-    if (s_tcp->open(conn, hc_open_cb, NULL) != NET_OK) return 0;
+    const char *buf = g_buf.data;
+    size_t blen = g_buf.len;
+    const char *hEnd = NULL;
+    for (size_t i = 0; i + 3 < blen; i++)
+    {
+        if (buf[i] == '\r' && buf[i + 1] == '\n' &&
+            buf[i + 2] == '\r' && buf[i + 3] == '\n')
+        {
+            hEnd = &buf[i];
+            break;
+        }
+    }
+    if (!hEnd)
+    {
+        return 0;
+    }
+
+    g_savedHeaderCount = 0;
+    g_isChunked = 0;
+    g_contentLength = -1;
+    g_status = 200;
+
+    /* Status line: first line. Lua: tonumber(match("HTTP/%d+%.%d+ (%d+)")) */
+    {
+        const char *lineEnd = memchr(buf, '\n', (size_t)(hEnd - buf));
+        size_t llen = lineEnd ? (size_t)(lineEnd - buf) : (size_t)(hEnd - buf);
+        char statusLine[128];
+        if (llen >= sizeof(statusLine))
+        {
+            llen = sizeof(statusLine) - 1;
+        }
+        memcpy(statusLine, buf, llen);
+        statusLine[llen] = '\0';
+        const char *sp = strstr(statusLine, " ");
+        if (sp)
+        {
+            /* Lua: tonumber(match("HTTP/%d+%.%d+ (%d+)")) — the HTTP/x.y
+             * prefix is REQUIRED; anything else keeps the 200 default. */
+            int vmaj = 0, vmin = 0, st = 0;
+            if (sscanf(statusLine, "HTTP/%d.%d %d", &vmaj, &vmin, &st) == 3 && st > 0)
+            {
+                g_status = st;
+            }
+            (void)sp;
+        }
+    }
+
+    /* Collect set-cookie values (need the host at call time).
+     * BSS, not stack — 16×512B would sit under parse_headers_saved's caller
+     * every frame a header parse runs (P22 stack rule). */
+    char (*setCookies)[512] = g_setCookies;
+    int setCookieCount = 0;
+
+    const char *firstNl = (const char *)memchr(buf, '\n', blen);
+    size_t lineStart = firstNl ? (size_t)(firstNl - buf) + 1 : 0;
+    while (lineStart < (size_t)(hEnd - buf) &&
+           g_savedHeaderCount < 62 && setCookieCount < 16)
+    {
+        size_t lineEnd = lineStart;
+        while (lineEnd < (size_t)(hEnd - buf) && buf[lineEnd] != '\n')
+        {
+            lineEnd++;
+        }
+        size_t llen = lineEnd - lineStart;
+        if (llen > 0 && buf[lineStart + llen - 1] == '\r')
+        {
+            llen--;
+        }
+        if (llen == 0 || llen >= sizeof(g_hdrLine))
+        {
+            lineStart = lineEnd + 1;
+            continue;
+        }
+        memcpy(g_hdrLine, &buf[lineStart], llen);
+        g_hdrLine[llen] = '\0';
+
+        /* Lua ^%s*([^:]+)%s*:%s*(.-)%s*$ */
+        char *colon = strchr(g_hdrLine, ':');
+        if (colon)
+        {
+            *colon = '\0';
+            char *k = g_hdrLine;
+            while (*k == ' ' || *k == '\t') k++;
+            char *kend = k + strlen(k);
+            while (kend > k && (kend[-1] == ' ' || kend[-1] == '\t')) kend--;
+            *kend = '\0';
+            char *v = colon + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            char *vend = v + strlen(v);
+            while (vend > v && (vend[-1] == ' ' || vend[-1] == '\t')) vend--;
+            *vend = '\0';
+
+            if (k[0] != '\0' && v[0] != '\0')
+            {
+                if (strcasecmp(k, "set-cookie") == 0)
+                {
+                    strncpy(setCookies[setCookieCount], v, 511);
+                    setCookies[setCookieCount][511] = '\0';
+                    setCookieCount++;
+                }
+                else if (g_savedHeaderCount < 62)
+                {
+                    size_t klen = strlen(k);
+                    if (klen > 255)
+                    {
+                        klen = 255;
+                    }
+                    memcpy(g_savedHeaders[g_savedHeaderCount][0], k, klen);
+                    g_savedHeaders[g_savedHeaderCount][0][klen] = '\0';
+                    /* lower-case the key (Lua lk) */
+                    for (char *p = g_savedHeaders[g_savedHeaderCount][0]; *p; p++)
+                    {
+                        if (*p >= 'A' && *p <= 'Z')
+                        {
+                            *p += 32;
+                        }
+                    }
+                    size_t vlen = strlen(v);
+                    if (vlen > 255)
+                    {
+                        vlen = 255;
+                    }
+                    memcpy(g_savedHeaders[g_savedHeaderCount][1], v, vlen);
+                    g_savedHeaders[g_savedHeaderCount][1][vlen] = '\0';
+                    g_savedHeaderCount++;
+                }
+            }
+        }
+        lineStart = lineEnd + 1;
+    }
+
+    /* Feed Set-Cookies to the jar now (host needed; Lua did it here too). */
+    if (g_parsed && g_parsed->host[0] && setCookieCount > 0)
+    {
+        char *list[16];
+        for (int i = 0; i < setCookieCount; i++)
+        {
+            list[i] = setCookies[i];
+        }
+        cookie_jar_process_set_cookies(g_parsed->host, list, setCookieCount);
+    }
+
+    const char *te = saved_header("transfer-encoding");
+    g_isChunked = te && strstr(te, "chunked") != NULL;
+    if (g_isChunked)
+    {
+        g_contentLength = -1;
+    }
+    else
+    {
+        const char *cl = saved_header("content-length");
+        g_contentLength = cl ? atol(cl) : -1;
+    }
+
+    g_bodyStart = (size_t)(hEnd - buf) + 4;
     return 1;
 }
 
-static void connect_failed(void)
-{
-    PlutoHttpCallbacks cb = s_cbs;
-    char msg[HC_ERR_MAX];
-    snprintf(msg, sizeof(msg), "Could not open connection to %.200s",
-             s_parsed.host);
-    reset();
-    if (cb.onError) cb.onError(cb.ud, msg);
-}
+/* ── SDK callbacks ────────────────────────────────────────────────────────── */
 
-static void access_cb(bool allowed, void* userdata)
+static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
 {
-    (void)userdata;
-    if (!s_accessWaiting) return;
-    s_accessWaiting = 0;
-    if (s_reqId != s_accessReqId) return; // superseded while waiting
-    if (allowed) {
-        strncpy(s_grantHost, s_parsed.host, sizeof(s_grantHost) - 1);
-        s_grantHost[sizeof(s_grantHost) - 1] = '\0';
-        if (!connect_now()) connect_failed();
-    } else {
-        PlutoHttpCallbacks cb = s_cbs;
-        char msg[HC_ERR_MAX];
-        snprintf(msg, sizeof(msg), "Networking not available.");
-        reset();
-        if (cb.onError) cb.onError(cb.ud, msg);
+    (void)conn;
+    (void)err;
+    /* Stale events from a previous connection are ignored via generation id. */
+    if (g_tcp == conn && g_state != HS_IDLE)
+    {
+        g_connClosed = 1;
     }
 }
 
-// Internal doGet(): mirrors core/http_client.lua doGet block for block.
-static int do_get(const char* urlString, const PlutoHttpCallbacks* cbs)
+static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
 {
-    s_cbs = cbs ? *cbs : HC_NO_CBS;
-    snprintf(s_url, sizeof(s_url), "%s", urlString ? urlString : "");
-    s_state = HC_CONNECTING;
-    s_startMs = hc_now();
-    sb_clear(&s_buf);
-    s_status = 200;
-    clear_headers();
-    s_bodyStart = 0;
-    s_hasBodyStart = 0;
-    s_chunked = 0;
-    s_contentLength = -1;
-    s_connOpen = 0;
-    s_openFailed = 0;
-    s_connClosed = 0;
-    s_error[0] = '\0';
+    unsigned int myId = (unsigned int)(uintptr_t)ud;
+    if (myId != g_requestId)
+    {
+        /* Stale open (cancelled/superseded while connecting): the async open
+         * has settled NOW, so closing+releasing is finally safe. This is the
+         * orphan handoff from close_tcp — plus a defensive pool check. */
+        g_pd->network->tcp->close(conn);
+        g_pd->network->tcp->release(conn);
+        if (g_orphanTcp == conn)
+        {
+            g_orphanTcp = NULL;
+        }
+        if (g_pooledTcp == conn)
+        {
+            g_pooledTcp = NULL;
+        }
+        return;
+    }
+    if (err != NET_OK)
+    {
+        g_openFailed = 1;
+        snprintf(g_error, sizeof(g_error), "Connection failed: %d", (int)err);
+        g_state = HS_ERROR;
+        return;
+    }
+    g_connOpen = 1;
+}
 
-    // ── Internal about: pages ────────────────────────────────────────────
-    if (strncmp(s_url, "about:", 6) == 0) {
-        const HcInternalPage* page = hc_internal_page(s_url);
-        if (page) {
-            s_aboutPending = 1;
-            s_aboutPage = page;
-            s_aboutDueMs = hc_now() + HC_ABOUT_DELAY_MS;
-        } else {
-            PlutoHttpCallbacks cb = s_cbs;
-            char msg[HC_ERR_MAX];
-            snprintf(msg, sizeof(msg), "Unknown internal page: %.200s",
-                     s_url);
-            reset();
-            if (cb.onError) cb.onError(cb.ud, msg);
+static void access_cb(bool allowed, void *ud)
+{
+    (void)ud;
+    if (!allowed)
+    {
+        /* Only meaningful if this reply still belongs to the live request.
+         * A reply for a cancelled/reset request must not clobber fresh
+         * state: reset_state() bumped g_requestId before reuse. */
+        if (g_accessRequestId != g_requestId)
+        {
+            return;
+        }
+        snprintf(g_error, sizeof(g_error), "Network access denied.");
+        g_state = HS_ERROR;
+        return;
+    }
+    /* Connection opens on the NEXT http_update tick, never inside this SDK
+     * callback — matching the reference's tick-deferral pattern. */
+    if (g_state == HS_ACCESS_WAIT && g_accessRequestId == g_requestId)
+    {
+        g_state = HS_CONNECTING;
+    }
+}
+
+/* ── Request start (Lua doGet) ────────────────────────────────────────────── */
+
+typedef struct
+{
+    InternalPage *page;
+    unsigned int id; /* request generation at scheduling time */
+} AboutTimerCtx;
+
+static void about_timer_cb(void *ud)
+{
+    AboutTimerCtx *ctx = (AboutTimerCtx *)ud;
+    InternalPage *page = ctx->page;
+    unsigned int id = ctx->id;
+    PLUTO_FREE(ctx);
+    if (id != g_requestId)
+    {
+        /* Superseded between scheduling and firing: a stale about: timer
+         * must never deliver content (Lua's closure captured its own
+         * callbacks; our global g_cb needs the generation tag). */
+        return;
+    }
+    if (g_cb.onProgress)
+    {
+        g_cb.onProgress(100, 100);
+    }
+    if (g_cb.onSuccess)
+    {
+        char *keys[1] = { "content-type" };
+        char *vals[1] = { "text/html" };
+        g_cb.onSuccess(200, keys, vals, 1, page->html, strlen(page->html), g_url);
+    }
+    reset_state();
+}
+
+static int start_request(const char *urlString, const HttpCallbacks *callbacks)
+{
+    if (callbacks)
+    {
+        g_cb = *callbacks;
+    }
+    else
+    {
+        memset(&g_cb, 0, sizeof(g_cb));
+    }
+    strncpy(g_url, urlString ? urlString : "", sizeof(g_url) - 1);
+    g_url[sizeof(g_url) - 1] = '\0';
+    g_state = HS_CONNECTING;
+    g_requestStart = g_pd->system->getCurrentTimeMilliseconds();
+    strbuf_reset(&g_buf);
+    g_status = 200;
+    g_bodyStart = 0;
+    g_isChunked = 0;
+    g_contentLength = -1;
+    g_connOpen = 0;
+    g_openFailed = 0;
+    g_connClosed = 0;
+    g_error[0] = '\0';
+
+    /* ── Internal about: pages ────────────────────────────────────────────── */
+    if (strncmp(g_url, "about:", 6) == 0)
+    {
+        InternalPage *page = NULL;
+        for (size_t i = 0; i < sizeof(INTERNAL_PAGES) / sizeof(INTERNAL_PAGES[0]); i++)
+        {
+            if (strcmp(g_url, INTERNAL_PAGES[i].name) == 0)
+            {
+                page = (InternalPage *)&INTERNAL_PAGES[i];
+                break;
+            }
+        }
+        if (page)
+        {
+            /* Stay HS_CONNECTING for the 20ms window (Lua: requestState
+             * stays "connecting" until the timer delivers) — setting DONE
+             * here made http_update's done-path pre-fire an empty success
+             * before the timer. */
+            AboutTimerCtx *ctx = (AboutTimerCtx *)PLUTO_MALLOC(sizeof(AboutTimerCtx));
+            if (ctx)
+            {
+                ctx->page = page;
+                ctx->id = g_requestId;
+                    pdtimer_perform_after_delay(g_pd, 20, about_timer_cb, ctx);
+            }
+        }
+        else
+        {
+            if (g_cb.onError)
+            {
+                char msg[1100];
+                snprintf(msg, sizeof(msg), "Unknown internal page: %s", g_url);
+                g_cb.onError(msg);
+            }
+            reset_state();
         }
         return 1;
     }
 
-    // ── Parse URL ────────────────────────────────────────────────────────
-    url_parse(s_url, &s_parsed);
-    if (s_parsed.host[0] == '\0') {
-        PlutoHttpCallbacks cb = s_cbs;
-        char msg[HC_ERR_MAX];
-        snprintf(msg, sizeof(msg), "Invalid URL (no hostname): %.200s",
-                 s_url);
-        reset();
-        if (cb.onError) cb.onError(cb.ud, msg);
-        return 0;
-    }
-
-    // ── Network availability ─────────────────────────────────────────────
-    // Need at least TCP or HTTP API available. For HTTP/HTTPS URLs, prefer
-    // the HTTP API; for other protocols, TCP is required.
-    int has_tcp = s_pd->network && s_pd->network->tcp && s_tcp;
-    int has_http = s_pd->network && s_pd->network->http && s_http &&
-                   (s_parsed.isSsl || strcmp(s_parsed.scheme, "http") == 0);
-    if (!has_tcp && !has_http) {
-        PlutoHttpCallbacks cb = s_cbs;
-        char msg[HC_ERR_MAX];
-        snprintf(msg, sizeof(msg), "Networking not available.");
-        reset();
-        if (cb.onError) cb.onError(cb.ud, msg);
-        return 0;
-    }
-
-    // Select backend: honor the Settings preference, falling back to the
-    // other backend when the preferred one isn't available.
-    if (s_backendPref == HC_BACKEND_TCP) {
-        s_backend = has_tcp ? HC_BACKEND_TCP
-                            : (has_http ? HC_BACKEND_HTTP : HC_BACKEND_TCP);
-    } else {
-        s_backend = has_http ? HC_BACKEND_HTTP
-                             : (has_tcp ? HC_BACKEND_TCP : HC_BACKEND_HTTP);
-    }
-    PLUTO_LOG("[HC] Backend selected: %s (pref=%s, http=%d, tcp=%d)",
-              s_backend == HC_BACKEND_HTTP ? "HTTP_API" : "TCP",
-              s_backendPref == HC_BACKEND_HTTP ? "HTTP" : "TCP",
-              has_http, has_tcp);
-
-    // ── Access gating (C-only; the Lua SDK did this inside tcp.new) ──────
-    if (strcmp(s_grantHost, s_parsed.host) != 0) {
-        enum accessReply ar =
-            s_tcp->requestAccess(s_parsed.host, s_parsed.port,
-                                 s_parsed.isSsl != 0, HC_NET_PURPOSE,
-                                 s_backend == HC_BACKEND_HTTP
-                                     ? http_access_cb : access_cb,
-                                 NULL);
-        if (ar == kAccessAllow) {
-            strncpy(s_grantHost, s_parsed.host, sizeof(s_grantHost) - 1);
-            s_grantHost[sizeof(s_grantHost) - 1] = '\0';
-        } else if (ar == kAccessDeny) {
-            PlutoHttpCallbacks cb = s_cbs;
-            char msg[HC_ERR_MAX];
-            snprintf(msg, sizeof(msg), "Networking not available.");
-            reset();
-            if (cb.onError) cb.onError(cb.ud, msg);
+    /* ── Parse URL ────────────────────────────────────────────────────────── */
+    if (!g_parsed)
+    {
+        g_parsed = (UrlParsed *)PLUTO_MALLOC(sizeof(UrlParsed));
+        if (!g_parsed)
+        {
             return 0;
-        } else { // kAccessAsk: wait for access_cb
-            s_accessWaiting = 1;
-            s_accessReqId = s_reqId;
+        }
+    }
+    if (url_parse(g_url, g_parsed) != 0 || g_parsed->host[0] == '\0')
+    {
+        if (g_cb.onError)
+        {
+            char msg[1100];
+            snprintf(msg, sizeof(msg), "Invalid URL (no hostname): %s", g_url);
+            g_cb.onError(msg);
+        }
+        reset_state();
+        return 0;
+    }
+
+    /* ── Network availability ─────────────────────────────────────────────── */
+    if (!g_pd->network || !g_pd->network->tcp)
+    {
+        if (g_cb.onError)
+        {
+            g_cb.onError("Networking not available.");
+        }
+        reset_state();
+        return 0;
+    }
+
+    /* ── HTTPS access request (C-only requirement; Lua prompted implicitly) ─ */
+    if (g_parsed->isSsl)
+    {
+        /* Official docs: requestAccess returns an accessReply —
+         *   kAccessAllow: already granted (or auto-granted); no dialog, the
+         *     callback may never fire → proceed to connecting NOW.
+         *   kAccessDeny: denied → error out.
+         *   kAccessAsk: a dialog is up; the callback fires after the user
+         *     responds → wait in HS_ACCESS_WAIT (watchdog deliberately does
+         *     not cover this state). */
+        g_accessRequestId = ++g_requestId;
+        int reply = g_pd->network->tcp->requestAccess(
+            g_parsed->host, g_parsed->port, 1,
+            "CometBrowser Web Browsing", access_cb, NULL);
+        if (reply == kAccessAllow)
+        {
+                g_state = HS_CONNECTING;
             return 1;
         }
+        if (reply == kAccessDeny)
+        {
+            snprintf(g_error, sizeof(g_error), "Network access denied.");
+            g_state = HS_ERROR;
+            return 1;
+        }
+        /* kAccessAsk: mark the state and wait for access_cb. */
+        g_state = HS_ACCESS_WAIT;
+        return 1;
     }
 
-    if (s_backend == HC_BACKEND_HTTP) {
-        if (!http_connect_now()) http_connect_failed();
-    } else {
-        if (!connect_now()) connect_failed();
-    }
-    return hc_is_loading() ? 1 : 0;
+    g_state = HS_CONNECTING;
+    return 1;
 }
 
-// ── Delivery ──────────────────────────────────────────────────────────────────
-
-// requestState == "done": slice the body, attempt chunked decode, hand
-// everything to onSuccess after reset() (Lua order preserved).
-static void deliver_done(void)
+/* Open the TCP connection (runs on the frame after start/access-allowed —
+ * never inside the SDK access callback, matching the reference's tick
+ * deferral pattern). */
+static void open_connection(void)
 {
-    PlutoHttpCallbacks cb = s_cbs;
-    int st = s_status;
-    char url[HC_URL_MAX];
-    memcpy(url, s_url, sizeof(url));
+    int pooled = g_pooledTcp && g_pooledPort == g_parsed->port &&
+                 g_pooledSsl == g_parsed->isSsl &&
+                 strncmp(g_pooledHost, g_parsed->host, sizeof(g_pooledHost)) == 0;
+    TCPConnection *tcp;
+    if (pooled)
+    {
+        /* Same host as last request: reopen the pooled connection (skips the
+         * TLS handshake and dodges the SDK re-setup trap). */
+        tcp = g_pooledTcp;
+        g_pd->network->tcp->close(tcp);
+    }
+    else
+    {
+        if (g_pooledTcp)
+        {
+            /* Host switch: close now, but DEFER the release to the graveyard
+             * tick (GRAVE_FRAMES later) — releasing while the SDK event loop
+             * may still drain the connection's state crashes it (hazards 1+2). */
+            g_pd->network->tcp->close(g_pooledTcp);
+            g_graveTcp = g_pooledTcp;
+            g_graveTimer = GRAVE_FRAMES;
+            g_pooledTcp = NULL;
+        }
+        tcp = g_pd->network->tcp->newConnection(
+            g_parsed->host, g_parsed->port, g_parsed->isSsl);
+    }
+    if (!tcp)
+    {
+        if (g_cb.onError)
+        {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "Could not open connection to %s", g_parsed->host);
+            g_cb.onError(msg);
+        }
+        reset_state();
+        return;
+    }
 
-    StrBuf body;
-    sb_init(&body);
-    if (s_backend == HC_BACKEND_HTTP) {
-        // HTTP API delivers body directly in deliver_done via request_complete_cb.
-        // Body is already fully received and stored in s_buf by the time we get here.
-        if (s_buf.len > 0) sb_append(&body, s_buf.data, s_buf.len);
-    } else {
-        // TCP backend: slice the body from the raw response buffer.
-        size_t off = s_hasBodyStart ? s_bodyStart : 0;
-        if (s_buf.len > off) sb_append(&body, s_buf.data + off, s_buf.len - off);
-        if (s_chunked) {
-            StrBuf* dec = decode_chunked(body.data, body.len);
-            if (dec) {
-                sb_free(&body);
-                body = *dec;
-                pluto_free(dec);
+    if (!pooled)
+    {
+        g_pooledTcp = tcp;
+        snprintf(g_pooledHost, sizeof(g_pooledHost), "%s", g_parsed->host);
+        g_pooledPort = g_parsed->port;
+        g_pooledSsl = g_parsed->isSsl;
+    }
+
+    g_tcp = tcp;
+
+    /* Generation id: any callback that no longer matches is a stale event. */
+    unsigned int myId = ++g_requestId;
+
+    g_pd->network->tcp->setConnectTimeout(tcp, SDK_TIMEOUT_MS);
+    g_pd->network->tcp->setReadTimeout(tcp, SDK_TIMEOUT_MS);
+    g_pd->network->tcp->setReadBufferSize(tcp, SDK_READ_BUFFER);
+    g_pd->network->tcp->setConnectionClosedCallback(tcp, tcp_closed_cb);
+
+    PDNetErr rc = g_pd->network->tcp->open(tcp, tcp_open_cb, (void *)(uintptr_t)myId);
+    if (rc != NET_OK)
+    {
+        if (g_cb.onError)
+        {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "Could not open connection to %s", g_parsed->host);
+            g_cb.onError(msg);
+        }
+        g_tcp = NULL; /* callback ownership not transferred on sync failure */
+        if (g_pooledTcp == tcp)
+        {
+            g_pooledTcp = NULL; /* never leave a dangling pool entry */
+        }
+        g_pd->network->tcp->close(tcp);
+        g_pd->network->tcp->release(tcp);
+        reset_state();
+    }
+}
+
+/* ── Public API ───────────────────────────────────────────────────────────── */
+
+void http_client_init(PlaydateAPI *pd)
+{
+    g_pd = pd;
+    strbuf_init(&g_buf);
+    strbuf_init(&g_savedBuf);
+}
+
+int http_get(const char *urlString, const HttpCallbacks *callbacks)
+{
+    /* Cancel any previous request cleanly (Lua HttpClient.get). */
+    reset_state();
+    /* A fresh top-level request starts a new redirect chain. */
+    g_hasPendingRedirect = 0;
+    g_redirectDepth = 0;
+    return start_request(urlString, callbacks);
+}
+
+void http_cancel(void)
+{
+    reset_state();
+}
+
+
+int http_is_loading(void)
+{
+    return g_state == HS_CONNECTING || g_state == HS_READING ||
+           g_state == HS_ACCESS_WAIT;
+}
+
+/* ── Update: call once per frame ──────────────────────────────────────────── */
+
+void http_update(void)
+{
+    if (!g_pd)
+    {
+        return;
+    }
+
+    /* Graveyard: release a host-switched connection once its event-loop state
+     * has long drained (deferred release, see the lifecycle comment). */
+    if (g_graveTcp && --g_graveTimer <= 0)
+    {
+        g_pd->network->tcp->release(g_graveTcp);
+        g_graveTcp = NULL;
+    }
+
+    /* A deferred redirect (from a prior tick) opens the next connection now,
+     * well after the previous connection was closed by us. */
+    if (g_hasPendingRedirect)
+    {
+        HttpCallbacks cb = g_pendingRedirectCb;
+        g_hasPendingRedirect = 0;
+        reset_state();
+        /* No stack copy needed: start_request memcpy's the URL into g_url
+         * before anything else can touch g_pendingRedirectUrl. */
+        start_request(g_pendingRedirectUrl, &cb);
+        return;
+    }
+
+    if (g_state == HS_IDLE)
+    {
+        return;
+    }
+
+    unsigned int now = g_pd->system->getCurrentTimeMilliseconds();
+
+    /* HTTPS access dialog is up: do nothing until the user answers (the 60s
+     * watchdog deliberately does not cover this state). */
+    if (g_state == HS_ACCESS_WAIT)
+    {
+        return;
+    }
+
+    /* Timeout watchdog (connecting/reading only — never ACCESS_WAIT). */
+    if (g_state == HS_CONNECTING || g_state == HS_READING)
+    {
+        if (now - g_requestStart > REQUEST_TIMEOUT_MS)
+        {
+            if (g_buf.len > 512)
+            {
+                g_state = HS_DONE; /* partial content wins */
+            }
+            else
+            {
+                snprintf(g_error, sizeof(g_error),
+                         "Connection timed out after 60 seconds.");
+                g_state = HS_ERROR;
             }
         }
     }
 
-    // Take header ownership away so reset() cannot free what we deliver.
-    StrMap* map = s_headers;
-    s_headers = NULL;
-    char* vals[HC_MAX_HDRS];
-    size_t nVals = s_nHdrVals;
-    memcpy(vals, s_hdrVals, nVals * sizeof(char*));
-    s_nHdrVals = 0;
-
-    reset();
-
-    if (cb.onSuccess)
-        cb.onSuccess(cb.ud, st, map, body.data ? body.data : "", body.len,
-                     url);
-
-    for (size_t i = 0; i < nVals; i++) pluto_free(vals[i]);
-    sm_destroy(map);
-    sb_free(&body);
-}
-
-// ── Update ────────────────────────────────────────────────────────────────────
-
-void hc_update(void)
-{
-    // A deferred redirect (from a prior tick) opens the next connection now,
-    // well after the previous connection was fully closed by us.
-    if (s_hasPendingRedirect) {
-        char u[HC_URL_MAX];
-        memcpy(u, s_pendingUrl, sizeof(u));
-        PlutoHttpCallbacks cb = s_pendingCbs;
-        s_hasPendingRedirect = 0;
-        s_pendingCbs = HC_NO_CBS;
-        do_get(u, &cb);
-        return;
-    }
-
-    if (s_state == HC_IDLE) return;
-
-    // about-page timer (playdate.timer.performAfterDelay(20) parity).
-    // Faithful ordering: progress -> success -> reset (a get() issued from
-    // inside onSuccess is clobbered by this trailing reset, like in Lua).
-    if (s_aboutPending && hc_now() >= s_aboutDueMs) {
-        PlutoHttpCallbacks cb = s_cbs;
-        const HcInternalPage* page = s_aboutPage;
-        char url[HC_URL_MAX];
-        memcpy(url, s_url, sizeof(url));
-        if (cb.onProgress) cb.onProgress(cb.ud, 100, 100);
-        if (cb.onSuccess) {
-            StrMap* m = sm_create(4);
-            char* v = pluto_strdup("text/html");
-            if (m && v) {
-                sm_put(m, "content-type", v);
-                cb.onSuccess(cb.ud, 200, m, page->html, page->htmlLen, url);
-            }
-            pluto_free(v);
-            sm_destroy(m);
-        }
-        reset();
-        return;
-    }
-
-    unsigned now = hc_now();
-
-    // For HTTP backend: headers_read_cb fires when status/headers arrive,
-    // meaning the connection is established and data is flowing.
-    if (s_state == HC_CONNECTING && s_backend == HC_BACKEND_HTTP &&
-        s_status > 0 && s_http_conn) {
-        s_state = HC_READING;
-    }
-
-    // Timeout watchdog
-    if ((s_state == HC_CONNECTING || s_state == HC_READING) &&
-        now - s_startMs > HC_REQUEST_TIMEOUT_MS) {
-        if (s_buf.len > 512) {
-            // Got some data — treat as done rather than fail silently
-            s_state = HC_DONE;
-        } else {
-            set_error("Connection timed out after 60 seconds.");
-            s_state = HC_ERROR;
+    /* ── Open the TCP connection on the frame AFTER start (deferred open) ── */
+    if (g_state == HS_CONNECTING && !g_tcp && g_parsed && g_parsed->host[0] &&
+        !g_openFailed && g_connOpen == 0)
+    {
+        /* Plain-http connections open here; the https path reaches this via
+         * access_cb → HS_CONNECTING. open_connection guards double-open via
+         * the g_tcp check. */
+        open_connection();
+        if (g_state != HS_CONNECTING)
+        {
+            return; /* open failed synchronously */
         }
     }
 
-    // Send the HTTP request once the connection is open. Written from a later
-    // update frame (not inside the SDK open callback) so TLS settles first.
-    // Only for TCP backend — the HTTP API handles request formatting/sending.
-    if (s_state == HC_CONNECTING && s_connOpen && s_conn &&
-        s_backend == HC_BACKEND_TCP) {
+    /* ── Send the HTTP request once the connection is open ────────────────── */
+    if (g_state == HS_CONNECTING && g_connOpen && g_tcp)
+    {
         StrBuf req;
-        sb_init(&req);
-        build_request(&s_parsed, &req);
-        int sent = s_tcp->write(s_conn, req.data, req.len);
-        sb_free(&req);
-        if (sent > 0) {
-            s_state = HC_READING;
-        } else if (sent == 0) {
-            set_error("Send failed: ?");
-            s_state = HC_ERROR;
-        } else {
-            set_error("Send failed: %s", neterr_name((PDNetErr)sent));
-            s_state = HC_ERROR;
+        strbuf_init(&req);
+        build_request(&req);
+        int sent = g_pd->network->tcp->write(g_tcp, req.data, req.len);
+        strbuf_free(&req);
+        if (sent >= 0)
+        {
+            g_state = HS_READING;
+        }
+        else if (sent == NET_WRITE_BUSY)
+        {
+            g_writePending = 1; /* retry next frame */
+        }
+        else
+        {
+            snprintf(g_error, sizeof(g_error), "Send failed: %d", (int)sent);
+            g_state = HS_ERROR;
         }
     }
 
-    // Pump incoming data. The staging buffer is static: the SDK update loop
-    // is single-threaded and 32 KiB would blow the 60 KiB app stack.
-    // For TCP: read manually from socket. For HTTP: read from HTTP API.
-    if (s_state == HC_READING) {
-        static char pumpTmp[HC_READ_CHUNK];
-        if (s_backend == HC_BACKEND_TCP && s_conn && s_connOpen) {
-            size_t avail = s_tcp->getBytesAvailable(s_conn);
-            if (avail > 0) {
-                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
-                int n = s_tcp->read(s_conn, pumpTmp, want);
-                if (n > 0) {
-                    if (s_buf.len < HC_MAX_RESPONSE_SIZE)
-                        sb_append(&s_buf, pumpTmp, (size_t)n);
-                    long tot = s_contentLength >= 0 ? s_contentLength : 0;
-                    long cur = 0;
-                    if (s_hasBodyStart) {
-                        cur = (long)s_buf.len - (long)s_bodyStart;
-                        if (cur < 0) cur = 0;
-                        if (tot > 0 && cur > tot) cur = tot;
+    /* ── Pump incoming data ───────────────────────────────────────────────── */
+    if (g_state == HS_READING && g_tcp && g_connOpen)
+    {
+        size_t avail = g_pd->network->tcp->getBytesAvailable(g_tcp);
+        if (avail > 0)
+        {
+            size_t want = avail < READ_CHUNK ? avail : READ_CHUNK;
+            int n = g_pd->network->tcp->read(g_tcp, g_readChunk, want);
+            if (n > 0)
+            {
+                if (g_buf.len < MAX_RESPONSE_SIZE)
+                {
+                    strbuf_append_n(&g_buf, g_readChunk, (size_t)n);
+                }
+                long tot = g_contentLength;
+                if (tot < 0)
+                {
+                    tot = 0;
+                }
+                long cur = 0;
+                if (g_bodyStart)
+                {
+                    cur = (long)(g_buf.len - g_bodyStart);
+                    if (cur < 0)
+                    {
+                        cur = 0;
                     }
-                    if (s_cbs.onProgress)
-                        s_cbs.onProgress(s_cbs.ud, (int)cur, (int)tot);
+                    if (tot > 0 && cur > tot)
+                    {
+                        cur = tot;
+                    }
+                }
+                if (g_cb.onProgress)
+                {
+                    g_cb.onProgress((int)cur, (int)tot);
                 }
             }
-        } else if (s_backend == HC_BACKEND_HTTP && s_http_conn) {
-            // Drain all buffered data in a loop: the SDK may buffer more
-            // data between frames or fire request_complete before all data
-            // is read.
-            size_t avail;
-            int n;
-            do {
-                avail = s_http->getBytesAvailable(s_http_conn);
-                if (avail == 0) break;
-                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
-                n = s_http->read(s_http_conn, pumpTmp, (int)want);
-                if (n <= 0) break;
-                if (s_buf.len < HC_MAX_RESPONSE_SIZE)
-                    sb_append(&s_buf, pumpTmp, (size_t)n);
-                long tot = s_contentLength >= 0 ? s_contentLength : 0;
-                long cur = (long)s_buf.len;
-                if (tot > 0 && cur > tot) cur = tot;
-                if (s_cbs.onProgress)
-                    s_cbs.onProgress(s_cbs.ud, (int)cur, (int)tot);
-            } while (1);
         }
-        // read failure: Lua inspected getError() and ignored it — same.
     }
 
-    // Parse headers once they've fully arrived, handle redirects in-band.
-    // Only for TCP backend — the HTTP API parses headers via callbacks.
-    if (s_state == HC_READING && !s_hasBodyStart &&
-        s_backend == HC_BACKEND_TCP) {
-        const char* h = memfind(s_buf.data, s_buf.len, "\r\n\r\n", 4);
-        if (h) {
-            parse_headers((size_t)(h - s_buf.data));
-            const char* loc = s_headers
-                                  ? (const char*)sm_get(s_headers, "location")
-                                  : NULL;
-            if (s_status >= 300 && s_status < 400 && loc && loc[0]) {
-                s_redirectDepth++;
-                if (s_redirectDepth <= HC_MAX_REDIRECTS) {
-                    StrBuf abs;
-                    sb_init(&abs);
-                    url_resolve(s_url, loc, &abs);
-                    snprintf(s_pendingUrl, sizeof(s_pendingUrl), "%s",
-                             abs.data ? abs.data : "");
-                    sb_free(&abs);
-                    s_pendingCbs = s_cbs;
-                    s_hasPendingRedirect = 1;
-                } else {
-                    set_error("Too many redirects to %s", s_url);
-                    s_state = HC_ERROR;
+    /* ── Parse headers once they've fully arrived ─────────────────────────── */
+    if (g_state == HS_READING && !g_bodyStart)
+    {
+        int haveSep = 0;
+        for (size_t i = 0; i + 3 < g_buf.len; i++)
+        {
+            if (g_buf.data[i] == '\r' && g_buf.data[i + 1] == '\n' &&
+                g_buf.data[i + 2] == '\r' && g_buf.data[i + 3] == '\n')
+            {
+                haveSep = 1;
+                break;
+            }
+        }
+        if (haveSep)
+        {
+            parse_headers_saved();
+
+            /* Redirect handling entirely here (why we're on raw TCP). */
+            const char *loc = NULL;
+            if (g_status >= 300 && g_status < 400)
+            {
+                for (int i = 0; i < g_savedHeaderCount; i++)
+                {
+                    if (strcasecmp(g_savedHeaders[i][0], "location") == 0)
+                    {
+                        loc = g_savedHeaders[i][1];
+                        break;
+                    }
                 }
-                // Faithful quirk: this unconditional reset() closes the TCP
-                // connection AND wipes errorMessage/state on the cap branch,
-                // so an over-deep chain is silently dropped (p07 G truth).
-                reset();
+            }
+            if (g_status >= 300 && g_status < 400 && loc && loc[0])
+            {
+                g_redirectDepth++;
+                if (g_redirectDepth <= MAX_REDIRECTS)
+                {
+                    char *resolved = url_resolve(g_url, loc);
+                    if (resolved)
+                    {
+                        strncpy(g_pendingRedirectUrl, resolved,
+                                sizeof(g_pendingRedirectUrl) - 1);
+                        g_pendingRedirectUrl[sizeof(g_pendingRedirectUrl) - 1] = '\0';
+                        pluto_free(resolved);
+                    }
+                    else
+                    {
+                        strncpy(g_pendingRedirectUrl, loc,
+                                sizeof(g_pendingRedirectUrl) - 1);
+                        g_pendingRedirectUrl[sizeof(g_pendingRedirectUrl) - 1] = '\0';
+                    }
+                    g_pendingRedirectCb = g_cb;
+                    g_hasPendingRedirect = 1;
+                }
+                else
+                {
+                    snprintf(g_error, sizeof(g_error), "Too many redirects to %.200s",
+                             g_url);
+                    g_state = HS_ERROR;
+                }
+                reset_state(); /* closes TCP; redirect opens next tick */
                 return;
             }
         }
     }
 
-    // Detect a complete body (TCP backend only — HTTP API uses request_complete_cb)
-    if (s_state == HC_READING && s_hasBodyStart &&
-        s_backend == HC_BACKEND_TCP) {
-        long bodyBytes = (long)s_buf.len - (long)s_bodyStart;
-        if (s_chunked) {
-            StrBuf* dec =
-                decode_chunked(s_buf.data + s_bodyStart,
-                               s_buf.len - s_bodyStart);
-            if (dec) {
-                sb_free(dec);
+    /* ── Detect a complete body ───────────────────────────────────────────── */
+    if (g_state == HS_READING && g_bodyStart)
+    {
+        size_t bodyBytes = g_buf.len - g_bodyStart;
+        if (g_isChunked)
+        {
+            size_t decLen;
+            char *dec = decode_chunked(g_buf.data + g_bodyStart,
+                                       g_buf.len - g_bodyStart, &decLen);
+            if (dec)
+            {
                 pluto_free(dec);
-                s_state = HC_DONE;
-            }
-        } else if (s_contentLength >= 0 && bodyBytes >= s_contentLength) {
-            s_state = HC_DONE;
-        }
-        if (s_buf.len >= HC_MAX_RESPONSE_SIZE) s_state = HC_DONE;
-    }
-
-    // Server closed the connection
-    if (s_state == HC_READING && s_connClosed) {
-        // Drain any remaining data from the HTTP API before declaring done.
-        // The SDK may fire request_complete/connection_closed before our pump
-        // has read everything.
-        if (s_backend == HC_BACKEND_HTTP && s_http_conn) {
-            static char drainTmp[HC_READ_CHUNK];
-            size_t avail;
-            while ((avail = s_http->getBytesAvailable(s_http_conn)) > 0) {
-                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
-                int n = s_http->read(s_http_conn, drainTmp, (int)want);
-                if (n > 0) {
-                    if (s_buf.len < HC_MAX_RESPONSE_SIZE)
-                        sb_append(&s_buf, drainTmp, (size_t)n);
-                } else {
-                    break;
-                }
+                g_state = HS_DONE;
             }
         }
-        PLUTO_LOG("[HC] connClosed: bufLen=%zu state=%d backend=%d",
-                  s_buf.len, s_state, s_backend);
-        if (s_buf.len == 0) {
-            set_error("Connection closed before any data was received.");
-            s_state = HC_ERROR;
-        } else {
-            s_state = HC_DONE;
-        }
-    }
-
-    // Handle completed request
-    if (s_state == HC_DONE) {
-        deliver_done();
-        return;
-    }
-    if (s_state == HC_ERROR) {
-        PlutoHttpCallbacks cb = s_cbs;
-        char msg[HC_ERR_MAX];
-        snprintf(msg, sizeof(msg), "%s",
-                 s_error[0] ? s_error : "Connection failed.");
-        reset();
-        if (cb.onError) cb.onError(cb.ud, msg);
-        return;
-    }
-}
-
-// ── HTTP API callbacks ──────────────────────────────────────────────────────────
-// The native HTTP API fires these callbacks asynchronously. The HTTP API
-// handles TLS negotiation, HTTP request formatting, and status/header parsing
-// internally — we just receive the parsed results.
-
-static void http_header_received_cb(HTTPConnection* conn, const char* key,
-                                    const char* value)
-{
-    if (conn != s_http_conn) return;
-    if (key && key[0]) {
-        PLUTO_LOG("[HC] HTTP header: %s = %s", key, value ? value : "(null)");
-        store_header(key, strlen(key), value,
-                     value ? strlen(value) : 0);
-    }
-}
-
-static void http_headers_read_cb(HTTPConnection* conn)
-{
-    if (conn != s_http_conn) return;
-    s_status = s_http->getResponseStatus(conn);
-    PLUTO_LOG("[HC] HTTP headers read, status=%d", s_status);
-    // Extract content-length for progress tracking.
-    const char* cl = s_headers ? (const char*)sm_get(s_headers, "content-length") : NULL;
-    if (cl) {
-        long v = strtol(cl, NULL, 10);
-        if (v > 0) s_contentLength = v;
-    }
-    // For HTTP backend, detect redirects in-band here (TCP does it in hc_update).
-    // On the simulator, getResponseStatus() may return 0; if we have a Location
-    // header, that's strong evidence of a redirect even without the status code.
-    int is_redirect = (s_status >= 300 && s_status < 400);
-    if (!is_redirect && s_status == 0) {
-        const char* loc_check = s_headers
-                                    ? (const char*)sm_get(s_headers, "location")
-                                    : NULL;
-        if (loc_check && loc_check[0]) is_redirect = 1;
-    }
-    if (is_redirect) {
-        const char* loc = s_headers
-                              ? (const char*)sm_get(s_headers, "location")
-                              : NULL;
-        if (loc && loc[0]) {
-            s_redirectDepth++;
-            if (s_redirectDepth <= HC_MAX_REDIRECTS) {
-                StrBuf abs;
-                sb_init(&abs);
-                url_resolve(s_url, loc, &abs);
-                snprintf(s_pendingUrl, sizeof(s_pendingUrl), "%s",
-                         abs.data ? abs.data : "");
-                sb_free(&abs);
-                s_pendingCbs = s_cbs;
-                s_hasPendingRedirect = 1;
-            } else {
-                set_error("Too many redirects to %s", s_url);
-                s_state = HC_ERROR;
+        else if (g_contentLength >= 0)
+        {
+            if ((long)bodyBytes >= g_contentLength)
+            {
+                g_state = HS_DONE;
             }
-            PLUTO_LOG("[HC] HTTP redirect to %s (status=%d)", s_pendingUrl, s_status);
-            reset();
-            return;
+        }
+        if (g_buf.len >= MAX_RESPONSE_SIZE)
+        {
+            g_state = HS_DONE;
+        }
+    }
+
+    /* ── Server closed the connection ─────────────────────────────────────── */
+    if (g_state == HS_READING && g_connClosed)
+    {
+        if (g_buf.len == 0)
+        {
+            snprintf(g_error, sizeof(g_error),
+                     "Connection closed before any data was received.");
+            g_state = HS_ERROR;
+        }
+        else
+        {
+            g_state = HS_DONE;
+        }
+    }
+
+    /* ── Handle completed request ─────────────────────────────────────────── */
+    if (g_state == HS_DONE)
+    {
+        /* Save everything the callback needs (Lua saved locals). */
+        g_savedStatus = g_status;
+        strbuf_reset(&g_savedBuf);
+        strbuf_append_n(&g_savedBuf, g_buf.data, g_buf.len);
+        g_savedBodyStart = g_bodyStart;
+        g_savedIsChunked = g_isChunked;
+
+        size_t bodyOff = g_savedBodyStart ? g_savedBodyStart : 0;
+        size_t bodyLen = g_savedBuf.len > bodyOff ? g_savedBuf.len - bodyOff : 0;
+        size_t deliveredLen = bodyLen;
+        char *body = NULL;
+        if (g_savedIsChunked && bodyLen)
+        {
+            body = decode_chunked(g_savedBuf.data + bodyOff, bodyLen, &deliveredLen);
+            if (!body)
+            {
+                body = strbuf_detach(&g_savedBuf) + bodyOff; /* unreachable */
+            }
+        }
+        if (!body)
+        {
+            /* NUL-terminate a copy of the body slice for the callback. */
+            body = (char *)PLUTO_MALLOC(bodyLen + 1);
+            if (body)
+            {
+                memcpy(body, g_savedBuf.data + bodyOff, bodyLen);
+                body[bodyLen] = '\0';
+            }
+        }
+
+        /* Headers stay in BSS g_savedHeaders (reset_state does not clear it,
+         * and no reentrant path can parse new headers during the callback) —
+         * a 32KB stack copy here was the last update-loop stack hazard. */
+        int hc = g_savedHeaderCount;
+        /* static: ~1.1KB off the game-task stack (the done path runs inside
+         * http_update inside updateFrame; device gameTask stack is tiny and
+         * the callback chain below adds several KB more). The done path
+         * cannot reenter itself: reset_state() already ran and no other
+         * request can start until the callback returns. */
+        static char *k[64], *v[64];
+        for (int i = 0; i < hc; i++)
+        {
+            k[i] = g_savedHeaders[i][0];
+            v[i] = g_savedHeaders[i][1];
+        }
+        static char urlSnapshot[1024];
+        strncpy(urlSnapshot, g_url, sizeof(urlSnapshot) - 1);
+        urlSnapshot[sizeof(urlSnapshot) - 1] = '\0';
+        HttpCallbacks cb = g_cb;
+
+        reset_state();
+
+        if (cb.onSuccess && body)
+        {
+            cb.onSuccess(g_savedStatus, k, v, hc, body, deliveredLen, urlSnapshot);
+        }
+        PLUTO_FREE(body);
+    }
+    else if (g_state == HS_ERROR)
+    {
+        char errSnapshot[256];
+        strncpy(errSnapshot, g_error[0] ? g_error : "Connection failed.",
+                sizeof(errSnapshot) - 1);
+        errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+        HttpCallbacks cb = g_cb;
+
+        reset_state();
+
+        if (cb.onError)
+        {
+            cb.onError(errSnapshot);
         }
     }
 }
-
-static void http_request_complete_cb(HTTPConnection* conn)
-{
-    if (conn != s_http_conn) return;
-    PDNetErr err = s_http->getError(conn);
-    PLUTO_LOG("[HC] HTTP request complete, err=%d (%s)", err, neterr_name(err));
-    // Re-check status here in case headers_read fired before status was ready.
-    int st = s_http->getResponseStatus(conn);
-    if (st > 0) s_status = st;
-    PLUTO_LOG("[HC] HTTP final status=%d", s_status);
-    if (err != NET_OK) {
-        set_error("HTTP API request failed: %s", neterr_name(err));
-        s_state = HC_ERROR;
-        return;
-    }
-    s_connClosed = 1;
-}
-
-static void http_connection_closed_cb(HTTPConnection* conn)
-{
-    if (conn != s_http_conn) return;
-    PLUTO_LOG("[HC] HTTP connection closed");
-    s_connClosed = 1;
-}
-
-// ── HTTP API connection ────────────────────────────────────────────────────────
-
-static int http_connect_now(void)
-{
-    PLUTO_LOG("[HC] HTTP API: connecting to %s:%d ssl=%d",
-              s_parsed.host, s_parsed.port, s_parsed.isSsl);
-    // Allocate s_headers so store_header() can populate it during callbacks.
-    if (!s_headers) s_headers = sm_create(16);
-    HTTPConnection* conn = s_http->newConnection(s_parsed.host, s_parsed.port,
-                                                 s_parsed.isSsl != 0);
-    if (!conn) {
-        PLUTO_LOG("[HC] HTTP API: newConnection failed");
-        return 0;
-    }
-    s_http_conn = conn;
-    s_http->setConnectTimeout(conn, HC_CONNECT_TIMEOUT_MS);
-    s_http->setReadTimeout(conn, HC_READ_TIMEOUT_MS);
-    s_http->setReadBufferSize(conn, HC_SOCKET_BUFFER_BYTES);
-    s_http->setHeaderReceivedCallback(conn, http_header_received_cb);
-    s_http->setHeadersReadCallback(conn, http_headers_read_cb);
-    s_http->setRequestCompleteCallback(conn, http_request_complete_cb);
-    s_http->setConnectionClosedCallback(conn, http_connection_closed_cb);
-    // Build the headers string for the HTTP API.
-    // Note: http->get() adds Host automatically from the connection's server/port.
-    StrBuf headers;
-    sb_init(&headers);
-    sb_append_str(&headers, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
-    sb_append_str(&headers, "Accept: text/html,text/plain;q=0.8\r\n");
-    sb_append_str(&headers, "Accept-Language: en-US,en;q=0.9\r\n");
-    StrBuf cookie;
-    sb_init(&cookie);
-    cj_get_header(s_parsed.host, s_parsed.path, s_parsed.isSsl, &cookie);
-    if (cookie.len > 0) {
-        sb_append_str(&headers, "Cookie: ");
-        sb_append(&headers, cookie.data, cookie.len);
-        sb_append_str(&headers, "\r\n");
-    }
-    sb_free(&cookie);
-    sb_append_str(&headers, "Connection: close\r\n");
-    sb_append_str(&headers, "\r\n");
-    PDNetErr err = s_http->get(conn, s_parsed.fullPath,
-                               headers.data, headers.len);
-    sb_free(&headers);
-    if (err != NET_OK) {
-        PLUTO_LOG("[HC] HTTP API: get() failed: %s", neterr_name(err));
-        return 0;
-    }
-    return 1;
-}
-
-static void http_connect_failed(void)
-{
-    PlutoHttpCallbacks cb = s_cbs;
-    char msg[HC_ERR_MAX];
-    snprintf(msg, sizeof(msg), "Could not open connection to %.200s",
-             s_parsed.host);
-    reset();
-    if (cb.onError) cb.onError(cb.ud, msg);
-}
-
-static void http_access_cb(bool allowed, void* userdata)
-{
-    (void)userdata;
-    if (!s_accessWaiting) return;
-    s_accessWaiting = 0;
-    if (s_reqId != s_accessReqId) return;
-    if (allowed) {
-        strncpy(s_grantHost, s_parsed.host, sizeof(s_grantHost) - 1);
-        s_grantHost[sizeof(s_grantHost) - 1] = '\0';
-        if (!http_connect_now()) http_connect_failed();
-    } else {
-        PlutoHttpCallbacks cb = s_cbs;
-        char msg[HC_ERR_MAX];
-        snprintf(msg, sizeof(msg), "Networking not available.");
-        reset();
-        if (cb.onError) cb.onError(cb.ud, msg);
-    }
-}
-
-// ── TCP callbacks ─────────────────────────────────────────────────────────────
-
-static void hc_open_cb(TCPConnection* conn, PDNetErr err, void* ud)
-{
-    (void)ud;
-    unsigned myId = (unsigned)(uintptr_t)s_tcp->getUserdata(conn);
-    if (myId != s_reqId || conn != s_conn) {
-        // Cancelled or superseded while still connecting; open has resolved,
-        // so closing here is safe (see close_tcp comment).
-        s_tcp->close(conn);
-        return;
-    }
-    if (err != NET_OK) {
-        s_openFailed = 1;
-        set_error("Connection failed: %s", neterr_name(err));
-        s_state = HC_ERROR;
-        return;
-    }
-    s_connOpen = 1;
-}
-
-static void hc_closed_cb(TCPConnection* conn, PDNetErr err)
-{
-    (void)err;
-    unsigned myId = (unsigned)(uintptr_t)s_tcp->getUserdata(conn);
-    if (myId == s_reqId && conn == s_conn) s_connClosed = 1;
-}
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
-void hc_init(struct PlaydateAPI* pd)
-{
-    s_pd = pd;
-    s_tcp = (pd && pd->network) ? pd->network->tcp : NULL;
-    s_http = (pd && pd->network) ? pd->network->http : NULL;
-    s_clockfn = NULL;
-    sb_init(&s_buf);
-    s_reqId = 1;
-    s_state = HC_IDLE;
-    s_grantHost[0] = '\0';
-    s_http_conn = NULL;
-}
-
-int hc_get(const char* urlStr, const PlutoHttpCallbacks* cbs)
-{
-    // Cancel any previous request cleanly.
-    hc_cancel();
-    // A fresh top-level request starts a new redirect chain and must not be
-    // pre-empted by a stale redirect enqueued for the previous request.
-    s_hasPendingRedirect = 0;
-    s_pendingCbs = HC_NO_CBS;
-    s_redirectDepth = 0;
-    return do_get(urlStr, cbs);
-}
-
-int hc_is_loading(void)
-{
-    return s_state == HC_CONNECTING || s_state == HC_READING;
-}
-
-const char* hc_backend_label(void)
-{
-    if (s_backend == HC_BACKEND_TCP) return "TCP";
-    if (s_backend == HC_BACKEND_HTTP) {
-        return s_parsed.isSsl ? "HTTPS" : "HTTP";
-    }
-    return "TCP";
-}
-
-void hc_cancel(void) { reset(); }
-
-void hc_set_tcp_for_tests(struct playdate_tcp* fake)
-{
-    s_tcp = fake ? fake : ((s_pd && s_pd->network) ? s_pd->network->tcp : NULL);
-}
-
-void hc_set_http_for_tests(struct playdate_http* fake)
-{
-    // NULL explicitly disables HTTP API (forces TCP); non-NULL installs fake.
-    s_http = fake;
-}
-
-enum HcBackend hc_backend_pref(void) { return s_backendPref; }
-
-void hc_set_backend_pref(enum HcBackend pref)
-{
-    if (pref == HC_BACKEND_HTTP || pref == HC_BACKEND_TCP) {
-        s_backendPref = pref;
-    }
-}
-
-void hc_restore_http_api(void)
-{
-    // Restores the real HTTP API vtable from the PlaydateAPI.
-    s_http = (s_pd && s_pd->network) ? s_pd->network->http : NULL;
-}
-
-void hc_set_clock_fn(unsigned (*fn)(void)) { s_clockfn = fn; }

@@ -1,0 +1,5 @@
+scale.c:25:6:scale_box_sizes	16	static
+scale.c:46:13:scale_accum_new	48	static
+scale.c:67:6:scale_accum_add_row	24	static
+scale.c:128:11:scale_accum_finish	32	static
+scale.c:175:6:scale_accum_free	16	static

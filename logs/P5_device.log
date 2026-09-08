@@ -1,0 +1,38 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[15:30:14 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[15:30:14 #2] P1 fmt: [str][X][%][-42]
+[15:30:14 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:151
+[15:30:14 #4] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[15:30:14 #5] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[15:30:14 #6] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[15:30:14 #7] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[15:30:14 #8] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[15:30:14 #9] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[15:30:14 #10] === PlutoBrowser boot (Phase 0 scaffold) ===
+[15:30:14 #11] eventHandler: kEventInit, osversion=30101
+[15:30:14 #12] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[15:30:14 #13] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[15:30:14 #14] P5 about: host=home norm=about:home
+[15:30:14 #15] P5 noscheme: norm=https://example.com/path ssl=1
+[15:30:14 #16] P5 defport: norm=http://x.com/
+[15:30:14 #17] P5 unwrap=https://example.org/page
+[15:30:14 #18] P5 resolve1=https://x.com/a/b/c.png
+[15:30:14 #19] P5 resolve2=https://x.com/root.png
+[15:30:14 #20] P5 resolve3=https://cdn.y.com/i.png
+[15:30:14 #21] P5 resolve4=https://x.com/a/page.html#top
+[15:30:14 #22] P5 search: hw=1 dotcom=0 ip=0 about=0
+[15:30:14 #23] P5 encode=%s val=a+b%26clank
+[15:30:14 #24] P5 decode=a b&clank
+[15:30:14 #25] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[15:30:14 #26] P4 scheduled: pending=2
+[15:30:14 #27] updateFrame: first frame executed
+[15:30:14 #28] P4 chain complete (5 iterations)
+[15:30:15 #29] P4 oneshot fired (count=1)
+[15:30:15 #30] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[15:30:24 #31] updateFrame: heartbeat frame=300
+[15:30:34 #32] updateFrame: heartbeat frame=600
+[15:30:44 #33] updateFrame: heartbeat frame=900
+[15:30:54 #34] updateFrame: heartbeat frame=1200
+[15:31:03 #35] updateFrame: heartbeat frame=1500
+[15:31:05 #36] eventHandler: kEventTerminate, frames=1550

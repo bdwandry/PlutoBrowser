@@ -1,0 +1,3 @@
+ico.c:70:16:ico_dib_pixel_gray	24	static
+ico.c:148:19:ico_decode_dib	368	static
+ico.c:237:12:ico_decode	88	static

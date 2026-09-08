@@ -1,268 +1,327 @@
-#ifndef PLUTO_HTML_DOCUMENT_H
-#define PLUTO_HTML_DOCUMENT_H
+/*
+ * PlutoBrowser — document.h
+ * Port of Source/html/document.lua (part 1: parse helpers + parse skeleton).
+ *
+ * Remaining parts of document.lua (the element walker building blocks/links)
+ * arrive in later phases; document_parse currently implements the exact
+ * reference behavior for: empty input, title extraction, reader dispatch
+ * (stub until P19 lands readability), base-href override, meta refresh scan,
+ * and empty doc/block/link scaffolding.
+ */
+#ifndef PLUTO_DOCUMENT_H
+#define PLUTO_DOCUMENT_H
 
-#include <stddef.h>
+#include "pd_api.h"
+#include "html/dom.h"
 
-struct PlaydateAPI;
+/* ── Style map (port of parseStyle's Lua table) ─────────────────────────────
+ * Fixed-capacity lowercase key→trimmed-lowercase-value list, preserving the
+ * LAST occurrence of duplicate keys (Lua table semantics). */
+#define DOC_STYLE_MAX 16
 
-/* ── Inline model ─────────────────────────────────────────────────────── */
+typedef struct
+{
+    char key[32];
+    char val[128];
+    int used;
+} DocStyleEntry;
 
-enum {
-    DIT_TEXT = 0,
-    DIT_BR   = 1,
-    DIT_WBR  = 2
-};
+typedef struct
+{
+    DocStyleEntry e[DOC_STYLE_MAX];
+    int count;
+} DocStyle;
 
-typedef struct DocInline {
-    int type;
-    char* text;          /* TEXT: owned */
-    size_t textLen;
-    unsigned char bold, italic, underline, code, small, big;
-    unsigned char sub, sup, mark, strike, invert, inert;
-    char* href;          /* owned; NULL when not a link */
-    long anchorIndex;    /* -1 when none */
+/* ── Box spacing (port of parseBoxSpacing's return table) ────────────────── */
+typedef struct
+{
+    int top, bottom, left, right;
+} DocBoxSpacing;
+
+/* ── Meta refresh (port of the metaRefresh table) ────────────────────────── */
+typedef struct
+{
+    int present;      /* metaRefresh found */
+    float delay;      /* tonumber(delayStr) or 0 */
+    char url[512];    /* resolved URL; url[0]=='\0' means nil */
+} DocMetaRefresh;
+
+/* ── Inline items (port of block.inlines entries) ─────────────────────────── */
+#define DOC_INLINE_TEXT 0
+#define DOC_INLINE_BR 1
+#define DOC_INLINE_WBR 2
+
+/* Style flags (mirror Lua boolean fields). */
+#define DOC_INF_BOLD 0x0001
+#define DOC_INF_ITALIC 0x0002
+#define DOC_INF_UNDERLINE 0x0004
+#define DOC_INF_CODE 0x0008
+#define DOC_INF_SMALL 0x0010
+#define DOC_INF_BIG 0x0020
+#define DOC_INF_SUB 0x0040
+#define DOC_INF_SUP 0x0080
+#define DOC_INF_MARK 0x0100
+#define DOC_INF_STRIKE 0x0200
+#define DOC_INF_INVERT 0x0400
+#define DOC_INF_INERT 0x0800
+
+typedef struct
+{
+    int type; /* DOC_INLINE_* */
+    char *text; /* arena string, NULL for br/wbr */
+    unsigned flags; /* DOC_INF_* */
+    char *href; /* arena string or NULL */
+    int anchorIndex; /* 0 = none */
 } DocInline;
 
-/* ── Block model ───────────────────────────────────────────────────────── */
+/* ── Block types (port of doc.blocks[].type) ─────────────────────────────── */
+#define DOC_BLOCK_PARAGRAPH 0
+#define DOC_BLOCK_HEADING 1
+#define DOC_BLOCK_BLOCKQUOTE 2
+#define DOC_BLOCK_LIST_ITEM 3
+#define DOC_BLOCK_IMAGE 4
+#define DOC_BLOCK_HR 5
+#define DOC_BLOCK_CODE_BLOCK 6
+#define DOC_BLOCK_TABLE 7
+#define DOC_BLOCK_HIDDEN_FIELD 8
+#define DOC_BLOCK_CHECKBOX_FIELD 9
+#define DOC_BLOCK_INPUT_FIELD 10
+#define DOC_BLOCK_INPUT_SUBMIT 11
+#define DOC_BLOCK_SELECT_FIELD 12
+#define DOC_BLOCK_BOX_OPEN 13
+#define DOC_BLOCK_BOX_CLOSE 14
+#define DOC_BLOCK_PLACEHOLDER 15
+#define DOC_BLOCK_METER 16
+#define DOC_BLOCK_MATH 17
+#define DOC_BLOCK_READER_HEADER 18 /* emitted by readability (later phase) */
 
-enum {
-    DB_PARAGRAPH = 0,
-    DB_HEADING,
-    DB_BLOCKQUOTE,
-    DB_LIST_ITEM,
-    DB_CODE_BLOCK,
-    DB_HR,
-    DB_IMAGE,
-    DB_TABLE,
-    DB_INPUT_FIELD,
-    DB_CHECKBOX_FIELD,
-    DB_INPUT_SUBMIT,
-    DB_SELECT_FIELD,
-    DB_BOX_OPEN,
-    DB_BOX_CLOSE,
-    DB_PLACEHOLDER,
-    DB_METER,
-    DB_MATH,
-    DB_READER_HEADER
-};
+/* Walker caps (Lua MAX_BLOCKS / MAX_INLINES). Shared with readability.c. */
+#define DOC_MAX_BLOCKS 1200
+#define DOC_MAX_INLINES 900
 
-/* tables */
+/* ── Table cells / rows (port of tbl.rows[i].cells[j]) ───────────────────── */
+typedef struct
+{
+    DocInline **inlines; /* heap array */
+    int inlineCount;
+    int inlineCap;
+    int header; /* th */
+    int colspan;
+    int rowspan;
+    char *abbr; /* arena string (may be "") */
+    const char *align; /* "center"/"right"/"left" or NULL */
+} DocCell;
 
-typedef struct DocTableCell {
-    DocInline* inlines;
-    size_t nInlines;
-    size_t capInlines;
-    int isHeader;        /* <th> */
-    int colspan;         /* >= 1 */
-    int rowspan;         /* >= 1 */
-    char* abbr;          /* owned: abbr || title || "" */
-    const char* align;   /* static */
-} DocTableCell;
+typedef struct
+{
+    DocCell **cells; /* heap array */
+    int cellCount;
+    int cellCap;
+} DocRow;
 
-typedef struct DocTableRow {
-    DocTableCell* cells;
-    size_t nCells;
-    size_t capCells;
-} DocTableRow;
+typedef struct
+{
+    DocRow **rows; /* heap array */
+    int rowCount;
+    int rowCap;
+    char *caption; /* arena string ("" when absent) */
+    const char *align; /* or NULL */
+    int border; /* border attr present and != "0" */
+    char *width; /* arena string or NULL */
+} DocTable;
 
-/* selects */
-
-typedef struct DocSelectOpt {
-    char* text;          /* owned */
-    char* value;         /* owned */
+/* ── Select options (port of select options + datalist entries) ──────────── */
+typedef struct
+{
+    char *text; /* arena */
+    char *value; /* arena */
+    int group;
     int selected;
     int disabled;
-    int group;           /* optgroup header entry */
-} DocSelectOpt;
+} DocOption;
 
-/* image-map regions (<map>/<area>) */
+/* ── Image maps (port of doc.maps[name] = { shape, coords, href, alt }) ──── */
+typedef struct
+{
+    char *shape; /* arena */
+    int *coords; /* heap array */
+    int coordCount;
+    char *href; /* arena or NULL */
+    char *alt; /* arena */
+} DocArea;
 
-typedef struct DocAreaRegion {
-    char* shape;         /* owned: "rect" | ... */
-    int* coords;         /* owned */
-    size_t nCoords;
-    char* href;          /* owned resolved URL or NULL */
-    char* alt;           /* owned */
-} DocAreaRegion;
-
-typedef struct DocMap {
-    char* name;          /* owned */
-    DocAreaRegion* regions;
-    size_t nRegions;
-    size_t capRegions;
+typedef struct
+{
+    char *name; /* arena */
+    DocArea **areas; /* heap array */
+    int areaCount;
+    int areaCap;
 } DocMap;
 
-/* <datalist id> suggestion metadata */
-
-typedef struct DocDatalistOpt {
-    char* text;
-    char* value;
-} DocDatalistOpt;
-
-typedef struct DocDatalist {
-    char* id;            /* owned */
-    DocDatalistOpt* opts;
-    size_t nOpts;
-    size_t capOpts;
+typedef struct
+{
+    char *id; /* arena */
+    DocOption **options; /* heap array */
+    int optionCount;
+    int optionCap;
 } DocDatalist;
 
-typedef struct DocBlock {
-    int type;
-    /* inline carriers: paragraph / heading / blockquote / list_item */
-    DocInline* inlines;
-    size_t nInlines;
-    size_t capInlines;
-
-    const char* align;   /* NULL | "left" | "center" | "right" (static) */
+/* ── Blocks (port of doc.blocks[i]) ──────────────────────────────────────── */
+typedef struct
+{
+    int type; /* DOC_BLOCK_* */
+    /* layout fields shared by flow blocks */
+    int level; /* heading */
+    const char *align; /* "center"/"right"/"left" or NULL */
     int spacingTop, spacingBottom, indent;
+    int hasSpacing; /* Lua parity: element blocks carry spacing keys (printed
+                     * even when 0); implicit stray-text paragraphs don't. */
     int invert;
-
-    /* heading */
-    int level;
-
+    DocInline **inlines; /* heap array */
+    int inlineCount;
+    int inlineCap;
     /* list_item */
     int isOrdered;
+    int hasNumber; /* dt/dd have none */
     int number;
+    char markerType; /* '1','a','A','i','I' */
     int depth;
-    const char* markerType;  /* "1" | "a" | "A" | "i" | "I" (static) */
-    unsigned char dtFlag, ddFlag;
-
-    /* code_block */
-    char* codeText;          /* owned, full pre buffer */
-    char** lines;            /* owned, split on \r?\n */
-    size_t nLines;
-
-    /* image (DB_IMAGE) */
-    char* src;               /* owned resolved URL */
-    char* alt;               /* owned */
-    char* caption;           /* owned; figure caption override */
-    char* imgHref;           /* owned */
-    char* usemap;            /* owned */
-    int width, height;
-    int imgInert;
-    int imgIsSvg;            /* inline <svg> serialized to XML */
-    char* svgXml;            /* owned serialized subtree (P24 rasterizes) */
-
-    /* table (DB_TABLE) */
-    DocTableRow* rows;
-    size_t nRows;
-    size_t capRows;
-    char* tableCaption;      /* owned collapsed+trimmed or NULL */
-    int tableBorder;         /* border attr present and != "0" */
-    char* tableWidth;        /* owned raw width attr or NULL */
-
-    /* input_field / checkbox_field (shared flat fields) */
-    char* inputType;         /* owned lowercased type string */
-    char* inName;            /* owned */
-    char* inValue;           /* owned */
-    char* placeholder;       /* owned */
-    char* checkboxLabel;     /* owned */
-    int fieldWidth;          /* -1 when unset */
-    int fieldRows;           /* -1 when unset */
-    int maxlength;           /* -1 when unset */
-    unsigned char disabledFlag, readonlyFlag, requiredFlag;
-    unsigned char radioFlag, checkedFlag;
-    unsigned char blockInert; /* input-family: inert || disabled */
-
-    /* input_submit */
-    char* submitLabel;       /* owned */
-
-    /* form plumbing shared by field/checkbox/submit/select */
-    char* formAction;        /* owned resolved or NULL */
-    char* formMethod;        /* owned lowercased ("get" default) */
-
+    int dt, dd;
+    /* image */
+    char *src, *alt, *usemap; /* arena strings */
+    double width, height; /* Lua numbers (Lua tostring prints integral as "N") */
+    char *caption; /* figure caption merge (image blocks) */
+    char *href; /* image inside a link: resolved target (arena, else NULL) */
+    void *img; /* decoded bitmap (later phases) */
+    /* code_block / math */
+    char *text; /* arena */
+    char **lines; /* heap array of arena strings (code_block) */
+    int lineCount;
+    int lineCap;
+    /* table */
+    DocTable *table; /* arena */
+    /* hidden_field / checkbox_field / input_field / input_submit */
+    char *name, *value, *placeholder, *label; /* arena strings */
+    int fieldWidth, fieldRows;
+    int disabled, readonly, required;
+    int maxlength; /* -1 = absent (Lua nil) */
+    char *formAction; /* arena resolved URL */
+    char *formMethod; /* arena "get"/"post" */
+    int inert;
+    int radio, checked;
+    char *inputType; /* arena: "text","textarea","search",... */
     /* select_field */
-    DocSelectOpt* options;
-    size_t nOptions;
-    size_t capOptions;
+    DocOption **options; /* heap array */
+    int optionCount;
+    int optionCap;
     int selectedIndex;
-    unsigned char multipleFlag;
-
-    /* box_open / box_close (fieldset / details / dialog) */
-    char* boxLabel;          /* owned ("" allowed) */
-    char* toggleKey;         /* owned "dN" or NULL */
+    int multiple;
+    /* box_open / box_close */
+    char *toggleKey; /* arena "d<N>" or NULL */
     int toggleOpen;
-
     /* placeholder */
-    char* phTag;             /* owned tag name */
-    char* phHref;            /* owned resolved URL or NULL */
-
+    char *ptag, *plabel, *phref; /* arena strings */
+    double pwidth, pheight;
     /* meter */
-    double mValue, mMax, mMin, mLow, mHigh, mOptimum;
-
-    /* reader_header (readability.c, P12) */
-    char* readerHost;        /* owned uppercased host or "BLANK" */
-    char* readerTitle;       /* owned page title */
-    char* readingTime;       /* owned "N min read (M words)" */
+    double mvalue, mmax, mmin, mlow, mhigh, moptimum;
+    /* reader_header (readability) */
+    char *host, *readingTime; /* arena strings or NULL */
 } DocBlock;
 
-/* ── Links & document ─────────────────────────────────────────────────── */
-
-typedef struct DocLink {
-    char* href;
-    char* text;
-    char* target;        /* owned or NULL */
+/* ── Links (port of doc.links[i]) ────────────────────────────────────────── */
+typedef struct
+{
+    char *href; /* arena */
+    char *text; /* arena */
+    char *target; /* arena or NULL */
 } DocLink;
 
-typedef struct DocDocument {
-    char* title;
-    char* baseUrl;
-    char* rawHtml;
-    int isReaderMode;
+/* ── Parse options (port of Document.parse's opts table) ─────────────────── */
+typedef int (*DocSvgDecoderFn)(const char *xml, int w, int h, void **outBitmap);
 
-    DocBlock* blocks;
-    size_t nBlocks;
-    size_t capBlocks;
-
-    DocLink* links;
-    size_t nLinks;
-    size_t capLinks;
-
-    int hasMetaRefresh;  /* body-walker result preferred over head scan */
-    double metaDelay;
-    char* metaUrl;       /* owned resolved URL or NULL */
-
-    DocMap* maps;        /* <map name> -> area regions */
-    size_t nMaps;
-    size_t capMaps;
-
-    DocDatalist* datalists;
-    size_t nDatalists;
-    size_t capDatalists;
-
-    /* reader-mode extras (readability.c, P12) */
-    int readerWords;     /* result wordCount over selected blocks */
-    char* readerTime;    /* owned same string as header block */
-} DocDocument;
-
-#define DOC_ALIGN_NONE    ((const char*)NULL)
-/* align values are the static strings "left" / "center" / "right" */
-
-/* Parse-time overrides. <details> elements get deterministic keys
- * "d1","d2",... in walk order; an override forces a key open or closed. */
-typedef struct {
-    const char* key;     /* "d1" style */
-    int open;
-} DocDetailsOverride;
-
-typedef struct {
-    const DocDetailsOverride* detailsOverrides; /* NULL when unused */
-    size_t nOverrides;
+typedef struct
+{
+    /* opts.detailsOpen: positional overrides for keys d1..dN.
+     * details[i-1] = 1 → open, 0 → closed. NULL → no overrides. */
+    const int *detailsOpen;
+    int detailsOpenCount;
+    DocSvgDecoderFn svgDecoder; /* NULL → inline svg decode fails (no block) */
 } DocParseOpts;
 
-void doc_init(struct PlaydateAPI* pd);
+/* ── Document result ─────────────────────────────────────────────────────── */
+typedef struct
+{
+    char title[256];
+    char baseUrl[512];
+    char *rawHtml; /* malloc'd copy; caller frees via document_free */
+    int isReaderMode;
+    int mode; /* MODE_READER / MODE_RAW_HTML */
+    DocMetaRefresh metaRefresh;
+    /* Walker output */
+    DocBlock **blocks; /* heap array */
+    int blockCount;
+    int blockCap;
+    DocLink **links; /* heap array */
+    int linkCount;
+    int linkCap;
+    DocMap **maps; /* heap array */
+    int mapCount;
+    int mapCap;
+    DocDatalist **datalists; /* heap array */
+    int datalistCount;
+    int datalistCap;
+    /* The reference throws (e.g. bare <li>: arithmetic on nil ctx.start) and
+     * CometBrowser propagates the error. C sets parseError=1 and stops.
+     * Callers surface it as the reference's error outcome. */
+    int parseError;
+    /* Reader-mode extras (Lua doc.wordCount / doc.readingTime). */
+    int readingTimeWords;
+    char *readingTimeStr; /* arena string (readability arena) */
+    void *_arena; /* walker string/object arena (document.c internal) */
+} DocParseResult;
 
-/* HTML-mode parse (PLUTO_MODE_RAW_HTML). Reader mode is ported in P12 and
- * returns NULL for PLUTO_MODE_READER for now. NULL on OOM / reader mode. */
-DocDocument* doc_parse_opts(const char* htmlString, const char* baseUrlStr,
-                            int mode, const DocParseOpts* opts);
-#define doc_parse(html, base, m) \
-    doc_parse_opts((html), (base), (m), (const DocParseOpts*)NULL)
+/* ── Parsing helpers (exact ports; see document.c for quirk notes) ──────── */
 
-void doc_free(DocDocument* d);
+/* parseStyle(styleStr): "k:v;k2:v2" → lowercase keys/values, trimmed values.
+ * Empty/NULL → empty map. Unparseable junk between ';' is SKIPPED (continue). */
+void doc_parse_style(const char *styleStr, DocStyle *out);
 
-/* deep-free every owned field inside one block (shell struct itself is
- * NOT freed) -- shared with readability.c */
-void doc_free_block_fields(DocBlock* b);
+/* parseAlign(attrs): align attr overridden by style text-align; only
+ * center/right/left (case-insensitive) are valid; NULL/empty attrs → NULL.
+ * Returns the lowercased value (static storage; valid until next call). */
+const char *doc_parse_align(const DocStyleEntry *attrs, int attrCount);
 
-#endif
+/* isDisplayNone(attrs): hidden/popover attr (any value incl. PLUTO_TOK_ATTR_TRUE)
+ * or style display/visibility containing "none"/"hidden". */
+int doc_is_display_none(const DocStyleEntry *attrs, int attrCount);
+
+/* isInvertedStyle(attrs): color white/#fff/#FFFFxx or background(-color)
+ * black/#000/#000000 (patterns applied to the LOWERCASED style value). */
+int doc_is_inverted_style(const DocStyleEntry *attrs, int attrCount);
+
+/* parseBoxSpacing(attrs): margin/padding shorthand + longhand extraction.
+ * QUIRK (Lua parity): component values must parse as PURE numbers
+ * ("10px" fails tonumber → treated as absent); values are halved (floor). */
+DocBoxSpacing doc_parse_box_spacing(const DocStyleEntry *attrs, int attrCount);
+
+/* concatNodeText(node): concatenated text of all descendants. Writes into
+ * buf (NUL-terminated); returns needed length (like snprintf). */
+size_t doc_concat_node_text(const DomNode *node, char *buf, size_t cap);
+
+/* validHref(raw): "" / #x / javascript: / data: → 0; else 1. NULL → 0. */
+int doc_valid_href(const char *raw);
+
+/* serializeSvgNode(n): inline SVG subtree → XML string for the rasterizer.
+ * Attr values get '"'< escaped; text nodes go through Entities.encode.
+ * Returns malloc'd string (caller frees with PLUTO_FREE/pd realloc), or NULL. */
+char *doc_serialize_svg_node(const DomNode *n);
+
+/* ── Document.parse ─────────────────────────────────────────────────────────
+ * mode: MODE_READER or MODE_RAW_HTML (constants.h). opts may be NULL.
+ * Returns 0 ok (check out->parseError), -1 alloc failure. */
+int document_parse(const char *htmlString, const char *baseUrl, int mode,
+                   const DocParseOpts *opts, DocParseResult *out);
+
+void document_free(DocParseResult *doc);
+
+#endif /* PLUTO_DOCUMENT_H */

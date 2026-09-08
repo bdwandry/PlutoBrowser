@@ -1,0 +1,85 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[17:09:39 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[17:09:39 #2] P1 fmt: [str][X][%][-42]
+[17:09:39 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:330
+[17:09:39 #4] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[17:09:39 #5] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[17:09:39 #6] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[17:09:39 #7] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[17:09:39 #8] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[17:09:39 #9] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[17:09:39 #10] === PlutoBrowser boot (Phase 0 scaffold) ===
+[17:09:39 #11] eventHandler: kEventInit, osversion=30101
+[17:09:39 #12] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[17:09:39 #13] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[17:09:39 #14] P5 about: host=home norm=about:home
+[17:09:39 #15] P5 noscheme: norm=https://example.com/path ssl=1
+[17:09:39 #16] P5 defport: norm=http://x.com/
+[17:09:39 #17] P5 unwrap=https://example.org/page
+[17:09:39 #18] P5 resolve1=https://x.com/a/b/c.png
+[17:09:39 #19] P5 resolve2=https://x.com/root.png
+[17:09:39 #20] P5 resolve3=https://cdn.y.com/i.png
+[17:09:39 #21] P5 resolve4=https://x.com/a/page.html#top
+[17:09:39 #22] P5 search: hw=1 dotcom=0 ip=0 about=0
+[17:09:39 #23] P5 encode=%s val=a+b%26clank
+[17:09:39 #24] P5 decode=a b&clank
+[17:09:39 #25] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[17:09:39 #26] P7 utf16le=Aé😀
+[17:09:39 #27] P7 cp1252 len=10(first=E2:want) first=E2
+[17:09:39 #28] P7 meta=<html><head><meta charset="iso-8859-1"><title>t</title></head><body>café</body></html>
+[17:09:39 #29] P7 hdr-passthrough=identical
+[17:09:39 #30] P7 utf8 passthrough=café
+[17:09:39 #31] P8 tc1a=sid=abc123; plain=1 (want sid=abc123; plain=1)
+[17:09:39 #32] P8 tc1b=plain=1 (want plain=1)
+[17:09:39 #33] P8 tc1c=[] (want empty)
+[17:09:39 #34] P8 tc4-http=plain=1 (want plain=1)
+[17:09:39 #35] P8 tc4-https=plain=1; sec=9 (want plain=1; sec=9)
+[17:09:39 #36] P8 tc2=sec=9 (want sec=9) count=2 (want 2)
+[17:09:39 #37] P8 tc5 count=5 (want 5)
+[17:09:39 #38] P8 tc5 d1.expires>1824103680 (want >0 name=a)
+[17:09:42 #39] P8 tc3 after-expiry count=5 (want 5, tmp pruned)
+[17:09:43 #40] P8 tc7 count=300 lo=cap10 hi=cap309 (want 300 cap10 cap309)
+[17:09:43 #41] P8 cleared count=0 (want 0)
+[17:09:43 #42] P9 init bookmarks=9 (want 9 defaults) history=0
+[17:09:43 #43] P9 tc2 top=First Again url=https://a.example/1 time=17:09 (want top First Again a.example)
+[17:09:43 #44] P9 tc3 second=Second Page count=2 (want Second Page, 2)
+[17:09:44 #45] P9 tc4 count=50 (want 50) top=https://cap.example/54 (want cap.example/54)
+[17:09:44 #46] P9 tc5 9->10->10 (want +1 then same) title=New Title (want New Title)
+[17:09:44 #47] P9 tc6 10->11 removed=1 (want +1, 1) now=10
+[17:09:44 #48] P9 tc7 reload bookmarks=10 (want 10) history=50 (want 50)
+[17:09:44 #49] P9 tc8 corrupt-recovery bookmarks=9 (want 9)
+[17:09:44 #50] P9 tc1b jar-after-reload=0 (cookie section persists; jar restore in P30)
+[17:09:44 #51] P9 about-filter 0==0 (want equal)
+[17:09:44 #52] P10 tc1 fonts-ready=7 (want 7)
+[17:09:44 #53] P10 tc2 body(Hello)=41 h1(Hello)=62 empty=0 (want >0, >w_body? no: h1 wider, 0)
+[17:09:44 #54] P10 tc3 h1 lh=24 mt=6 (want 24, 6) ptr=1
+[17:09:44 #55] P10 tc3 h2 lh=18 mt=5 (want 18, 5)
+[17:09:44 #56] P10 tc3 h3 lh=16 mt=4 (want 16, 4)
+[17:09:44 #57] P10 tc3 body-bold lh=16 (want 16) ptr=1
+[17:09:44 #58] P10 tc3 mono lh=15 (want 15)
+[17:09:44 #59] P10 tc3 small lh=14 (want 14) ptr=1
+[17:09:44 #60] P10 tc3 sub lh=14 (want 14)
+[17:09:44 #61] P4 scheduled: pending=2
+[17:09:44 #62] updateFrame: first frame executed
+[17:09:44 #63] P4 chain complete (5 iterations)
+[17:09:44 #64] P6 cancel_all after t1 done + t2 error (cancelledFired must stay 0)
+[17:09:44 #65] P6 RESULT: done=1 (want 1) error=1 (want 1) cancelledCompleted=0 (want 0) progress=0.00 running=0 maxTicksPerFrame=1
+[17:09:46 #66] P11 tc1 chrome loading frame rendered
+[17:09:47 #67] P11 tc1 chrome idle + hud link bar rendered
+[17:09:48 #68] P11 tc1 chrome about/globe rendered
+[17:09:49 #69] P11 tc3 selection after R,R,L (want 2) = 2
+[17:09:50 #70] P11 tc3 action on A=search (want search)
+[17:09:51 #71] P11 tc2 scrollbar + error page sequence complete
+[17:09:51 #72] P4 oneshot fired (count=1)
+[17:09:51 #73] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[17:09:54 #74] updateFrame: heartbeat frame=300
+[17:10:04 #75] updateFrame: heartbeat frame=600
+[17:10:14 #76] updateFrame: heartbeat frame=900
+[17:10:24 #77] updateFrame: heartbeat frame=1200
+[17:10:34 #78] updateFrame: heartbeat frame=1500
+[17:10:43 #79] updateFrame: heartbeat frame=1800
+[17:10:53 #80] updateFrame: heartbeat frame=2100
+[17:11:03 #81] updateFrame: heartbeat frame=2400
+[17:11:13 #82] updateFrame: heartbeat frame=2700
+[17:11:15 #83] eventHandler: kEventTerminate, frames=2752

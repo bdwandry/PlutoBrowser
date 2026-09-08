@@ -1,93 +1,80 @@
-// http_client.h — Multi-protocol HTTP/HTTPS client for PlutoBrowser.
-//
-// Supports two networking backends:
-//  1. Native HTTP API (pd->network->http): preferred for HTTP/HTTPS. Handles
-//     TLS, HTTP request formatting, status/header parsing internally.
-//  2. Raw TCP API (pd->network->tcp): fallback for HTTP/HTTPS if the HTTP API
-//     is unavailable or fails. Also used for non-HTTP TCP connections.
-//
-// Protocol selection: HTTP/HTTPS URLs attempt the native HTTP API first; if
-// unavailable or the connection fails, falls back to raw TCP. The browser
-// receives responses through the same PlutoHttpCallbacks interface regardless
-// of which backend succeeded — the protocol is an implementation detail.
-//
-// Behavior parity notes (verified against the Lua original via p07_oracle):
-//  - One request at a time; hc_get() cancels any previous one.
-//  - Redirects (3xx + Location) resolve via url_resolve() and are deferred to
-//    the NEXT update tick; up to 5 follows per top-level request.
-//  - Content-Length completion delivers everything after the header block,
-//    even bytes beyond the declared length (slice-to-end quirk).
-//  - Chunked bodies decode only once complete; an incomplete stream at close
-//    delivers the RAW undecoded chunked text.
-//  - Timeout watchdog: >60 s with >512 buffered bytes completes instead of
-//    erroring; otherwise "Connection timed out after 60 seconds."
-//  - about:home/blank/acidtest served locally ~20 ms after get(); unknown
-//    about:* pages fail synchronously but still return 1 from hc_get().
-//  - Header keys lowercased; Set-Cookie excluded from the map and forwarded
-//    to the cookie jar. Progress fires per read chunk.
-//  - Network access gating via requestAccess() with a session grant cache
-//    keyed by host.
-
+/*
+ * PlutoBrowser — http_client.h
+ * Port of Source/core/http_client.lua (reference, 538 lines).
+ *
+ * Lua → C function map:
+ *   HttpClient.get(url, cb)      → http_get()
+ *   HttpClient.cancel()          → http_cancel()
+ *   HttpClient.isLoading()       → http_is_loading()
+ *   HttpClient.update()          → http_update()  (call once per frame)
+ *   buildRequest/parseHeaders/decodeChunked/closeTcp/reset/doGet → static fns
+ *   INTERNAL_PAGES (about:home/blank/acidtest) → static structs (verbatim HTML)
+ *
+ * Preserved semantics (verified against the reference):
+ *   - Raw-TCP HTTP/1.1 GET over playdate->network->tcp (the Lua ref deliberately
+ *     avoids playdate.network.http: it follows redirects internally and crashed
+ *     the WX Simulator on 3xx). Redirects (max 5) are resolved in this module:
+ *     on a 3xx with Location, the connection is closed and the next one opens
+ *     on a LATER update tick (deferred, reference parity).
+ *   - State machine: idle → connecting → (accessWait) → reading → done | error.
+ *   - Request written from a later update frame after the open callback fires
+ *     (never inside the callback — TLS must settle first).
+ *   - Timeouts: connect/read 10 (Lua seconds → 10000 ms C), 60s request
+ *     watchdog; >512 bytes buffered at timeout = done (partial content wins).
+ *   - 2MB buffer cap; 32KB read chunks; 16KB SDK read buffer.
+ *   - Chunked decoding: retry-until-complete (nil while incomplete).
+ *   - Header parse on "\r\n\r\n": status line, case-lowered keys, multiple
+ *     Set-Cookie → cookie_jar_process_set_cookies(host, list, count).
+ *   - Stale-callback generation: requestId bumped on every reset; any SDK
+ *     callback whose saved id != current is ignored (and closes its own
+ *     connection once the open has resolved — never while still connecting,
+ *     which crashed the WX Simulator).
+ *   - about: pages answered locally after a 20ms timer (pdtimer), success path.
+ *   - Errors surfaced via callbacks.onError; partial-content-on-timeout rule.
+ *
+ * C API mapping (pd_api_network.h + "Inside Playdate with C" §7.6):
+ *   - tcp.new → pd->network->tcp->newConnection(host, port, usessl)
+ *   - tcp:open(cb) → tcp->open(conn, TCPOpenCallback, ud)  [err code not bool]
+ *   - tcp:write → tcp->write (bytes or negative PDNetErr; NET_WRITE_BUSY retry)
+ *   - getBytesAvailable/read → tcp->getBytesAvailable / tcp->read
+ *   - setConnectTimeout/setReadTimeout take MS in C (Lua took seconds)
+ *   - C requires explicit requestAccess for HTTPS (Lua prompted implicitly):
+ *     accessWait state added; the 60s watchdog deliberately does NOT cover it
+ *     (a permission dialog must not kill the request — matches the Lua ref,
+ *     whose runtime was paused while the dialog was up).
+ */
 #ifndef PLUTO_HTTP_CLIENT_H
 #define PLUTO_HTTP_CLIENT_H
 
 #include <stddef.h>
+#include "pd_api.h"
 
-#include "../util/strmap.h"
+/* Callbacks mirroring the Lua table: onSuccess(status, headers, body, bodyLen, url),
+ * onError(msg), onProgress(cur, total). All optional (NULL allowed). */
+typedef struct
+{
+    void (*onSuccess)(int status, char **headerKeys, char **headerVals,
+                      int headerCount, const char *body, size_t bodyLen,
+                      const char *url);
+    void (*onError)(const char *message);
+    void (*onProgress)(int cur, int total);
+} HttpCallbacks;
 
-struct PlaydateAPI;
-struct playdate_tcp;
-struct playdate_http;
+/* Initialize (stores the API pointer). Call once at boot. */
+void http_client_init(PlaydateAPI *pd);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* Start a GET. Cancels any in-flight request first (Lua parity).
+ * Returns 1 if a request was started (or answered internally), 0 on
+ * immediate failure (onError already fired). */
+int http_get(const char *urlString, const HttpCallbacks *callbacks);
 
-// Protocol backend selection (used internally; not exposed to browser.c).
-enum HcBackend {
-    HC_BACKEND_HTTP = 0,  // native HTTP API (preferred for HTTP/HTTPS)
-    HC_BACKEND_TCP  = 1,  // raw TCP API (fallback)
-};
+/* Cancel any in-flight request (safe when idle). */
+void http_cancel(void);
 
-typedef struct PlutoHttpCallbacks {
-    void* ud;
-    void (*onProgress)(void* ud, int cur, int tot);
-    // headers/body/finalUrl are borrowed and valid only during the call.
-    void (*onSuccess)(void* ud, int status, const StrMap* headers,
-                      const char* body, size_t bodyLen,
-                      const char* finalUrl);
-    void (*onError)(void* ud, const char* msg);
-} PlutoHttpCallbacks;
+/* 1 while a request is connecting/reading. */
+int http_is_loading(void);
 
-void hc_init(struct PlaydateAPI* pd);
+/* Pump the state machine — call once per frame from the update loop. */
+void http_update(void);
 
-// Starts a request, cancelling any previous one. Returns 1 when accepted
-// (like the Lua original this can still be 1 for URLs that later fail via
-// onError); 0 means synchronous rejection (onError already fired).
-int  hc_get(const char* urlStr, const PlutoHttpCallbacks* cbs);
-
-int  hc_is_loading(void);
-void hc_cancel(void);
-void hc_update(void);   // call once per frame
-
-// Returns a short label for the active backend: "TCP", "HTTP", or "HTTPS".
-const char* hc_backend_label(void);
-
-// Test hooks: swap the HTTP/TCP vtable / clock. NULL restores defaults.
-// The fake vtable must stay alive while installed.
-void hc_set_http_for_tests(struct playdate_http* fake);
-void hc_set_tcp_for_tests(struct playdate_tcp* fake);
-void hc_set_clock_fn(unsigned (*fn)(void)); // milliseconds like getCurrentTimeMilliseconds
-void hc_restore_http_api(void); // restores real HTTP API after selftests
-
-// Backend preference (Settings "Protocol"): HTTP API by default. do_get()
-// honors the preference when the backend is available and falls back to the
-// other one otherwise. Values match the enum HcBackend above.
-enum HcBackend hc_backend_pref(void);
-void hc_set_backend_pref(enum HcBackend pref);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // PLUTO_HTTP_CLIENT_H
+#endif /* PLUTO_HTTP_CLIENT_H */

@@ -1,6 +1,4 @@
 build/Source/render/cloud_layout.o: Source/render/cloud_layout.c \
- Source/render/cloud_layout.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/ieeefp.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
@@ -8,6 +6,7 @@ build/Source/render/cloud_layout.o: Source/render/cloud_layout.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_newlib_version.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/config.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/features.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/_ansi.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_types.h \
@@ -21,30 +20,10 @@ build/Source/render/cloud_layout.o: Source/render/cloud_layout.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/xlocale.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/strings.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h \
- Source/core/constants.h Source/core/logger.h \
- Source/render/image_decoder.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h \
- Source/render/link_manager.h Source/render/style.h Source/util/json.h \
- Source/util/strbuf.h Source/util/mem.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
- /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/types.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/endian.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/_endian.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/select.h \
@@ -56,11 +35,26 @@ build/Source/render/cloud_layout.o: Source/render/cloud_layout.c \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/sched.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/types.h \
  /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h \
- /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h
-
-Source/render/cloud_layout.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
+ Source/render/cloud_layout.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h \
+ /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h \
+ /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h \
+ Source/render/link_manager.h Source/render/style.h \
+ Source/render/image_decoder.h Source/core/constants.h Source/util/json.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdlib.h:
 
@@ -75,6 +69,8 @@ Source/render/cloud_layout.h:
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/config.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/features.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stddef.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/reent.h:
 
@@ -102,61 +98,13 @@ Source/render/cloud_layout.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/string.h:
 
-Source/core/constants.h:
-
-Source/core/logger.h:
-
-Source/render/image_decoder.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h:
-
-Source/render/link_manager.h:
-
-Source/render/style.h:
-
-Source/util/json.h:
-
-Source/util/strbuf.h:
-
-Source/util/mem.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdarg.h:
 
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h:
-
-/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h:
-
-/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
-
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/types.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_stdint.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/machine/endian.h:
 
@@ -180,4 +128,48 @@ Source/util/mem.h:
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/stdio.h:
 
+Source/render/cloud_layout.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdint.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdint.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/sys/_intsup.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_file.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_gfx.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/lib/gcc/arm-none-eabi/9.2.1/include/stdbool.h:
+
 /Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_lua.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_json.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sprite.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sound.h:
+
+/usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/math.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_display.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_scoreboards.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_network.h:
+
+/Users/bwandrych/Developer/PlaydateSDK/C_API/pd_api/pd_api_sys.h:
+
+Source/render/link_manager.h:
+
+Source/render/style.h:
+
+Source/render/image_decoder.h:
+
+Source/core/constants.h:
+
+Source/util/json.h:

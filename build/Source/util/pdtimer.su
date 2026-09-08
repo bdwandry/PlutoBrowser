@@ -1,0 +1,6 @@
+pdtimer.c:30:6:pdtimer_init	8	static
+pdtimer.c:37:14:pdtimer_perform_after_delay	32	static
+pdtimer.c:61:6:pdtimer_update	536	static
+pdtimer.c:96:6:pdtimer_cancel_all	0	static
+pdtimer.c:104:6:pdtimer_cancel	0	static
+pdtimer.c:120:5:pdtimer_pending_count	0	static

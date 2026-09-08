@@ -1,369 +1,414 @@
-// settings_page.c — P31: C port of CometBrowser Source/ui/settings_page.lua.
-//
-// Six rows: Search Engine (cycle NAMES), Browse Mode (toggle), Invert
-// Crank (toggle), Image Mode (cycle NAMES order), Clear Cookies (action,
-// runs immediately), Protocol (cycle HTTP/TCP). Save writes staged ->
-// Storage.settings + save() + onChange; Cancel discards. Box animates from
-// center, ease-out-cubic.
-
-#include "ui/settings_page.h"
-
+/*
+ * PlutoBrowser — settings_page.c
+ * Settings menu overlay (port of Source/ui/settings_page.lua).
+ * Staged-changes semantics preserved exactly: open() snapshots storage into
+ * the staged copy; left/right adjust ONLY the staged copy; A saves (applies
+ * staged → storage, fires onChange) unless the row is the Clear Cookies
+ * action (executes immediately); B discards. Animation: 300ms ease-out cubic
+ * box scale from center, contents clipped, drawn only past t>0.4.
+ */
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define SP_HAS_PD 1
-#endif
+#include "ui/settings_page.h"
+#include "core/constants.h"
+#include "core/storage.h"
+#include "render/style.h"
+#include "pd_api.h"
 
-#include "../core/constants.h"
-#include "../core/cookie_jar.h"
-#include "../core/logger.h"
-#include "../core/storage.h"
-#include "../render/style.h"
+extern PlaydateAPI *pluto_pd(void);
 
-#define SP_ANIM_DURATION_MS 300
-#define SP_BORDER 10
-#define SP_BOX_RADIUS 10
+#define BTN_UP (1 << 2)
+#define BTN_DOWN (1 << 3)
+#define BTN_LEFT (1 << 0)
+#define BTN_RIGHT (1 << 1)
+#define BTN_A (1 << 5)
+#define BTN_B (1 << 4)
 
-static PlaydateAPI* s_pd = NULL;
+#define ANIM_DURATION_MS 300
+#define BORDER 10
+#define BOX_RADIUS 10
+#define BOX_X (BORDER)
+#define BOX_Y (BORDER + 10)
+#define BOX_W (SCREEN_WIDTH - BORDER * 2)
+#define BOX_H (SCREEN_HEIGHT - BORDER - BOX_Y)
+#define CENTER_X (SCREEN_WIDTH / 2)
+#define CENTER_Y (BOX_Y + BOX_H / 2)
 
-static int s_isOpen = 0;
-static int s_selectedIndex = 1;
-static char s_prevState[32];
-static unsigned s_animStartMs = 0;
-static SpOnChangeFn s_onChange = NULL;
+#define OPTION_COUNT 5
 
-/* Staged settings: only applied to Storage on Save (A). */
-static struct {
-    int searchEngine;
-    int mode;
-    int invertCrank;
-    int imageMode; // PlutoImageMode
-    int protocol;  // PlutoProtocol
-} s_staged;
+static int g_isOpen = 0;
+static int g_selectedIndex = 1;
+static int g_previousState = 0;
+static unsigned int g_animStartMs = 0;
+static void (*g_onChangeCallback)(void) = NULL;
+static void (*g_clearCookiesCb)(void) = NULL;
 
-void sp_init_pd(PlaydateAPI* pd) { s_pd = pd; }
+/* staged copy (mirrors the Lua `staged` table) */
+static struct
+{
+    int searchEngine;             /* 1..SEARCH_ENGINE_COUNT */
+    int mode;                     /* BrowseMode */
+    int invertCrank;              /* 0/1 */
+    char imageMode[16];           /* persisted name */
+} g_staged;
 
-void sp_set_on_change(SpOnChangeFn cb) { s_onChange = cb; }
+void settings_page_set_onchange_callback(void (*fn)(void));
 
-int sp_is_open(void) { return s_isOpen; }
-int sp_selected_index(void) { return s_selectedIndex; }
-const char* sp_previous_state(void) { return s_prevState; }
-
-const char* sp_staged_engine_name(void) {
-    int idx = s_staged.searchEngine;
-    if (idx < 1 || idx > PLUTO_SEARCH_ENGINE_COUNT) return "DuckDuckGo";
-    return PLUTO_SEARCH_ENGINES[idx - 1].name;
+void settings_page_set_onchange_callback(void (*fn)(void))
+{
+    g_onChangeCallback = fn;
 }
 
-const char* sp_staged_mode_label(void) {
-    return (s_staged.mode == PLUTO_MODE_RAW_HTML) ? "HTML" : "Reader";
+int settings_page_is_open(void)
+{
+    return g_isOpen;
 }
 
-const char* sp_staged_invert_label(void) {
-    return s_staged.invertCrank ? "On" : "Off";
+int settings_page_selected_index(void)
+{
+    return g_selectedIndex;
 }
 
-const char* sp_staged_image_label(void) {
-    /* Lua: IMAGE_MODE_LABELS[mode] or "Render All" */
-    const char* label =
-        pluto_image_mode_label((PlutoImageMode)s_staged.imageMode);
-    return (label != NULL) ? label : "Render All";
+int settings_page_previous_state(void)
+{
+    return g_previousState;
 }
 
-const char* sp_staged_protocol_label(void) {
-    /* Lua: PROTOCOL_LABELS[protocol] or "HTTP" */
-    const char* label =
-        pluto_protocol_label((PlutoProtocol)s_staged.protocol);
-    return (label != NULL) ? label : "HTTP";
+void settings_page_open(int prevState)
+{
+    g_isOpen = 1;
+    g_selectedIndex = 1;
+    g_previousState = prevState;
+    g_animStartMs = pluto_pd()->system->getCurrentTimeMilliseconds();
+
+    g_staged.searchEngine = storage_setting_int("searchEngine");
+    g_staged.mode = storage_setting_int("mode");
+    g_staged.invertCrank = storage_setting_int("invertCrank");
+    const char *im = storage_setting_str("imageMode");
+    snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
+             im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_VIEWPORT]);
 }
 
-void sp_open(const char* prevState) {
-    s_isOpen = 1;
-    s_selectedIndex = 1;
-    snprintf(s_prevState, sizeof(s_prevState), "%s",
-             prevState ? prevState : "");
-
-#ifdef SP_HAS_PD
-    if (s_pd != NULL) {
-        s_animStartMs = s_pd->system->getCurrentTimeMilliseconds();
-    }
-#endif
-
-    PlutoSettings* st = storage_settings();
-    /* Lua snapshot defaults: searchEngine or 1, mode or MODE_READER,
-     * invertCrank or false, imageMode or IMAGE_MODE_ALL */
-    s_staged.searchEngine = st ? st->searchEngine : 1;
-    if (s_staged.searchEngine < 1 ||
-        s_staged.searchEngine > PLUTO_SEARCH_ENGINE_COUNT) {
-        s_staged.searchEngine = 1;
-    }
-    s_staged.mode = st ? st->mode : (int)PLUTO_MODE_READER;
-    s_staged.invertCrank = st ? st->invertCrank : 0;
-    s_staged.imageMode = st ? st->imageMode : (int)PLUTO_IMAGE_MODE_ALL;
-    s_staged.protocol = st ? st->protocol : (int)PLUTO_PROTOCOL_HTTP;
-    if (s_staged.protocol < PLUTO_PROTOCOL_HTTP ||
-        s_staged.protocol > PLUTO_PROTOCOL_TCP) {
-        s_staged.protocol = (int)PLUTO_PROTOCOL_HTTP;
-    }
-
-    PLUTO_LOG("[P31] SettingsPage.open() previousState=%s", s_prevState);
+void settings_page_close(void)
+{
+    g_isOpen = 0;
 }
 
-void sp_close(void) {
-    s_isOpen = 0;
-    PLUTO_LOG("[P31] SettingsPage.close()");
-}
-
-/* Row 1: Search Engine cycle — Lua ((v-2+n)%n)+1 / (v%n)+1 */
-static void cycle_engine(int dir) {
-    const int n = PLUTO_SEARCH_ENGINE_COUNT;
-    int v = s_staged.searchEngine;
-    if (dir < 0) {
-        v = ((v - 2 + n) % n) + 1;
-    } else {
-        v = (v % n) + 1;
-    }
-    s_staged.searchEngine = v;
-}
-
-/* Row 2: Browse Mode toggle (both directions identical in Lua) */
-static void toggle_mode(void) {
-    s_staged.mode = (s_staged.mode == (int)PLUTO_MODE_RAW_HTML)
-                        ? (int)PLUTO_MODE_READER
-                        : (int)PLUTO_MODE_RAW_HTML;
-}
-
-/* Row 3: Invert Crank toggle */
-static void toggle_invert(void) {
-    s_staged.invertCrank = !s_staged.invertCrank;
-}
-
-/* Row 4: Image Mode cycle in IMAGE_MODE_NAMES order (enum order) */
-static void cycle_image_mode(int dir) {
-    const int n = (int)PLUTO_IMAGE_MODE_DISABLED + 1;
-    int v = s_staged.imageMode;
-    v += (dir < 0) ? -1 : 1;
-    if (v < 0) v += n;
-    if (v >= n) v -= n;
-    s_staged.imageMode = v;
-}
-
-/* Row 5: Clear Cookies action (immediate, both directions) */
-static void clear_cookies(void) {
-    cj_clear();
-    PLUTO_LOG("[P31] cookies cleared");
-}
-
-/* Row 6: Protocol cycle (http <-> tcp), both directions identical */
-static void cycle_protocol(void) {
-    s_staged.protocol = (s_staged.protocol == (int)PLUTO_PROTOCOL_HTTP)
-                            ? (int)PLUTO_PROTOCOL_TCP
-                            : (int)PLUTO_PROTOCOL_HTTP;
-}
-
-static SpAction save_and_close(void) {
-    PlutoSettings* st = storage_settings();
-    if (st != NULL) {
-        st->searchEngine = s_staged.searchEngine;
-        st->mode = s_staged.mode;
-        st->invertCrank = s_staged.invertCrank;
-        st->imageMode = s_staged.imageMode;
-        st->protocol = s_staged.protocol;
-    }
+static void save_and_close(char **out)
+{
+    storage_set_setting_int("searchEngine", g_staged.searchEngine);
+    storage_set_setting_int("mode", g_staged.mode);
+    storage_set_setting_int("invertCrank", g_staged.invertCrank);
+    storage_set_setting_str("imageMode", g_staged.imageMode);
     storage_save();
-    if (s_onChange != NULL) {
-        s_onChange();
+    if (g_onChangeCallback)
+    {
+        g_onChangeCallback();
     }
-    PLUTO_LOG("[P31] saveAndClose: mode=%d imageMode=%d protocol=%d",
-              s_staged.mode, s_staged.imageMode, s_staged.protocol);
-    sp_close();
-    return SP_ACT_SAVED;
+    settings_page_close();
+    if (out)
+    {
+        *out = (char *)pluto_pd()->system->realloc(NULL, 6);
+        if (*out)
+        {
+            strcpy(*out, "save");
+        }
+    }
 }
 
-SpAction sp_handle_input(SpButton btn) {
-    if (!s_isOpen) return SP_ACT_NONE;
+static void cancel_and_close(char **out)
+{
+    settings_page_close();
+    if (out)
+    {
+        *out = (char *)pluto_pd()->system->realloc(NULL, 7);
+        if (*out)
+        {
+            strcpy(*out, "close");
+        }
+    }
+}
 
-    switch (btn) {
-        case SP_BTN_DOWN:
-            s_selectedIndex += 1; // math.min(#options, sel+1)
-            if (s_selectedIndex > SP_OPTION_COUNT) {
-                s_selectedIndex = SP_OPTION_COUNT;
+const char *settings_page_staged_value(int optionIndex)
+{
+    static char buf[40];
+    switch (optionIndex)
+    {
+    case 1:
+    {
+        int idx = g_staged.searchEngine - 1;
+        if (idx < 0 || idx >= SEARCH_ENGINE_COUNT)
+        {
+            idx = 0;
+        }
+        return SEARCH_ENGINES[idx].name;
+    }
+    case 2:
+        return g_staged.mode == 1 ? "HTML" : "Reader"; /* MODE_RAW_HTML=1 */
+    case 3:
+        return g_staged.invertCrank ? "On" : "Off";
+    case 4:
+    {
+        int n = image_mode_from_name(g_staged.imageMode);
+        return image_mode_label((ImageMode)(n >= 0 ? n : IMAGE_MODE_ALL));
+    }
+    case 5:
+        return "";
+    default:
+        return "";
+    }
+    (void)buf;
+}
+
+char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(void))
+{
+    if (!g_isOpen)
+    {
+        return NULL;
+    }
+    g_clearCookiesCb = clearCookiesCb;
+
+    char *result = NULL;
+
+    if (pushed & BTN_DOWN)
+    {
+        if (g_selectedIndex < OPTION_COUNT)
+        {
+            g_selectedIndex++;
+        }
+    }
+    else if (pushed & BTN_UP)
+    {
+        if (g_selectedIndex > 1)
+        {
+            g_selectedIndex--;
+        }
+    }
+    else if (pushed & BTN_LEFT)
+    {
+        switch (g_selectedIndex)
+        {
+        case 1:
+        {
+            int n = SEARCH_ENGINE_COUNT;
+            g_staged.searchEngine = ((g_staged.searchEngine - 2 + n) % n) + 1;
+            break;
+        }
+        case 2:
+            g_staged.mode = (g_staged.mode == 1) ? 0 : 1; /* RAW_HTML <-> READER */
+            break;
+        case 3:
+            g_staged.invertCrank = !g_staged.invertCrank;
+            break;
+        case 4:
+        {
+            int cur = image_mode_from_name(g_staged.imageMode);
+            if (cur < 0)
+            {
+                cur = IMAGE_MODE_ALL;
+            }
+            int idx = ((cur - 2 + IMAGE_MODE_COUNT) % IMAGE_MODE_COUNT);
+            snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
+                     IMAGE_MODE_NAMES[idx]);
+            break;
+        }
+        case 5:
+            if (g_clearCookiesCb)
+            {
+                g_clearCookiesCb();
             }
             break;
-        case SP_BTN_UP:
-            s_selectedIndex -= 1; // math.max(1, sel-1)
-            if (s_selectedIndex < 1) s_selectedIndex = 1;
-            break;
-        case SP_BTN_LEFT:
-            switch (s_selectedIndex) {
-                case 1: cycle_engine(-1); break;
-                case 2: toggle_mode(); break;
-                case 3: toggle_invert(); break;
-                case 4: cycle_image_mode(-1); break;
-                case 5: clear_cookies(); break;
-                case 6: cycle_protocol(); break;
-                default: break;
-            }
-            break;
-        case SP_BTN_RIGHT:
-            switch (s_selectedIndex) {
-                case 1: cycle_engine(1); break;
-                case 2: toggle_mode(); break;
-                case 3: toggle_invert(); break;
-                case 4: cycle_image_mode(1); break;
-                case 5: clear_cookies(); break;
-                case 6: cycle_protocol(); break;
-                default: break;
-            }
-            break;
-        case SP_BTN_A:
-            if (s_selectedIndex == 5) {
-                clear_cookies(); // immediate action row
-            } else {
-                return save_and_close();
-            }
-            break;
-        case SP_BTN_B:
-            PLUTO_LOG("[P31] cancelAndClose: discarding changes");
-            sp_close();
-            return SP_ACT_CLOSED;
         default:
             break;
+        }
     }
-    return SP_ACT_NONE;
+    else if (pushed & BTN_RIGHT)
+    {
+        switch (g_selectedIndex)
+        {
+        case 1:
+        {
+            int n = SEARCH_ENGINE_COUNT;
+            g_staged.searchEngine = (g_staged.searchEngine % n) + 1;
+            break;
+        }
+        case 2:
+            g_staged.mode = (g_staged.mode == 1) ? 0 : 1;
+            break;
+        case 3:
+            g_staged.invertCrank = !g_staged.invertCrank;
+            break;
+        case 4:
+        {
+            int cur = image_mode_from_name(g_staged.imageMode);
+            if (cur < 0)
+            {
+                cur = IMAGE_MODE_ALL;
+            }
+            int idx = (cur % IMAGE_MODE_COUNT) + 1;
+            if (idx >= IMAGE_MODE_COUNT)
+            {
+                idx = 0; /* (idx % n) + 1 wraps to 1-based; names are 0-based */
+            }
+            snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
+                     IMAGE_MODE_NAMES[idx]);
+            break;
+        }
+        case 5:
+            if (g_clearCookiesCb)
+            {
+                g_clearCookiesCb();
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    else if (pushed & BTN_A)
+    {
+        if (g_selectedIndex == 5)
+        {
+            /* Clear Cookies action: execute immediately */
+            if (g_clearCookiesCb)
+            {
+                g_clearCookiesCb();
+            }
+        }
+        else
+        {
+            save_and_close(&result);
+        }
+    }
+    else if (pushed & BTN_B)
+    {
+        cancel_and_close(&result);
+    }
+
+    return result;
 }
 
-#ifdef SP_HAS_PD
+void settings_page_draw(void)
+{
+    if (!g_isOpen)
+    {
+        return;
+    }
+    PlaydateAPI *pd = pluto_pd();
 
-void sp_draw(void) {
-    if (!s_isOpen || s_pd == NULL) return;
-
-    const float boxX0 = (float)SP_BORDER;
-    const float boxY0 = (float)(SP_BORDER + 10);
-    const float boxW = (float)(PLUTO_SCREEN_WIDTH - SP_BORDER * 2);
-    const float boxH =
-        (float)(PLUTO_SCREEN_HEIGHT - SP_BORDER - (SP_BORDER + 10));
-    const float centerX = (float)PLUTO_SCREEN_WIDTH / 2.0f;
-    const float centerY = boxY0 + boxH / 2.0f;
-
-    unsigned elapsed =
-        s_pd->system->getCurrentTimeMilliseconds() - s_animStartMs;
-    float t = (float)elapsed / (float)SP_ANIM_DURATION_MS;
-    if (t > 1.0f) t = 1.0f;
+    float elapsed = (float)(pd->system->getCurrentTimeMilliseconds() - g_animStartMs);
+    float t = elapsed / (float)ANIM_DURATION_MS;
+    if (t > 1.0f)
+    {
+        t = 1.0f;
+    }
     /* ease-out cubic */
-    t = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+    float e = 1.0f - t;
+    t = 1.0f - e * e * e;
 
-    int curW = (int)(boxW * t);
-    int curH = (int)(boxH * t);
-    if (curW < 1) curW = 1;
-    if (curH < 1) curH = 1;
-    int curX = (int)(centerX - (float)curW / 2.0f);
-    int curY = (int)(centerY - (float)curH / 2.0f);
-    int r = (int)((float)SP_BOX_RADIUS * t);
-
-    s_pd->graphics->fillRoundRect((float)curX, (float)curY,
-                                  (float)curW, (float)curH, r,
-                                  kColorWhite);
-    s_pd->graphics->drawRoundRect(curX, curY, curW, curH, r, 1,
-                                  kColorBlack);
-
-    if (t <= 0.4f) return;
-
-        PlutoFont* fontH = style_get_heading_font(2, NULL, NULL);
-    int bsz = 0;
-    PlutoFont* fontBold = style_get_body_font(1, 0, &bsz);
-    PlutoFont* fontSmall = style_get_ui_small_font();
-
-    s_pd->graphics->pushContext(NULL);
-    s_pd->graphics->setClipRect(curX + 2, curY + 2, curW - 4, curH - 4);
-
-    int innerX = curX + 16;
-    int innerY = curY + 10;
-    int innerW = curW - 32;
-
-    s_pd->graphics->setFont(fontH);
-    s_pd->graphics->drawText("SETTINGS", 8, kASCIIEncoding, innerX,
-                             innerY);
-    s_pd->graphics->drawLine(innerX, innerY + 16, innerX + innerW,
-                             innerY + 16, 1, kColorBlack);
-
-    static const char* const labels[SP_OPTION_COUNT] = {
-        "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-        "Clear Cookies", "Protocol"
-    };
-
-    int itemY = innerY + 24;
-    const int itemH = 24;  // 6 rows must fit alongside the footer
-    const int rowStep = itemH + 2;
-
-    for (int i = 1; i <= SP_OPTION_COUNT; i++) {
-        int iy = itemY + (i - 1) * rowStep;
-        int isSel = (i == s_selectedIndex);
-
-        if (isSel) {
-            s_pd->graphics->fillRoundRect(
-                (float)(innerX - 4), (float)iy, (float)(innerW + 8),
-                (float)itemH, 4, kColorBlack);
-            s_pd->graphics->drawRoundRect(innerX - 3, iy + 1,
-                                          innerW + 6, itemH - 2, 3, 1,
-                                          kColorWhite);
-            s_pd->graphics->setDrawMode(kDrawModeFillWhite);
-        } else {
-            s_pd->graphics->setDrawMode(kDrawModeCopy);
-        }
-
-        s_pd->graphics->setFont(fontBold);
-        const char* label = labels[i - 1];
-        s_pd->graphics->drawText(label, strlen(label), kUTF8Encoding,
-                                 innerX + 4, iy + 5);
-
-        /* getValue() */
-        const char* val = "";
-        switch (i) {
-            case 1: val = sp_staged_engine_name(); break;
-            case 2: val = sp_staged_mode_label(); break;
-            case 3: val = sp_staged_invert_label(); break;
-            case 4: val = sp_staged_image_label(); break;
-            case 6: val = sp_staged_protocol_label(); break;
-            default: val = ""; break; // Clear Cookies renders ""
-        }
-        int isAction = (i == 5);
-
-        if (val[0] != '\0') {
-            s_pd->graphics->setFont(fontSmall);
-            int valW = style_get_text_width(fontSmall, val);
-            s_pd->graphics->drawText(val, strlen(val), kUTF8Encoding,
-                                     innerX + innerW - valW - 4, iy + 7);
-        }
-
-        if (isSel && !isAction) {
-            s_pd->graphics->setFont(fontSmall);
-            int valW = (int)style_get_text_width(fontSmall, val);
-            s_pd->graphics->drawText("<", 1, kASCIIEncoding,
-                                     innerX + innerW - valW - 18, iy + 7);
-            s_pd->graphics->drawText(">", 1, kASCIIEncoding,
-                                     innerX + innerW - 2, iy + 7);
-        } else if (isSel && isAction) {
-            s_pd->graphics->setFont(fontSmall);
-            int w = (int)style_get_text_width(fontSmall, "Press A");
-            s_pd->graphics->drawText("Press A", 7, kASCIIEncoding,
-                                     innerX + innerW - w - 4, iy + 7);
-        }
-
-        s_pd->graphics->setDrawMode(kDrawModeCopy);
+    int curW = (int)(BOX_W * t);
+    if (curW < 1)
+    {
+        curW = 1;
     }
+    int curH = (int)(BOX_H * t);
+    if (curH < 1)
+    {
+        curH = 1;
+    }
+    int curX = CENTER_X - curW / 2;
+    int curY = CENTER_Y - curH / 2;
+    int r = (int)(BOX_RADIUS * t);
 
-    int footerY = itemY + SP_OPTION_COUNT * rowStep + 8;
-    s_pd->graphics->setFont(fontSmall);
-    s_pd->graphics->drawText("(B) Cancel  *  (A) Save & Close", 30,
-                             kASCIIEncoding, innerX, footerY);
+    pd->graphics->fillRoundRect(curX, curY, curW, curH, r, kColorWhite);
+    pd->graphics->drawRoundRect(curX, curY, curW, curH, r, 1, kColorBlack);
 
-    s_pd->graphics->popContext();
+    if (t > 0.4f)
+    {
+        LCDFont *fontH = style_font(PLUTO_FONT_HEADING2);
+        LCDFont *fontBold = style_font(PLUTO_FONT_BODY_BOLD);
+        LCDFont *fontSmall = style_font(PLUTO_FONT_SMALL);
+
+        pd->graphics->pushContext(NULL);
+        pd->graphics->setClipRect(curX + 2, curY + 2, curW - 4, curH - 4);
+
+        int innerX = curX + 16;
+        int innerY = curY + 10;
+        int innerW = curW - 32;
+
+        pd->graphics->setFont(fontH);
+        const char *title = "SETTINGS";
+        pd->graphics->drawText(title, strlen(title), kUTF8Encoding, innerX, innerY);
+        pd->graphics->drawLine(innerX, innerY + 16, innerX + innerW, innerY + 16,
+                               1, kColorBlack);
+
+        static const char *const labels[OPTION_COUNT] = {
+            "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
+            "Clear Cookies"};
+        int itemY = innerY + 24;
+        int itemH = 26;
+
+        for (int i = 1; i <= OPTION_COUNT; i++)
+        {
+            int iy = itemY + (i - 1) * (itemH + 4);
+            int isSel = (i == g_selectedIndex);
+            int isAction = (i == 5);
+
+            if (isSel)
+            {
+                pd->graphics->fillRoundRect(innerX - 4, iy, innerW + 8, itemH, 4,
+                                            kColorBlack);
+                pd->graphics->drawRoundRect(innerX - 3, iy + 1, innerW + 6,
+                                            itemH - 2, 3, 1, kColorWhite);
+                pd->graphics->setDrawMode(kDrawModeFillWhite);
+            }
+            else
+            {
+                pd->graphics->setDrawMode(kDrawModeCopy);
+            }
+
+            pd->graphics->setFont(fontBold);
+            pd->graphics->drawText(labels[i - 1], strlen(labels[i - 1]),
+                                   kUTF8Encoding, innerX + 4, iy + 5);
+
+            const char *val = settings_page_staged_value(i);
+            if (val && val[0])
+            {
+                pd->graphics->setFont(fontSmall);
+                int valW = style_get_text_width(PLUTO_FONT_SMALL, val);
+                pd->graphics->drawText(val, strlen(val), kUTF8Encoding,
+                                       innerX + innerW - valW - 4, iy + 7);
+            }
+
+            if (isSel && !isAction)
+            {
+                pd->graphics->setFont(fontSmall);
+                int valW = val ? style_get_text_width(PLUTO_FONT_SMALL, val) : 0;
+                pd->graphics->drawText("<", 1, kUTF8Encoding,
+                                       innerX + innerW - valW - 18, iy + 7);
+                pd->graphics->drawText(">", 1, kUTF8Encoding, innerX + innerW - 2,
+                                       iy + 7);
+            }
+            else if (isSel && isAction)
+            {
+                pd->graphics->setFont(fontSmall);
+                const char *pa = "Press A";
+                int paW = style_get_text_width(PLUTO_FONT_SMALL, pa);
+                pd->graphics->drawText(pa, strlen(pa), kUTF8Encoding,
+                                       innerX + innerW - paW - 4, iy + 7);
+            }
+
+            pd->graphics->setDrawMode(kDrawModeCopy);
+        }
+
+        int footerY = itemY + OPTION_COUNT * (itemH + 4) + 8;
+        pd->graphics->setFont(fontSmall);
+        const char *footer = "(B) Cancel  *  (A) Save & Close";
+        pd->graphics->drawText(footer, strlen(footer), kUTF8Encoding, innerX,
+                               footerY);
+
+        pd->graphics->clearClipRect();
+        pd->graphics->popContext();
+    }
 }
-
-#else /* host build */
-
-void sp_draw(void) {}
-
-#endif

@@ -1,50 +1,52 @@
-#ifndef PLUTO_RENDER_STYLE_H
-#define PLUTO_RENDER_STYLE_H
-
-/* C port of Source/render/style.lua (Style).
+/*
+ * PlutoBrowser — style.h
+ * Typography & styling (port of Source/render/style.lua).
  *
- * Fonts are looked up at init; any missing slot falls back to the system
- * font (gfx.getFont() in Lua -- main.c installs its body font as the
- * current font, so that same font is passed here as the fallback).
- * When built WITHOUT the Playdate API (host test harness), every slot
- * stays NULL and width measuring degrades to the Lua last resort of
- * 8 px per character.
+ * Lua loaded fonts with pcall + system-font fallback; loadFont in C returns
+ * NULL on failure, so the fallback chain is: named Roobert font → the system
+ * font provided by pd->graphics->getFont() — the identical observable result.
  */
+#ifndef PLUTO_STYLE_H
+#define PLUTO_STYLE_H
 
-struct PlaydateAPI;
+#include "pd_api.h"
 
-/* opaque font handle (really LCDFont*) */
-typedef void PlutoFont;
+typedef enum
+{
+    PLUTO_FONT_HEADING1 = 0,
+    PLUTO_FONT_HEADING2,
+    PLUTO_FONT_HEADING3,
+    PLUTO_FONT_BODY,
+    PLUTO_FONT_BODY_BOLD,
+    PLUTO_FONT_MONO,
+    PLUTO_FONT_SMALL,
+    PLUTO_FONT_COUNT
+} PlutoFontRole;
 
-void style_init(struct PlaydateAPI* pd);
+/* Load all fonts (safe to call once at boot). */
+void style_init(PlaydateAPI *pd);
 
-/* system-font fallback (call once after loading, mirrors gfx.getFont()) */
-void style_set_system_font(PlutoFont* f);
+/* Font for a role (never NULL after init). */
+LCDFont *style_font(PlutoFontRole role);
 
-/* Style.getTextWidth: nil/"" -> 0; font arg may be NULL (body fallback);
- * final fallback = 8 px per char */
-int  style_get_text_width(PlutoFont* font, const char* text);
+/* Lua getTextWidth: 0 for empty text; font metrics; last-resort len*8. */
+int style_get_text_width(PlutoFontRole role, const char *text);
 
-/* returns font, fills lineHeight + marginBottom:
- * Lua Style.getHeadingFont -> font, lineH, marginB
- *   level 1 -> 24, 6; level 2 -> 18, 5; else 16, 4 */
-PlutoFont* style_get_heading_font(int level, int* lineHeight, int* marginBottom);
+/* Lua getHeadingFont(level): returns font; lineHeight and marginTopOut set. */
+LCDFont *style_get_heading_font(int level, int *lineHeight, int *marginTopOut);
 
-/* code -> mono 15; bold -> bold 16; else body 16 */
-PlutoFont* style_get_body_font(int isBold, int isCode, int* size);
+/* Lua getBodyFont(isBold, isCode): returns font; lineHeight set. */
+LCDFont *style_get_body_font(int isBold, int isCode, int *lineHeight);
 
-/* Style.fontSmall resolution: init assigns sysFont when the slot never
- * loaded (Lua: fontSmall = fontSmall or gfx.getFont()) */
-PlutoFont* style_get_small_font(void);
-/* Lua UI chain: Style.fontSmall or Style.fontMono or gfx.getFont(). */
-PlutoFont* style_get_ui_small_font(void);
+/* Host-test seam: install sentinel font pointers (see p31 battery). */
+void style_test_set_fonts(LCDFont *body, LCDFont *bold, LCDFont *mono,
+                          LCDFont *small);
+void style_test_set_fonts_ex(LCDFont *body, LCDFont *bold, LCDFont *mono,
+                             LCDFont *small, LCDFont *h1, LCDFont *h2,
+                             LCDFont *h3);
 
-/* Style.fontMono (Roobert-11-Mono-Condensed), sys-font fallback. */
-PlutoFont* style_get_mono_font(void);
+/* Lua getInlineFont(isBold, isCode, isSmall, isSub, isSup, isBig). */
+LCDFont *style_get_inline_font(int isBold, int isCode, int isSmall, int isSub,
+                               int isSup, int isBig, int *lineHeight);
 
-/* precedence: code > small/sub/sup > bold/big > regular */
-PlutoFont* style_get_inline_font(int isBold, int isCode, int isSmall,
-                                 int isSub, int isSup, int isBig,
-                                 int* size);
-
-#endif
+#endif /* PLUTO_STYLE_H */

@@ -1,0 +1,4 @@
+dither.c:29:12:dither_core.part.0	56	static
+dither.c:21:5:dither_rgb_to_gray	4	static
+dither.c:57:5:dither_to_bits	12	static
+dither.c:74:12:dither_to_bitmap	72	static

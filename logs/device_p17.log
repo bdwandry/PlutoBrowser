@@ -1,0 +1,332 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[05:06:47 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
+[05:06:47 #2] P1 fmt: [str][X][%][-42]
+[05:06:47 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:1141
+[05:06:47 #4] P3 engine[0]=DuckDuckGo Lite url=https://html.duckduckgo.com/html/?q=
+[05:06:47 #5] P3 engine[1]=FrogFind (Fast Text) url=http://frogfind.com/?q=
+[05:06:47 #6] P3 engine[2]=Wiby (Classic Web) url=https://wiby.me/?q=
+[05:06:47 #7] P3 engine[3]=Wikipedia Search url=https://en.wikipedia.org/wiki/Special:Search?search=
+[05:06:47 #8] P3 bookmarks=9 first=Google last=Dan Luu's Blog
+[05:06:47 #9] P3 imgmodes: all=all viewport-label=In-View Only fromname(viewport)=1
+[05:06:47 #10] === PlutoBrowser boot (Phase 0 scaffold) ===
+[05:06:47 #11] eventHandler: kEventInit, osversion=30101
+[05:06:47 #12] P5 parse: scheme=https host=example.com port=8080 path=/a/b q=q=1 h=frag
+[05:06:47 #13] P5 norm1=https://example.com:8080/a/b?q=1#frag
+[05:06:47 #14] P5 about: host=home norm=about:home
+[05:06:47 #15] P5 noscheme: norm=https://example.com/path ssl=1
+[05:06:47 #16] P5 defport: norm=http://x.com/
+[05:06:47 #17] P5 unwrap=https://example.org/page
+[05:06:47 #18] P5 resolve1=https://x.com/a/b/c.png
+[05:06:47 #19] P5 resolve2=https://x.com/root.png
+[05:06:47 #20] P5 resolve3=https://cdn.y.com/i.png
+[05:06:47 #21] P5 resolve4=https://x.com/a/page.html#top
+[05:06:47 #22] P5 search: hw=1 dotcom=0 ip=0 about=0
+[05:06:47 #23] P5 encode=%s val=a+b%26clank
+[05:06:47 #24] P5 decode=a b&clank
+[05:06:47 #25] P5 searchurl=https://html.duckduckgo.com/html/?q=playdate+consolepage.html
+[05:06:47 #26] P7 utf16le=Aé😀
+[05:06:47 #27] P7 cp1252 len=10(first=E2:want) first=E2
+[05:06:47 #28] P7 meta=<html><head><meta charset="iso-8859-1"><title>t</title></head><body>café</body></html>
+[05:06:47 #29] P7 hdr-passthrough=identical
+[05:06:47 #30] P7 utf8 passthrough=café
+[05:06:47 #31] P8 tc1a=sid=abc123; plain=1 (want sid=abc123; plain=1)
+[05:06:47 #32] P8 tc1b=plain=1 (want plain=1)
+[05:06:47 #33] P8 tc1c=[] (want empty)
+[05:06:47 #34] P8 tc4-http=plain=1 (want plain=1)
+[05:06:47 #35] P8 tc4-https=plain=1; sec=9 (want plain=1; sec=9)
+[05:06:47 #36] P8 tc2=sec=9 (want sec=9) count=2 (want 2)
+[05:06:47 #37] P8 tc5 count=5 (want 5)
+[05:06:47 #38] P8 tc5 d1.expires>1824103680 (want >0 name=a)
+[05:06:49 #39] P8 tc3 after-expiry count=5 (want 5, tmp pruned)
+[05:06:50 #40] P8 tc7 count=300 lo=cap10 hi=cap309 (want 300 cap10 cap309)
+[05:06:50 #41] P8 cleared count=0 (want 0)
+[05:06:50 #42] P9 init bookmarks=9 (want 9 defaults) history=0
+[05:06:50 #43] P9 tc2 top=First Again url=https://a.example/1 time=05:06 (want top First Again a.example)
+[05:06:50 #44] P9 tc3 second=Second Page count=2 (want Second Page, 2)
+[05:06:51 #45] P9 tc4 count=50 (want 50) top=https://cap.example/54 (want cap.example/54)
+[05:06:51 #46] P9 tc5 9->10->10 (want +1 then same) title=New Title (want New Title)
+[05:06:51 #47] P9 tc6 10->11 removed=1 (want +1, 1) now=10
+[05:06:51 #48] P9 tc7 reload bookmarks=10 (want 10) history=50 (want 50)
+[05:06:51 #49] P9 tc8 corrupt-recovery bookmarks=9 (want 9)
+[05:06:51 #50] P9 tc1b jar-after-reload=0 (cookie section persists; jar restore in P30)
+[05:06:51 #51] P9 about-filter 0==0 (want equal)
+[05:06:51 #52] P10 tc1 fonts-ready=7 (want 7)
+[05:06:51 #53] P10 tc2 body(Hello)=41 h1(Hello)=62 empty=0 (want >0, >w_body? no: h1 wider, 0)
+[05:06:51 #54] P10 tc3 h1 lh=24 mt=6 (want 24, 6) ptr=1
+[05:06:51 #55] P10 tc3 h2 lh=18 mt=5 (want 18, 5)
+[05:06:51 #56] P10 tc3 h3 lh=16 mt=4 (want 16, 4)
+[05:06:51 #57] P10 tc3 body-bold lh=16 (want 16) ptr=1
+[05:06:51 #58] P10 tc3 mono lh=15 (want 15)
+[05:06:51 #59] P10 tc3 small lh=14 (want 14) ptr=1
+[05:06:51 #60] P10 tc3 sub lh=14 (want 14)
+[05:06:51 #61] P15 tc1=[&<AB (c) -- A] (want [&<AB (c) -- A])
+[05:06:51 #62] P15 tc2=[cafe  --   x...] (want [cafe  --   x...])
+[05:06:51 #63] P15 tc3=[a&lt;b&gt;&amp;&quot;c] (want [a&lt;b&gt;&amp;&quot;c])
+[05:06:51 #64] P15 tc4=[x foobar y] (want [x foobar y])
+[05:06:51 #65] P15 tc5=[plain ascii 123!] (want identical)
+[05:06:51 #66] P15 tc6=[ --  ...pi ] (want [ --  ...pi ])
+[05:06:51 #67] P15 tc7=[ --  piA - ] (want [ --  piA - ])
+[05:06:51 #68] P15 tc8=[&] (want [&])
+[05:06:51 #69] P15 tc9=[AT&T] (want [AT&T])
+[05:06:51 #70] P15 tc10 empty ok=1
+[05:06:51 #71] P15 tc11 null ok=1
+[05:06:51 #72] P15 tc12=[not  not in   deg] (want [not  not in   deg])
+[05:06:51 #73] P15 tc13=[a&b&c&;a&#38Ab] (want [a&b&c&;a&#38Ab])
+[05:06:51 #74] P15 tc14=[CAFE a$c<>  &] (want [CAFE a$c<>  &])
+[05:06:51 #75] P15 init battery complete
+[05:06:51 #76] P16 tc1 tokens=18 (want 18) title=[Home & More] (want [Home & More])
+[05:06:51 #77] P16 tc1 p-attrs=3 (want 3) class=[intro] data-x=[7] checked=true
+[05:06:51 #78] P16 tc1 img self=1 (want 1) src=[a.png]; br self=0 (want 0)
+[05:06:51 #79] P16 tc1 a href=[/next?page=1&x=2] (want [/next?page=1&x=2])
+[05:06:51 #80] P16 tc1 /a closing=1 self=1 (want 1 1)
+[05:06:51 #81] P16 tc2 tokens=3 (want 3) href=[a>b] (want [a>b]) data-x=[1]
+[05:06:51 #82] P16 tc3 tokens=1 (want 1) t0=[text ] (want [text ])
+[05:06:51 #83] P16 tc4 tokens=3 (want 3) title=[Hi & Bye] (want [Hi & Bye]) t0.name=p
+[05:06:51 #84] P16 tc5 tokens=1 (want 1) t0=[a ] (want [a ])
+[05:06:51 #85] P16 tc6 href=[a&b] (want [a&b]) title=[xA] (want [xA]) text=[e degt] (want [e degt])
+[05:06:51 #86] P16 tc7 nattrs=1 (want 1) href=[1] (want [1])
+[05:06:51 #87] P16 tc8 nattrs=3 (want 3) z=[] (want []) b=true (want true) w=[1] (want [1])
+[05:06:51 #88] P16 tc9 tokens=0 (want 0) title=[Web Page] (want [Web Page])
+[05:06:55 #89] P16 tc10 inlen=320000 (want 320000) tokens=98256 (want 98256) tags=65504 (want 65504) title=[Web Page]
+[05:06:55 #90] P16 init battery complete
+[05:06:55 #91] P17 tc1 ser=PASS cnt=PASS tok=12 (want 12) text=4 (want 4) elem=6 (want 6) proc=12 (want 12) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #92] P17 tc2 ser=PASS cnt=PASS tok=19 (want 19) text=3 (want 3) elem=8 (want 8) proc=19 (want 19) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #93] P17 tc3 ser=PASS cnt=PASS tok=17 (want 17) text=5 (want 5) elem=4 (want 4) proc=17 (want 17) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #94] P17 tc4 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=3 (want 3) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #95] P17 tc5 ser=PASS cnt=PASS tok=11 (want 11) text=2 (want 2) elem=2 (want 2) proc=11 (want 11) max=0 (want 0) skip=3 (want 3)
+[05:06:55 #96] P17 tc7 ser=PASS cnt=PASS tok=7 (want 7) text=3 (want 3) elem=2 (want 2) proc=7 (want 7) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #97] P17 tc8 ser=PASS cnt=PASS tok=6 (want 6) text=2 (want 2) elem=3 (want 3) proc=6 (want 6) max=0 (want 0) skip=0 (want 0)
+[05:06:55 #98] P17 tc5b ser=PASS cnt=PASS tok=1207 (want 1207) text=236 (want 236) elem=235 (want 235) proc=1207 (want 1207) max=0 (want 0) skip=500 (want 500)
+[05:06:56 #99] P17 tc6 ser=PASS cnt=PASS tok=12000 (want 12000) text=3000 (want 3000) elem=3000 (want 3000) proc=9000 (want 9000) max=0 (want 0) skip=0 (want 0)
+[05:06:56 #100] P17 init battery complete
+[05:06:56 #101] P4 scheduled: pending=2
+[05:06:56 #102] KB new: entering
+[05:06:56 #103] KB new: allocated
+[05:06:56 #104] KB load: font...
+[05:06:56 #105] KB load: font ok h=36
+[05:06:56 #106] KB load: menu-space ok
+[05:06:56 #107] KB load: menu-ok ok
+[05:06:56 #108] KB load: menu-del ok
+[05:06:56 #109] KB load: menu-cancel ok
+[05:06:56 #110] KB new: font+images loaded
+[05:06:56 #111] P13 newKeyboard returned
+[05:06:56 #112] P13 update-callback set
+[05:06:56 #113] updateFrame: first frame executed
+[05:06:56 #114] P4 chain complete (5 iterations)
+[05:06:56 #115] P6 cancel_all after t1 done + t2 error (cancelledFired must stay 0)
+[05:06:56 #116] P6 RESULT: done=1 (want 1) error=1 (want 1) cancelledCompleted=0 (want 0) progress=0.00 running=0 maxTicksPerFrame=1
+[05:06:57 #117] P4 oneshot fired (count=1)
+[05:06:57 #118] P4 RESULT: oneshot=1 (want 1) chain=5 (want 5) cancelledFired=0 (want 0) pending=0
+[05:07:00 #119] P12 tc2 home selection after D,D,R (want 4) = 4
+[05:07:00 #120] P12 tc2a card4 url clean (want no pipe) = YES
+[05:07:01 #121] navigate_to: https://en.wikipedia.org/wiki/Main_Page
+[05:07:01 #122] P12 state -> 3 (frame 140)
+[05:07:03 #123] P12 tc3 error selection after R,R (want 3) = 3
+[05:07:03 #124] navigate_to: about:home
+[05:07:03 #125] P12 state -> 0 (frame 220)
+[05:07:05 #126] P12 state -> 4 (frame 260)
+[05:07:05 #127] navigate_to: about:home
+[05:07:05 #128] P12 state -> 0 (frame 270)
+[05:07:05 #129] P12 state -> 5 (frame 280)
+[05:07:06 #130] navigate_to: about:home
+[05:07:06 #131] P12 state -> 0 (frame 290)
+[05:07:06 #132] P12 state -> 6 (frame 300)
+[05:07:06 #133] updateFrame: heartbeat frame=300
+[05:07:07 #134] navigate_to: about:home
+[05:07:07 #135] P12 state -> 0 (frame 320)
+[05:07:07 #136] P12 tc6 after-cancel searchEngine=1 (want 1, staged discarded)
+[05:07:07 #137] P12 state -> 6 (frame 330)
+[05:07:08 #138] navigate_to: about:home
+[05:07:08 #139] P12 state -> 0 (frame 350)
+[05:07:08 #140] P12 tc6 after-save searchEngine=2 (want 2, persisted)
+[05:07:09 #141] P12 RESULT state=0 (want 0=HOME) scripted sequence complete
+[05:07:09 #142] P13 session1: show
+[05:07:09 #143] KB frame 0: enter
+[05:07:09 #144] KB frame 0: letters ok
+[05:07:09 #145] KB frame 0: anim ok
+[05:07:09 #146] KB frame 0: input ok
+[05:07:09 #147] KB frame 0: app update ok
+[05:07:09 #148] KB frame 0: draw ok
+[05:07:09 #149] KB frame 1: enter
+[05:07:09 #150] KB frame 1: letters ok
+[05:07:09 #151] KB frame 1: anim ok
+[05:07:09 #152] KB frame 1: input ok
+[05:07:09 #153] KB frame 1: app update ok
+[05:07:09 #154] KB frame 1: draw ok
+[05:07:09 #155] KB frame 2: enter
+[05:07:09 #156] KB frame 2: letters ok
+[05:07:09 #157] KB frame 2: anim ok
+[05:07:09 #158] KB frame 2: input ok
+[05:07:09 #159] KB frame 2: app update ok
+[05:07:09 #160] KB frame 2: draw ok
+[05:07:09 #161] KB frame 3: enter
+[05:07:09 #162] KB frame 3: letters ok
+[05:07:09 #163] KB frame 3: anim ok
+[05:07:09 #164] KB frame 3: input ok
+[05:07:09 #165] KB frame 3: app update ok
+[05:07:09 #166] KB frame 3: draw ok
+[05:07:09 #167] KB frame 4: enter
+[05:07:09 #168] KB frame 4: letters ok
+[05:07:09 #169] KB frame 4: anim ok
+[05:07:09 #170] KB frame 4: input ok
+[05:07:10 #171] KB frame 4: app update ok
+[05:07:10 #172] KB frame 4: draw ok
+[05:07:10 #173] KB frame 5: enter
+[05:07:10 #174] KB frame 5: letters ok
+[05:07:10 #175] P13 didShow (count=1)
+[05:07:10 #176] KB frame 5: anim ok
+[05:07:10 #177] KB frame 5: input ok
+[05:07:10 #178] KB frame 5: app update ok
+[05:07:10 #179] KB frame 5: draw ok
+[05:07:10 #180] KB frame 6: enter
+[05:07:10 #181] KB frame 6: letters ok
+[05:07:10 #182] KB frame 6: anim ok
+[05:07:10 #183] KB frame 6: input ok
+[05:07:10 #184] KB frame 6: app update ok
+[05:07:10 #185] KB frame 6: draw ok
+[05:07:10 #186] KB frame 7: enter
+[05:07:10 #187] KB frame 7: letters ok
+[05:07:10 #188] KB frame 7: anim ok
+[05:07:10 #189] KB frame 7: input ok
+[05:07:10 #190] KB frame 7: app update ok
+[05:07:10 #191] KB frame 7: draw ok
+[05:07:10 #192] KB frame 8: enter
+[05:07:10 #193] KB frame 8: letters ok
+[05:07:10 #194] KB frame 8: anim ok
+[05:07:10 #195] KB frame 8: input ok
+[05:07:10 #196] KB frame 8: app update ok
+[05:07:10 #197] KB frame 8: draw ok
+[05:07:10 #198] KB frame 9: enter
+[05:07:10 #199] KB frame 9: letters ok
+[05:07:10 #200] KB frame 9: anim ok
+[05:07:10 #201] KB frame 9: input ok
+[05:07:10 #202] KB frame 9: app update ok
+[05:07:10 #203] KB frame 9: draw ok
+[05:07:10 #204] KB frame 10: enter
+[05:07:10 #205] KB frame 10: letters ok
+[05:07:10 #206] KB frame 10: anim ok
+[05:07:10 #207] KB frame 10: input ok
+[05:07:10 #208] KB frame 10: app update ok
+[05:07:10 #209] KB frame 10: draw ok
+[05:07:10 #210] KB frame 11: enter
+[05:07:10 #211] KB frame 11: letters ok
+[05:07:10 #212] KB frame 11: anim ok
+[05:07:10 #213] KB frame 11: input ok
+[05:07:10 #214] KB frame 11: app update ok
+[05:07:10 #215] KB frame 11: draw ok
+[05:07:10 #216] KB frame 12: enter
+[05:07:10 #217] KB frame 12: letters ok
+[05:07:10 #218] KB frame 12: anim ok
+[05:07:10 #219] KB frame 12: input ok
+[05:07:10 #220] KB frame 12: app update ok
+[05:07:10 #221] KB frame 12: draw ok
+[05:07:10 #222] KB frame 13: enter
+[05:07:10 #223] KB frame 13: letters ok
+[05:07:10 #224] KB frame 13: anim ok
+[05:07:10 #225] KB frame 13: input ok
+[05:07:10 #226] KB frame 13: app update ok
+[05:07:10 #227] KB frame 13: draw ok
+[05:07:10 #228] KB frame 14: enter
+[05:07:10 #229] KB frame 14: letters ok
+[05:07:10 #230] KB frame 14: anim ok
+[05:07:10 #231] KB frame 14: input ok
+[05:07:10 #232] KB frame 14: app update ok
+[05:07:10 #233] KB frame 14: draw ok
+[05:07:10 #234] KB frame 15: enter
+[05:07:10 #235] KB frame 15: letters ok
+[05:07:10 #236] KB frame 15: anim ok
+[05:07:10 #237] KB frame 15: input ok
+[05:07:10 #238] KB frame 15: app update ok
+[05:07:10 #239] KB frame 15: draw ok
+[05:07:10 #240] KB frame 16: enter
+[05:07:10 #241] KB frame 16: letters ok
+[05:07:10 #242] KB frame 16: anim ok
+[05:07:10 #243] KB frame 16: input ok
+[05:07:10 #244] KB frame 16: app update ok
+[05:07:10 #245] KB frame 16: draw ok
+[05:07:10 #246] KB frame 17: enter
+[05:07:10 #247] KB frame 17: letters ok
+[05:07:10 #248] KB frame 17: anim ok
+[05:07:10 #249] KB frame 17: input ok
+[05:07:10 #250] KB frame 17: app update ok
+[05:07:10 #251] KB frame 17: draw ok
+[05:07:10 #252] KB frame 18: enter
+[05:07:10 #253] KB frame 18: letters ok
+[05:07:10 #254] KB frame 18: anim ok
+[05:07:10 #255] KB frame 18: input ok
+[05:07:10 #256] KB frame 18: app update ok
+[05:07:10 #257] KB frame 18: draw ok
+[05:07:10 #258] KB frame 19: enter
+[05:07:10 #259] KB frame 19: letters ok
+[05:07:10 #260] KB frame 19: anim ok
+[05:07:10 #261] KB frame 19: input ok
+[05:07:10 #262] P13 visible=1 width=183 left=222 (animating)
+[05:07:10 #263] KB frame 19: app update ok
+[05:07:10 #264] KB frame 19: draw ok
+[05:07:10 #265] KB frame 20: enter
+[05:07:10 #266] KB frame 20: letters ok
+[05:07:10 #267] KB frame 20: anim ok
+[05:07:10 #268] KB frame 20: input ok
+[05:07:10 #269] KB frame 20: app update ok
+[05:07:10 #270] KB frame 20: draw ok
+[05:07:10 #271] KB frame 21: enter
+[05:07:10 #272] KB frame 21: letters ok
+[05:07:10 #273] KB frame 21: anim ok
+[05:07:10 #274] KB frame 21: input ok
+[05:07:10 #275] KB frame 21: app update ok
+[05:07:10 #276] KB frame 21: draw ok
+[05:07:10 #277] KB frame 22: enter
+[05:07:10 #278] KB frame 22: letters ok
+[05:07:10 #279] KB frame 22: anim ok
+[05:07:10 #280] KB frame 22: input ok
+[05:07:10 #281] KB frame 22: app update ok
+[05:07:10 #282] KB frame 22: draw ok
+[05:07:10 #283] KB frame 23: enter
+[05:07:10 #284] KB frame 23: letters ok
+[05:07:10 #285] KB frame 23: anim ok
+[05:07:10 #286] KB frame 23: input ok
+[05:07:10 #287] KB frame 23: app update ok
+[05:07:10 #288] KB frame 23: draw ok
+[05:07:10 #289] KB frame 24: enter
+[05:07:10 #290] KB frame 24: letters ok
+[05:07:10 #291] KB frame 24: anim ok
+[05:07:10 #292] KB frame 24: input ok
+[05:07:10 #293] KB frame 24: app update ok
+[05:07:10 #294] KB frame 24: draw ok
+[05:07:10 #295] P13 capBehavior=0 (0 normal)
+[05:07:15 #296] P13 willHide ok=0 text=[]
+[05:07:16 #297] P13 didHide (count=1)
+[05:07:16 #298] P13 tc5 textChanges=4 (want 4: a, A, delete, cancel-restore)
+[05:07:16 #299] P13 tc4 willHideOk=0 (want 0 cancel) text=[] (want empty)
+[05:07:16 #300] P13 tc1 didShow=1 didHide=1 visible=0 (want 1 1 0)
+[05:07:16 #301] updateFrame: heartbeat frame=600
+[05:07:16 #302] P13 session2: show with initial 'x'
+[05:07:17 #303] P13 didShow (count=2)
+[05:07:19 #304] P13 willHide ok=1 text=[x1]
+[05:07:20 #305] P13 didHide (count=2)
+[05:07:20 #306] P13 tc4b willHideOk=1 (want 1 OK) text=[x1] (want x1)
+[05:07:20 #307] P13 tc1b didShow=2 didHide=2 visible=0 (want 2 2 0)
+[05:07:20 #308] P13 tc6 update-callback restored: heartbeat next frames
+[05:07:21 #309] P14 tc1 open: prefill=[https://example.com/page] (want https://example.com/page) shown=0 (want 0)
+[05:07:22 #310] P13 didShow (count=3)
+[05:07:22 #311] P14 tc1b launch: shown=1 visible=1 (want 1 1)
+[05:07:23 #312] P14 tc2 preview=[https://example.com/page2] (want https://example.com/page2)
+[05:07:25 #313] P13 didHide (count=3)
+[05:07:25 #314] P14 tc5 after cancel: open=0 (want 0) submits=0 (want 0)
+[05:07:25 #315] AddressBar submit: https://html.duckduckgo.com/html/?q=hello+world
+[05:07:25 #316] P14 submit fired: https://html.duckduckgo.com/html/?q=hello+world
+[05:07:25 #317] P14 tc3 submits=1 (want 1) got=[https://html.duckduckgo.com/html/?q=hello+world] open=0 (want 0)
+[05:07:25 #318] AddressBar submit: https://example.com/
+[05:07:25 #319] P14 submit fired: https://example.com/
+[05:07:25 #320] P14 tc4 submits=2 (want 2) got=[https://example.com/] (want https://example.com/)
+[05:07:25 #321] main: B-release opened address bar (keyboard)
+[05:07:26 #322] P14 tc6 B-release: open=1 (want 1) shown=1 (want 1) visible=1 (want 1)
+[05:07:26 #323] main: system menu close detected, address bar cancelled
+[05:07:26 #324] P14 tc7 menu-gap: open=0 (want 0) visible=1 (hide anim in flight ok) skip=0 (want 0, armed 2 then consumed)
+[05:07:26 #325] P14 RESULT scripted address-bar sequence complete state=0 (want 0=HOME)
+[05:07:26 #326] P13 didShow (count=4)
+[05:07:26 #327] updateFrame: heartbeat frame=900
+[05:07:36 #328] updateFrame: heartbeat frame=1200
+[05:07:46 #329] updateFrame: heartbeat frame=1500
+[05:07:50 #330] eventHandler: kEventTerminate, frames=1614

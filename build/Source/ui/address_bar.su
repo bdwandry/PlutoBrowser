@@ -1,0 +1,15 @@
+address_bar.c:164:13:ab_keyboard_text_changed	16	static
+address_bar.c:57:13:ab_route_submit	16	static
+address_bar.c:139:13:ab_keyboard_will_hide.part.0	536	static
+address_bar.c:139:13:ab_keyboard_will_hide	8	static
+address_bar.c:184:6:address_bar_init	8	static
+address_bar.c:194:6:address_bar_open	16	static
+address_bar.c:211:6:address_bar_launch_keyboard	24	static
+address_bar.c:235:6:address_bar_cancel	16	static
+address_bar.c:247:5:address_bar_is_open	0	static
+address_bar.c:252:5:address_bar_keyboard_shown	0	static
+address_bar.c:257:6:address_bar_sync_text	16	static
+address_bar.c:273:5:address_bar_consume_skip_frames	0	static
+address_bar.c:280:13:address_bar_input_text	0	static
+address_bar.c:287:6:address_bar_test_submit	0	static
+address_bar.c:294:6:address_bar_draw_overlay	352	static

@@ -1,0 +1,5 @@
+bookmarks_page.c:38:14:dup_url	16	static
+bookmarks_page.c:27:6:bookmarks_page_open	0	static
+bookmarks_page.c:33:5:bookmarks_page_selected_index	0	static
+bookmarks_page.c:49:7:bookmarks_page_handle_input	8	static
+bookmarks_page.c:86:6:bookmarks_page_draw	176	static

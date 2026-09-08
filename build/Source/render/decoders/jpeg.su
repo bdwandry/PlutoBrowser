@@ -1,0 +1,15 @@
+jpeg.c:78:12:jpeg_rd_byte	8	static
+jpeg.c:139:12:jpeg_expect_restart	16	static
+jpeg.c:166:13:jpeg_build_huff	24	static
+jpeg.c:116:12:jpeg_rd_bits.part.0	16	static
+jpeg.c:196:12:jpeg_decode_symbol	24	static
+jpeg.c:237:12:jpeg_decode_dc	16	static
+jpeg.c:1273:16:jpeg_dither_pixel	0	static
+jpeg.c:447:13:jpeg_baseline_store_row_rowbuf.part.0	32	static
+jpeg.c:810:20:jpeg_render_prog_dc.isra.0	168	static
+jpeg.c:1252:6:jpeg_gray_free.part.0	16	static
+jpeg.c:307:12:jpeg_decode_ac	40	static
+jpeg.c:919:11:jpeg_decode_gray.part.0	5848	static
+jpeg.c:919:11:jpeg_decode_gray	12	static
+jpeg.c:1252:6:jpeg_gray_free	0	static
+jpeg.c:1288:12:jpeg_decode	48	static
