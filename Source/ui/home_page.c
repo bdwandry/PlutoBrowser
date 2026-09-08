@@ -4,8 +4,12 @@
  * All geometry, navigation quirks (2-column grid with row wrap, settings
  * button at index 0), crank scrolling (×1.5, invertCrank flips), smooth
  * scroll (0.3 factor, 0.5 snap), auto-scroll-to-selection, comet logo,
- * address bar pill, and per-card oscillating marquee (speed 50, dwell 1s,
- * clip 15px) preserved from the reference.
+ * address bar pill, and per-card oscillating marquee (speed 50, dwell 1s)
+ * preserved from the reference.
+ * BF7 fix (user-requested): the marquee's clip rect no longer shaves the
+ * bottom off scrolling glyphs — its height now comes from the actual font
+ * height instead of the reference's hardcoded 15px. Horizontal scrolling
+ * behavior is unchanged.
  */
 #include <stdio.h>
 #include <string.h>
@@ -66,13 +70,17 @@ static int bookmark_count(void)
     return storage_bookmark_count();
 }
 
-/* Oscillating marquee, faithful to drawMarquee(): speed 50 px/s, dwell 1s. */
+/* Oscillating marquee, faithful to drawMarquee(): speed 50 px/s, dwell 1s.
+ * BF7: measures with the SAME font role that draws (the reference passed the
+ * font object itself; the C port previously measured BODY for both lines),
+ * and the clip height now derives from the font's real height (+2 safety)
+ * — the hardcoded 15px shaved glyph bottoms off the taller system font. */
 static void draw_marquee(const char *text, int x, int y, int maxW,
-                         LCDFont *font, int slot)
+                         LCDFont *font, PlutoFontRole role, int slot)
 {
     PlaydateAPI *pd = pluto_pd();
     pd->graphics->setFont(font);
-    int tw = style_get_text_width(PLUTO_FONT_BODY, text);
+    int tw = style_get_text_width(role, text);
     if (tw <= maxW)
     {
         pd->graphics->drawText(text, strlen(text), kUTF8Encoding, x, y);
@@ -112,7 +120,10 @@ static void draw_marquee(const char *text, int x, int y, int maxW,
         offset = (float)range - (t - dwell - travel - dwell) * speed;
     }
 
-    pd->graphics->setClipRect(x, y, maxW, 15);
+    /* BF7: clip to the full font height so descenders (g, y, p, &) are
+     * never cut at the bottom while the text scrolls horizontally. */
+    int clipH = pd->graphics->getFontHeight(font) + 2;
+    pd->graphics->setClipRect(x, y, maxW, clipH);
     pd->graphics->drawText(text, strlen(text), kUTF8Encoding,
                            x - (int)offset, y);
     pd->graphics->clearClipRect();
@@ -381,11 +392,13 @@ void home_page_draw(float crankChange)
 
         pd->graphics->setFont(fontBold);
         const char *t = bm->title ? bm->title : bm->url;
-        draw_marquee(t, cardX + 8, cardY + 6, textAreaW, fontBold, i * 2 - 2);
+        draw_marquee(t, cardX + 8, cardY + 6, textAreaW, fontBold,
+                     PLUTO_FONT_BODY_BOLD, i * 2 - 2);
 
         pd->graphics->setFont(fontSmall);
         const char *d = bm->desc ? bm->desc : bm->url;
-        draw_marquee(d, cardX + 8, cardY + 24, textAreaW, fontSmall, i * 2 - 1);
+        draw_marquee(d, cardX + 8, cardY + 24, textAreaW, fontSmall,
+                     PLUTO_FONT_SMALL, i * 2 - 1);
 
         pd->graphics->setDrawMode(kDrawModeCopy);
     }
