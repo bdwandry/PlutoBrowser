@@ -1578,3 +1578,39 @@ website pages AND all other states.
 **Note:** a Simulator-only double-getButtonState instability was found during test
 development (two SDK button reads per frame → SIGTRAP/bus error); the final build uses
 the single-read contract. Test injection seams were removed post-verification.
+
+## Beta Bug Fix #7 — Home-page bookmark card text clipped at the bottom
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** On the home page's SPEED DIAL / BOOKMARKS cards, scrolling title/desc
+text had its character bottoms shaved off (screenshot: "Pixel-art & hitman...",
+"Documentation &", "Free encyclopedia", "Fast private search" all visibly clipped).
+User requirement: KEEP the left-right marquee scrolling; only fix the clipping.
+
+**Root cause (two defects):**
+1. `draw_marquee` clip rect used the reference's hardcoded 15px height. The desc
+   line uses the system Roobert font (taller than the reference's small font) and
+   its glyphs extend below 15px — every scrolling descender was cut at row 15.
+2. `draw_marquee` measured text width with PLUTO_FONT_BODY regardless of the
+   drawing font, so overflow/scroll range for the bold title line was computed
+   with the wrong metrics (the Lua reference passed the font object itself).
+
+**Fix (Source/ui/home_page.c, marquee only — no layout/geometry changes):**
+- Clip height now `getFontHeight(font) + 2` (real glyph height incl. descenders).
+- Width measurement uses the same font role that draws (title=BODY_BOLD, desc=SMALL).
+- Call sites updated to pass the matching role. Horizontal oscillation untouched.
+
+**Verification:**
+- Temporary in-game framebuffer dump (1-bit PBM of the real frame) analyzed at 1:1:
+  card 1 desc "Pixel-art & hitman" now renders full glyph bottoms at rows 223-224 —
+  exactly the rows the old 15px clip (208+15=223) amputated. Ink present in
+  y=224-228 band that was previously clipped. Horizontal scrolling confirmed
+  (frame captured mid-scroll). PASS
+- Simulator: clean build boots, heartbeats stable. PASS
+- Device: MD5-verified deploy (9af0673b…), boot + heartbeats stable,
+  errorlog/crashlog empty. PASS
+- Test scaffolding removed; log archived (tests/logs/device_bf7_*.log).
+
+**Note:** an initial word-wrap reimplementation was incorrectly attempted first
+(user clarified: keep scrolling, fix clipping only) and fully reverted before
+this fix; the shipped change is the minimal marquee-clip fix.
