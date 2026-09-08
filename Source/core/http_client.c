@@ -1,20 +1,20 @@
-// http_client.c — raw TCP HTTP/HTTPS client (C port of core/http_client.lua).
+// http_client.c — Multi-protocol HTTP/HTTPS client for PlutoBrowser.
 //
-// One request at a time over pd->network->tcp, with the Lua original's state
-// machine reproduced block-for-block inside hc_update() (same order, same
-// early returns, same quirks — see http_client.h for the annotated list).
+// Supports two networking backends:
+//  1. Native HTTP API (pd->network->http): preferred for HTTP/HTTPS. Handles
+//     TLS, HTTP request formatting, and status/header parsing internally.
+//  2. Raw TCP API (pd->network->tcp): fallback for HTTP/HTTPS if the HTTP API
+//     is unavailable or fails. Also used for non-HTTP TCP connections.
 //
-// C-only additions the Lua SDK wrapper hid:
-//  - network access gating via tcp->requestAccess + a session grant cache
-//    keyed by host (kAccessAsk waits for the callback before connecting);
-//  - millisecond timeouts (Lua used seconds: 10 s -> 10000 ms);
-//  - stale-callback identification by connection pointer + generation id
-//    stored through setUserdata (the closed-callback carries no userdata);
-//  - write/read failures surface PDNetErr names where the Lua wrapper fed
-//    arbitrary error strings ("Send failed: NET_WRITE_ERROR").
+// Protocol selection: HTTP/HTTPS URLs attempt the native HTTP API first. If
+// the HTTP API is unavailable or the connection fails, falls back to raw TCP.
+// The browser receives responses through the same PlutoHttpCallbacks interface
+// regardless of which backend succeeded — the protocol is an implementation
+// detail of content retrieval.
 //
-// Testability: hc_set_tcp_for_tests()/hc_set_clock_fn() swap the vtable and
-// clock so selftest_http.c can replay the oracle scenarios offline.
+// Testability: hc_set_http_for_tests()/hc_set_tcp_for_tests()/hc_set_clock_fn()
+// swap the vtables and clock so selftest_http.c can replay the oracle
+// scenarios offline.
 
 #include "http_client.h"
 
@@ -28,6 +28,7 @@
 #include "../util/mem.h"
 #include "cookie_jar.h"
 #include "internal_pages.h"
+#include "logger.h"
 #include "url.h"
 
 #define HC_MAX_RESPONSE_SIZE ((size_t)2097152)
@@ -55,9 +56,19 @@ enum {
 static struct PlaydateAPI* s_pd;
 // pd->network->tcp is a const vtable; tests inject a non-const fake.
 static const struct playdate_tcp* s_tcp;
+static const struct playdate_http* s_http;
 static unsigned (*s_clockfn)(void);
 
+// Which networking backend is active for the current request.
+enum HcBackend s_backend;
+
+// User-selected preference (from Settings): HTTP API or raw TCP. Defaults to
+// HTTP for fresh installs. do_get() falls back to the other backend when the
+// preferred one is unavailable.
+static enum HcBackend s_backendPref = HC_BACKEND_HTTP;
+
 static TCPConnection* s_conn;
+static HTTPConnection* s_http_conn;
 static int s_state;
 static PlutoHttpCallbacks s_cbs;
 static char s_url[HC_URL_MAX];
@@ -383,6 +394,9 @@ static void parse_headers(size_t hEnd)
 static void hc_open_cb(TCPConnection* conn, PDNetErr err, void* ud);
 static void hc_closed_cb(TCPConnection* conn, PDNetErr err);
 static int connect_now(void);
+static int http_connect_now(void);
+static void http_connect_failed(void);
+static void http_access_cb(bool allowed, void* userdata);
 
 static void close_tcp(void)
 {
@@ -394,9 +408,27 @@ static void close_tcp(void)
     if (s_connOpen || s_openFailed) s_tcp->close(conn);
 }
 
+static void close_http(void)
+{
+    if (!s_http_conn) return;
+    HTTPConnection* conn = s_http_conn;
+    s_http_conn = NULL;
+    // Note: do NOT call s_http->close() here. The server will close the
+    // connection (we send "Connection: close") and calling close() inside
+    // a callback can confuse the SDK on the simulator.  The connection
+    // will be cleaned up by the SDK when connectionClosed fires.
+}
+
 static void reset(void)
 {
-    close_tcp();
+    if (s_backend == HC_BACKEND_TCP) {
+        close_tcp();
+    } else if (s_backend == HC_BACKEND_HTTP) {
+        close_http();
+    } else {
+        close_tcp();
+        close_http();
+    }
     s_reqId++;
     s_cbs = HC_NO_CBS;
     s_url[0] = '\0';
@@ -512,7 +544,12 @@ static int do_get(const char* urlString, const PlutoHttpCallbacks* cbs)
     }
 
     // ── Network availability ─────────────────────────────────────────────
-    if (!s_pd->network || !s_pd->network->tcp || !s_tcp) {
+    // Need at least TCP or HTTP API available. For HTTP/HTTPS URLs, prefer
+    // the HTTP API; for other protocols, TCP is required.
+    int has_tcp = s_pd->network && s_pd->network->tcp && s_tcp;
+    int has_http = s_pd->network && s_pd->network->http && s_http &&
+                   (s_parsed.isSsl || strcmp(s_parsed.scheme, "http") == 0);
+    if (!has_tcp && !has_http) {
         PlutoHttpCallbacks cb = s_cbs;
         char msg[HC_ERR_MAX];
         snprintf(msg, sizeof(msg), "Networking not available.");
@@ -521,12 +558,28 @@ static int do_get(const char* urlString, const PlutoHttpCallbacks* cbs)
         return 0;
     }
 
+    // Select backend: honor the Settings preference, falling back to the
+    // other backend when the preferred one isn't available.
+    if (s_backendPref == HC_BACKEND_TCP) {
+        s_backend = has_tcp ? HC_BACKEND_TCP
+                            : (has_http ? HC_BACKEND_HTTP : HC_BACKEND_TCP);
+    } else {
+        s_backend = has_http ? HC_BACKEND_HTTP
+                             : (has_tcp ? HC_BACKEND_TCP : HC_BACKEND_HTTP);
+    }
+    PLUTO_LOG("[HC] Backend selected: %s (pref=%s, http=%d, tcp=%d)",
+              s_backend == HC_BACKEND_HTTP ? "HTTP_API" : "TCP",
+              s_backendPref == HC_BACKEND_HTTP ? "HTTP" : "TCP",
+              has_http, has_tcp);
+
     // ── Access gating (C-only; the Lua SDK did this inside tcp.new) ──────
     if (strcmp(s_grantHost, s_parsed.host) != 0) {
         enum accessReply ar =
             s_tcp->requestAccess(s_parsed.host, s_parsed.port,
                                  s_parsed.isSsl != 0, HC_NET_PURPOSE,
-                                 access_cb, NULL);
+                                 s_backend == HC_BACKEND_HTTP
+                                     ? http_access_cb : access_cb,
+                                 NULL);
         if (ar == kAccessAllow) {
             strncpy(s_grantHost, s_parsed.host, sizeof(s_grantHost) - 1);
             s_grantHost[sizeof(s_grantHost) - 1] = '\0';
@@ -544,7 +597,11 @@ static int do_get(const char* urlString, const PlutoHttpCallbacks* cbs)
         }
     }
 
-    if (!connect_now()) connect_failed();
+    if (s_backend == HC_BACKEND_HTTP) {
+        if (!http_connect_now()) http_connect_failed();
+    } else {
+        if (!connect_now()) connect_failed();
+    }
     return hc_is_loading() ? 1 : 0;
 }
 
@@ -561,14 +618,21 @@ static void deliver_done(void)
 
     StrBuf body;
     sb_init(&body);
-    size_t off = s_hasBodyStart ? s_bodyStart : 0;
-    if (s_buf.len > off) sb_append(&body, s_buf.data + off, s_buf.len - off);
-    if (s_chunked) {
-        StrBuf* dec = decode_chunked(body.data, body.len);
-        if (dec) {
-            sb_free(&body);
-            body = *dec;
-            pluto_free(dec);
+    if (s_backend == HC_BACKEND_HTTP) {
+        // HTTP API delivers body directly in deliver_done via request_complete_cb.
+        // Body is already fully received and stored in s_buf by the time we get here.
+        if (s_buf.len > 0) sb_append(&body, s_buf.data, s_buf.len);
+    } else {
+        // TCP backend: slice the body from the raw response buffer.
+        size_t off = s_hasBodyStart ? s_bodyStart : 0;
+        if (s_buf.len > off) sb_append(&body, s_buf.data + off, s_buf.len - off);
+        if (s_chunked) {
+            StrBuf* dec = decode_chunked(body.data, body.len);
+            if (dec) {
+                sb_free(&body);
+                body = *dec;
+                pluto_free(dec);
+            }
         }
     }
 
@@ -634,6 +698,13 @@ void hc_update(void)
 
     unsigned now = hc_now();
 
+    // For HTTP backend: headers_read_cb fires when status/headers arrive,
+    // meaning the connection is established and data is flowing.
+    if (s_state == HC_CONNECTING && s_backend == HC_BACKEND_HTTP &&
+        s_status > 0 && s_http_conn) {
+        s_state = HC_READING;
+    }
+
     // Timeout watchdog
     if ((s_state == HC_CONNECTING || s_state == HC_READING) &&
         now - s_startMs > HC_REQUEST_TIMEOUT_MS) {
@@ -648,7 +719,9 @@ void hc_update(void)
 
     // Send the HTTP request once the connection is open. Written from a later
     // update frame (not inside the SDK open callback) so TLS settles first.
-    if (s_state == HC_CONNECTING && s_connOpen && s_conn) {
+    // Only for TCP backend — the HTTP API handles request formatting/sending.
+    if (s_state == HC_CONNECTING && s_connOpen && s_conn &&
+        s_backend == HC_BACKEND_TCP) {
         StrBuf req;
         sb_init(&req);
         build_request(&s_parsed, &req);
@@ -667,33 +740,56 @@ void hc_update(void)
 
     // Pump incoming data. The staging buffer is static: the SDK update loop
     // is single-threaded and 32 KiB would blow the 60 KiB app stack.
-    if (s_state == HC_READING && s_conn && s_connOpen) {
+    // For TCP: read manually from socket. For HTTP: read from HTTP API.
+    if (s_state == HC_READING) {
         static char pumpTmp[HC_READ_CHUNK];
-        size_t avail = s_tcp->getBytesAvailable(s_conn);
-        if (avail > 0) {
-            size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
-            int n = s_tcp->read(s_conn, pumpTmp, want);
-            if (n > 0) {
+        if (s_backend == HC_BACKEND_TCP && s_conn && s_connOpen) {
+            size_t avail = s_tcp->getBytesAvailable(s_conn);
+            if (avail > 0) {
+                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
+                int n = s_tcp->read(s_conn, pumpTmp, want);
+                if (n > 0) {
+                    if (s_buf.len < HC_MAX_RESPONSE_SIZE)
+                        sb_append(&s_buf, pumpTmp, (size_t)n);
+                    long tot = s_contentLength >= 0 ? s_contentLength : 0;
+                    long cur = 0;
+                    if (s_hasBodyStart) {
+                        cur = (long)s_buf.len - (long)s_bodyStart;
+                        if (cur < 0) cur = 0;
+                        if (tot > 0 && cur > tot) cur = tot;
+                    }
+                    if (s_cbs.onProgress)
+                        s_cbs.onProgress(s_cbs.ud, (int)cur, (int)tot);
+                }
+            }
+        } else if (s_backend == HC_BACKEND_HTTP && s_http_conn) {
+            // Drain all buffered data in a loop: the SDK may buffer more
+            // data between frames or fire request_complete before all data
+            // is read.
+            size_t avail;
+            int n;
+            do {
+                avail = s_http->getBytesAvailable(s_http_conn);
+                if (avail == 0) break;
+                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
+                n = s_http->read(s_http_conn, pumpTmp, (int)want);
+                if (n <= 0) break;
                 if (s_buf.len < HC_MAX_RESPONSE_SIZE)
                     sb_append(&s_buf, pumpTmp, (size_t)n);
                 long tot = s_contentLength >= 0 ? s_contentLength : 0;
-                long cur = 0;
-                if (s_hasBodyStart) {
-                    // Report body bytes only (buffer includes headers), and
-                    // never overshoot the known total.
-                    cur = (long)s_buf.len - (long)s_bodyStart;
-                    if (cur < 0) cur = 0;
-                    if (tot > 0 && cur > tot) cur = tot;
-                }
+                long cur = (long)s_buf.len;
+                if (tot > 0 && cur > tot) cur = tot;
                 if (s_cbs.onProgress)
                     s_cbs.onProgress(s_cbs.ud, (int)cur, (int)tot);
-            }
-            // read failure: Lua inspected getError() and ignored it — same.
+            } while (1);
         }
+        // read failure: Lua inspected getError() and ignored it — same.
     }
 
     // Parse headers once they've fully arrived, handle redirects in-band.
-    if (s_state == HC_READING && !s_hasBodyStart) {
+    // Only for TCP backend — the HTTP API parses headers via callbacks.
+    if (s_state == HC_READING && !s_hasBodyStart &&
+        s_backend == HC_BACKEND_TCP) {
         const char* h = memfind(s_buf.data, s_buf.len, "\r\n\r\n", 4);
         if (h) {
             parse_headers((size_t)(h - s_buf.data));
@@ -724,8 +820,9 @@ void hc_update(void)
         }
     }
 
-    // Detect a complete body
-    if (s_state == HC_READING && s_hasBodyStart) {
+    // Detect a complete body (TCP backend only — HTTP API uses request_complete_cb)
+    if (s_state == HC_READING && s_hasBodyStart &&
+        s_backend == HC_BACKEND_TCP) {
         long bodyBytes = (long)s_buf.len - (long)s_bodyStart;
         if (s_chunked) {
             StrBuf* dec =
@@ -744,6 +841,25 @@ void hc_update(void)
 
     // Server closed the connection
     if (s_state == HC_READING && s_connClosed) {
+        // Drain any remaining data from the HTTP API before declaring done.
+        // The SDK may fire request_complete/connection_closed before our pump
+        // has read everything.
+        if (s_backend == HC_BACKEND_HTTP && s_http_conn) {
+            static char drainTmp[HC_READ_CHUNK];
+            size_t avail;
+            while ((avail = s_http->getBytesAvailable(s_http_conn)) > 0) {
+                size_t want = avail < HC_READ_CHUNK ? avail : HC_READ_CHUNK;
+                int n = s_http->read(s_http_conn, drainTmp, (int)want);
+                if (n > 0) {
+                    if (s_buf.len < HC_MAX_RESPONSE_SIZE)
+                        sb_append(&s_buf, drainTmp, (size_t)n);
+                } else {
+                    break;
+                }
+            }
+        }
+        PLUTO_LOG("[HC] connClosed: bufLen=%zu state=%d backend=%d",
+                  s_buf.len, s_state, s_backend);
         if (s_buf.len == 0) {
             set_error("Connection closed before any data was received.");
             s_state = HC_ERROR;
@@ -765,6 +881,172 @@ void hc_update(void)
         reset();
         if (cb.onError) cb.onError(cb.ud, msg);
         return;
+    }
+}
+
+// ── HTTP API callbacks ──────────────────────────────────────────────────────────
+// The native HTTP API fires these callbacks asynchronously. The HTTP API
+// handles TLS negotiation, HTTP request formatting, and status/header parsing
+// internally — we just receive the parsed results.
+
+static void http_header_received_cb(HTTPConnection* conn, const char* key,
+                                    const char* value)
+{
+    if (conn != s_http_conn) return;
+    if (key && key[0]) {
+        PLUTO_LOG("[HC] HTTP header: %s = %s", key, value ? value : "(null)");
+        store_header(key, strlen(key), value,
+                     value ? strlen(value) : 0);
+    }
+}
+
+static void http_headers_read_cb(HTTPConnection* conn)
+{
+    if (conn != s_http_conn) return;
+    s_status = s_http->getResponseStatus(conn);
+    PLUTO_LOG("[HC] HTTP headers read, status=%d", s_status);
+    // Extract content-length for progress tracking.
+    const char* cl = s_headers ? (const char*)sm_get(s_headers, "content-length") : NULL;
+    if (cl) {
+        long v = strtol(cl, NULL, 10);
+        if (v > 0) s_contentLength = v;
+    }
+    // For HTTP backend, detect redirects in-band here (TCP does it in hc_update).
+    // On the simulator, getResponseStatus() may return 0; if we have a Location
+    // header, that's strong evidence of a redirect even without the status code.
+    int is_redirect = (s_status >= 300 && s_status < 400);
+    if (!is_redirect && s_status == 0) {
+        const char* loc_check = s_headers
+                                    ? (const char*)sm_get(s_headers, "location")
+                                    : NULL;
+        if (loc_check && loc_check[0]) is_redirect = 1;
+    }
+    if (is_redirect) {
+        const char* loc = s_headers
+                              ? (const char*)sm_get(s_headers, "location")
+                              : NULL;
+        if (loc && loc[0]) {
+            s_redirectDepth++;
+            if (s_redirectDepth <= HC_MAX_REDIRECTS) {
+                StrBuf abs;
+                sb_init(&abs);
+                url_resolve(s_url, loc, &abs);
+                snprintf(s_pendingUrl, sizeof(s_pendingUrl), "%s",
+                         abs.data ? abs.data : "");
+                sb_free(&abs);
+                s_pendingCbs = s_cbs;
+                s_hasPendingRedirect = 1;
+            } else {
+                set_error("Too many redirects to %s", s_url);
+                s_state = HC_ERROR;
+            }
+            PLUTO_LOG("[HC] HTTP redirect to %s (status=%d)", s_pendingUrl, s_status);
+            reset();
+            return;
+        }
+    }
+}
+
+static void http_request_complete_cb(HTTPConnection* conn)
+{
+    if (conn != s_http_conn) return;
+    PDNetErr err = s_http->getError(conn);
+    PLUTO_LOG("[HC] HTTP request complete, err=%d (%s)", err, neterr_name(err));
+    // Re-check status here in case headers_read fired before status was ready.
+    int st = s_http->getResponseStatus(conn);
+    if (st > 0) s_status = st;
+    PLUTO_LOG("[HC] HTTP final status=%d", s_status);
+    if (err != NET_OK) {
+        set_error("HTTP API request failed: %s", neterr_name(err));
+        s_state = HC_ERROR;
+        return;
+    }
+    s_connClosed = 1;
+}
+
+static void http_connection_closed_cb(HTTPConnection* conn)
+{
+    if (conn != s_http_conn) return;
+    PLUTO_LOG("[HC] HTTP connection closed");
+    s_connClosed = 1;
+}
+
+// ── HTTP API connection ────────────────────────────────────────────────────────
+
+static int http_connect_now(void)
+{
+    PLUTO_LOG("[HC] HTTP API: connecting to %s:%d ssl=%d",
+              s_parsed.host, s_parsed.port, s_parsed.isSsl);
+    // Allocate s_headers so store_header() can populate it during callbacks.
+    if (!s_headers) s_headers = sm_create(16);
+    HTTPConnection* conn = s_http->newConnection(s_parsed.host, s_parsed.port,
+                                                 s_parsed.isSsl != 0);
+    if (!conn) {
+        PLUTO_LOG("[HC] HTTP API: newConnection failed");
+        return 0;
+    }
+    s_http_conn = conn;
+    s_http->setConnectTimeout(conn, HC_CONNECT_TIMEOUT_MS);
+    s_http->setReadTimeout(conn, HC_READ_TIMEOUT_MS);
+    s_http->setReadBufferSize(conn, HC_SOCKET_BUFFER_BYTES);
+    s_http->setHeaderReceivedCallback(conn, http_header_received_cb);
+    s_http->setHeadersReadCallback(conn, http_headers_read_cb);
+    s_http->setRequestCompleteCallback(conn, http_request_complete_cb);
+    s_http->setConnectionClosedCallback(conn, http_connection_closed_cb);
+    // Build the headers string for the HTTP API.
+    // Note: http->get() adds Host automatically from the connection's server/port.
+    StrBuf headers;
+    sb_init(&headers);
+    sb_append_str(&headers, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
+    sb_append_str(&headers, "Accept: text/html,text/plain;q=0.8\r\n");
+    sb_append_str(&headers, "Accept-Language: en-US,en;q=0.9\r\n");
+    StrBuf cookie;
+    sb_init(&cookie);
+    cj_get_header(s_parsed.host, s_parsed.path, s_parsed.isSsl, &cookie);
+    if (cookie.len > 0) {
+        sb_append_str(&headers, "Cookie: ");
+        sb_append(&headers, cookie.data, cookie.len);
+        sb_append_str(&headers, "\r\n");
+    }
+    sb_free(&cookie);
+    sb_append_str(&headers, "Connection: close\r\n");
+    sb_append_str(&headers, "\r\n");
+    PDNetErr err = s_http->get(conn, s_parsed.fullPath,
+                               headers.data, headers.len);
+    sb_free(&headers);
+    if (err != NET_OK) {
+        PLUTO_LOG("[HC] HTTP API: get() failed: %s", neterr_name(err));
+        return 0;
+    }
+    return 1;
+}
+
+static void http_connect_failed(void)
+{
+    PlutoHttpCallbacks cb = s_cbs;
+    char msg[HC_ERR_MAX];
+    snprintf(msg, sizeof(msg), "Could not open connection to %.200s",
+             s_parsed.host);
+    reset();
+    if (cb.onError) cb.onError(cb.ud, msg);
+}
+
+static void http_access_cb(bool allowed, void* userdata)
+{
+    (void)userdata;
+    if (!s_accessWaiting) return;
+    s_accessWaiting = 0;
+    if (s_reqId != s_accessReqId) return;
+    if (allowed) {
+        strncpy(s_grantHost, s_parsed.host, sizeof(s_grantHost) - 1);
+        s_grantHost[sizeof(s_grantHost) - 1] = '\0';
+        if (!http_connect_now()) http_connect_failed();
+    } else {
+        PlutoHttpCallbacks cb = s_cbs;
+        char msg[HC_ERR_MAX];
+        snprintf(msg, sizeof(msg), "Networking not available.");
+        reset();
+        if (cb.onError) cb.onError(cb.ud, msg);
     }
 }
 
@@ -802,11 +1084,13 @@ void hc_init(struct PlaydateAPI* pd)
 {
     s_pd = pd;
     s_tcp = (pd && pd->network) ? pd->network->tcp : NULL;
+    s_http = (pd && pd->network) ? pd->network->http : NULL;
     s_clockfn = NULL;
     sb_init(&s_buf);
     s_reqId = 1;
     s_state = HC_IDLE;
     s_grantHost[0] = '\0';
+    s_http_conn = NULL;
 }
 
 int hc_get(const char* urlStr, const PlutoHttpCallbacks* cbs)
@@ -826,11 +1110,41 @@ int hc_is_loading(void)
     return s_state == HC_CONNECTING || s_state == HC_READING;
 }
 
+const char* hc_backend_label(void)
+{
+    if (s_backend == HC_BACKEND_TCP) return "TCP";
+    if (s_backend == HC_BACKEND_HTTP) {
+        return s_parsed.isSsl ? "HTTPS" : "HTTP";
+    }
+    return "TCP";
+}
+
 void hc_cancel(void) { reset(); }
 
 void hc_set_tcp_for_tests(struct playdate_tcp* fake)
 {
     s_tcp = fake ? fake : ((s_pd && s_pd->network) ? s_pd->network->tcp : NULL);
+}
+
+void hc_set_http_for_tests(struct playdate_http* fake)
+{
+    // NULL explicitly disables HTTP API (forces TCP); non-NULL installs fake.
+    s_http = fake;
+}
+
+enum HcBackend hc_backend_pref(void) { return s_backendPref; }
+
+void hc_set_backend_pref(enum HcBackend pref)
+{
+    if (pref == HC_BACKEND_HTTP || pref == HC_BACKEND_TCP) {
+        s_backendPref = pref;
+    }
+}
+
+void hc_restore_http_api(void)
+{
+    // Restores the real HTTP API vtable from the PlaydateAPI.
+    s_http = (s_pd && s_pd->network) ? s_pd->network->http : NULL;
 }
 
 void hc_set_clock_fn(unsigned (*fn)(void)) { s_clockfn = fn; }

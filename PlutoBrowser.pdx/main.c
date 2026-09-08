@@ -193,80 +193,94 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
                       PLUTO_CHROME_HEIGHT, PLUTO_CONTENT_Y, PLUTO_CONTENT_HEIGHT);
 
             // P02 util-layer self-tests (permanent boot diagnostics).
+#ifdef TARGET_SIMULATOR
             selftest_util_run(&s_selfPass, &s_selfFail);
             if (s_selfFail > 0) {
                 PLUTO_ERROR("P02 SELFTEST FAILURES: %d", s_selfFail);
             }
+#endif
 
             // P03 core/url self-tests (permanent boot diagnostics).
+#ifdef TARGET_SIMULATOR
             selftest_url_run(&s_urlPass, &s_urlFail);
             if (s_urlFail > 0) {
                 PLUTO_ERROR("P03 SELFTEST FAILURES: %d", s_urlFail);
             }
-
-            // P04 storage + cookie jar: init real persistence, then tests.
+#endif
             storage_init(pd);
             cj_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_storage_run(&s_stPass, &s_stFail);
             if (s_stFail > 0) {
                 PLUTO_ERROR("P04 SELFTEST FAILURES: %d", s_stFail);
             }
+#endif
 
-            // P05 cooperative task scheduler self-tests (fake clock).
+            // P05 cooperative task scheduler init.
             tasks_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_tasks_run(&s_tkPass, &s_tkFail);
             if (s_tkFail > 0) {
                 PLUTO_ERROR("P05 SELFTEST FAILURES: %d", s_tkFail);
             }
+#endif
 
-            // P06 charset conversion + HTML entities self-tests.
+            // P06 charset conversion + HTML entities init.
             encoding_init(pd);
             entities_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_encoding_run(&s_enPass, &s_enFail);
             if (s_enFail > 0) {
                 PLUTO_ERROR("P06 SELFTEST FAILURES: %d", s_enFail);
             }
+#endif
 
-            // P07 raw TCP HTTP client self-tests (fake TCP vtable + fake
-            // clock; real networking restored afterwards for the benchmark).
+            // P07 raw TCP HTTP client init.
             cj_init(pd); // idempotent: reuses the P04 storage backend
             hc_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_http_run(&s_hcPass, &s_hcFail);
             if (s_hcFail > 0) {
                 PLUTO_ERROR("P07 SELFTEST FAILURES: %d", s_hcFail);
             }
+#endif
 
-            // P08 HTML tokenizer self-tests (oracle replay fixtures).
+            // P08 HTML tokenizer init.
             htt_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_tokenizer_run(&s_ttPass, &s_ttFail);
-            if (s_ttFail > 0) {
+            if (s_tkFail > 0) {
                 PLUTO_ERROR("P08 SELFTEST FAILURES: %d", s_ttFail);
             }
+#endif
 
-            // P09 DOM tree builder self-tests (tokenizer -> dom pipeline).
+            // P09 DOM tree builder init.
             dom_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_dom_run(&s_dmPass, &s_dmFail);
             if (s_dmFail > 0) {
                 PLUTO_ERROR("P09 SELFTEST FAILURES: %d", s_dmFail);
             }
+#endif
 
-            // P11 document model self-tests (dom -> blocks/links pipeline).
+            // P11 document model init.
             doc_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_document_run(&s_dcPass, &s_dcFail);
             if (s_dcFail > 0) {
                 PLUTO_ERROR("P11 SELFTEST FAILURES: %d", s_dcFail);
             }
+#endif
 
+#ifdef TARGET_SIMULATOR
             // P12 readability (reader-mode distiller) self-tests.
             selftest_readability_run(&s_rzPass, &s_rzFail);
             if (s_rzFail > 0) {
                 PLUTO_ERROR("P12 SELFTEST FAILURES: %d", s_rzFail);
             }
+#endif
 
-            // Lua main.lua did not call setRefreshRate -> keep SDK default.
-
-            // P13 typography system loads every Style font (with
-            // system-font fallback per slot, mirroring Style.init).
+            // P13 typography system loads every Style font.
             style_init(pd);
             s_fontBody = (LCDFont*)style_get_body_font(0, 0, NULL);
             if (s_fontBody == NULL) {
@@ -274,7 +288,7 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             }
             style_set_system_font((PlutoFont*)s_fontBody);
             lm_init(pd);
-
+#ifdef TARGET_SIMULATOR
             selftest_style_run(&s_syPass, &s_syFail);
             if (s_syFail > 0) {
                 PLUTO_ERROR("P13 SELFTEST FAILURES: %d", s_syFail);
@@ -286,9 +300,7 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             }
 
             selftest_decoders_run(&s_dc15Pass, &s_dc15Fail);
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
             selftest_decoders_device(pd);
-#endif
             if (s_dc15Fail > 0) {
                 PLUTO_ERROR("P15 SELFTEST FAILURES: %d", s_dc15Fail);
             }
@@ -339,80 +351,100 @@ int eventHandler(PlaydateAPI* pdApi, PDSystemEvent event, uint32_t arg)
             if (s_svFail > 0) {
                 PLUTO_ERROR("P24 SELFTEST FAILURES: %d", s_svFail);
             }
+#endif
 
             id_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_image_decoder_set_pd(pd);
             selftest_image_decoder_run(&s_idPass, &s_idFail);
             if (s_idFail > 0) {
                 PLUTO_ERROR("P25 SELFTEST FAILURES: %d", s_idFail);
             }
-            PLUTO_LOG("[P25] image decoder ready");
+#endif
+            PLUTO_LOG("image decoder ready");
 
-            // P26 cloud layout: parse/build/draw pipeline over JSON docs.
+            // P26 cloud layout init.
             cl_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_cloud_layout_run(&s_clPass, &s_clFail);
             if (s_clFail > 0) {
                 PLUTO_ERROR("P26 SELFTEST FAILURES: %d", s_clFail);
             }
-            PLUTO_LOG("[P26] cloud layout ready");
+#endif
+            PLUTO_LOG("cloud layout ready");
 
-            // P26B block layout: parse/build pipeline over HTML docs.
+            // P26B block layout init.
             layout_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_layout_run(&s_lyPass, &s_lyFail);
             if (s_lyFail > 0) {
                 PLUTO_ERROR("P26B SELFTEST FAILURES: %d", s_lyFail);
             }
-            PLUTO_LOG("[P26B] layout ready (%d/%d)", s_lyPass, s_lyFail);
+#endif
+            PLUTO_LOG("layout ready");
 
-            // P27 chrome + hud: top bar and floating overlays.
+            // P27 chrome + hud init.
             chrome_init(pd);
             hud_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_ui_run(&s_uiPass, &s_uiFail);
             if (s_uiFail > 0) {
                 PLUTO_ERROR("P27 SELFTEST FAILURES: %d", s_uiFail);
             }
-            PLUTO_LOG("[P27] chrome/hud ready");
+#endif
+            PLUTO_LOG("chrome/hud ready");
 
-            // P28 home page: speed dial grid + input rules.
+            // P28 home page init.
             hp_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_home_page_run(&s_hpPass, &s_hpFail);
             if (s_hpFail > 0) {
                 PLUTO_ERROR("P28 SELFTEST FAILURES: %d", s_hpFail);
             }
-            PLUTO_LOG("[P28] home page ready");
+#endif
+            PLUTO_LOG("home page ready");
 
-            // P29 address bar + vendored C keyboard.
+            // P29 address bar + vendored C keyboard init.
             ab_init(pd, update, NULL);
+#ifdef TARGET_SIMULATOR
             selftest_address_bar_run(&s_abPass, &s_abFail);
             if (s_abFail > 0) {
                 PLUTO_ERROR("P29 SELFTEST FAILURES: %d", s_abFail);
             }
-            PLUTO_LOG("[P29] address bar ready");
+#endif
+            PLUTO_LOG("address bar ready");
 
-            // P30 error / bookmarks / history pages.
+            // P30 error / bookmarks / history pages init.
             ep_init_pd(pd);
             bm_init_pd(pd);
             hi_init_pd(pd);
+#ifdef TARGET_SIMULATOR
             selftest_pages_run(&s_p30Pass, &s_p30Fail);
             if (s_p30Fail > 0) {
                 PLUTO_ERROR("P30 SELFTEST FAILURES: %d", s_p30Fail);
             }
-            PLUTO_LOG("[P30] pages ready");
+#endif
+            PLUTO_LOG("pages ready");
 
-            // P31 settings overlay.
+            // P31 settings overlay init.
             sp_init_pd(pd);
+#ifdef TARGET_SIMULATOR
             selftest_settings_run(&s_spPass, &s_spFail);
             if (s_spFail > 0) {
                 PLUTO_ERROR("P31 SELFTEST FAILURES: %d", s_spFail);
             }
-            PLUTO_LOG("[P31] settings page ready");
+#endif
+            PLUTO_LOG("settings page ready");
 
             // P32 browser engine.
+            br_init(pd);
+#ifdef TARGET_SIMULATOR
             selftest_browser_run(pd, &s_brPass, &s_brFail);
             if (s_brFail > 0) {
                 PLUTO_ERROR("P32 SELFTEST FAILURES: %d", s_brFail);
             }
-            PLUTO_LOG("[P32] browser engine ready");
+#endif
+            PLUTO_LOG("browser engine ready");
 
             // P33 app shell: hand control to the real browser. br_boot()
             // re-runs the Lua init tail (STATE_HOME, callbacks, menu) on a

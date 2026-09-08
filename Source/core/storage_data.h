@@ -62,6 +62,7 @@ typedef struct {
     char fontSize[16]; // default "medium"
     int  imageMode;    // PlutoImageMode, default VIEWPORT ("viewport")
     int  invertCrank;  // default 0
+    int  protocol;     // PlutoProtocol, default HTTP ("http")
 } PlutoSettings;
 
 #ifdef __cplusplus

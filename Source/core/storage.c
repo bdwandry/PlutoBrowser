@@ -88,6 +88,7 @@ void storage_reset_defaults(void)
     copy_field(s_settings.fontSize, sizeof(s_settings.fontSize), "medium");
     s_settings.imageMode = PLUTO_IMAGE_MODE_VIEWPORT;
     s_settings.invertCrank = 0;
+    s_settings.protocol = PLUTO_PROTOCOL_HTTP;
 }
 
 // ------------------------------------------------------- mode mappings ----
@@ -129,6 +130,22 @@ static int image_mode_from_str(const char* s)
     if (strcmp(s, "ondemand") == 0) return PLUTO_IMAGE_MODE_ONDEMAND;
     if (strcmp(s, "hover") == 0)    return PLUTO_IMAGE_MODE_HOVER;
     if (strcmp(s, "disabled") == 0) return PLUTO_IMAGE_MODE_DISABLED;
+    return -1;
+}
+
+static const char* protocol_to_str(int mode)
+{
+    switch ((PlutoProtocol)mode) {
+        case PLUTO_PROTOCOL_HTTP: return "http";
+        case PLUTO_PROTOCOL_TCP:  return "tcp";
+        default:                  return "http";
+    }
+}
+
+static int protocol_from_str(const char* s)
+{
+    if (strcmp(s, "http") == 0) return PLUTO_PROTOCOL_HTTP;
+    if (strcmp(s, "tcp") == 0)  return PLUTO_PROTOCOL_TCP;
     return -1;
 }
 
@@ -200,6 +217,8 @@ int storage_save(void)
     json_obj_set(obj, "imageMode",
                  json_new_string(image_mode_to_str(s_settings.imageMode)));
     json_obj_set(obj, "invertCrank", json_new_bool(s_settings.invertCrank));
+    json_obj_set(obj, "protocol",
+                 json_new_string(protocol_to_str(s_settings.protocol)));
     json_obj_set(root, "settings", obj);
 
     sb_init(&out);
@@ -406,6 +425,11 @@ int storage_load(void)
             v = json_obj_get(set, "invertCrank");
             if (v != NULL && !json_is_null(v))
                 s_settings.invertCrank = json_bool_val(v, 0);
+            v = json_obj_get(set, "protocol");
+            if (v != NULL && json_str(v, NULL) != NULL) {
+                int p = protocol_from_str(json_str(v, NULL));
+                if (p >= 0) s_settings.protocol = p;
+            }
         }
     }
 

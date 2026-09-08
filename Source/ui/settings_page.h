@@ -28,8 +28,8 @@ typedef enum {
     SP_ACT_CLOSED   // B: discarded + closed
 } SpAction;
 
-#define SP_OPTION_COUNT 5 // Search Engine / Browse Mode / Invert Crank /
-                          // Image Mode / Clear Cookies
+#define SP_OPTION_COUNT 6 // Search Engine / Browse Mode / Invert Crank /
+                          // Image Mode / Clear Cookies / Protocol
 
 typedef void (*SpOnChangeFn)(void);
 
@@ -50,5 +50,6 @@ const char* sp_staged_engine_name(void);
 const char* sp_staged_mode_label(void);    /* "HTML" / "Reader"      */
 const char* sp_staged_invert_label(void);  /* "On" / "Off"           */
 const char* sp_staged_image_label(void);   /* IMAGE_MODE_LABELS[...] */
+const char* sp_staged_protocol_label(void);/* PROTOCOL label: "HTTP"/"TCP" */
 
 #endif

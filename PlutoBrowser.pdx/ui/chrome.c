@@ -99,7 +99,7 @@ void ch_display_host(const PlutoUrl* urlObj, char* out, size_t cap) {
 
 void ch_draw(const PlutoUrl* urlObj, const char* pageTitle,
              int isLoading, long progressCur, long progressTot,
-             int isReaderMode) {
+             int isReaderMode, const char* backendLabel) {
 #ifndef PLUTO_CH_PD
     (void)urlObj;
     (void)pageTitle;
@@ -107,6 +107,7 @@ void ch_draw(const PlutoUrl* urlObj, const char* pageTitle,
     (void)progressCur;
     (void)progressTot;
     (void)isReaderMode;
+    (void)backendLabel;
 #else
     if (s_pd == NULL) return;
     PlaydateAPI* pd = s_pd;
@@ -145,14 +146,18 @@ void ch_draw(const PlutoUrl* urlObj, const char* pageTitle,
     pd->graphics->drawText(displayHost, strlen(displayHost),
                            kASCIIEncoding, 22, 4);
 
-    /* 3. Reader mode indicator badge */
+    /* 3. Reader mode indicator badge + protocol label */
     if (urlObj != NULL && strcmp(urlObj->scheme, "about") != 0 &&
         !isLoading) {
-        const char* badgeText = isReaderMode ? "[READ]" : "[WEB]";
+        const char* modeText = isReaderMode ? "[READ]" : "[WEB]";
+        char badge[32];
+        if (backendLabel && backendLabel[0])
+            snprintf(badge, sizeof(badge), "[%s]%s", backendLabel, modeText);
+        else
+            snprintf(badge, sizeof(badge), "%s", modeText);
         pd->graphics->setFont((LCDFont*)fontSmall);
-        int badgeW =
-            style_get_text_width(fontSmall, badgeText);
-        pd->graphics->drawText(badgeText, strlen(badgeText),
+        int badgeW = style_get_text_width(fontSmall, badge);
+        pd->graphics->drawText(badge, strlen(badge),
                                kASCIIEncoding,
                                PLUTO_SCREEN_WIDTH - badgeW - 62, 6);
     }
