@@ -1179,6 +1179,19 @@ static int updateFrame(void *userdata)
     unsigned int btnCurrent = 0, btnPushed = 0, btnReleased = 0;
     pd->system->getButtonState((PDButtons *)&btnCurrent, (PDButtons *)&btnPushed,
                                (PDButtons *)&btnReleased);
+    /* ── KBGATE (Bug Fix #6): while a keyboard owns input (address bar or
+     * form field), the app must not react to buttons AT ALL — the keyboard
+     * reads the hardware itself, so an A press meant for typing previously
+     * also launched bookmarks/links/cursor actions underneath. Zero the
+     * app-visible button state; the keyboard's own button reader is
+     * unaffected. This holds for EVERY app state (home, page, …). */
+    if (formKeyboardOpen || address_bar_is_open() ||
+        (g_kb && keyboardApi.isVisible(g_kb)))
+    {
+        btnCurrent = 0;
+        btnPushed = 0;
+        btnReleased = 0;
+    }
 
     float crankChange = pd->system->getCrankChange();
 
