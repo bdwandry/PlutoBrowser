@@ -22,6 +22,14 @@
 #include "util/strutil.h"
 
 extern void pluto_free(void *p);
+extern void *pluto_realloc(void *p, size_t n);
+
+/* url.c-returned buffers (encode/decode/resolve/unwrap) are freed by callers
+ * with pluto_free() (main.c, document.c, readability.c, http_client.c). All
+ * allocations here MUST therefore use the same SDK allocator — newlib malloc
+ * lives in a different heap on device, and cross-allocator frees corrupt the
+ * heap (observed as garbage bytes injected into submitted form URLs). */
+#define URL_MALLOC(n) pluto_realloc(NULL, (n))
 
 /* ── internal helpers ─────────────────────────────────────────────────────── */
 
@@ -122,7 +130,7 @@ char *url_encode(const char *str)
             maxLen += 3;
         }
     }
-    char *out = (char *)malloc(maxLen + 1);
+    char *out = (char *)URL_MALLOC(maxLen + 1);
     if (!out)
     {
         return NULL;
@@ -146,6 +154,12 @@ char *url_encode(const char *str)
             o += sprintf(o, "%%%02X", c);
         }
     }
+    *o = '\0'; /* BUGFIX (BF5b): pass 1 previously left the tail of the
+                * allocation uninitialized. The pass-2 ' '→'+' scan then read
+                * stale heap bytes on device (recycled SDK heap) and copied
+                * them into the result — the 3-garbage-byte corruption seen
+                * in submitted URLs. Simulator zero-fills fresh host pages,
+                * which masked it. Terminate before scanning. */
     /* Second pass: ' ' → '+' in-place (shrink-only, safe). */
     char *w = out;
     for (const char *r = out; *r; r++)
@@ -163,7 +177,7 @@ char *url_decode(const char *str)
         str = "";
     }
     size_t n = strlen(str);
-    char *out = (char *)malloc(n + 1);
+    char *out = (char *)URL_MALLOC(n + 1);
     if (!out)
     {
         return NULL;
@@ -468,7 +482,7 @@ char *url_unwrap_redirect(const char *urlString)
     {
         len++;
     }
-    char *enc = (char *)malloc(len + 1);
+    char *enc = (char *)URL_MALLOC(len + 1);
     if (!enc)
     {
         return NULL;
@@ -520,7 +534,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
     if (rel[0] == '/' && rel[1] == '/')
     {
         size_t need = strlen(base.scheme) + 1 + strlen(rel) + 1;
-        out = (char *)malloc(need);
+        out = (char *)URL_MALLOC(need);
         if (out)
         {
             snprintf(out, need, "%s:%s", base.scheme, rel);
@@ -542,7 +556,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
         }
         size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(anchorPort) +
                       strlen(base.path) + strlen(base.query) + 1 + strlen(rel) + 8;
-        out = (char *)malloc(need);
+        out = (char *)URL_MALLOC(need);
         if (out)
         {
             snprintf(out, need, "%s://%s%s%s%s%s",
@@ -559,7 +573,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
     {
         size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
                       strlen(base.path) + strlen(rel) + 1;
-        out = (char *)malloc(need);
+        out = (char *)URL_MALLOC(need);
         if (out)
         {
             snprintf(out, need, "%s://%s%s%s%s",
@@ -574,7 +588,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
     {
         size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
                       strlen(rel) + 1;
-        out = (char *)malloc(need);
+        out = (char *)URL_MALLOC(need);
         if (out)
         {
             snprintf(out, need, "%s://%s%s%s", base.scheme, base.host, portStr, rel);
@@ -590,7 +604,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
 
     /* combined = dir + rel */
     size_t combLen = dirLen + strlen(rel) + 2;
-    char *combined = (char *)malloc(combLen);
+    char *combined = (char *)URL_MALLOC(combLen);
     if (!combined)
     {
         url_free(rel);
@@ -608,7 +622,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
     strcat(combined, rel);
 
     /* Normalize segments */
-    char *resolvedPath = (char *)malloc(combLen + 2);
+    char *resolvedPath = (char *)URL_MALLOC(combLen + 2);
     if (!resolvedPath)
     {
         url_free(combined);
@@ -657,7 +671,7 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
 
     size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
                   strlen(resolvedPath) + 1;
-    out = (char *)malloc(need);
+    out = (char *)URL_MALLOC(need);
     if (out)
     {
         snprintf(out, need, "%s://%s%s%s", base.scheme, base.host, portStr, resolvedPath);
@@ -677,7 +691,7 @@ char *url_build_search_url(const char *searchEngineUrl, const char *queryText)
         return NULL;
     }
     size_t need = strlen(searchEngineUrl) + strlen(enc) + 1;
-    char *out = (char *)malloc(need);
+    char *out = (char *)URL_MALLOC(need);
     if (out)
     {
         snprintf(out, need, "%s%s", searchEngineUrl, enc);

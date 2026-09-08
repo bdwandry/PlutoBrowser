@@ -42,7 +42,7 @@ typedef struct
 
 static Setting g_settings[16] = {
     {"searchEngine", "", 1, 1},
-    {"mode", "", 0, 1},       /* MODE_RAW_HTML — filled in storage_init */
+    {"mode", "", 1, 1},       /* Constants.MODE_RAW_HTML = "html" (Lua default) */
     {"autoReader", "", 0, 1}, /* false */
     {"fontSize", "medium", 0, 0},
     {"imageMode", "", 0, 1},  /* IMAGE_MODE_VIEWPORT — filled in storage_init */
@@ -342,7 +342,7 @@ void storage_load(void)
 
     /* reset settings to defaults before applying the file */
     storage_set_setting_int("searchEngine", 1);
-    storage_set_setting_int("mode", 0); /* MODE_RAW_HTML index */
+    storage_set_setting_int("mode", 1); /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_int("autoReader", 0);
     storage_set_setting_str("fontSize", "medium");
     storage_set_setting_int("imageMode", 0); /* IMAGE_MODE_VIEWPORT index */
@@ -662,7 +662,7 @@ void storage_init(PlaydateAPI *pd)
     (void)pd; /* pluto_pd() already set by main */
     logger_log("STORAGE: init enter");
     /* fill the two settings whose defaults come from Constants */
-    storage_set_setting_int("mode", 0);       /* MODE_RAW_HTML */
+    storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_int("imageMode", 0);  /* IMAGE_MODE_VIEWPORT */
     storage_load();
     logger_log("STORAGE: init exit");

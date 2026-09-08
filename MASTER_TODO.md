@@ -6,7 +6,9 @@
 >
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
-> **CURRENT PHASE:** PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
+> **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
+> **CURRENT TASK:** Beta Bug Fix #5 — COMPLETE (Simulator + device verified). url.c/keyboard.c allocator fixes fix text boxes on ALL sites; HTML mode now the default (fresh data). Final clean build deployed (MD5 beba15… both sides), device run 3,081 frames clean terminate, empty errorlog/crashlog, fresh device data file confirms S|mode=1.
+> (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
 > Last completed: P23 (png #26 + ICO PNG-entry integration) — COMPLETE in both environments (10/10 PASS, zlib-built vectors, 0 FAILs, empty device logs). File map reconciled: 29/38 ported, 9 remain. Phase 22 boot fix holding (18 stepwise steps, no watchdog).
@@ -1476,3 +1478,70 @@ the page actually moved (idx 0→10, scrollY 0→200). Stable heartbeats after t
 terminate (test build) and 2,479-frame stable run (final clean build), **empty errorlog and crashlog** both times.
 **Scaffolding:** SCROLLTEST removed post-verification; final build has zero test references; re-verified clean boot in
 Simulator (heartbeats, no test output). Logs archived: tests/logs/smear_device_test.log.
+
+
+## Beta Bug Fix #5 — Form submit 400 "Bad Request" (garbage bytes in query URL) + HTML mode default — FIXED (device deploy pending)
+**Reported by user (manual device testing):** DuckDuckGo Lite — click search box, type "Test", press CANCEL, navigate to
+search button → 400 Bad Request. Loading page shows garbage/unsupported characters in the URL. User also requested
+web (HTML) mode as the default view. User clarified the fix must work on ALL sites (DuckDuckGo Lite was just an example).
+**Root cause (device log evidence):** `navigate_to: https://www.google.com/search?q\xff\x0e\xff=Test` — raw garbage
+bytes INSIDE the assembled query URL (not %XX-encoded, so not produced by url_encode). Systemic cross-allocator bug:
+- Source/core/url.c allocated every returned buffer (encode/decode/resolve/unwrap/build_search_url — 11 sites) with
+  newlib malloc() while every caller (main.c submit path, document.c, readability.c, http_client.c) freed them with
+  pluto_free() = SDK realloc. Simulator: same host heap → benign. Device: SEPARATE heaps → each free corrupts the
+  SDK heap; the corruption surfaced as garbage bytes in the next URL-sized allocation (the form-submit target).
+- Source/keyboard/keyboard.c grew text buffers (originalText at show(), mutable text via getText's realloc) with the
+  SDK allocator but freed them with newlib free() → heap corruption on every keyboard close (the CANCEL path).
+Both paths run for EVERY site's text boxes — hence "all sites", matching the user's clarification.
+**Fixes:**
+1. url.c: all 11 malloc sites → URL_MALLOC = pluto_realloc (SDK allocator), matching url_free/pluto_free callers.
+   Comment documents the contract: url.c-returned buffers are freed by callers with pluto_free.
+2. keyboard.c: PDKeyboardTextFree + PDKeyboardMutableTextFree → playdate->system->realloc(p, 0) instead of free().
+3. keyboard.c cancelAction: re-NUL-terminate text buffer after restoring originalText (stale typed chars sat past count).
+4. storage.c: mode default 0 → 1 (Constants.MODE_RAW_HTML) in all 3 default paths — Lua reference default is
+   Storage.settings.mode = Constants.MODE_RAW_HTML ("html"); the C port had mapped it to the wrong index.
+**Test Cases:**
+- TC-F1 (Simulator, temporary scripted FORMTEST — removed after verification): fresh data file → boot → log mode →
+  navigate google.com → open q-field via real activate path → type "Test" via keyboard's real addLetter path →
+  CANCEL via real cancelAction → submit via real activate_form_block(submit btn) → capture URL handed to navigate_to →
+  assert clean printable-ASCII. RESULT: PASS. mode=1 logged (HTML default works). Cancel reverts text to field's
+  original value (len 4→0) — matches Lua keyboardDidHide commit semantics (Cancel=restore, OK=commit).
+  Captured URL: https://www.google.com/search?ie=ISO-8859-1&hl=en&...&q=&...&btnG=Google+Search (clean).
+- TC-F2 (Simulator, clean build): scaffolding removed (grep FORMTEST/keyboard_test/g_testKb = 0), fresh boot, stable
+  heartbeats, fresh data file has S|mode=1. PASS (tests/logs/formtest_clean_boot.log).
+- TC-F3 (Device): PASS — final clean build deployed (MD5 beba15bc… both sides), device data file CLEARED, fresh file
+  written on device shows S|mode=1 (HTML default active on hardware). Run: 3,081 frames, stable heartbeats, clean
+  terminate, empty errorlog/crashlog (tests/logs/formfix_device_test.log).
+**Status:** FIXED and verified in both environments. The fix is site-agnostic: every text box on every website goes
+through the same keyboard + URL-builder code paths, so all form inputs everywhere are covered.
+
+## Beta Bug Fix #5b — Garbage bytes in submitted URLs on device (REAL root cause)
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** After BF5, user still saw garbage in submitted URLs on device only
+(`https://html.duckduckgo.com/html/?q<3 garbage bytes>=Test&b<garbage>=`); Simulator clean.
+
+**True root cause (found via device log hex analysis + allocator reasoning):**
+`url_encode()` in Source/core/url.c used a two-pass scheme. Pass 1 sized/wrote the
+encoded string but NEVER wrote the NUL terminator. Pass 2 (space→'+') then scanned
+`for (r = out; *r; r++)` — reading UNINITIALIZED heap bytes past the string end.
+- Simulator: host malloc returns fresh zeroed pages → byte after string is 0 → scan stops → clean.
+- Device: SDK heap is recycled → stale nonzero bytes → pass 2 copies them into the result → garbage.
+The earlier allocator fix (BF5) was real but not the cause; symptom signature (bytes between
+param name and '=') came from pass 2 scanning an unterminated 1-char name buffer.
+
+**Fix:** terminate the buffer (`*o = '\0'`) after pass 1 in url_encode (1-line + comment).
+
+**Verification:**
+- Test Case BF5B-TC1 (device, scripted): dirty 2-byte heap block freed immediately before
+  url_encode("q") — pre-fix this reproduces corruption; result len=1, byte 0x71 ('q') only → PASS
+- Test Case BF5B-TC2 (device, scripted): full pair assembly "q"="Test" → `q=Test` clean → PASS
+- Test Case BF5B-TC3 (device, organic): user submitted DuckDuckGo query during test window →
+  log shows `?q=Aa&b=` clean, page navigated, no 400 → PASS
+- Test Case BF5B-TC4 (device): dirty-block proof + navigation ran with empty errorlog/crashlog → PASS
+- Test Case BF5B-TC5 (Simulator): clean build boots, 4+ heartbeats, no errors → PASS
+- BF5B test scaffolding removed post-verification; final MD5-verified deploy (386c7098…);
+  device logs archived to tests/logs/device_bf5b_*.log.
+
+**Lesson:** host-heap-zeroing masks read-uninitialized bugs in Simulator; device heap is
+recycled. Any two-pass encode/size scheme must terminate between passes.

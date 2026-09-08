@@ -498,9 +498,12 @@ static void drawKeyboard(PDKeyboard * _Nonnull self) {
 
 #pragma mark Text
 
+/* Text buffers are grown with the SDK allocator (playdate->system->realloc);
+ * they must also be freed with it. The SDK heap is separate from newlib's on
+ * device, and free()ing SDK pointers corrupts the heap. */
 static void PDKeyboardTextFree(PDKeyboardText * _Nonnull self) {
     if (self->data) {
-        free(self->data);
+        playdate->system->realloc(self->data, 0);
         self->data = NULL;
         self->count = 0;
     }
@@ -510,7 +513,7 @@ static void PDKeyboardTextFree(PDKeyboardText * _Nonnull self) {
 
 static void PDKeyboardMutableTextFree(PDKeyboardMutableText * _Nonnull self) {
     if (self->super.data) {
-        free(self->super.data);
+        playdate->system->realloc(self->super.data, 0);
         self->super.data = NULL;
         self->super.count = 0;
         self->capacity = 0;
@@ -561,6 +564,8 @@ static void deleteAction(PDKeyboard * _Nonnull self) {
 static void cancelAction(PDKeyboard * _Nonnull self) {
     memcpy(self->text.super.data, self->originalText.data, sizeof(char) * self->originalText.count);
     self->text.super.count = self->originalText.count;
+    /* Re-terminate: stale typed characters may sit past count in the buffer. */
+    self->text.super.data[self->text.super.count] = '\0';
 
     if (self->textChangedCallback) {
         self->textChangedCallback(self->textChangedCallbackUserdata);
@@ -1078,6 +1083,7 @@ static PDKeyboard * _Nonnull PDKeyboardNew(void) {
 
         .text = {},
     };
+
     return self;
 }
 
@@ -1238,3 +1244,4 @@ const struct pd_keyboard keyboardApi = (struct pd_keyboard) {
     .setKeyboardAnimatingCallback = PDKeyboardSetKeyboardAnimatingCallback,
     .setTextChangedCallback = PDKeyboardSetTextChangedCallback,
 };
+
