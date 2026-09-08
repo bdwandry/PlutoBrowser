@@ -1361,7 +1361,7 @@ Discarded input sections
  .debug_macro   0x0000000000000000      0x1e1 build/Source/render/cloud_layout.o
  .debug_macro   0x0000000000000000       0x52 build/Source/render/cloud_layout.o
  .debug_line    0x0000000000000000      0xfc0 build/Source/render/cloud_layout.o
- .debug_str     0x0000000000000000     0xc2f2 build/Source/render/cloud_layout.o
+ .debug_str     0x0000000000000000     0xc2f3 build/Source/render/cloud_layout.o
  .comment       0x0000000000000000       0x7a build/Source/render/cloud_layout.o
  .debug_frame   0x0000000000000000      0x1f8 build/Source/render/cloud_layout.o
  .ARM.attributes
@@ -4782,7 +4782,7 @@ LOAD /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-no
 LOAD /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a
 END GROUP
 
-.text           0x0000000000000000    0x3a690
+.text           0x0000000000000000    0x3a6f8
  *(.text)
  .text          0x0000000000000000      0x378 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_addsubdf3.o)
                 0x0000000000000000                __aeabi_drsub
@@ -5131,9 +5131,9 @@ END GROUP
                 0x0000000000006e00                storage_save
  *fill*         0x00000000000071d4        0xc 
  .text.storage_load
-                0x00000000000071e0      0x664 build/Source/core/storage.o
+                0x00000000000071e0      0x66c build/Source/core/storage.o
                 0x00000000000071e0                storage_load
- *fill*         0x0000000000007844        0xc 
+ *fill*         0x000000000000784c        0x4 
  .text.storage_init
                 0x0000000000007850       0x38 build/Source/core/storage.o
                 0x0000000000007850                storage_init
@@ -6685,1013 +6685,1013 @@ END GROUP
                 0x00000000000353dc        0xb build/Source/core/constants.o
  *fill*         0x00000000000353e7        0x1 
  .rodata.str1.4
-                0x00000000000353e8      0x379 build/Source/core/constants.o
- *fill*         0x0000000000035761        0x3 
+                0x00000000000353e8      0x3d5 build/Source/core/constants.o
+ *fill*         0x00000000000357bd        0x3 
  .rodata.CSWTCH.1
-                0x0000000000035764       0x10 build/Source/core/constants.o
+                0x00000000000357c0       0x10 build/Source/core/constants.o
  .rodata.DEFAULT_BOOKMARKS
-                0x0000000000035774       0x6c build/Source/core/constants.o
-                0x0000000000035774                DEFAULT_BOOKMARKS
+                0x00000000000357d0       0x78 build/Source/core/constants.o
+                0x00000000000357d0                DEFAULT_BOOKMARKS
  .rodata.SEARCH_ENGINES
-                0x00000000000357e0       0x20 build/Source/core/constants.o
-                0x00000000000357e0                SEARCH_ENGINES
+                0x0000000000035848       0x20 build/Source/core/constants.o
+                0x0000000000035848                SEARCH_ENGINES
  .rodata.url_encode.str1.4
-                0x0000000000035800        0x7 build/Source/core/url.o
- *fill*         0x0000000000035807        0x1 
+                0x0000000000035868        0x7 build/Source/core/url.o
+ *fill*         0x000000000003586f        0x1 
  .rodata.url_is_search_query.str1.4
-                0x0000000000035808       0x12 build/Source/core/url.o
+                0x0000000000035870       0x12 build/Source/core/url.o
                                          0x2e (size before relaxing)
- *fill*         0x000000000003581a        0x2 
+ *fill*         0x0000000000035882        0x2 
  .rodata.url_parse.str1.4
-                0x000000000003581c       0x34 build/Source/core/url.o
+                0x0000000000035884       0x34 build/Source/core/url.o
                                          0x4c (size before relaxing)
  .rodata.url_unwrap_redirect.str1.4
-                0x0000000000035850       0x1a build/Source/core/url.o
- *fill*         0x000000000003586a        0x2 
+                0x00000000000358b8       0x1a build/Source/core/url.o
+ *fill*         0x00000000000358d2        0x2 
  .rodata.url_resolve.str1.4
-                0x000000000003586c       0x48 build/Source/core/url.o
+                0x00000000000358d4       0x48 build/Source/core/url.o
                                          0x4c (size before relaxing)
  .rodata.url_build_search_url.str1.4
-                0x00000000000358b4        0x5 build/Source/core/url.o
- *fill*         0x00000000000358b9        0x3 
+                0x000000000003591c        0x5 build/Source/core/url.o
+ *fill*         0x0000000000035921        0x3 
  .rodata.utf8_encode.str1.4
-                0x00000000000358bc       0x11 build/Source/core/encoding.o
+                0x0000000000035924       0x11 build/Source/core/encoding.o
                                          0x22 (size before relaxing)
- *fill*         0x00000000000358cd        0x3 
+ *fill*         0x0000000000035935        0x3 
  .rodata.normalize_charset.part.0.constprop.0.str1.4
-                0x00000000000358d0       0x66 build/Source/core/encoding.o
- *fill*         0x0000000000035936        0x2 
+                0x0000000000035938       0x66 build/Source/core/encoding.o
+ *fill*         0x000000000003599e        0x2 
  .rodata.ci_strstr.constprop.0.str1.4
-                0x0000000000035938        0x8 build/Source/core/encoding.o
+                0x00000000000359a0        0x8 build/Source/core/encoding.o
  .rodata.encoding_to_utf8.str1.4
-                0x0000000000035940       0x29 build/Source/core/encoding.o
- *fill*         0x0000000000035969        0x3 
+                0x00000000000359a8       0x29 build/Source/core/encoding.o
+ *fill*         0x00000000000359d1        0x3 
  .rodata.CP1252
-                0x000000000003596c       0x80 build/Source/core/encoding.o
+                0x00000000000359d4       0x80 build/Source/core/encoding.o
  .rodata.month_from_name.part.0.str1.4
-                0x00000000000359ec        0x4 build/Source/core/cookie_jar.o
+                0x0000000000035a54        0x4 build/Source/core/cookie_jar.o
  .rodata.cookie_jar_parse_set_cookie.part.0.str1.4
-                0x00000000000359f0       0x5c build/Source/core/cookie_jar.o
+                0x0000000000035a58       0x5c build/Source/core/cookie_jar.o
                                          0x74 (size before relaxing)
  .rodata.cookie_key.constprop.0.str1.4
-                0x0000000000035a4c        0xc build/Source/core/cookie_jar.o
+                0x0000000000035ab4        0xc build/Source/core/cookie_jar.o
                                          0x10 (size before relaxing)
  .rodata.cookie_jar_get_header.str1.4
-                0x0000000000035a58        0x6 build/Source/core/cookie_jar.o
+                0x0000000000035ac0        0x6 build/Source/core/cookie_jar.o
  .rodata.str1.4
-                0x0000000000035a58       0x2c build/Source/core/cookie_jar.o
+                0x0000000000035ac0       0x2c build/Source/core/cookie_jar.o
  .rodata.months.10361
-                0x0000000000035a84       0x30 build/Source/core/cookie_jar.o
+                0x0000000000035aec       0x30 build/Source/core/cookie_jar.o
  .rodata.escape_to.str1.4
-                0x0000000000035ab4        0x7 build/Source/core/storage.o
+                0x0000000000035b1c        0x7 build/Source/core/storage.o
  .rodata.storage_set_setting_str.str1.4
-                0x0000000000035abb        0x3 build/Source/core/storage.o
- *fill*         0x0000000000035abb        0x1 
+                0x0000000000035b23        0x3 build/Source/core/storage.o
+ *fill*         0x0000000000035b23        0x1 
  .rodata.storage_save.str1.4
-                0x0000000000035abc      0x113 build/Source/core/storage.o
+                0x0000000000035b24      0x113 build/Source/core/storage.o
                                         0x11b (size before relaxing)
- *fill*         0x0000000000035bcf        0x1 
+ *fill*         0x0000000000035c37        0x1 
  .rodata.storage_load.str1.4
-                0x0000000000035bd0       0xe8 build/Source/core/storage.o
+                0x0000000000035c38       0xe8 build/Source/core/storage.o
                                         0x118 (size before relaxing)
  .rodata.storage_init.str1.4
-                0x0000000000035cb8       0x27 build/Source/core/storage.o
- *fill*         0x0000000000035cdf        0x1 
+                0x0000000000035d20       0x27 build/Source/core/storage.o
+ *fill*         0x0000000000035d47        0x1 
  .rodata.storage_add_history.str1.4
-                0x0000000000035ce0        0xa build/Source/core/storage.o
+                0x0000000000035d48        0xa build/Source/core/storage.o
                                          0x12 (size before relaxing)
- *fill*         0x0000000000035cea        0x2 
- .rodata        0x0000000000035cec        0x8 build/Source/core/storage.o
+ *fill*         0x0000000000035d52        0x2 
+ .rodata        0x0000000000035d54        0x8 build/Source/core/storage.o
  .rodata.start_request.str1.4
-                0x0000000000035cf4       0x9b build/Source/core/http_client.o
+                0x0000000000035d5c       0x9b build/Source/core/http_client.o
                                          0xbf (size before relaxing)
- *fill*         0x0000000000035d8f        0x1 
+ *fill*         0x0000000000035df7        0x1 
  .rodata.about_timer_cb.str1.4
-                0x0000000000035d90        0xa build/Source/core/http_client.o
+                0x0000000000035df8        0xa build/Source/core/http_client.o
                                          0x1a (size before relaxing)
- *fill*         0x0000000000035d9a        0x2 
+ *fill*         0x0000000000035e02        0x2 
  .rodata.tcp_open_cb.str1.4
-                0x0000000000035d9c       0x16 build/Source/core/http_client.o
- *fill*         0x0000000000035db2        0x2 
+                0x0000000000035e04       0x16 build/Source/core/http_client.o
+ *fill*         0x0000000000035e1a        0x2 
  .rodata.http_update.str1.4
-                0x0000000000035db4      0x1e0 build/Source/core/http_client.o
+                0x0000000000035e1c      0x1e0 build/Source/core/http_client.o
                                         0x1e4 (size before relaxing)
  .rodata.str1.4
-                0x0000000000035f94       0xab build/Source/core/http_client.o
- *fill*         0x000000000003603f        0x1 
+                0x0000000000035ffc       0xab build/Source/core/http_client.o
+ *fill*         0x00000000000360a7        0x1 
  .rodata.ACIDTEST_HTML
-                0x0000000000036040      0xba9 build/Source/core/http_client.o
- *fill*         0x0000000000036be9        0x3 
+                0x00000000000360a8      0xba9 build/Source/core/http_client.o
+ *fill*         0x0000000000036c51        0x3 
  .rodata.INTERNAL_PAGES
-                0x0000000000036bec       0x24 build/Source/core/http_client.o
+                0x0000000000036c54       0x24 build/Source/core/http_client.o
  .rodata.style_init.str1.4
-                0x0000000000036c10       0x88 build/Source/render/style.o
+                0x0000000000036c78       0x88 build/Source/render/style.o
  .rodata.process_next.str1.4
-                0x0000000000036c98        0x3 build/Source/render/image_decoder.o
+                0x0000000000036d00        0x3 build/Source/render/image_decoder.o
  .rodata.async_decode_done.str1.4
-                0x0000000000036c98       0x4b build/Source/render/image_decoder.o
- *fill*         0x0000000000036ce3        0x1 
+                0x0000000000036d00       0x4b build/Source/render/image_decoder.o
+ *fill*         0x0000000000036d4b        0x1 
  .rodata.decode_raw_image_data.constprop.0.str1.4
-                0x0000000000036ce4       0x90 build/Source/render/image_decoder.o
+                0x0000000000036d4c       0x90 build/Source/render/image_decoder.o
  .rodata.imgdec_draw.str1.4
-                0x0000000000036d74        0x4 build/Source/render/image_decoder.o
+                0x0000000000036ddc        0x4 build/Source/render/image_decoder.o
  .rodata.image_mode.str1.4
-                0x0000000000036d74        0xa build/Source/render/layout.o
+                0x0000000000036ddc        0xa build/Source/render/layout.o
  .rodata.emit_flow.isra.0.str1.4
-                0x0000000000036d74        0xe build/Source/render/layout.o
+                0x0000000000036ddc        0xe build/Source/render/layout.o
                                          0x13 (size before relaxing)
- *fill*         0x0000000000036d82        0x2 
+ *fill*         0x0000000000036dea        0x2 
  .rodata.layout_draw_on_demand_overlay.part.0.str1.4
-                0x0000000000036d84       0x3f build/Source/render/layout.o
+                0x0000000000036dec       0x3f build/Source/render/layout.o
                                          0x44 (size before relaxing)
  .rodata.break_lines.str1.4
-                0x0000000000036dc3       0x3f build/Source/render/layout.o
+                0x0000000000036e2b       0x3f build/Source/render/layout.o
                                           0x2 (size before relaxing)
  .rodata.layout_to_roman.str1.4
-                0x0000000000036dc3        0x3 build/Source/render/layout.o
- *fill*         0x0000000000036dc3        0x1 
+                0x0000000000036e2b        0x3 build/Source/render/layout.o
+ *fill*         0x0000000000036e2b        0x1 
  .rodata.layout_to_alpha.str1.4
-                0x0000000000036dc4        0x2 build/Source/render/layout.o
- *fill*         0x0000000000036dc6        0x2 
+                0x0000000000036e2c        0x2 build/Source/render/layout.o
+ *fill*         0x0000000000036e2e        0x2 
  .rodata.layout_build.str1.4
-                0x0000000000036dc8       0xc2 build/Source/render/layout.o
+                0x0000000000036e30       0xc2 build/Source/render/layout.o
                                          0xce (size before relaxing)
- *fill*         0x0000000000036e8a        0x2 
+ *fill*         0x0000000000036ef2        0x2 
  .rodata.layout_draw.str1.4
-                0x0000000000036e8c       0x6e build/Source/render/layout.o
+                0x0000000000036ef4       0x6e build/Source/render/layout.o
                                          0x7a (size before relaxing)
- *fill*         0x0000000000036efa        0x2 
+ *fill*         0x0000000000036f62        0x2 
  .rodata.layout_show_on_demand_overlay.str1.4
-                0x0000000000036efc        0x6 build/Source/render/layout.o
- *fill*         0x0000000000036f02        0x2 
+                0x0000000000036f64        0x6 build/Source/render/layout.o
+ *fill*         0x0000000000036f6a        0x2 
  .rodata.layout_handle_on_demand_input.str1.4
-                0x0000000000036f04       0x17 build/Source/render/layout.o
+                0x0000000000036f6c       0x17 build/Source/render/layout.o
                                          0x1d (size before relaxing)
- *fill*         0x0000000000036f1b        0x1 
+ *fill*         0x0000000000036f83        0x1 
  .rodata.str1.4
-                0x0000000000036f1c       0x26 build/Source/render/layout.o
+                0x0000000000036f84       0x26 build/Source/render/layout.o
                                          0x32 (size before relaxing)
- *fill*         0x0000000000036f42        0x2 
+ *fill*         0x0000000000036faa        0x2 
  .rodata.syms.11188
-                0x0000000000036f44       0x34 build/Source/render/layout.o
+                0x0000000000036fac       0x34 build/Source/render/layout.o
  .rodata.vals.11187
-                0x0000000000036f78       0x34 build/Source/render/layout.o
+                0x0000000000036fe0       0x34 build/Source/render/layout.o
  .rodata.bayer4x4
-                0x0000000000036fac       0x10 build/Source/render/decoders/dither.o
+                0x0000000000037014       0x10 build/Source/render/decoders/dither.o
  .rodata.clOrder
-                0x0000000000036fbc       0x13 build/Source/render/decoders/inflate.o
- *fill*         0x0000000000036fcf        0x1 
+                0x0000000000037024       0x13 build/Source/render/decoders/inflate.o
+ *fill*         0x0000000000037037        0x1 
  .rodata.distBaseTab
-                0x0000000000036fd0       0x3c build/Source/render/decoders/inflate.o
+                0x0000000000037038       0x3c build/Source/render/decoders/inflate.o
  .rodata.distExtraTab
-                0x000000000003700c       0x1e build/Source/render/decoders/inflate.o
- *fill*         0x000000000003702a        0x2 
+                0x0000000000037074       0x1e build/Source/render/decoders/inflate.o
+ *fill*         0x0000000000037092        0x2 
  .rodata.lengthBaseTab
-                0x000000000003702c       0x3a build/Source/render/decoders/inflate.o
- *fill*         0x0000000000037066        0x2 
+                0x0000000000037094       0x3a build/Source/render/decoders/inflate.o
+ *fill*         0x00000000000370ce        0x2 
  .rodata.lengthExtraTab
-                0x0000000000037068       0x1d build/Source/render/decoders/inflate.o
+                0x00000000000370d0       0x1d build/Source/render/decoders/inflate.o
  .rodata.gif_decode.str1.4
-                0x0000000000037085        0xf build/Source/render/decoders/gif.o
- *fill*         0x0000000000037085        0x3 
+                0x00000000000370ed        0xf build/Source/render/decoders/gif.o
+ *fill*         0x00000000000370ed        0x3 
  .rodata.passes.10459
-                0x0000000000037088       0x20 build/Source/render/decoders/gif.o
+                0x00000000000370f0       0x20 build/Source/render/decoders/gif.o
  .rodata.png_decode.str1.4
-                0x00000000000370a8       0xbd build/Source/render/decoders/png.o
- *fill*         0x0000000000037165        0x3 
- .rodata.JPEG_ZIGZAG
-                0x0000000000037168       0x40 build/Source/render/decoders/jpeg.o
- .rodata.svg_expand_uses.str1.4
-                0x00000000000371a8       0x16 build/Source/render/decoders/svg.o
-                                         0x1a (size before relaxing)
- *fill*         0x00000000000371be        0x2 
- .rodata.svg_has_ink.constprop.0.str1.4
-                0x00000000000371c0        0xd build/Source/render/decoders/svg.o
-                                         0x15 (size before relaxing)
+                0x0000000000037110       0xbd build/Source/render/decoders/png.o
  *fill*         0x00000000000371cd        0x3 
+ .rodata.JPEG_ZIGZAG
+                0x00000000000371d0       0x40 build/Source/render/decoders/jpeg.o
+ .rodata.svg_expand_uses.str1.4
+                0x0000000000037210       0x16 build/Source/render/decoders/svg.o
+                                         0x1a (size before relaxing)
+ *fill*         0x0000000000037226        0x2 
+ .rodata.svg_has_ink.constprop.0.str1.4
+                0x0000000000037228        0xd build/Source/render/decoders/svg.o
+                                         0x15 (size before relaxing)
+ *fill*         0x0000000000037235        0x3 
  .rodata.svg_decode.str1.4
-                0x00000000000371d0       0xab build/Source/render/decoders/svg.o
+                0x0000000000037238       0xab build/Source/render/decoders/svg.o
                                          0xdd (size before relaxing)
- *fill*         0x000000000003727b        0x1 
+ *fill*         0x00000000000372e3        0x1 
  .rodata.webp_alphabet_size
-                0x000000000003727c       0x14 build/Source/render/decoders/webp.o
-                0x000000000003727c                webp_alphabet_size
+                0x00000000000372e4       0x14 build/Source/render/decoders/webp.o
+                0x00000000000372e4                webp_alphabet_size
  .rodata.webp_code_length_code_order
-                0x0000000000037290       0x13 build/Source/render/decoders/webp.o
-                0x0000000000037290                webp_code_length_code_order
- *fill*         0x00000000000372a3        0x1 
+                0x00000000000372f8       0x13 build/Source/render/decoders/webp.o
+                0x00000000000372f8                webp_code_length_code_order
+ *fill*         0x000000000003730b        0x1 
  .rodata.webp_code_length_extra_bits
-                0x00000000000372a4        0x3 build/Source/render/decoders/webp.o
-                0x00000000000372a4                webp_code_length_extra_bits
- *fill*         0x00000000000372a7        0x1 
+                0x000000000003730c        0x3 build/Source/render/decoders/webp.o
+                0x000000000003730c                webp_code_length_extra_bits
+ *fill*         0x000000000003730f        0x1 
  .rodata.webp_code_length_repeat_offsets
-                0x00000000000372a8        0x3 build/Source/render/decoders/webp.o
-                0x00000000000372a8                webp_code_length_repeat_offsets
- *fill*         0x00000000000372ab        0x1 
+                0x0000000000037310        0x3 build/Source/render/decoders/webp.o
+                0x0000000000037310                webp_code_length_repeat_offsets
+ *fill*         0x0000000000037313        0x1 
  .rodata.webp_code_to_plane
-                0x00000000000372ac       0x78 build/Source/render/decoders/webp.o
-                0x00000000000372ac                webp_code_to_plane
+                0x0000000000037314       0x78 build/Source/render/decoders/webp.o
+                0x0000000000037314                webp_code_to_plane
  .rodata.webp_literal_map
-                0x0000000000037324        0x5 build/Source/render/decoders/webp.o
-                0x0000000000037324                webp_literal_map
- *fill*         0x0000000000037329        0x3 
+                0x000000000003738c        0x5 build/Source/render/decoders/webp.o
+                0x000000000003738c                webp_literal_map
+ *fill*         0x0000000000037391        0x3 
  .rodata.vp8_ac_table
-                0x000000000003732c      0x100 build/Source/render/decoders/webp_vp8_data.o
-                0x000000000003732c                vp8_ac_table
+                0x0000000000037394      0x100 build/Source/render/decoders/webp_vp8_data.o
+                0x0000000000037394                vp8_ac_table
  .rodata.vp8_bands
-                0x000000000003742c       0x11 build/Source/render/decoders/webp_vp8_data.o
-                0x000000000003742c                vp8_bands
- *fill*         0x000000000003743d        0x3 
+                0x0000000000037494       0x11 build/Source/render/decoders/webp_vp8_data.o
+                0x0000000000037494                vp8_bands
+ *fill*         0x00000000000374a5        0x3 
  .rodata.vp8_bmodes_proba
-                0x0000000000037440      0x384 build/Source/render/decoders/webp_vp8_data.o
-                0x0000000000037440                vp8_bmodes_proba
+                0x00000000000374a8      0x384 build/Source/render/decoders/webp_vp8_data.o
+                0x00000000000374a8                vp8_bmodes_proba
  .rodata.vp8_cat3456
-                0x00000000000377c4       0x30 build/Source/render/decoders/webp_vp8_data.o
-                0x00000000000377c4                vp8_cat3456
+                0x000000000003782c       0x30 build/Source/render/decoders/webp_vp8_data.o
+                0x000000000003782c                vp8_cat3456
  .rodata.vp8_coeffs_proba0
-                0x00000000000377f4      0x420 build/Source/render/decoders/webp_vp8_data.o
-                0x00000000000377f4                vp8_coeffs_proba0
+                0x000000000003785c      0x420 build/Source/render/decoders/webp_vp8_data.o
+                0x000000000003785c                vp8_coeffs_proba0
  .rodata.vp8_coeffs_update_proba
-                0x0000000000037c14      0x420 build/Source/render/decoders/webp_vp8_data.o
-                0x0000000000037c14                vp8_coeffs_update_proba
+                0x0000000000037c7c      0x420 build/Source/render/decoders/webp_vp8_data.o
+                0x0000000000037c7c                vp8_coeffs_update_proba
  .rodata.vp8_dc_table
-                0x0000000000038034       0x80 build/Source/render/decoders/webp_vp8_data.o
-                0x0000000000038034                vp8_dc_table
+                0x000000000003809c       0x80 build/Source/render/decoders/webp_vp8_data.o
+                0x000000000003809c                vp8_dc_table
  .rodata.vp8_zigzag
-                0x00000000000380b4       0x10 build/Source/render/decoders/webp_vp8_data.o
-                0x00000000000380b4                vp8_zigzag
+                0x000000000003811c       0x10 build/Source/render/decoders/webp_vp8_data.o
+                0x000000000003811c                vp8_zigzag
  .rodata.VP8_KFILTER_EXTRA_ROWS
-                0x00000000000380c4        0x3 build/Source/render/decoders/webp_vp8.o
- *fill*         0x00000000000380c7        0x1 
+                0x000000000003812c        0x3 build/Source/render/decoders/webp_vp8.o
+ *fill*         0x000000000003812f        0x1 
  .rodata.VP8_KSCAN
-                0x00000000000380c8       0x20 build/Source/render/decoders/webp_vp8.o
+                0x0000000000038130       0x20 build/Source/render/decoders/webp_vp8.o
  .rodata.VP8_PRED_CHROMA8
-                0x00000000000380e8       0x1c build/Source/render/decoders/webp_vp8.o
+                0x0000000000038150       0x1c build/Source/render/decoders/webp_vp8.o
  .rodata.VP8_PRED_LUMA16
-                0x0000000000038104       0x1c build/Source/render/decoders/webp_vp8.o
+                0x000000000003816c       0x1c build/Source/render/decoders/webp_vp8.o
  .rodata.VP8_PRED_LUMA4
-                0x0000000000038120       0x28 build/Source/render/decoders/webp_vp8.o
+                0x0000000000038188       0x28 build/Source/render/decoders/webp_vp8.o
  .rodata.webp_parse_container.str1.4
-                0x0000000000038148       0x15 build/Source/render/decoders/webp_container.o
+                0x00000000000381b0       0x15 build/Source/render/decoders/webp_container.o
                                          0x25 (size before relaxing)
- *fill*         0x000000000003815d        0x3 
+ *fill*         0x00000000000381c5        0x3 
  .rodata.chrome_draw.str1.4
-                0x0000000000038160       0x24 build/Source/ui/chrome.o
+                0x00000000000381c8       0x24 build/Source/ui/chrome.o
                                          0x42 (size before relaxing)
- .rodata        0x0000000000038184       0x90 build/Source/ui/chrome.o
+ .rodata        0x00000000000381ec       0x90 build/Source/ui/chrome.o
  .rodata.hud_draw.str1.4
-                0x0000000000038214       0x11 build/Source/ui/hud.o
+                0x000000000003827c       0x11 build/Source/ui/hud.o
                                          0x17 (size before relaxing)
  .rodata.hud_draw_hover_status.str1.4
-                0x0000000000038225       0x11 build/Source/ui/hud.o
+                0x000000000003828d       0x11 build/Source/ui/hud.o
                                           0x9 (size before relaxing)
- *fill*         0x0000000000038225        0x3 
+ *fill*         0x000000000003828d        0x3 
  .rodata.error_page_show.str1.4
-                0x0000000000038228       0x17 build/Source/ui/error_page.o
+                0x0000000000038290       0x17 build/Source/ui/error_page.o
                                          0x1f (size before relaxing)
  .rodata.error_page_handle_input.str1.4
-                0x000000000003823f       0x15 build/Source/ui/error_page.o
- *fill*         0x000000000003823f        0x1 
+                0x00000000000382a7       0x15 build/Source/ui/error_page.o
+ *fill*         0x00000000000382a7        0x1 
  .rodata.error_page_draw.str1.4
-                0x0000000000038240       0x6b build/Source/ui/error_page.o
- *fill*         0x00000000000382ab        0x1 
+                0x00000000000382a8       0x6b build/Source/ui/error_page.o
+ *fill*         0x0000000000038313        0x1 
  .rodata.str1.4
-                0x00000000000382ac       0x20 build/Source/ui/error_page.o
+                0x0000000000038314       0x20 build/Source/ui/error_page.o
  .rodata.buttons.10402
-                0x00000000000382cc        0xc build/Source/ui/error_page.o
+                0x0000000000038334        0xc build/Source/ui/error_page.o
  .rodata.home_page_draw.str1.4
-                0x00000000000382d8       0x8f build/Source/ui/home_page.o
+                0x0000000000038340       0x8f build/Source/ui/home_page.o
                                          0xa7 (size before relaxing)
  .rodata.bookmarks_page_handle_input.str1.4
-                0x0000000000038367        0x6 build/Source/ui/bookmarks_page.o
- *fill*         0x0000000000038367        0x1 
+                0x00000000000383cf        0x6 build/Source/ui/bookmarks_page.o
+ *fill*         0x00000000000383cf        0x1 
  .rodata.bookmarks_page_draw.str1.4
-                0x0000000000038368       0x61 build/Source/ui/bookmarks_page.o
+                0x00000000000383d0       0x61 build/Source/ui/bookmarks_page.o
                                          0x69 (size before relaxing)
  .rodata.history_page_handle_input.str1.4
-                0x00000000000383c9        0x6 build/Source/ui/history_page.o
- *fill*         0x00000000000383c9        0x3 
+                0x0000000000038431        0x6 build/Source/ui/history_page.o
+ *fill*         0x0000000000038431        0x3 
  .rodata.history_page_draw.str1.4
-                0x00000000000383cc       0x36 build/Source/ui/history_page.o
+                0x0000000000038434       0x36 build/Source/ui/history_page.o
                                          0x55 (size before relaxing)
  .rodata.settings_page_open.str1.4
-                0x0000000000038402       0x33 build/Source/ui/settings_page.o
- *fill*         0x0000000000038402        0x2 
+                0x000000000003846a       0x33 build/Source/ui/settings_page.o
+ *fill*         0x000000000003846a        0x2 
  .rodata.settings_page_staged_value.str1.4
-                0x0000000000038404        0x8 build/Source/ui/settings_page.o
+                0x000000000003846c        0x8 build/Source/ui/settings_page.o
                                          0x1c (size before relaxing)
  .rodata.settings_page_handle_input.str1.4
-                0x000000000003840c        0x5 build/Source/ui/settings_page.o
+                0x0000000000038474        0x5 build/Source/ui/settings_page.o
                                           0xe (size before relaxing)
- *fill*         0x0000000000038411        0x3 
+ *fill*         0x0000000000038479        0x3 
  .rodata.settings_page_draw.str1.4
-                0x0000000000038414       0x34 build/Source/ui/settings_page.o
+                0x000000000003847c       0x34 build/Source/ui/settings_page.o
                                          0x3c (size before relaxing)
  .rodata.str1.4
-                0x0000000000038448       0x37 build/Source/ui/settings_page.o
+                0x00000000000384b0       0x37 build/Source/ui/settings_page.o
                                          0x46 (size before relaxing)
- *fill*         0x000000000003847f        0x1 
+ *fill*         0x00000000000384e7        0x1 
  .rodata.labels.10519
-                0x0000000000038480       0x14 build/Source/ui/settings_page.o
+                0x00000000000384e8       0x14 build/Source/ui/settings_page.o
  .rodata.ab_keyboard_text_changed.str1.4
-                0x0000000000038494        0x3 build/Source/ui/address_bar.o
+                0x00000000000384fc        0x3 build/Source/ui/address_bar.o
  .rodata.ab_route_submit.str1.4
-                0x0000000000038494       0x16 build/Source/ui/address_bar.o
+                0x00000000000384fc       0x16 build/Source/ui/address_bar.o
                                          0x2a (size before relaxing)
  .rodata.address_bar_open.str1.4
-                0x00000000000384aa        0x7 build/Source/ui/address_bar.o
- *fill*         0x00000000000384aa        0x2 
+                0x0000000000038512        0x7 build/Source/ui/address_bar.o
+ *fill*         0x0000000000038512        0x2 
  .rodata.address_bar_draw_overlay.str1.4
-                0x00000000000384ac       0x15 build/Source/ui/address_bar.o
- *fill*         0x00000000000384c1        0x3 
+                0x0000000000038514       0x15 build/Source/ui/address_bar.o
+ *fill*         0x0000000000038529        0x3 
  .rodata.append_cp_translation.str1.4
-                0x00000000000384c4       0x14 build/Source/html/entities.o
+                0x000000000003852c       0x14 build/Source/html/entities.o
                                          0x1e (size before relaxing)
  .rodata.entities_decode.str1.4
-                0x00000000000384d8       0x1b build/Source/html/entities.o
- *fill*         0x00000000000384f3        0x1 
+                0x0000000000038540       0x1b build/Source/html/entities.o
+ *fill*         0x000000000003855b        0x1 
  .rodata.entities_encode.str1.4
-                0x00000000000384f4       0x1e build/Source/html/entities.o
- *fill*         0x0000000000038512        0x2 
+                0x000000000003855c       0x1e build/Source/html/entities.o
+ *fill*         0x000000000003857a        0x2 
  .rodata.str1.4
-                0x0000000000038514      0x554 build/Source/html/entities.o
+                0x000000000003857c      0x554 build/Source/html/entities.o
                                         0x5f8 (size before relaxing)
  .rodata.CSWTCH.10
-                0x0000000000038a68      0x2fc build/Source/html/entities.o
+                0x0000000000038ad0      0x2fc build/Source/html/entities.o
  .rodata.MATH_CP
-                0x0000000000038d64       0xc8 build/Source/html/entities.o
+                0x0000000000038dcc       0xc8 build/Source/html/entities.o
  .rodata.NAMED_ENTITIES
-                0x0000000000038e2c      0x430 build/Source/html/entities.o
+                0x0000000000038e94      0x430 build/Source/html/entities.o
  .rodata.UTF8_CLEANUP
-                0x000000000003925c       0xd8 build/Source/html/entities.o
+                0x00000000000392c4       0xd8 build/Source/html/entities.o
  .rodata.find_close_tag.str1.4
-                0x0000000000039334        0x6 build/Source/html/tokenizer.o
- *fill*         0x000000000003933a        0x2 
+                0x000000000003939c        0x6 build/Source/html/tokenizer.o
+ *fill*         0x00000000000393a2        0x2 
  .rodata.tokenizer_tokenize.str1.4
-                0x000000000003933c       0x12 build/Source/html/tokenizer.o
+                0x00000000000393a4       0x12 build/Source/html/tokenizer.o
                                          0x2d (size before relaxing)
- *fill*         0x000000000003934e        0x2 
+ *fill*         0x00000000000393b6        0x2 
  .rodata.PLUTO_TOK_ATTR_TRUE
-                0x0000000000039350        0x1 build/Source/html/tokenizer.o
-                0x0000000000039350                PLUTO_TOK_ATTR_TRUE
- *fill*         0x0000000000039351        0x3 
+                0x00000000000393b8        0x1 build/Source/html/tokenizer.o
+                0x00000000000393b8                PLUTO_TOK_ATTR_TRUE
+ *fill*         0x00000000000393b9        0x3 
  .rodata.is_skip_subtree.str1.4
-                0x0000000000039354       0x24 build/Source/html/dom.o
+                0x00000000000393bc       0x24 build/Source/html/dom.o
  .rodata.is_table_ctx.str1.4
-                0x0000000000039378       0x1e build/Source/html/dom.o
- *fill*         0x0000000000039396        0x2 
+                0x00000000000393e0       0x1e build/Source/html/dom.o
+ *fill*         0x00000000000393fe        0x2 
  .rodata.dom_build.str1.4
-                0x0000000000039398       0x2b build/Source/html/dom.o
+                0x0000000000039400       0x2b build/Source/html/dom.o
                                          0x3e (size before relaxing)
- *fill*         0x00000000000393c3        0x1 
+ *fill*         0x000000000003942b        0x1 
  .rodata.str1.4
-                0x00000000000393c4      0x100 build/Source/html/dom.o
+                0x000000000003942c      0x100 build/Source/html/dom.o
                                         0x114 (size before relaxing)
  .rodata.BLOCK.10465
-                0x00000000000394c4       0x90 build/Source/html/dom.o
+                0x000000000003952c       0x90 build/Source/html/dom.o
  .rodata.VOID.10454
-                0x0000000000039554       0x38 build/Source/html/dom.o
+                0x00000000000395bc       0x38 build/Source/html/dom.o
  .rodata.attr_val.str1.4
-                0x000000000003958c        0x1 build/Source/html/document.o
+                0x00000000000395f4        0x1 build/Source/html/document.o
  .rodata.svg_serialize.str1.4
-                0x000000000003958c        0xb build/Source/html/document.o
+                0x00000000000395f4        0xb build/Source/html/document.o
                                          0x1b (size before relaxing)
- *fill*         0x0000000000039597        0x1 
+ *fill*         0x00000000000395ff        0x1 
  .rodata.refresh_from_content.str1.4
-                0x0000000000039598        0x5 build/Source/html/document.o
+                0x0000000000039600        0x5 build/Source/html/document.o
                                           0xb (size before relaxing)
  .rodata.q_quote.str1.4
-                0x000000000003959d        0x2 build/Source/html/document.o
- *fill*         0x000000000003959d        0x3 
+                0x0000000000039605        0x2 build/Source/html/document.o
+ *fill*         0x0000000000039605        0x3 
  .rodata.run_exit.str1.4
-                0x00000000000395a0        0x4 build/Source/html/document.o
+                0x0000000000039608        0x4 build/Source/html/document.o
                                           0xc (size before relaxing)
  .rodata.walk_box_spacing.part.0.str1.4
-                0x00000000000395a4       0x55 build/Source/html/document.o
+                0x000000000003960c       0x55 build/Source/html/document.o
  .rodata.walk_box_spacing.str1.4
-                0x00000000000395f9        0x6 build/Source/html/document.o
- *fill*         0x00000000000395f9        0x3 
+                0x0000000000039661        0x6 build/Source/html/document.o
+ *fill*         0x0000000000039661        0x3 
  .rodata.walk_inverted.str1.4
-                0x00000000000395fc       0x4e build/Source/html/document.o
- *fill*         0x000000000003964a        0x2 
+                0x0000000000039664       0x4e build/Source/html/document.o
+ *fill*         0x00000000000396b2        0x2 
  .rodata.walk_align.str1.4
-                0x000000000003964c       0x13 build/Source/html/document.o
+                0x00000000000396b4       0x13 build/Source/html/document.o
                                          0x21 (size before relaxing)
- *fill*         0x000000000003965f        0x1 
+ *fill*         0x00000000000396c7        0x1 
  .rodata.doc_is_display_none.str1.4
-                0x0000000000039660        0x8 build/Source/html/document.o
+                0x00000000000396c8        0x8 build/Source/html/document.o
                                          0x2b (size before relaxing)
  .rodata.doc_valid_href.str1.4
-                0x0000000000039668       0x12 build/Source/html/document.o
+                0x00000000000396d0       0x12 build/Source/html/document.o
  .rodata.handle_element.str1.4
-                0x0000000000039668      0x4dc build/Source/html/document.o
+                0x00000000000396d0      0x4dc build/Source/html/document.o
                                         0x708 (size before relaxing)
  .rodata.walk_children.str1.4
-                0x0000000000039b44        0x6 build/Source/html/document.o
- *fill*         0x0000000000039b4a        0x2 
+                0x0000000000039bac        0x6 build/Source/html/document.o
+ *fill*         0x0000000000039bb2        0x2 
  .rodata.handle_row.isra.0.str1.4
-                0x0000000000039b4c       0x10 build/Source/html/document.o
+                0x0000000000039bb4       0x10 build/Source/html/document.o
  .rodata.document_parse.str1.4
-                0x0000000000039b5c       0x45 build/Source/html/document.o
+                0x0000000000039bc4       0x45 build/Source/html/document.o
                                          0x65 (size before relaxing)
  .rodata.rd_trim.str1.4
-                0x0000000000039ba1        0x1 build/Source/html/readability.o
- *fill*         0x0000000000039ba1        0x3 
+                0x0000000000039c09        0x1 build/Source/html/readability.o
+ *fill*         0x0000000000039c09        0x3 
  .rodata.readability_distill.str1.4
-                0x0000000000039ba4       0x2b build/Source/html/readability.o
+                0x0000000000039c0c       0x2b build/Source/html/readability.o
                                         0x1e7 (size before relaxing)
  .rodata.str1.4
-                0x0000000000039bcf       0x1f build/Source/html/readability.o
- *fill*         0x0000000000039bcf        0x1 
+                0x0000000000039c37       0x1f build/Source/html/readability.o
+ *fill*         0x0000000000039c37        0x1 
  .rodata.stripTags.11110
-                0x0000000000039bd0       0x24 build/Source/html/readability.o
+                0x0000000000039c38       0x24 build/Source/html/readability.o
  .rodata.playSound.str1.4
-                0x0000000000039bf4       0x22 build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039c16        0x2 
+                0x0000000000039c5c       0x22 build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039c7e        0x2 
  .rodata.loadBitmapOrError.str1.4
-                0x0000000000039c18       0x2c build/Source/keyboard/keyboard.o
+                0x0000000000039c80       0x2c build/Source/keyboard/keyboard.o
  .rodata.PDKeyboardSetCapitalizationBehavior.str1.4
-                0x0000000000039c44       0xa5 build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039ce9        0x3 
+                0x0000000000039cac       0xa5 build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039d51        0x3 
  .rodata.PDKeyboardNew.str1.4
-                0x0000000000039cec      0x1c7 build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039eb3        0x1 
+                0x0000000000039d54      0x1c7 build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039f1b        0x1 
  .rodata.PDKeyboardShow.str1.4
-                0x0000000000039eb4       0x35 build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039ee9        0x3 
+                0x0000000000039f1c       0x35 build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039f51        0x3 
  .rodata.enterKey.str1.4
-                0x0000000000039eec       0x1c build/Source/keyboard/keyboard.o
+                0x0000000000039f54       0x1c build/Source/keyboard/keyboard.o
  .rodata.columnCounts
-                0x0000000000039f08       0x10 build/Source/keyboard/keyboard.o
+                0x0000000000039f70       0x10 build/Source/keyboard/keyboard.o
  .rodata.columnPositions
-                0x0000000000039f18       0x10 build/Source/keyboard/keyboard.o
+                0x0000000000039f80       0x10 build/Source/keyboard/keyboard.o
  .rodata.columnWidths
-                0x0000000000039f28       0x10 build/Source/keyboard/keyboard.o
+                0x0000000000039f90       0x10 build/Source/keyboard/keyboard.o
  .rodata.columns
-                0x0000000000039f38       0x10 build/Source/keyboard/keyboard.o
+                0x0000000000039fa0       0x10 build/Source/keyboard/keyboard.o
  .rodata.kSoundBump
-                0x0000000000039f48       0x1b build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039f63        0x1 
+                0x0000000000039fb0       0x1b build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039fcb        0x1 
  .rodata.kSoundColumnMoveNext
-                0x0000000000039f64       0x1e build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039f82        0x2 
+                0x0000000000039fcc       0x1e build/Source/keyboard/keyboard.o
+ *fill*         0x0000000000039fea        0x2 
  .rodata.kSoundColumnMovePrevious
-                0x0000000000039f84       0x26 build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039faa        0x2 
+                0x0000000000039fec       0x26 build/Source/keyboard/keyboard.o
+ *fill*         0x000000000003a012        0x2 
  .rodata.kSoundKeyPress
-                0x0000000000039fac       0x18 build/Source/keyboard/keyboard.o
+                0x000000000003a014       0x18 build/Source/keyboard/keyboard.o
  .rodata.kSoundRowMove
-                0x0000000000039fc4       0x1a build/Source/keyboard/keyboard.o
- *fill*         0x0000000000039fde        0x2 
+                0x000000000003a02c       0x1a build/Source/keyboard/keyboard.o
+ *fill*         0x000000000003a046        0x2 
  .rodata.keyboardApi
-                0x0000000000039fe0       0x44 build/Source/keyboard/keyboard.o
-                0x0000000000039fe0                keyboardApi
+                0x000000000003a048       0x44 build/Source/keyboard/keyboard.o
+                0x000000000003a048                keyboardApi
  .rodata.lowerColumn
-                0x000000000003a024       0x1a build/Source/keyboard/keyboard.o
- *fill*         0x000000000003a03e        0x2 
+                0x000000000003a08c       0x1a build/Source/keyboard/keyboard.o
+ *fill*         0x000000000003a0a6        0x2 
  .rodata.numbersColumn
-                0x000000000003a040       0x2a build/Source/keyboard/keyboard.o
- *fill*         0x000000000003a06a        0x2 
+                0x000000000003a0a8       0x2a build/Source/keyboard/keyboard.o
+ *fill*         0x000000000003a0d2        0x2 
  .rodata.upperColumn
-                0x000000000003a06c       0x1a build/Source/keyboard/keyboard.o
- *fill*         0x000000000003a086        0x2 
+                0x000000000003a0d4       0x1a build/Source/keyboard/keyboard.o
+ *fill*         0x000000000003a0ee        0x2 
  .rodata.tasks_update.str1.4
-                0x000000000003a088        0xb build/Source/core/tasks.o
+                0x000000000003a0f0        0xb build/Source/core/tasks.o
  .rodata.strutil_trim_dup.str1.4
-                0x000000000003a093        0x1 build/Source/util/strutil.o
- *fill*         0x000000000003a093        0x1 
+                0x000000000003a0fb        0x1 build/Source/util/strutil.o
+ *fill*         0x000000000003a0fb        0x1 
  .rodata._ctype_
-                0x000000000003a094      0x101 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-ctype_.o)
-                0x000000000003a094                _ctype_
- *fill*         0x000000000003a195        0x3 
+                0x000000000003a0fc      0x101 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-ctype_.o)
+                0x000000000003a0fc                _ctype_
+ *fill*         0x000000000003a1fd        0x3 
  .rodata._strtod_l.str1.4
-                0x000000000003a198        0xf /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
+                0x000000000003a200        0xf /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
                                          0x11 (size before relaxing)
- *fill*         0x000000000003a1a7        0x1 
+ *fill*         0x000000000003a20f        0x1 
  .rodata.fpi.7558
-                0x000000000003a1a8       0x14 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
+                0x000000000003a210       0x14 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
  .rodata.fpinan.7594
-                0x000000000003a1bc       0x14 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
+                0x000000000003a224       0x14 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
  .rodata.tinytens
-                0x000000000003a1d0       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
+                0x000000000003a238       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
  .rodata._svfprintf_r.str1.4
-                0x000000000003a1f8       0x3b /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
+                0x000000000003a260       0x3b /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
                                          0x42 (size before relaxing)
- *fill*         0x000000000003a233        0x1 
+ *fill*         0x000000000003a29b        0x1 
  .rodata.blanks.8708
-                0x000000000003a234       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
+                0x000000000003a29c       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
  .rodata.zeroes.8709
-                0x000000000003a244       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
+                0x000000000003a2ac       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
  .rodata.__ssvfscanf_r.str1.4
-                0x000000000003a254        0x5 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
+                0x000000000003a2bc        0x5 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
                                           0x9 (size before relaxing)
- *fill*         0x000000000003a259        0x3 
+ *fill*         0x000000000003a2c1        0x3 
  .rodata.basefix.8777
-                0x000000000003a25c       0x22 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
- *fill*         0x000000000003a27e        0x2 
+                0x000000000003a2c4       0x22 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
+ *fill*         0x000000000003a2e6        0x2 
  .rodata._dtoa_r.str1.4
-                0x000000000003a280        0xd /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-dtoa.o)
+                0x000000000003a2e8        0xd /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-dtoa.o)
                                          0x12 (size before relaxing)
- *fill*         0x000000000003a28d        0x3 
+ *fill*         0x000000000003a2f5        0x3 
  .rodata.__hexdig
-                0x000000000003a290      0x100 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-gethex.o)
-                0x000000000003a290                __hexdig
+                0x000000000003a2f8      0x100 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-gethex.o)
+                0x000000000003a2f8                __hexdig
  .rodata.str1.4
-                0x000000000003a390        0xd /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
+                0x000000000003a3f8        0xd /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
                                           0x5 (size before relaxing)
  .rodata._C_numeric_locale
-                0x000000000003a390        0xc /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
-                0x000000000003a390                _C_numeric_locale
+                0x000000000003a3f8        0xc /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
+                0x000000000003a3f8                _C_numeric_locale
  .rodata._setlocale_r.str1.4
-                0x000000000003a39c        0x6 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
+                0x000000000003a404        0x6 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
                                           0xd (size before relaxing)
  .rodata.str1.4
-                0x000000000003a3a2        0x2 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
+                0x000000000003a40a        0x2 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
  .rodata._mbrtowc_r.str1.4
-                0x000000000003a3a2        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbrtowc.o)
- *fill*         0x000000000003a3a2        0x6 
+                0x000000000003a40a        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbrtowc.o)
+ *fill*         0x000000000003a40a        0x6 
  .rodata.__mprec_bigtens
-                0x000000000003a3a8       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
-                0x000000000003a3a8                __mprec_bigtens
+                0x000000000003a410       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
+                0x000000000003a410                __mprec_bigtens
  .rodata.__mprec_tens
-                0x000000000003a3d0       0xc8 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
-                0x000000000003a3d0                __mprec_tens
+                0x000000000003a438       0xc8 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
+                0x000000000003a438                __mprec_tens
  .rodata.p05.7478
-                0x000000000003a498        0xc /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
+                0x000000000003a500        0xc /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
  .rodata.powf.str1.4
-                0x000000000003a4a4        0x5 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-wf_pow.o)
- *fill*         0x000000000003a4a9        0x3 
+                0x000000000003a50c        0x5 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-wf_pow.o)
+ *fill*         0x000000000003a511        0x3 
  .rodata.npio2_hw
-                0x000000000003a4ac       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
+                0x000000000003a514       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
  .rodata.two_over_pi
-                0x000000000003a52c      0x108 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
+                0x000000000003a594      0x108 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
  .rodata.__ieee754_powf.str1.4
-                0x000000000003a634        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_pow.o)
- *fill*         0x000000000003a634        0x4 
- .rodata.PIo2   0x000000000003a638       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
+                0x000000000003a69c        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_pow.o)
+ *fill*         0x000000000003a69c        0x4 
+ .rodata.PIo2   0x000000000003a6a0       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
  .rodata.init_jk
-                0x000000000003a678       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
- .rodata.TWO23  0x000000000003a688        0x8 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_rint.o)
+                0x000000000003a6e0       0x10 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
+ .rodata.TWO23  0x000000000003a6f0        0x8 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_rint.o)
  *(.eh_frame*)
 
-.glue_7         0x000000000003a690        0x0
- .glue_7        0x000000000003a690        0x0 linker stubs
+.glue_7         0x000000000003a6f8        0x0
+ .glue_7        0x000000000003a6f8        0x0 linker stubs
 
-.glue_7t        0x000000000003a690        0x0
- .glue_7t       0x000000000003a690        0x0 linker stubs
+.glue_7t        0x000000000003a6f8        0x0
+ .glue_7t       0x000000000003a6f8        0x0 linker stubs
 
-.vfp11_veneer   0x000000000003a690        0x0
- .vfp11_veneer  0x000000000003a690        0x0 linker stubs
+.vfp11_veneer   0x000000000003a6f8        0x0
+ .vfp11_veneer  0x000000000003a6f8        0x0 linker stubs
 
-.v4_bx          0x000000000003a690        0x0
- .v4_bx         0x000000000003a690        0x0 linker stubs
+.v4_bx          0x000000000003a6f8        0x0
+ .v4_bx         0x000000000003a6f8        0x0 linker stubs
 
-.iplt           0x000000000003a690        0x0
- .iplt          0x000000000003a690        0x0 build/Source/main.o
+.iplt           0x000000000003a6f8        0x0
+ .iplt          0x000000000003a6f8        0x0 build/Source/main.o
 
-.rel.dyn        0x000000000003a690        0x0
- .rel.iplt      0x000000000003a690        0x0 build/Source/main.o
+.rel.dyn        0x000000000003a6f8        0x0
+ .rel.iplt      0x000000000003a6f8        0x0 build/Source/main.o
 
-.data           0x000000000003a690     0x11e4
-                0x000000000003a690                __etext = .
-                0x000000000003a690                __data_start__ = .
+.data           0x000000000003a6f8     0x11e4
+                0x000000000003a6f8                __etext = .
+                0x000000000003a6f8                __data_start__ = .
  *(vtable)
  *(.data*)
  .data.currentBrowseMode
-                0x000000000003a690        0x4 build/Source/main.o
+                0x000000000003a6f8        0x4 build/Source/main.o
  .data.k_viewOptions
-                0x000000000003a694        0x8 build/Source/main.o
- .data.mouseX   0x000000000003a69c        0x4 build/Source/main.o
- .data.mouseY   0x000000000003a6a0        0x4 build/Source/main.o
+                0x000000000003a6fc        0x8 build/Source/main.o
+ .data.mouseX   0x000000000003a704        0x4 build/Source/main.o
+ .data.mouseY   0x000000000003a708        0x4 build/Source/main.o
  .data.pageTitle
-                0x000000000003a6a4      0x100 build/Source/main.o
+                0x000000000003a70c      0x100 build/Source/main.o
  .data.IMAGE_MODE_NAMES
-                0x000000000003a7a4       0x14 build/Source/core/constants.o
-                0x000000000003a7a4                IMAGE_MODE_NAMES
+                0x000000000003a80c       0x14 build/Source/core/constants.o
+                0x000000000003a80c                IMAGE_MODE_NAMES
  .data.g_settings
-                0x000000000003a7b8      0xa80 build/Source/core/storage.o
+                0x000000000003a820      0xa80 build/Source/core/storage.o
  .data.g_contentLength
-                0x000000000003b238        0x4 build/Source/core/http_client.o
+                0x000000000003b2a0        0x4 build/Source/core/http_client.o
  .data.g_status
-                0x000000000003b23c        0x4 build/Source/core/http_client.o
+                0x000000000003b2a4        0x4 build/Source/core/http_client.o
  .data.g_errorMsg
-                0x000000000003b240       0x80 build/Source/ui/error_page.o
+                0x000000000003b2a8       0x80 build/Source/ui/error_page.o
  .data.g_selectedIndex
-                0x000000000003b2c0        0x4 build/Source/ui/error_page.o
+                0x000000000003b328        0x4 build/Source/ui/error_page.o
  .data.g_selectedIndex
-                0x000000000003b2c4        0x4 build/Source/ui/bookmarks_page.o
+                0x000000000003b32c        0x4 build/Source/ui/bookmarks_page.o
  .data.g_selectedIndex
-                0x000000000003b2c8        0x4 build/Source/ui/history_page.o
+                0x000000000003b330        0x4 build/Source/ui/history_page.o
  .data.g_selectedIndex
-                0x000000000003b2cc        0x4 build/Source/ui/settings_page.o
+                0x000000000003b334        0x4 build/Source/ui/settings_page.o
  .data.g_nextId
-                0x000000000003b2d0        0x4 build/Source/util/pdtimer.o
+                0x000000000003b338        0x4 build/Source/util/pdtimer.o
  .data._impure_ptr
-                0x000000000003b2d4        0x4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-impure.o)
-                0x000000000003b2d4                _impure_ptr
+                0x000000000003b33c        0x4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-impure.o)
+                0x000000000003b33c                _impure_ptr
  .data.impure_data
-                0x000000000003b2d8      0x428 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-impure.o)
+                0x000000000003b340      0x428 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-impure.o)
  .data.numempty
-                0x000000000003b700        0x2 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
- *fill*         0x000000000003b702        0x2 
+                0x000000000003b768        0x2 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
+ *fill*         0x000000000003b76a        0x2 
  .data.__global_locale
-                0x000000000003b704      0x16c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
-                0x000000000003b704                __global_locale
+                0x000000000003b76c      0x16c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
+                0x000000000003b76c                __global_locale
  .data.__fdlib_version
-                0x000000000003b870        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_lib_ver.o)
-                0x000000000003b870                __fdlib_version
-                0x000000000003b874                . = ALIGN (0x4)
- *fill*         0x000000000003b871        0x3 
+                0x000000000003b8d8        0x1 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_lib_ver.o)
+                0x000000000003b8d8                __fdlib_version
+                0x000000000003b8dc                . = ALIGN (0x4)
+ *fill*         0x000000000003b8d9        0x3 
                 [!provide]                        PROVIDE (__preinit_array_start = .)
  *(.preinit_array)
                 [!provide]                        PROVIDE (__preinit_array_end = .)
-                0x000000000003b874                . = ALIGN (0x4)
+                0x000000000003b8dc                . = ALIGN (0x4)
                 [!provide]                        PROVIDE (__init_array_start = .)
  *(SORT_BY_NAME(.init_array.*))
  *(.init_array)
                 [!provide]                        PROVIDE (__init_array_end = .)
-                0x000000000003b874                . = ALIGN (0x4)
+                0x000000000003b8dc                . = ALIGN (0x4)
                 [!provide]                        PROVIDE (__fini_array_start = .)
  *(SORT_BY_NAME(.fini_array.*))
  *(.fini_array)
                 [!provide]                        PROVIDE (__fini_array_end = .)
-                0x000000000003b874                . = ALIGN (0x4)
-                0x000000000003b874                __data_end__ = .
+                0x000000000003b8dc                . = ALIGN (0x4)
+                0x000000000003b8dc                __data_end__ = .
 
-.igot.plt       0x000000000003b874        0x0
- .igot.plt      0x000000000003b874        0x0 build/Source/main.o
+.igot.plt       0x000000000003b8dc        0x0
+ .igot.plt      0x000000000003b8dc        0x0 build/Source/main.o
 
-.bss            0x000000000003b878    0x7f2f4
-                0x000000000003b878                . = ALIGN (0x4)
-                0x000000000003b878                __bss_start__ = .
+.bss            0x000000000003b8e0    0x7f2f4
+                0x000000000003b8e0                . = ALIGN (0x4)
+                0x000000000003b8e0                __bss_start__ = .
  *(.bss*)
  .bss.bHoldActive
-                0x000000000003b878        0x4 build/Source/main.o
+                0x000000000003b8e0        0x4 build/Source/main.o
  .bss.bHoldUsedDir
-                0x000000000003b87c        0x4 build/Source/main.o
+                0x000000000003b8e4        0x4 build/Source/main.o
  .bss.bNotPressedFrames
-                0x000000000003b880        0x4 build/Source/main.o
+                0x000000000003b8e8        0x4 build/Source/main.o
  .bss.crankVelocity
-                0x000000000003b884        0x4 build/Source/main.o
+                0x000000000003b8ec        0x4 build/Source/main.o
  .bss.currentDoc
-                0x000000000003b888        0x4 build/Source/main.o
+                0x000000000003b8f0        0x4 build/Source/main.o
  .bss.currentState
-                0x000000000003b88c        0x1 build/Source/main.o
- *fill*         0x000000000003b88d        0x3 
+                0x000000000003b8f4        0x1 build/Source/main.o
+ *fill*         0x000000000003b8f5        0x3 
  .bss.currentUrlObj
-                0x000000000003b890        0x4 build/Source/main.o
+                0x000000000003b8f8        0x4 build/Source/main.o
  .bss.detailsKeyCount
-                0x000000000003b894        0x4 build/Source/main.o
+                0x000000000003b8fc        0x4 build/Source/main.o
  .bss.detailsKeys
-                0x000000000003b898      0x100 build/Source/main.o
+                0x000000000003b900      0x100 build/Source/main.o
  .bss.detailsOpenState
-                0x000000000003b998      0x100 build/Source/main.o
+                0x000000000003ba00      0x100 build/Source/main.o
  .bss.formInputItem
-                0x000000000003ba98        0x4 build/Source/main.o
+                0x000000000003bb00        0x4 build/Source/main.o
  .bss.formKeyboardOpen
-                0x000000000003ba9c        0x4 build/Source/main.o
+                0x000000000003bb04        0x4 build/Source/main.o
  .bss.frameCount
-                0x000000000003baa0        0x4 build/Source/main.o
+                0x000000000003bb08        0x4 build/Source/main.o
  .bss.g_formOverrideCount
-                0x000000000003baa4        0x4 build/Source/main.o
+                0x000000000003bb0c        0x4 build/Source/main.o
  .bss.g_formOverrides
-                0x000000000003baa8      0x100 build/Source/main.o
- .bss.g_kb      0x000000000003bba8        0x4 build/Source/main.o
+                0x000000000003bb10      0x100 build/Source/main.o
+ .bss.g_kb      0x000000000003bc10        0x4 build/Source/main.o
  .bss.g_lastFrameAtMs
-                0x000000000003bbac        0x4 build/Source/main.o
+                0x000000000003bc14        0x4 build/Source/main.o
  .bss.g_lastLoggedState
-                0x000000000003bbb0        0x1 build/Source/main.o
- *fill*         0x000000000003bbb1        0x3 
+                0x000000000003bc18        0x1 build/Source/main.o
+ *fill*         0x000000000003bc19        0x3 
  .bss.g_renderErrMsg
-                0x000000000003bbb4       0xc0 build/Source/main.o
+                0x000000000003bc1c       0xc0 build/Source/main.o
  .bss.g_viewMenuItem
-                0x000000000003bc74        0x4 build/Source/main.o
+                0x000000000003bcdc        0x4 build/Source/main.o
  .bss.historyIndex
-                0x000000000003bc78        0x4 build/Source/main.o
+                0x000000000003bce0        0x4 build/Source/main.o
  .bss.isRendering
-                0x000000000003bc7c        0x4 build/Source/main.o
+                0x000000000003bce4        0x4 build/Source/main.o
  .bss.navHistory
-                0x000000000003bc80       0x78 build/Source/main.o
+                0x000000000003bce8       0x78 build/Source/main.o
  .bss.navHistoryCount
-                0x000000000003bcf8        0x4 build/Source/main.o
+                0x000000000003bd60        0x4 build/Source/main.o
  .bss.navigatingHistory
-                0x000000000003bcfc        0x4 build/Source/main.o
- .bss.pd        0x000000000003bd00        0x4 build/Source/main.o
+                0x000000000003bd64        0x4 build/Source/main.o
+ .bss.pd        0x000000000003bd68        0x4 build/Source/main.o
  .bss.pendingNavUrl
-                0x000000000003bd04      0x280 build/Source/main.o
+                0x000000000003bd6c      0x280 build/Source/main.o
  .bss.pendingNavUrlSet
-                0x000000000003bf84        0x4 build/Source/main.o
- .bss.playdate  0x000000000003bf88        0x4 build/Source/main.o
-                0x000000000003bf88                playdate
+                0x000000000003bfec        0x4 build/Source/main.o
+ .bss.playdate  0x000000000003bff0        0x4 build/Source/main.o
+                0x000000000003bff0                playdate
  .bss.progressCurrent
-                0x000000000003bf8c        0x4 build/Source/main.o
+                0x000000000003bff4        0x4 build/Source/main.o
  .bss.progressTotal
-                0x000000000003bf90        0x4 build/Source/main.o
- .bss.scrollY   0x000000000003bf94        0x4 build/Source/main.o
+                0x000000000003bff8        0x4 build/Source/main.o
+ .bss.scrollY   0x000000000003bffc        0x4 build/Source/main.o
  .bss.skipInputFrames
-                0x000000000003bf98        0x4 build/Source/main.o
+                0x000000000003c000        0x4 build/Source/main.o
  .bss.targetScrollY
-                0x000000000003bf9c        0x4 build/Source/main.o
- .bss.g_pd      0x000000000003bfa0        0x4 build/Source/core/logger.o
- .bss.g_seq     0x000000000003bfa4        0x4 build/Source/core/logger.o
+                0x000000000003c004        0x4 build/Source/main.o
+ .bss.g_pd      0x000000000003c008        0x4 build/Source/core/logger.o
+ .bss.g_seq     0x000000000003c00c        0x4 build/Source/core/logger.o
  .bss.line.10287
-                0x000000000003bfa8      0x230 build/Source/core/logger.o
+                0x000000000003c010      0x230 build/Source/core/logger.o
  .bss.base.7460
-                0x000000000003c1d8      0x794 build/Source/core/url.o
+                0x000000000003c240      0x794 build/Source/core/url.o
  .bss.hash.7419
-                0x000000000003c96c       0x80 build/Source/core/url.o
+                0x000000000003c9d4       0x80 build/Source/core/url.o
  .bss.host.7428
-                0x000000000003c9ec       0x80 build/Source/core/url.o
+                0x000000000003ca54       0x80 build/Source/core/url.o
  .bss.query.7422
-                0x000000000003ca6c      0x100 build/Source/core/url.o
+                0x000000000003cad4      0x100 build/Source/core/url.o
  .bss.scheme.7408
-                0x000000000003cb6c        0xc build/Source/core/url.o
+                0x000000000003cbd4        0xc build/Source/core/url.o
  .bss.head.6040
-                0x000000000003cb78      0x401 build/Source/core/encoding.o
- *fill*         0x000000000003cf79        0x3 
+                0x000000000003cbe0      0x401 build/Source/core/encoding.o
+ *fill*         0x000000000003cfe1        0x3 
  .bss.attr.10467
-                0x000000000003cf7c      0x200 build/Source/core/cookie_jar.o
+                0x000000000003cfe4      0x200 build/Source/core/cookie_jar.o
  .bss.first.10433
-                0x000000000003d17c      0x200 build/Source/core/cookie_jar.o
- .bss.g_count   0x000000000003d37c        0x4 build/Source/core/cookie_jar.o
- .bss.g_list    0x000000000003d380      0x4b0 build/Source/core/cookie_jar.o
+                0x000000000003d1e4      0x200 build/Source/core/cookie_jar.o
+ .bss.g_count   0x000000000003d3e4        0x4 build/Source/core/cookie_jar.o
+ .bss.g_list    0x000000000003d3e8      0x4b0 build/Source/core/cookie_jar.o
  .bss.g_saveHook
-                0x000000000003d830        0x4 build/Source/core/cookie_jar.o
+                0x000000000003d898        0x4 build/Source/core/cookie_jar.o
  .bss.name.10454
-                0x000000000003d834       0x80 build/Source/core/cookie_jar.o
+                0x000000000003d89c       0x80 build/Source/core/cookie_jar.o
  .bss.rest.10434
-                0x000000000003d8b4      0x200 build/Source/core/cookie_jar.o
- .bss.s.10432   0x000000000003dab4      0x400 build/Source/core/cookie_jar.o
+                0x000000000003d91c      0x200 build/Source/core/cookie_jar.o
+ .bss.s.10432   0x000000000003db1c      0x400 build/Source/core/cookie_jar.o
  .bss.value.10453
-                0x000000000003deb4      0x200 build/Source/core/cookie_jar.o
+                0x000000000003df1c      0x200 build/Source/core/cookie_jar.o
  .bss.g_bookmarkCount
-                0x000000000003e0b4        0x4 build/Source/core/storage.o
+                0x000000000003e11c        0x4 build/Source/core/storage.o
  .bss.g_bookmarks
-                0x000000000003e0b8      0x100 build/Source/core/storage.o
+                0x000000000003e120      0x100 build/Source/core/storage.o
  .bss.g_history
-                0x000000000003e1b8       0xc8 build/Source/core/storage.o
+                0x000000000003e220       0xc8 build/Source/core/storage.o
  .bss.g_historyCount
-                0x000000000003e280        0x4 build/Source/core/storage.o
+                0x000000000003e2e8        0x4 build/Source/core/storage.o
  .bss.g_loadLine
-                0x000000000003e284      0x400 build/Source/core/storage.o
+                0x000000000003e2ec      0x400 build/Source/core/storage.o
  .bss.g_saveEsc
-                0x000000000003e684      0x320 build/Source/core/storage.o
+                0x000000000003e6ec      0x320 build/Source/core/storage.o
  .bss.g_saveLine
-                0x000000000003e9a4      0x4b0 build/Source/core/storage.o
+                0x000000000003ea0c      0x4b0 build/Source/core/storage.o
  .bss.g_accessRequestId
-                0x000000000003ee54        0x4 build/Source/core/http_client.o
+                0x000000000003eebc        0x4 build/Source/core/http_client.o
  .bss.g_bodyStart
-                0x000000000003ee58        0x4 build/Source/core/http_client.o
- .bss.g_buf     0x000000000003ee5c        0xc build/Source/core/http_client.o
- .bss.g_cb      0x000000000003ee68        0xc build/Source/core/http_client.o
+                0x000000000003eec0        0x4 build/Source/core/http_client.o
+ .bss.g_buf     0x000000000003eec4        0xc build/Source/core/http_client.o
+ .bss.g_cb      0x000000000003eed0        0xc build/Source/core/http_client.o
  .bss.g_connClosed
-                0x000000000003ee74        0x4 build/Source/core/http_client.o
+                0x000000000003eedc        0x4 build/Source/core/http_client.o
  .bss.g_connOpen
-                0x000000000003ee78        0x4 build/Source/core/http_client.o
- .bss.g_error   0x000000000003ee7c      0x100 build/Source/core/http_client.o
+                0x000000000003eee0        0x4 build/Source/core/http_client.o
+ .bss.g_error   0x000000000003eee4      0x100 build/Source/core/http_client.o
  .bss.g_graveTcp
-                0x000000000003ef7c        0x4 build/Source/core/http_client.o
+                0x000000000003efe4        0x4 build/Source/core/http_client.o
  .bss.g_graveTimer
-                0x000000000003ef80        0x4 build/Source/core/http_client.o
+                0x000000000003efe8        0x4 build/Source/core/http_client.o
  .bss.g_hasPendingRedirect
-                0x000000000003ef84        0x4 build/Source/core/http_client.o
+                0x000000000003efec        0x4 build/Source/core/http_client.o
  .bss.g_hdrLine
-                0x000000000003ef88      0x300 build/Source/core/http_client.o
+                0x000000000003eff0      0x300 build/Source/core/http_client.o
  .bss.g_isChunked
-                0x000000000003f288        0x4 build/Source/core/http_client.o
+                0x000000000003f2f0        0x4 build/Source/core/http_client.o
  .bss.g_openFailed
-                0x000000000003f28c        0x4 build/Source/core/http_client.o
+                0x000000000003f2f4        0x4 build/Source/core/http_client.o
  .bss.g_orphanTcp
-                0x000000000003f290        0x4 build/Source/core/http_client.o
- .bss.g_parsed  0x000000000003f294        0x4 build/Source/core/http_client.o
- .bss.g_pd      0x000000000003f298        0x4 build/Source/core/http_client.o
+                0x000000000003f2f8        0x4 build/Source/core/http_client.o
+ .bss.g_parsed  0x000000000003f2fc        0x4 build/Source/core/http_client.o
+ .bss.g_pd      0x000000000003f300        0x4 build/Source/core/http_client.o
  .bss.g_pendingRedirectCb
-                0x000000000003f29c        0xc build/Source/core/http_client.o
+                0x000000000003f304        0xc build/Source/core/http_client.o
  .bss.g_pendingRedirectUrl
-                0x000000000003f2a8      0x400 build/Source/core/http_client.o
+                0x000000000003f310      0x400 build/Source/core/http_client.o
  .bss.g_pooledHost
-                0x000000000003f6a8      0x100 build/Source/core/http_client.o
+                0x000000000003f710      0x100 build/Source/core/http_client.o
  .bss.g_pooledPort
-                0x000000000003f7a8        0x4 build/Source/core/http_client.o
+                0x000000000003f810        0x4 build/Source/core/http_client.o
  .bss.g_pooledSsl
-                0x000000000003f7ac        0x4 build/Source/core/http_client.o
+                0x000000000003f814        0x4 build/Source/core/http_client.o
  .bss.g_pooledTcp
-                0x000000000003f7b0        0x4 build/Source/core/http_client.o
+                0x000000000003f818        0x4 build/Source/core/http_client.o
  .bss.g_readChunk
-                0x000000000003f7b4     0x4000 build/Source/core/http_client.o
+                0x000000000003f81c     0x4000 build/Source/core/http_client.o
  .bss.g_redirectDepth
-                0x00000000000437b4        0x4 build/Source/core/http_client.o
+                0x000000000004381c        0x4 build/Source/core/http_client.o
  .bss.g_requestId
-                0x00000000000437b8        0x4 build/Source/core/http_client.o
+                0x0000000000043820        0x4 build/Source/core/http_client.o
  .bss.g_requestStart
-                0x00000000000437bc        0x4 build/Source/core/http_client.o
+                0x0000000000043824        0x4 build/Source/core/http_client.o
  .bss.g_savedBuf
-                0x00000000000437c0        0xc build/Source/core/http_client.o
+                0x0000000000043828        0xc build/Source/core/http_client.o
  .bss.g_savedHeaderCount
-                0x00000000000437cc        0x4 build/Source/core/http_client.o
+                0x0000000000043834        0x4 build/Source/core/http_client.o
  .bss.g_savedHeaders
-                0x00000000000437d0     0x8000 build/Source/core/http_client.o
+                0x0000000000043838     0x8000 build/Source/core/http_client.o
  .bss.g_savedStatus
-                0x000000000004b7d0        0x4 build/Source/core/http_client.o
+                0x000000000004b838        0x4 build/Source/core/http_client.o
  .bss.g_setCookies
-                0x000000000004b7d4     0x2000 build/Source/core/http_client.o
- .bss.g_state   0x000000000004d7d4        0x1 build/Source/core/http_client.o
- *fill*         0x000000000004d7d5        0x3 
- .bss.g_tcp     0x000000000004d7d8        0x4 build/Source/core/http_client.o
- .bss.g_url     0x000000000004d7dc      0x400 build/Source/core/http_client.o
- .bss.k.10670   0x000000000004dbdc      0x100 build/Source/core/http_client.o
+                0x000000000004b83c     0x2000 build/Source/core/http_client.o
+ .bss.g_state   0x000000000004d83c        0x1 build/Source/core/http_client.o
+ *fill*         0x000000000004d83d        0x3 
+ .bss.g_tcp     0x000000000004d840        0x4 build/Source/core/http_client.o
+ .bss.g_url     0x000000000004d844      0x400 build/Source/core/http_client.o
+ .bss.k.10670   0x000000000004dc44      0x100 build/Source/core/http_client.o
  .bss.urlSnapshot.10676
-                0x000000000004dcdc      0x400 build/Source/core/http_client.o
- .bss.v.10671   0x000000000004e0dc      0x100 build/Source/core/http_client.o
- .bss.g_fonts   0x000000000004e1dc       0x1c build/Source/render/style.o
+                0x000000000004dd44      0x400 build/Source/core/http_client.o
+ .bss.v.10671   0x000000000004e144      0x100 build/Source/core/http_client.o
+ .bss.g_fonts   0x000000000004e244       0x1c build/Source/render/style.o
  .bss.g_linkCap
-                0x000000000004e1f8        0x4 build/Source/render/link_manager.o
+                0x000000000004e260        0x4 build/Source/render/link_manager.o
  .bss.g_linkCount
-                0x000000000004e1fc        0x4 build/Source/render/link_manager.o
- .bss.g_links   0x000000000004e200        0x4 build/Source/render/link_manager.o
+                0x000000000004e264        0x4 build/Source/render/link_manager.o
+ .bss.g_links   0x000000000004e268        0x4 build/Source/render/link_manager.o
  .bss.g_selectedIndex
-                0x000000000004e204        0x4 build/Source/render/link_manager.o
- .bss.g_cache   0x000000000004e208    0x10400 build/Source/render/image_decoder.o
+                0x000000000004e26c        0x4 build/Source/render/link_manager.o
+ .bss.g_cache   0x000000000004e270    0x10400 build/Source/render/image_decoder.o
  .bss.g_cacheCount
-                0x000000000005e608        0x4 build/Source/render/image_decoder.o
+                0x000000000005e670        0x4 build/Source/render/image_decoder.o
  .bss.g_currentUrl
-                0x000000000005e60c      0x200 build/Source/render/image_decoder.o
+                0x000000000005e674      0x200 build/Source/render/image_decoder.o
  .bss.g_isDecoding
-                0x000000000005e80c        0x4 build/Source/render/image_decoder.o
+                0x000000000005e874        0x4 build/Source/render/image_decoder.o
  .bss.g_isDownloading
-                0x000000000005e810        0x4 build/Source/render/image_decoder.o
- .bss.g_queue   0x000000000005e814     0x8000 build/Source/render/image_decoder.o
+                0x000000000005e878        0x4 build/Source/render/image_decoder.o
+ .bss.g_queue   0x000000000005e87c     0x8000 build/Source/render/image_decoder.o
  .bss.g_queueCount
-                0x0000000000066814        0x4 build/Source/render/image_decoder.o
- .bss.pd        0x0000000000066818        0x4 build/Source/render/image_decoder.o
+                0x000000000006687c        0x4 build/Source/render/image_decoder.o
+ .bss.pd        0x0000000000066880        0x4 build/Source/render/image_decoder.o
  .bss.buf.11174
-                0x000000000006681c       0x20 build/Source/render/layout.o
+                0x0000000000066884       0x20 build/Source/render/layout.o
  .bss.g_buildError
-                0x000000000006683c        0x4 build/Source/render/layout.o
+                0x00000000000668a4        0x4 build/Source/render/layout.o
  .bss.g_cellLinksRegistered
-                0x0000000000066840        0x4 build/Source/render/layout.o
+                0x00000000000668a8        0x4 build/Source/render/layout.o
  .bss.g_hasHoveredImage
-                0x0000000000066844        0x4 build/Source/render/layout.o
+                0x00000000000668ac        0x4 build/Source/render/layout.o
  .bss.g_hoveredImageSrc
-                0x0000000000066848      0x200 build/Source/render/layout.o
+                0x00000000000668b0      0x200 build/Source/render/layout.o
  .bss.g_itemCap
-                0x0000000000066a48        0x4 build/Source/render/layout.o
+                0x0000000000066ab0        0x4 build/Source/render/layout.o
  .bss.g_itemCount
-                0x0000000000066a4c        0x4 build/Source/render/layout.o
- .bss.g_items   0x0000000000066a50        0x4 build/Source/render/layout.o
+                0x0000000000066ab4        0x4 build/Source/render/layout.o
+ .bss.g_items   0x0000000000066ab8        0x4 build/Source/render/layout.o
  .bss.g_odRequested
-                0x0000000000066a54     0x8000 build/Source/render/layout.o
+                0x0000000000066abc     0x8000 build/Source/render/layout.o
  .bss.g_odRequestedCount
-                0x000000000006ea54        0x4 build/Source/render/layout.o
+                0x000000000006eabc        0x4 build/Source/render/layout.o
  .bss.g_onDemandConsumed
-                0x000000000006ea58        0x4 build/Source/render/layout.o
+                0x000000000006eac0        0x4 build/Source/render/layout.o
  .bss.g_overlay
-                0x000000000006ea5c      0x604 build/Source/render/layout.o
- .bss.g_pd      0x000000000006f060        0x4 build/Source/render/layout.o
+                0x000000000006eac4      0x604 build/Source/render/layout.o
+ .bss.g_pd      0x000000000006f0c8        0x4 build/Source/render/layout.o
  .bss.g_scrollYForLinks
-                0x000000000006f064        0x4 build/Source/render/layout.o
+                0x000000000006f0cc        0x4 build/Source/render/layout.o
  .bss.g_selectedInput
-                0x000000000006f068        0x4 build/Source/render/layout.o
+                0x000000000006f0d0        0x4 build/Source/render/layout.o
  .bss.g_totalHeight
-                0x000000000006f06c        0x4 build/Source/render/layout.o
+                0x000000000006f0d4        0x4 build/Source/render/layout.o
  .bss.g_wordArena
-                0x000000000006f070        0x4 build/Source/render/layout.o
+                0x000000000006f0d8        0x4 build/Source/render/layout.o
  .bss.g_wordArenaCap
-                0x000000000006f074        0x4 build/Source/render/layout.o
+                0x000000000006f0dc        0x4 build/Source/render/layout.o
  .bss.g_wordArenaUsed
-                0x000000000006f078        0x4 build/Source/render/layout.o
+                0x000000000006f0e0        0x4 build/Source/render/layout.o
  .bss.trunc.11814
-                0x000000000006f07c      0x104 build/Source/render/layout.o
+                0x000000000006f0e4      0x104 build/Source/render/layout.o
  .bss.fixedBuilt
-                0x000000000006f180        0x4 build/Source/render/decoders/inflate.o
+                0x000000000006f1e8        0x4 build/Source/render/decoders/inflate.o
  .bss.fixedDist
-                0x000000000006f184      0xd84 build/Source/render/decoders/inflate.o
- .bss.fixedLit  0x000000000006ff08      0xd84 build/Source/render/decoders/inflate.o
- .bss.g.10439   0x0000000000070c8c    0x10170 build/Source/render/decoders/gif.o
+                0x000000000006f1ec      0xd84 build/Source/render/decoders/inflate.o
+ .bss.fixedLit  0x000000000006ff70      0xd84 build/Source/render/decoders/inflate.o
+ .bss.g.10439   0x0000000000070cf4    0x10170 build/Source/render/decoders/gif.o
  .bss.JPEG_IDCT_T
-                0x0000000000080dfc      0x100 build/Source/render/decoders/jpeg.o
+                0x0000000000080e64      0x100 build/Source/render/decoders/jpeg.o
  .bss.jpeg_idct_ready
-                0x0000000000080efc        0x4 build/Source/render/decoders/jpeg.o
+                0x0000000000080f64        0x4 build/Source/render/decoders/jpeg.o
  .bss.attrs.10738
-                0x0000000000080f00      0xc04 build/Source/render/decoders/svg.o
- *fill*         0x0000000000081b04        0x4 
- .bss.g_svgCo   0x0000000000081b08     0x8008 build/Source/render/decoders/svg.o
- .bss.g_svgPts  0x0000000000089b10     0x8008 build/Source/render/decoders/svg.o
+                0x0000000000080f68      0xc04 build/Source/render/decoders/svg.o
+ *fill*         0x0000000000081b6c        0x4 
+ .bss.g_svgCo   0x0000000000081b70     0x8008 build/Source/render/decoders/svg.o
+ .bss.g_svgPts  0x0000000000089b78     0x8008 build/Source/render/decoders/svg.o
  .bss.g_tagAttrsRaw
-                0x0000000000091b18      0x400 build/Source/render/decoders/svg.o
+                0x0000000000091b80      0x400 build/Source/render/decoders/svg.o
  .bss.g_tagName
-                0x0000000000091f18       0x20 build/Source/render/decoders/svg.o
- .bss.st.10517  0x0000000000091f38      0xc04 build/Source/render/decoders/svg.o
+                0x0000000000091f80       0x20 build/Source/render/decoders/svg.o
+ .bss.st.10517  0x0000000000091fa0      0xc04 build/Source/render/decoders/svg.o
  .bss.stack.10732
-                0x0000000000092b3c      0x200 build/Source/render/decoders/svg.o
+                0x0000000000092ba4      0x200 build/Source/render/decoders/svg.o
  .bss.big.10848
-                0x0000000000092d3c    0x20000 build/Source/render/decoders/webp.o
+                0x0000000000092da4    0x20000 build/Source/render/decoders/webp.o
  .bss.codeLengthCodeLengths.10706
-                0x00000000000b2d3c       0x13 build/Source/render/decoders/webp.o
- *fill*         0x00000000000b2d4f        0x1 
+                0x00000000000b2da4       0x13 build/Source/render/decoders/webp.o
+ *fill*         0x00000000000b2db7        0x1 
  .bss.g_htreeGroups
-                0x00000000000b2d50        0x4 build/Source/render/decoders/webp.o
+                0x00000000000b2db8        0x4 build/Source/render/decoders/webp.o
  .bss.g_numHtreeGroupsMax
-                0x00000000000b2d54        0x4 build/Source/render/decoders/webp.o
+                0x00000000000b2dbc        0x4 build/Source/render/decoders/webp.o
  .bss.lengths_table.10707
-                0x00000000000b2d58      0x200 build/Source/render/decoders/webp.o
- .bss.VP8_LOG2  0x00000000000b2f58      0x400 build/Source/render/decoders/webp_vp8.o
+                0x00000000000b2dc0      0x200 build/Source/render/decoders/webp.o
+ .bss.VP8_LOG2  0x00000000000b2fc0      0x400 build/Source/render/decoders/webp_vp8.o
  .bss.VP8_UARR_MEM
-                0x00000000000b3358      0x144 build/Source/render/decoders/webp_vp8.o
+                0x00000000000b33c0      0x144 build/Source/render/decoders/webp_vp8.o
  .bss.VP8_VARR_MEM
-                0x00000000000b349c      0x144 build/Source/render/decoders/webp_vp8.o
- .bss.VP8_YARR  0x00000000000b35e0      0x280 build/Source/render/decoders/webp_vp8.o
+                0x00000000000b3504      0x144 build/Source/render/decoders/webp_vp8.o
+ .bss.VP8_YARR  0x00000000000b3648      0x280 build/Source/render/decoders/webp_vp8.o
  .bss.inited.10666
-                0x00000000000b3860        0x4 build/Source/render/decoders/webp_vp8.o
+                0x00000000000b38c8        0x4 build/Source/render/decoders/webp_vp8.o
  .bss.vp8_wht_tmp
-                0x00000000000b3864       0x40 build/Source/render/decoders/webp_vp8.o
+                0x00000000000b38cc       0x40 build/Source/render/decoders/webp_vp8.o
  .bss.g_cometAnimFrame
-                0x00000000000b38a4        0x4 build/Source/ui/chrome.o
+                0x00000000000b390c        0x4 build/Source/ui/chrome.o
  .bss.g_failedUrl
-                0x00000000000b38a8      0x100 build/Source/ui/error_page.o
+                0x00000000000b3910      0x100 build/Source/ui/error_page.o
  .bss.g_marquee
-                0x00000000000b39a8      0x100 build/Source/ui/home_page.o
+                0x00000000000b3a10      0x100 build/Source/ui/home_page.o
  .bss.g_scrollY
-                0x00000000000b3aa8        0x4 build/Source/ui/home_page.o
+                0x00000000000b3b10        0x4 build/Source/ui/home_page.o
  .bss.g_selectedIndex
-                0x00000000000b3aac        0x4 build/Source/ui/home_page.o
+                0x00000000000b3b14        0x4 build/Source/ui/home_page.o
  .bss.g_targetScrollY
-                0x00000000000b3ab0        0x4 build/Source/ui/home_page.o
+                0x00000000000b3b18        0x4 build/Source/ui/home_page.o
  .bss.g_scrollY
-                0x00000000000b3ab4        0x4 build/Source/ui/bookmarks_page.o
+                0x00000000000b3b1c        0x4 build/Source/ui/bookmarks_page.o
  .bss.g_scrollY
-                0x00000000000b3ab8        0x4 build/Source/ui/history_page.o
+                0x00000000000b3b20        0x4 build/Source/ui/history_page.o
  .bss.g_animStartMs
-                0x00000000000b3abc        0x4 build/Source/ui/settings_page.o
- .bss.g_isOpen  0x00000000000b3ac0        0x4 build/Source/ui/settings_page.o
+                0x00000000000b3b24        0x4 build/Source/ui/settings_page.o
+ .bss.g_isOpen  0x00000000000b3b28        0x4 build/Source/ui/settings_page.o
  .bss.g_onChangeCallback
-                0x00000000000b3ac4        0x4 build/Source/ui/settings_page.o
+                0x00000000000b3b2c        0x4 build/Source/ui/settings_page.o
  .bss.g_previousState
-                0x00000000000b3ac8        0x4 build/Source/ui/settings_page.o
- .bss.g_staged  0x00000000000b3acc       0x1c build/Source/ui/settings_page.o
+                0x00000000000b3b30        0x4 build/Source/ui/settings_page.o
+ .bss.g_staged  0x00000000000b3b34       0x1c build/Source/ui/settings_page.o
  .bss.finalUrl.10554
-                0x00000000000b3ae8      0x300 build/Source/ui/address_bar.o
+                0x00000000000b3b50      0x300 build/Source/ui/address_bar.o
  .bss.g_inputText
-                0x00000000000b3de8      0x200 build/Source/ui/address_bar.o
- .bss.g_isOpen  0x00000000000b3fe8        0x4 build/Source/ui/address_bar.o
+                0x00000000000b3e50      0x200 build/Source/ui/address_bar.o
+ .bss.g_isOpen  0x00000000000b4050        0x4 build/Source/ui/address_bar.o
  .bss.g_keyboardShown
-                0x00000000000b3fec        0x4 build/Source/ui/address_bar.o
+                0x00000000000b4054        0x4 build/Source/ui/address_bar.o
  .bss.g_onSubmit
-                0x00000000000b3ff0        0x4 build/Source/ui/address_bar.o
+                0x00000000000b4058        0x4 build/Source/ui/address_bar.o
  .bss.g_onSubmitUserdata
-                0x00000000000b3ff4        0x4 build/Source/ui/address_bar.o
+                0x00000000000b405c        0x4 build/Source/ui/address_bar.o
  .bss.g_pendingSkipFrames
-                0x00000000000b3ff8        0x4 build/Source/ui/address_bar.o
+                0x00000000000b4060        0x4 build/Source/ui/address_bar.o
  .bss.parsed.10557
-                0x00000000000b3ffc      0x794 build/Source/ui/address_bar.o
+                0x00000000000b4064      0x794 build/Source/ui/address_bar.o
  .bss.trimmed.10545
-                0x00000000000b4790      0x200 build/Source/ui/address_bar.o
+                0x00000000000b47f8      0x200 build/Source/ui/address_bar.o
  .bss.big.11403
-                0x00000000000b4990      0x800 build/Source/html/document.o
+                0x00000000000b49f8      0x800 build/Source/html/document.o
  .bss.cbuf.11451
-                0x00000000000b5190      0x400 build/Source/html/document.o
+                0x00000000000b51f8      0x400 build/Source/html/document.o
  .bss.lbuf.11220
-                0x00000000000b5590       0x10 build/Source/html/document.o
+                0x00000000000b55f8       0x10 build/Source/html/document.o
  .bss.lbuf.11495
-                0x00000000000b55a0      0x400 build/Source/html/document.o
+                0x00000000000b5608      0x400 build/Source/html/document.o
  .bss.lbuf.11512
-                0x00000000000b59a0      0x400 build/Source/html/document.o
+                0x00000000000b5a08      0x400 build/Source/html/document.o
  .bss.lbuf.11518
-                0x00000000000b5da0      0x400 build/Source/html/document.o
+                0x00000000000b5e08      0x400 build/Source/html/document.o
  .bss.lbuf.11534
-                0x00000000000b61a0      0x200 build/Source/html/document.o
- .bss.st.11218  0x00000000000b63a0      0xa44 build/Source/html/document.o
- .bss.st.11225  0x00000000000b6de4      0xa44 build/Source/html/document.o
- .bss.st.11232  0x00000000000b7828      0xa44 build/Source/html/document.o
- .bss.st.11240  0x00000000000b826c      0xa44 build/Source/html/document.o
- .bss.st.11417  0x00000000000b8cb0      0xa44 build/Source/html/document.o
+                0x00000000000b6208      0x200 build/Source/html/document.o
+ .bss.st.11218  0x00000000000b6408      0xa44 build/Source/html/document.o
+ .bss.st.11225  0x00000000000b6e4c      0xa44 build/Source/html/document.o
+ .bss.st.11232  0x00000000000b7890      0xa44 build/Source/html/document.o
+ .bss.st.11240  0x00000000000b82d4      0xa44 build/Source/html/document.o
+ .bss.st.11417  0x00000000000b8d18      0xa44 build/Source/html/document.o
  .bss.tbuf2.11581
-                0x00000000000b96f4      0x200 build/Source/html/document.o
+                0x00000000000b975c      0x200 build/Source/html/document.o
  .bss.tmp.11106
-                0x00000000000b98f4      0x400 build/Source/html/document.o
+                0x00000000000b995c      0x400 build/Source/html/document.o
  .bss.tmp.11261
-                0x00000000000b9cf4      0x400 build/Source/html/document.o
+                0x00000000000b9d5c      0x400 build/Source/html/document.o
  .bss.withPrefix.11522
-                0x00000000000ba0f4      0x44c build/Source/html/document.o
+                0x00000000000ba15c      0x44c build/Source/html/document.o
  .bss.fontHeight
-                0x00000000000ba540        0x4 build/Source/keyboard/keyboard.o
+                0x00000000000ba5a8        0x4 build/Source/keyboard/keyboard.o
  .bss.keyboardFont
-                0x00000000000ba544        0x4 build/Source/keyboard/keyboard.o
+                0x00000000000ba5ac        0x4 build/Source/keyboard/keyboard.o
  .bss.menuColumn
-                0x00000000000ba548       0x10 build/Source/keyboard/keyboard.o
- .bss.g_count   0x00000000000ba558        0x4 build/Source/core/tasks.o
- .bss.g_pd      0x00000000000ba55c        0x4 build/Source/core/tasks.o
+                0x00000000000ba5b0       0x10 build/Source/keyboard/keyboard.o
+ .bss.g_count   0x00000000000ba5c0        0x4 build/Source/core/tasks.o
+ .bss.g_pd      0x00000000000ba5c4        0x4 build/Source/core/tasks.o
  .bss.g_progress
-                0x00000000000ba560        0x4 build/Source/core/tasks.o
- .bss.g_queue   0x00000000000ba564      0x100 build/Source/core/tasks.o
- .bss.g_pd      0x00000000000ba664        0x4 build/Source/util/pdtimer.o
- .bss.g_slots   0x00000000000ba668      0x500 build/Source/util/pdtimer.o
+                0x00000000000ba5c8        0x4 build/Source/core/tasks.o
+ .bss.g_queue   0x00000000000ba5cc      0x100 build/Source/core/tasks.o
+ .bss.g_pd      0x00000000000ba6cc        0x4 build/Source/util/pdtimer.o
+ .bss.g_slots   0x00000000000ba6d0      0x500 build/Source/util/pdtimer.o
  .bss.pdrealloc
-                0x00000000000bab68        0x4 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+                0x00000000000babd0        0x4 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
  *(COMMON)
  *(COM)
-                0x00000000000bab6c                . = ALIGN (0x4)
-                0x00000000000bab6c                __bss_end__ = .
+                0x00000000000babd4                . = ALIGN (0x4)
+                0x00000000000babd4                __bss_end__ = .
 
 /DISCARD/
  *(.ARM.exidx)
@@ -7789,50 +7789,50 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_abbrev  0x000000000000d3c7      0x3cd build/Source/util/pdtimer.o
  .debug_abbrev  0x000000000000d794      0x342 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_loc      0x0000000000000000    0x5ec2b
+.debug_loc      0x0000000000000000    0x5ec31
  .debug_loc     0x0000000000000000     0x3295 build/Source/main.o
  .debug_loc     0x0000000000003295      0x253 build/Source/core/logger.o
  .debug_loc     0x00000000000034e8       0x8c build/Source/core/constants.o
  .debug_loc     0x0000000000003574     0x16ed build/Source/core/url.o
  .debug_loc     0x0000000000004c61     0x15c3 build/Source/core/encoding.o
  .debug_loc     0x0000000000006224     0x2ad2 build/Source/core/cookie_jar.o
- .debug_loc     0x0000000000008cf6     0x18e8 build/Source/core/storage.o
- .debug_loc     0x000000000000a5de     0x1686 build/Source/core/http_client.o
- .debug_loc     0x000000000000bc64      0x80a build/Source/render/style.o
- .debug_loc     0x000000000000c46e     0x1864 build/Source/render/link_manager.o
- .debug_loc     0x000000000000dcd2     0x2107 build/Source/render/image_decoder.o
- .debug_loc     0x000000000000fdd9     0x7c0a build/Source/render/layout.o
- .debug_loc     0x00000000000179e3      0xb46 build/Source/render/decoders/scale.o
- .debug_loc     0x0000000000018529      0x7a7 build/Source/render/decoders/dither.o
- .debug_loc     0x0000000000018cd0     0x1f7e build/Source/render/decoders/inflate.o
- .debug_loc     0x000000000001ac4e     0x1446 build/Source/render/decoders/bmp.o
- .debug_loc     0x000000000001c094     0x1431 build/Source/render/decoders/gif.o
- .debug_loc     0x000000000001d4c5     0x1b57 build/Source/render/decoders/ico.o
- .debug_loc     0x000000000001f01c     0x2b3b build/Source/render/decoders/png.o
- .debug_loc     0x0000000000021b57     0x4246 build/Source/render/decoders/jpeg.o
- .debug_loc     0x0000000000025d9d     0x56cb build/Source/render/decoders/svg.o
- .debug_loc     0x000000000002b468     0x6b8e build/Source/render/decoders/webp.o
- .debug_loc     0x0000000000031ff6     0xba89 build/Source/render/decoders/webp_vp8.o
- .debug_loc     0x000000000003da7f     0x2866 build/Source/render/decoders/webp_container.o
- .debug_loc     0x00000000000402e5      0x5dc build/Source/ui/chrome.o
- .debug_loc     0x00000000000408c1      0x50e build/Source/ui/hud.o
- .debug_loc     0x0000000000040dcf      0x345 build/Source/ui/error_page.o
- .debug_loc     0x0000000000041114      0xd80 build/Source/ui/home_page.o
- .debug_loc     0x0000000000041e94      0x4b3 build/Source/ui/bookmarks_page.o
- .debug_loc     0x0000000000042347      0x4b3 build/Source/ui/history_page.o
- .debug_loc     0x00000000000427fa      0xa9f build/Source/ui/settings_page.o
- .debug_loc     0x0000000000043299      0x908 build/Source/ui/address_bar.o
- .debug_loc     0x0000000000043ba1      0xf2b build/Source/html/entities.o
- .debug_loc     0x0000000000044acc     0x1c37 build/Source/html/tokenizer.o
- .debug_loc     0x0000000000046703     0x1664 build/Source/html/dom.o
- .debug_loc     0x0000000000047d67     0xda59 build/Source/html/document.o
- .debug_loc     0x00000000000557c0     0x4495 build/Source/html/readability.o
- .debug_loc     0x0000000000059c55     0x2f71 build/Source/keyboard/keyboard.o
- .debug_loc     0x000000000005cbc6      0x478 build/Source/core/tasks.o
- .debug_loc     0x000000000005d03e      0x663 build/Source/util/strbuf.o
- .debug_loc     0x000000000005d6a1     0x10b3 build/Source/util/strutil.o
- .debug_loc     0x000000000005e754      0x2bb build/Source/util/pdtimer.o
- .debug_loc     0x000000000005ea0f      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_loc     0x0000000000008cf6     0x18ee build/Source/core/storage.o
+ .debug_loc     0x000000000000a5e4     0x1686 build/Source/core/http_client.o
+ .debug_loc     0x000000000000bc6a      0x80a build/Source/render/style.o
+ .debug_loc     0x000000000000c474     0x1864 build/Source/render/link_manager.o
+ .debug_loc     0x000000000000dcd8     0x2107 build/Source/render/image_decoder.o
+ .debug_loc     0x000000000000fddf     0x7c0a build/Source/render/layout.o
+ .debug_loc     0x00000000000179e9      0xb46 build/Source/render/decoders/scale.o
+ .debug_loc     0x000000000001852f      0x7a7 build/Source/render/decoders/dither.o
+ .debug_loc     0x0000000000018cd6     0x1f7e build/Source/render/decoders/inflate.o
+ .debug_loc     0x000000000001ac54     0x1446 build/Source/render/decoders/bmp.o
+ .debug_loc     0x000000000001c09a     0x1431 build/Source/render/decoders/gif.o
+ .debug_loc     0x000000000001d4cb     0x1b57 build/Source/render/decoders/ico.o
+ .debug_loc     0x000000000001f022     0x2b3b build/Source/render/decoders/png.o
+ .debug_loc     0x0000000000021b5d     0x4246 build/Source/render/decoders/jpeg.o
+ .debug_loc     0x0000000000025da3     0x56cb build/Source/render/decoders/svg.o
+ .debug_loc     0x000000000002b46e     0x6b8e build/Source/render/decoders/webp.o
+ .debug_loc     0x0000000000031ffc     0xba89 build/Source/render/decoders/webp_vp8.o
+ .debug_loc     0x000000000003da85     0x2866 build/Source/render/decoders/webp_container.o
+ .debug_loc     0x00000000000402eb      0x5dc build/Source/ui/chrome.o
+ .debug_loc     0x00000000000408c7      0x50e build/Source/ui/hud.o
+ .debug_loc     0x0000000000040dd5      0x345 build/Source/ui/error_page.o
+ .debug_loc     0x000000000004111a      0xd80 build/Source/ui/home_page.o
+ .debug_loc     0x0000000000041e9a      0x4b3 build/Source/ui/bookmarks_page.o
+ .debug_loc     0x000000000004234d      0x4b3 build/Source/ui/history_page.o
+ .debug_loc     0x0000000000042800      0xa9f build/Source/ui/settings_page.o
+ .debug_loc     0x000000000004329f      0x908 build/Source/ui/address_bar.o
+ .debug_loc     0x0000000000043ba7      0xf2b build/Source/html/entities.o
+ .debug_loc     0x0000000000044ad2     0x1c37 build/Source/html/tokenizer.o
+ .debug_loc     0x0000000000046709     0x1664 build/Source/html/dom.o
+ .debug_loc     0x0000000000047d6d     0xda59 build/Source/html/document.o
+ .debug_loc     0x00000000000557c6     0x4495 build/Source/html/readability.o
+ .debug_loc     0x0000000000059c5b     0x2f71 build/Source/keyboard/keyboard.o
+ .debug_loc     0x000000000005cbcc      0x478 build/Source/core/tasks.o
+ .debug_loc     0x000000000005d044      0x663 build/Source/util/strbuf.o
+ .debug_loc     0x000000000005d6a7     0x10b3 build/Source/util/strutil.o
+ .debug_loc     0x000000000005e75a      0x2bb build/Source/util/pdtimer.o
+ .debug_loc     0x000000000005ea15      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
 .debug_aranges  0x0000000000000000     0x1560
  .debug_aranges
@@ -7924,50 +7924,50 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_aranges
                 0x0000000000001528       0x38 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_ranges   0x0000000000000000     0xfdf0
+.debug_ranges   0x0000000000000000     0xfe10
  .debug_ranges  0x0000000000000000      0x9e8 build/Source/main.o
  .debug_ranges  0x00000000000009e8       0x38 build/Source/core/logger.o
  .debug_ranges  0x0000000000000a20       0x18 build/Source/core/constants.o
  .debug_ranges  0x0000000000000a38      0x2b0 build/Source/core/url.o
  .debug_ranges  0x0000000000000ce8      0x2d0 build/Source/core/encoding.o
  .debug_ranges  0x0000000000000fb8      0x620 build/Source/core/cookie_jar.o
- .debug_ranges  0x00000000000015d8      0x490 build/Source/core/storage.o
- .debug_ranges  0x0000000000001a68      0x5a0 build/Source/core/http_client.o
- .debug_ranges  0x0000000000002008       0xc8 build/Source/render/style.o
- .debug_ranges  0x00000000000020d0      0x318 build/Source/render/link_manager.o
- .debug_ranges  0x00000000000023e8      0x2b0 build/Source/render/image_decoder.o
- .debug_ranges  0x0000000000002698     0x12a8 build/Source/render/layout.o
- .debug_ranges  0x0000000000003940      0x120 build/Source/render/decoders/scale.o
- .debug_ranges  0x0000000000003a60       0xb8 build/Source/render/decoders/dither.o
- .debug_ranges  0x0000000000003b18      0x5c8 build/Source/render/decoders/inflate.o
- .debug_ranges  0x00000000000040e0      0x108 build/Source/render/decoders/bmp.o
- .debug_ranges  0x00000000000041e8      0x3a0 build/Source/render/decoders/gif.o
- .debug_ranges  0x0000000000004588      0x288 build/Source/render/decoders/ico.o
- .debug_ranges  0x0000000000004810      0x4d8 build/Source/render/decoders/png.o
- .debug_ranges  0x0000000000004ce8      0xeb8 build/Source/render/decoders/jpeg.o
- .debug_ranges  0x0000000000005ba0      0xe58 build/Source/render/decoders/svg.o
- .debug_ranges  0x00000000000069f8     0x1170 build/Source/render/decoders/webp.o
- .debug_ranges  0x0000000000007b68     0x2758 build/Source/render/decoders/webp_vp8.o
- .debug_ranges  0x000000000000a2c0      0x688 build/Source/render/decoders/webp_container.o
- .debug_ranges  0x000000000000a948       0x48 build/Source/ui/chrome.o
- .debug_ranges  0x000000000000a990       0x30 build/Source/ui/hud.o
- .debug_ranges  0x000000000000a9c0       0x88 build/Source/ui/error_page.o
- .debug_ranges  0x000000000000aa48       0xf0 build/Source/ui/home_page.o
- .debug_ranges  0x000000000000ab38       0xc8 build/Source/ui/bookmarks_page.o
- .debug_ranges  0x000000000000ac00       0xc8 build/Source/ui/history_page.o
- .debug_ranges  0x000000000000acc8      0x160 build/Source/ui/settings_page.o
- .debug_ranges  0x000000000000ae28      0x1b8 build/Source/ui/address_bar.o
- .debug_ranges  0x000000000000afe0      0x260 build/Source/html/entities.o
- .debug_ranges  0x000000000000b240      0x360 build/Source/html/tokenizer.o
- .debug_ranges  0x000000000000b5a0      0x668 build/Source/html/dom.o
- .debug_ranges  0x000000000000bc08     0x2f78 build/Source/html/document.o
- .debug_ranges  0x000000000000eb80      0xa40 build/Source/html/readability.o
- .debug_ranges  0x000000000000f5c0      0x578 build/Source/keyboard/keyboard.o
- .debug_ranges  0x000000000000fb38       0x68 build/Source/core/tasks.o
- .debug_ranges  0x000000000000fba0       0x70 build/Source/util/strbuf.o
- .debug_ranges  0x000000000000fc10      0x168 build/Source/util/strutil.o
- .debug_ranges  0x000000000000fd78       0x50 build/Source/util/pdtimer.o
- .debug_ranges  0x000000000000fdc8       0x28 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_ranges  0x00000000000015d8      0x4b0 build/Source/core/storage.o
+ .debug_ranges  0x0000000000001a88      0x5a0 build/Source/core/http_client.o
+ .debug_ranges  0x0000000000002028       0xc8 build/Source/render/style.o
+ .debug_ranges  0x00000000000020f0      0x318 build/Source/render/link_manager.o
+ .debug_ranges  0x0000000000002408      0x2b0 build/Source/render/image_decoder.o
+ .debug_ranges  0x00000000000026b8     0x12a8 build/Source/render/layout.o
+ .debug_ranges  0x0000000000003960      0x120 build/Source/render/decoders/scale.o
+ .debug_ranges  0x0000000000003a80       0xb8 build/Source/render/decoders/dither.o
+ .debug_ranges  0x0000000000003b38      0x5c8 build/Source/render/decoders/inflate.o
+ .debug_ranges  0x0000000000004100      0x108 build/Source/render/decoders/bmp.o
+ .debug_ranges  0x0000000000004208      0x3a0 build/Source/render/decoders/gif.o
+ .debug_ranges  0x00000000000045a8      0x288 build/Source/render/decoders/ico.o
+ .debug_ranges  0x0000000000004830      0x4d8 build/Source/render/decoders/png.o
+ .debug_ranges  0x0000000000004d08      0xeb8 build/Source/render/decoders/jpeg.o
+ .debug_ranges  0x0000000000005bc0      0xe58 build/Source/render/decoders/svg.o
+ .debug_ranges  0x0000000000006a18     0x1170 build/Source/render/decoders/webp.o
+ .debug_ranges  0x0000000000007b88     0x2758 build/Source/render/decoders/webp_vp8.o
+ .debug_ranges  0x000000000000a2e0      0x688 build/Source/render/decoders/webp_container.o
+ .debug_ranges  0x000000000000a968       0x48 build/Source/ui/chrome.o
+ .debug_ranges  0x000000000000a9b0       0x30 build/Source/ui/hud.o
+ .debug_ranges  0x000000000000a9e0       0x88 build/Source/ui/error_page.o
+ .debug_ranges  0x000000000000aa68       0xf0 build/Source/ui/home_page.o
+ .debug_ranges  0x000000000000ab58       0xc8 build/Source/ui/bookmarks_page.o
+ .debug_ranges  0x000000000000ac20       0xc8 build/Source/ui/history_page.o
+ .debug_ranges  0x000000000000ace8      0x160 build/Source/ui/settings_page.o
+ .debug_ranges  0x000000000000ae48      0x1b8 build/Source/ui/address_bar.o
+ .debug_ranges  0x000000000000b000      0x260 build/Source/html/entities.o
+ .debug_ranges  0x000000000000b260      0x360 build/Source/html/tokenizer.o
+ .debug_ranges  0x000000000000b5c0      0x668 build/Source/html/dom.o
+ .debug_ranges  0x000000000000bc28     0x2f78 build/Source/html/document.o
+ .debug_ranges  0x000000000000eba0      0xa40 build/Source/html/readability.o
+ .debug_ranges  0x000000000000f5e0      0x578 build/Source/keyboard/keyboard.o
+ .debug_ranges  0x000000000000fb58       0x68 build/Source/core/tasks.o
+ .debug_ranges  0x000000000000fbc0       0x70 build/Source/util/strbuf.o
+ .debug_ranges  0x000000000000fc30      0x168 build/Source/util/strutil.o
+ .debug_ranges  0x000000000000fd98       0x50 build/Source/util/pdtimer.o
+ .debug_ranges  0x000000000000fde8       0x28 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
 .debug_macro    0x0000000000000000     0xa1c7
  .debug_macro   0x0000000000000000      0x4e2 build/Source/main.o
@@ -8078,140 +8078,140 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_macro   0x0000000000009c73      0x2b2 build/Source/util/pdtimer.o
  .debug_macro   0x0000000000009f25      0x2a2 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_line     0x0000000000000000    0x4050b
+.debug_line     0x0000000000000000    0x40515
  .debug_line    0x0000000000000000     0x3630 build/Source/main.o
  .debug_line    0x0000000000003630      0x624 build/Source/core/logger.o
  .debug_line    0x0000000000003c54      0x30d build/Source/core/constants.o
  .debug_line    0x0000000000003f61     0x1218 build/Source/core/url.o
  .debug_line    0x0000000000005179      0xbb5 build/Source/core/encoding.o
  .debug_line    0x0000000000005d2e     0x1df4 build/Source/core/cookie_jar.o
- .debug_line    0x0000000000007b22     0x1a42 build/Source/core/storage.o
- .debug_line    0x0000000000009564     0x1a28 build/Source/core/http_client.o
- .debug_line    0x000000000000af8c      0x926 build/Source/render/style.o
- .debug_line    0x000000000000b8b2     0x104f build/Source/render/link_manager.o
- .debug_line    0x000000000000c901     0x1355 build/Source/render/image_decoder.o
- .debug_line    0x000000000000dc56     0x51dc build/Source/render/layout.o
- .debug_line    0x0000000000012e32      0x825 build/Source/render/decoders/scale.o
- .debug_line    0x0000000000013657      0x6f5 build/Source/render/decoders/dither.o
- .debug_line    0x0000000000013d4c     0x14fb build/Source/render/decoders/inflate.o
- .debug_line    0x0000000000015247      0x906 build/Source/render/decoders/bmp.o
- .debug_line    0x0000000000015b4d     0x1232 build/Source/render/decoders/gif.o
- .debug_line    0x0000000000016d7f     0x109d build/Source/render/decoders/ico.o
- .debug_line    0x0000000000017e1c     0x12fe build/Source/render/decoders/png.o
- .debug_line    0x000000000001911a     0x2160 build/Source/render/decoders/jpeg.o
- .debug_line    0x000000000001b27a     0x32fa build/Source/render/decoders/svg.o
- .debug_line    0x000000000001e574     0x30b1 build/Source/render/decoders/webp.o
- .debug_line    0x0000000000021625      0x20d build/Source/render/decoders/webp_vp8_data.o
- .debug_line    0x0000000000021832     0x5d1d build/Source/render/decoders/webp_vp8.o
- .debug_line    0x000000000002754f     0x19ae build/Source/render/decoders/webp_container.o
- .debug_line    0x0000000000028efd      0x7ff build/Source/ui/chrome.o
- .debug_line    0x00000000000296fc      0x6c5 build/Source/ui/hud.o
- .debug_line    0x0000000000029dc1      0x80a build/Source/ui/error_page.o
- .debug_line    0x000000000002a5cb      0xcbd build/Source/ui/home_page.o
- .debug_line    0x000000000002b288      0x84e build/Source/ui/bookmarks_page.o
- .debug_line    0x000000000002bad6      0x84a build/Source/ui/history_page.o
- .debug_line    0x000000000002c320      0xc3f build/Source/ui/settings_page.o
- .debug_line    0x000000000002cf5f      0xcdf build/Source/ui/address_bar.o
- .debug_line    0x000000000002dc3e      0xceb build/Source/html/entities.o
- .debug_line    0x000000000002e929     0x1163 build/Source/html/tokenizer.o
- .debug_line    0x000000000002fa8c     0x1361 build/Source/html/dom.o
- .debug_line    0x0000000000030ded     0x827b build/Source/html/document.o
- .debug_line    0x0000000000039068     0x2d6f build/Source/html/readability.o
- .debug_line    0x000000000003bdd7     0x1f60 build/Source/keyboard/keyboard.o
- .debug_line    0x000000000003dd37      0x7a6 build/Source/core/tasks.o
- .debug_line    0x000000000003e4dd      0x7d2 build/Source/util/strbuf.o
- .debug_line    0x000000000003ecaf      0xb7b build/Source/util/strutil.o
- .debug_line    0x000000000003f82a      0x76b build/Source/util/pdtimer.o
- .debug_line    0x000000000003ff95      0x576 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_line    0x0000000000007b22     0x1a4c build/Source/core/storage.o
+ .debug_line    0x000000000000956e     0x1a28 build/Source/core/http_client.o
+ .debug_line    0x000000000000af96      0x926 build/Source/render/style.o
+ .debug_line    0x000000000000b8bc     0x104f build/Source/render/link_manager.o
+ .debug_line    0x000000000000c90b     0x1355 build/Source/render/image_decoder.o
+ .debug_line    0x000000000000dc60     0x51dc build/Source/render/layout.o
+ .debug_line    0x0000000000012e3c      0x825 build/Source/render/decoders/scale.o
+ .debug_line    0x0000000000013661      0x6f5 build/Source/render/decoders/dither.o
+ .debug_line    0x0000000000013d56     0x14fb build/Source/render/decoders/inflate.o
+ .debug_line    0x0000000000015251      0x906 build/Source/render/decoders/bmp.o
+ .debug_line    0x0000000000015b57     0x1232 build/Source/render/decoders/gif.o
+ .debug_line    0x0000000000016d89     0x109d build/Source/render/decoders/ico.o
+ .debug_line    0x0000000000017e26     0x12fe build/Source/render/decoders/png.o
+ .debug_line    0x0000000000019124     0x2160 build/Source/render/decoders/jpeg.o
+ .debug_line    0x000000000001b284     0x32fa build/Source/render/decoders/svg.o
+ .debug_line    0x000000000001e57e     0x30b1 build/Source/render/decoders/webp.o
+ .debug_line    0x000000000002162f      0x20d build/Source/render/decoders/webp_vp8_data.o
+ .debug_line    0x000000000002183c     0x5d1d build/Source/render/decoders/webp_vp8.o
+ .debug_line    0x0000000000027559     0x19ae build/Source/render/decoders/webp_container.o
+ .debug_line    0x0000000000028f07      0x7ff build/Source/ui/chrome.o
+ .debug_line    0x0000000000029706      0x6c5 build/Source/ui/hud.o
+ .debug_line    0x0000000000029dcb      0x80a build/Source/ui/error_page.o
+ .debug_line    0x000000000002a5d5      0xcbd build/Source/ui/home_page.o
+ .debug_line    0x000000000002b292      0x84e build/Source/ui/bookmarks_page.o
+ .debug_line    0x000000000002bae0      0x84a build/Source/ui/history_page.o
+ .debug_line    0x000000000002c32a      0xc3f build/Source/ui/settings_page.o
+ .debug_line    0x000000000002cf69      0xcdf build/Source/ui/address_bar.o
+ .debug_line    0x000000000002dc48      0xceb build/Source/html/entities.o
+ .debug_line    0x000000000002e933     0x1163 build/Source/html/tokenizer.o
+ .debug_line    0x000000000002fa96     0x1361 build/Source/html/dom.o
+ .debug_line    0x0000000000030df7     0x827b build/Source/html/document.o
+ .debug_line    0x0000000000039072     0x2d6f build/Source/html/readability.o
+ .debug_line    0x000000000003bde1     0x1f60 build/Source/keyboard/keyboard.o
+ .debug_line    0x000000000003dd41      0x7a6 build/Source/core/tasks.o
+ .debug_line    0x000000000003e4e7      0x7d2 build/Source/util/strbuf.o
+ .debug_line    0x000000000003ecb9      0xb7b build/Source/util/strutil.o
+ .debug_line    0x000000000003f834      0x76b build/Source/util/pdtimer.o
+ .debug_line    0x000000000003ff9f      0x576 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_str      0x0000000000000000    0x15418
- .debug_str     0x0000000000000000     0xdb6b build/Source/main.o
-                                       0xe266 (size before relaxing)
- .debug_str     0x000000000000db6b       0x71 build/Source/core/logger.o
+.debug_str      0x0000000000000000    0x15419
+ .debug_str     0x0000000000000000     0xdb6c build/Source/main.o
+                                       0xe267 (size before relaxing)
+ .debug_str     0x000000000000db6c       0x71 build/Source/core/logger.o
                                        0xbcfd (size before relaxing)
- .debug_str     0x000000000000dbdc       0x48 build/Source/core/constants.o
-                                       0x6e5d (size before relaxing)
- .debug_str     0x000000000000dc24      0xa18 build/Source/core/url.o
+ .debug_str     0x000000000000dbdd       0x48 build/Source/core/constants.o
+                                       0x6e5e (size before relaxing)
+ .debug_str     0x000000000000dc25      0xa18 build/Source/core/url.o
                                        0x8110 (size before relaxing)
- .debug_str     0x000000000000e63c       0xe3 build/Source/core/encoding.o
+ .debug_str     0x000000000000e63d       0xe3 build/Source/core/encoding.o
                                        0x6257 (size before relaxing)
- .debug_str     0x000000000000e71f      0x2eb build/Source/core/cookie_jar.o
+ .debug_str     0x000000000000e720      0x2eb build/Source/core/cookie_jar.o
                                        0x8f98 (size before relaxing)
- .debug_str     0x000000000000ea0a      0x265 build/Source/core/storage.o
-                                       0xc2ee (size before relaxing)
- .debug_str     0x000000000000ec6f      0x516 build/Source/core/http_client.o
+ .debug_str     0x000000000000ea0b      0x265 build/Source/core/storage.o
+                                       0xc2ef (size before relaxing)
+ .debug_str     0x000000000000ec70      0x516 build/Source/core/http_client.o
                                        0xc442 (size before relaxing)
- .debug_str     0x000000000000f185      0x117 build/Source/render/style.o
+ .debug_str     0x000000000000f186      0x117 build/Source/render/style.o
                                        0xbdff (size before relaxing)
- .debug_str     0x000000000000f29c      0x1c3 build/Source/render/link_manager.o
-                                       0xc14a (size before relaxing)
- .debug_str     0x000000000000f45f      0x271 build/Source/render/image_decoder.o
+ .debug_str     0x000000000000f29d      0x1c3 build/Source/render/link_manager.o
+                                       0xc14b (size before relaxing)
+ .debug_str     0x000000000000f460      0x271 build/Source/render/image_decoder.o
                                        0xc67d (size before relaxing)
- .debug_str     0x000000000000f6d0      0x841 build/Source/render/layout.o
-                                       0xdc0a (size before relaxing)
- .debug_str     0x000000000000ff11       0xcd build/Source/render/decoders/scale.o
+ .debug_str     0x000000000000f6d1      0x841 build/Source/render/layout.o
+                                       0xdc0b (size before relaxing)
+ .debug_str     0x000000000000ff12       0xcd build/Source/render/decoders/scale.o
                                        0x6e41 (size before relaxing)
- .debug_str     0x000000000000ffde       0xa0 build/Source/render/decoders/dither.o
+ .debug_str     0x000000000000ffdf       0xa0 build/Source/render/decoders/dither.o
                                        0xbcf3 (size before relaxing)
- .debug_str     0x000000000001007e      0x323 build/Source/render/decoders/inflate.o
+ .debug_str     0x000000000001007f      0x323 build/Source/render/decoders/inflate.o
                                        0x711b (size before relaxing)
- .debug_str     0x00000000000103a1       0xdc build/Source/render/decoders/bmp.o
+ .debug_str     0x00000000000103a2       0xdc build/Source/render/decoders/bmp.o
                                        0x8d33 (size before relaxing)
- .debug_str     0x000000000001047d      0x22a build/Source/render/decoders/gif.o
+ .debug_str     0x000000000001047e      0x22a build/Source/render/decoders/gif.o
                                        0x8f53 (size before relaxing)
- .debug_str     0x00000000000106a7       0xb8 build/Source/render/decoders/ico.o
+ .debug_str     0x00000000000106a8       0xb8 build/Source/render/decoders/ico.o
                                        0x8e09 (size before relaxing)
- .debug_str     0x000000000001075f      0x17b build/Source/render/decoders/png.o
+ .debug_str     0x0000000000010760      0x17b build/Source/render/decoders/png.o
                                        0x8f6c (size before relaxing)
- .debug_str     0x00000000000108da      0x3d0 build/Source/render/decoders/jpeg.o
+ .debug_str     0x00000000000108db      0x3d0 build/Source/render/decoders/jpeg.o
                                        0x91d6 (size before relaxing)
- .debug_str     0x0000000000010caa      0x302 build/Source/render/decoders/svg.o
+ .debug_str     0x0000000000010cab      0x302 build/Source/render/decoders/svg.o
                                        0xc912 (size before relaxing)
- .debug_str     0x0000000000010fac      0x953 build/Source/render/decoders/webp.o
+ .debug_str     0x0000000000010fad      0x953 build/Source/render/decoders/webp.o
                                        0x9bb8 (size before relaxing)
- .debug_str     0x00000000000118ff       0x27 build/Source/render/decoders/webp_vp8_data.o
+ .debug_str     0x0000000000011900       0x27 build/Source/render/decoders/webp_vp8_data.o
                                        0x3e3f (size before relaxing)
- .debug_str     0x0000000000011926      0xc7e build/Source/render/decoders/webp_vp8.o
+ .debug_str     0x0000000000011927      0xc7e build/Source/render/decoders/webp_vp8.o
                                        0xa0af (size before relaxing)
- .debug_str     0x00000000000125a4      0x2fd build/Source/render/decoders/webp_container.o
+ .debug_str     0x00000000000125a5      0x2fd build/Source/render/decoders/webp_container.o
                                        0x9574 (size before relaxing)
- .debug_str     0x00000000000128a1       0x9b build/Source/ui/chrome.o
-                                       0xc04a (size before relaxing)
- .debug_str     0x000000000001293c       0x67 build/Source/ui/hud.o
-                                       0xbf48 (size before relaxing)
- .debug_str     0x00000000000129a3       0xff build/Source/ui/error_page.o
-                                       0xc096 (size before relaxing)
- .debug_str     0x0000000000012aa2      0x1b9 build/Source/ui/home_page.o
-                                       0xc242 (size before relaxing)
- .debug_str     0x0000000000012c5b       0x85 build/Source/ui/bookmarks_page.o
-                                       0xc083 (size before relaxing)
- .debug_str     0x0000000000012ce0       0x35 build/Source/ui/history_page.o
-                                       0xc07d (size before relaxing)
- .debug_str     0x0000000000012d15      0x232 build/Source/ui/settings_page.o
-                                       0xc344 (size before relaxing)
- .debug_str     0x0000000000012f47      0x13e build/Source/ui/address_bar.o
-                                       0xc4b4 (size before relaxing)
- .debug_str     0x0000000000013085      0x22a build/Source/html/entities.o
+ .debug_str     0x00000000000128a2       0x9b build/Source/ui/chrome.o
+                                       0xc04b (size before relaxing)
+ .debug_str     0x000000000001293d       0x67 build/Source/ui/hud.o
+                                       0xbf49 (size before relaxing)
+ .debug_str     0x00000000000129a4       0xff build/Source/ui/error_page.o
+                                       0xc097 (size before relaxing)
+ .debug_str     0x0000000000012aa3      0x1b9 build/Source/ui/home_page.o
+                                       0xc243 (size before relaxing)
+ .debug_str     0x0000000000012c5c       0x85 build/Source/ui/bookmarks_page.o
+                                       0xc084 (size before relaxing)
+ .debug_str     0x0000000000012ce1       0x35 build/Source/ui/history_page.o
+                                       0xc07e (size before relaxing)
+ .debug_str     0x0000000000012d16      0x232 build/Source/ui/settings_page.o
+                                       0xc345 (size before relaxing)
+ .debug_str     0x0000000000012f48      0x13e build/Source/ui/address_bar.o
+                                       0xc4b5 (size before relaxing)
+ .debug_str     0x0000000000013086      0x22a build/Source/html/entities.o
                                        0x9743 (size before relaxing)
- .debug_str     0x00000000000132af      0x229 build/Source/html/tokenizer.o
+ .debug_str     0x00000000000132b0      0x229 build/Source/html/tokenizer.o
                                        0x9803 (size before relaxing)
- .debug_str     0x00000000000134d8      0x215 build/Source/html/dom.o
+ .debug_str     0x00000000000134d9      0x215 build/Source/html/dom.o
                                        0x9897 (size before relaxing)
- .debug_str     0x00000000000136ed      0x903 build/Source/html/document.o
-                                       0xa25c (size before relaxing)
- .debug_str     0x0000000000013ff0      0x461 build/Source/html/readability.o
-                                       0xa438 (size before relaxing)
- .debug_str     0x0000000000014451      0xcf4 build/Source/keyboard/keyboard.o
+ .debug_str     0x00000000000136ee      0x903 build/Source/html/document.o
+                                       0xa25d (size before relaxing)
+ .debug_str     0x0000000000013ff1      0x461 build/Source/html/readability.o
+                                       0xa439 (size before relaxing)
+ .debug_str     0x0000000000014452      0xcf4 build/Source/keyboard/keyboard.o
                                        0xcc03 (size before relaxing)
- .debug_str     0x0000000000015145       0x83 build/Source/core/tasks.o
+ .debug_str     0x0000000000015146       0x83 build/Source/core/tasks.o
                                        0xbd91 (size before relaxing)
- .debug_str     0x00000000000151c8       0x46 build/Source/util/strbuf.o
+ .debug_str     0x00000000000151c9       0x46 build/Source/util/strbuf.o
                                        0x8d66 (size before relaxing)
- .debug_str     0x000000000001520e       0xd3 build/Source/util/strutil.o
+ .debug_str     0x000000000001520f       0xd3 build/Source/util/strutil.o
                                        0x95cf (size before relaxing)
- .debug_str     0x00000000000152e1       0xb6 build/Source/util/pdtimer.o
+ .debug_str     0x00000000000152e2       0xb6 build/Source/util/pdtimer.o
                                        0xbd21 (size before relaxing)
- .debug_str     0x0000000000015397       0x81 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_str     0x0000000000015398       0x81 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
                                        0xbd5d (size before relaxing)
 
 .comment        0x0000000000000000       0x79

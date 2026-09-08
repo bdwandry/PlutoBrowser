@@ -16,6 +16,7 @@ const SearchEngine SEARCH_ENGINES[SEARCH_ENGINE_COUNT] = {
 
 /* Constants.DEFAULT_BOOKMARKS */
 const DefaultBookmark DEFAULT_BOOKMARKS[DEFAULT_BOOKMARK_COUNT] = {
+    { "Bitmap Gallery",         "https://wiesmann.codiferes.net/share/bitmaps/", "Pixel-art & bitmap gallery" },
     { "Google",                 "https://google.com",                        "Search engine" },
     { "Playdate Developer",     "https://play.date/dev",                     "Documentation & SDK" },
     { "Hacker News",            "https://news.ycombinator.com",              "Tech news & discussion" },
