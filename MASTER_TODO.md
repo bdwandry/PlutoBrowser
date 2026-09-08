@@ -1429,3 +1429,13 @@ regression batteries green; MASTER_TODO updated.
   - TC-FC-7 (both): regression — no battery/window code remains (grep for P1[0-9]/P2[0-9]/P3[0-9] logger lines: 0), no test seams (keyboard_test_/layout_test_ in app code: 0), PDX contains no source files. PASS.
 - **Actual results:** all PASS. Logs preserved: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log.
 - **Status:** PROJECT COMPLETE. PlutoBrowser stands alone as a 100% native C Playdate application with full CometBrowser functional parity.
+
+### Beta Bug Fix #1: HTML-mode mouse cursor not drawn — FIXED ✅
+- **Reported by user (manual device testing):** in HTML view mode (MODE_RAW_HTML on STATE_PAGE) no mouse cursor appeared over pages; the Lua reference draws one.
+- **Root cause:** the cursor's *logic* (movement, hover hit-testing, scroll zones, A=click) was fully ported, but the Lua reference's cursor *drawing* block (main.lua lines 1012–1023: white-filled triangle + black outline + inner line, drawn last so nothing covers it) was never ported to C.
+- **Fix (Source/main.c updateFrame tail):** after chrome/address-bar draw, in STATE_PAGE + MODE_RAW_HTML draw the cursor exactly as the reference: `fillTriangle(mx,my,mx+10,my+4,mx+4,my+10, white)`, then the outline. The C API has no `drawTriangle`, so the outline is three `drawLine(width=1)` edges (Lua's default line width) plus the reference's inner `drawLine(mx,my,mx+4,my+10)`. Also ported the reference's hover status bar (`Hud.drawHoverStatus`) that shares this block.
+- **Incidental cleanup:** removed the leftover 25-frame keyboard debug logging (`KB frame N: ...`) from Source/keyboard/keyboard.c that fired on every keyboard show.
+- **Test Cases:**
+  - TC-M1 (Simulator): boot → navigate (wikipedia.org) → STATE_PAGE in HTML mode → cursor visible and movable via D-pad, hover status bar shows link URLs, A follows hovered link. PASS (log: tests/logs/mouse_sim_test.log; no ERROR/FAIL/crash, clean terminate).
+  - TC-M2 (Device): MD5-verified deploy (16703fad… both sides). User-driven session: google.com → accounts.google.com link → DuckDuckGo results → multiple pages in HTML mode with cursor drawn and clickable. PASS (log: tests/logs/mouse_device_test.log; errorlog/crashlog EMPTY; clean terminate at frames=4958).
+- **Status:** FIXED and verified in both environments.

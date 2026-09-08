@@ -963,11 +963,7 @@ static int keyboardUpdate(void * _Nonnull userdata) {
     PDKeyboard *self = userdata;
 
     if (self->isVisible) {
-        static int kbDbgFrames = 0;
-        const int dbg = (kbDbgFrames < 25);
-        if (dbg) { logger_log("KB frame %d: enter", kbDbgFrames); }
         enterNewLetterIfNecessary(self);
-        if (dbg) { logger_log("KB frame %d: letters ok", kbDbgFrames); }
 
         if (self->currentAnimationType != kAnimationTypeNone) {
             updateAnimation(self);
@@ -978,7 +974,6 @@ static int keyboardUpdate(void * _Nonnull userdata) {
                 }
             }
         }
-        if (dbg) { logger_log("KB frame %d: anim ok", kbDbgFrames); }
 
         if (!self->justOpened) {
             checkButtonInputs(self);
@@ -989,13 +984,9 @@ static int keyboardUpdate(void * _Nonnull userdata) {
         } else {
             self->justOpened = false;
         }
-        if (dbg) { logger_log("KB frame %d: input ok", kbDbgFrames); }
 
         self->playdateUpdate(self->playdateUpdateUserdata);
-        if (dbg) { logger_log("KB frame %d: app update ok", kbDbgFrames); }
         drawKeyboard(self);
-        if (dbg) { logger_log("KB frame %d: draw ok", kbDbgFrames); }
-        kbDbgFrames++;
     }
     return true;
 }
