@@ -34,6 +34,12 @@
 #include "render/decoders/gif.h"
 #include "render/decoders/png.h"
 #include "render/decoders/svg.h"
+#include "render/decoders/tif.h"
+#include "render/decoders/tga.h"
+#include "render/decoders/psd.h"
+#include "render/decoders/sgi.h"
+#include "render/decoders/xbm.h"
+#include "render/decoders/pdfimg.h"
 #include "render/decoders/jpeg.h"
 #include "render/decoders/ico.h"
 #include "render/decoders/webp.h"
@@ -251,9 +257,39 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
     {
         img = bmp_decode(data, len); /* pcall: NULL on error */
     }
-    else if (b1 == 0 && b2 == 0 && (b3 == 1 || b3 == 2) && b4 == 0)
+    else if (b1 == 0 && b2 == 0 && (b3 == 1 || b3 == 2) && b4 == 0 &&
+             !(len >= 18 && data[2] == 2 && data[3] == 0 &&
+               data[16] >= 8 && data[16] <= 32))
     {
         img = ico_decode(data, len, 360, 200); /* ICO / CUR */
+    }
+    else if ((b1 == 'I' && b2 == 'I' && b3 == '*' && b4 == 0) ||
+             (b1 == 'M' && b2 == 'M' && b3 == 0 && b4 == '*'))
+    {
+        img = tif_decode(data, len); /* TIFF */
+    }
+    else if (len >= 18 && b1 == 0x01 && b2 == 0xDA)
+    {
+        img = sgi_decode(data, len); /* SGI (0x01DA magic at offset 0) */
+    }
+    else if (len >= 26 && memcmp(data, "8BPS", 4) == 0)
+    {
+        img = psd_decode(data, len); /* Photoshop */
+    }
+    else if (len >= 5 && memcmp(data, "%PDF-", 5) == 0)
+    {
+        img = pdfimg_decode(data, len); /* PDF embedded raster */
+    }
+    else if (len > 32 && (memcmp(data, "#define", 7) == 0))
+    {
+        img = xbm_decode(data, len); /* X BitMap (ASCII) */
+    }
+    else if (len >= 18 && (data[1] == 0 || data[1] == 1) &&
+             (data[2] == 1 || data[2] == 2 || data[2] == 3 ||
+              data[2] == 9 || data[2] == 10 || data[2] == 11) &&
+             data[16] >= 8 && data[16] <= 32)
+    {
+        img = tga_decode(data, len); /* TGA last (weak header) */
     }
     else
     {

@@ -1,0 +1,2 @@
+psd.c:63:16:psd_pixel_gray	8	static
+psd.c:74:12:psd_decode	168	static

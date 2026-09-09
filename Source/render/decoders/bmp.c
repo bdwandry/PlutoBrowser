@@ -46,6 +46,7 @@ typedef struct
     uint32_t pixelOffset;
     int bpp;
     int rowBytes;
+    int isOs2Pal; /* BITMAPCOREHEADER: 3-byte palette entries */
     uint8_t palette[256];
     /* downscale factor as a rational: scale = scaleNum / scaleDen
      * (Lua floor(outX * scale) computed exactly in integer math) */
@@ -121,9 +122,10 @@ static uint8_t bmp_pixel_gray(void *ud, int outX, int outY)
 static void bmp_load_palette(BmpCtx *c, size_t palOffset)
 {
     int numColors = 1 << c->bpp;
+    size_t stride = c->isOs2Pal ? 3 : 4; /* OS/2: RGBTRIPLE (3 bytes) */
     for (int i = 0; i < numColors && i < 256; i++)
     {
-        size_t p = palOffset + (size_t)i * 4;
+        size_t p = palOffset + (size_t)i * stride;
         if (p + 2 < c->len)
         {
             c->palette[i] = (uint8_t)dither_rgb_to_gray(c->data[p + 2], c->data[p + 1], c->data[p]);
@@ -152,10 +154,23 @@ LCDBitmap *bmp_decode(const uint8_t *data, size_t len)
     c.len = len;
     c.pixelOffset = rd32(data, 10, len);
     uint32_t headerSize = rd32(data, 14, len);
-    c.width = rds32(data, 18, len);
-    int32_t rawHeight = rds32(data, 22, len);
-    c.bpp = rd16(data, 28, len);
-    uint32_t compression = rd32(data, 30, len);
+    uint32_t compression = 0;
+    int32_t rawHeight;
+    if (headerSize == 12)
+    {
+        /* OS/2 BITMAPCOREHEADER: RGBTRIPLE palette, uint16 dims. */
+        c.width = rd16(data, 18, len);
+        rawHeight = (int32_t)rd16(data, 20, len);
+        c.bpp = rd16(data, 24, len);
+        c.isOs2Pal = 1;
+    }
+    else
+    {
+        c.width = rds32(data, 18, len);
+        rawHeight = rds32(data, 22, len);
+        c.bpp = rd16(data, 28, len);
+        compression = rd32(data, 30, len);
+    }
     (void)compression; /* read but unchecked (Lua parity) */
 
     if (c.width <= 0 || rawHeight == 0)

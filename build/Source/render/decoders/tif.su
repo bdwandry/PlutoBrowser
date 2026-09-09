@@ -1,0 +1,7 @@
+tif.c:336:12:g3_eol	32	static
+tif.c:439:16:tif_pixel_gray	8	static
+tif.c:43:17:tif_u16.isra.0	4	static
+tif.c:50:17:tif_u32.isra.0	4	static
+tif.c:310:12:g3_match.isra.0	28	static
+tif.c:105:12:lzw_emit.constprop	24	static
+tif.c:452:12:tif_decode	1704	static
