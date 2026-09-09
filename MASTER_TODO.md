@@ -1995,3 +1995,32 @@ port now implements the spec.
 google.com click-test is visible in the device log (logo decode at 11:57:10),
 clean kEventTerminate, crashlog + errorlog EMPTY.
 
+
+
+## Beta Bug Fix #13 — Image-format expansion (wiesmann.codiferes.net corpus: 16/16 decode)
+
+**User report:** the benchmark site hosts the same image in many formats; several didn't render in PlutoBrowser.
+
+**New C decoders added** (Source/render/decoders/, no changes to working decoders):
+- **tif.c** — TIFF: II/MM, LZW (with predictor-2 horizontal differencing), PackBits, uncompressed, and CCITT G3 1-bit (T.4 terminating+makeup codes from ffmpeg's faxcompr.c tables; EOL + fill-bit handling; makeup codes don't flip color)
+- **tga.c** — TGA: types 1/2/3/9/10/11, 8/15/16/24/32 bpp, RLE, palette/gray/truecolor, vertical flip via origin bit
+- **psd.c** — Photoshop: RGB/Gray, RLE (channel-sorted rows), planar→interleaved
+- **sgi.c** — SGI: RGB/RGBA/gray, 8/16-bit, RLE (per-channel starts/lengths) + raw, big-endian words
+- **xbm.c** — X BitMap: ASCII `#define` arrays, C-style comments/escapes
+- **pdfimg.c** — PDF: embedded raster XObjects (Flate/DCT) AND a **mini vector renderer** for vector-only PDFs (q/Q/cm/rg/RG/g/G/w/re/m/l/c/h/S/s/B*/W*/n/sh, nonzero-winding scanline fill, axial shadings, clip rects)
+
+**Dispatcher repairs (image_decoder.c):**
+- TGA `00 00 02 00` collided with the ICO/CUR check — ico_decode failed and swallowed the file; now only routes to ICO when the TGA weak-header doesn't match
+- SGI magic 0x01DA is at offset 0, not offset 2 — never routed before
+
+**Existing-decoder fix:** BMP with OS/2 BITMAPCOREHEADER (12-byte, RGBTRIPLE palette, uint16 dims) parsed as a Windows DIB → site BMP rendered garbage (360x57). Now handles both header variants (correct 200x150).
+
+**Verification:**
+- Host harness vs ffmpeg ground truth (ASan-clean): tif1 byte-exact 100%; tif/tga/psd/sgi 100% identical to the app's own png.c pipeline on the same source pattern (ffmpeg refs use bilinear resampling, hence only ~76% vs nearest-neighbor phase — expected)
+- Vector PDF vs poppler (pdftoppm) at identical resolution: **96.0% pixel agreement** (only differing block = dithered gradient band phase)
+- Simulator: **16/16 site images decode** (IMGDEC ok each)
+- Device: MD5-verified deploy, all 16 decode on hardware, clean terminate (5445 frames), empty crashlog/errorlog
+
+**Still unsupported (by design):** AVIF (AV1 codec) and JP2 (JPEG2000 wavelet/MQ) — 100k+-line international codec standards, out of scope for hand-porting; both fail gracefully to the unsupported-image path exactly like the Lua reference.
+
+**TEMP scaffolding to revert:** main.c auto-launch of the benchmark URL (marked `TEMP(IMGFMT)`) — remove when user resumes Home-Page boot.

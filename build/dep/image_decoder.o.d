@@ -56,7 +56,10 @@ build/Source/render/image_decoder.o: Source/render/image_decoder.c \
  Source/core/http_client.h Source/core/tasks.h Source/util/pdtimer.h \
  Source/render/style.h Source/render/decoders/bmp.h \
  Source/render/decoders/gif.h Source/render/decoders/png.h \
- Source/render/decoders/svg.h Source/render/decoders/jpeg.h \
+ Source/render/decoders/svg.h Source/render/decoders/tif.h \
+ Source/render/decoders/tga.h Source/render/decoders/psd.h \
+ Source/render/decoders/sgi.h Source/render/decoders/xbm.h \
+ Source/render/decoders/pdfimg.h Source/render/decoders/jpeg.h \
  Source/render/decoders/ico.h Source/render/decoders/webp.h
 
 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/arm-none-eabi/include/stdio.h:
@@ -184,6 +187,18 @@ Source/render/decoders/gif.h:
 Source/render/decoders/png.h:
 
 Source/render/decoders/svg.h:
+
+Source/render/decoders/tif.h:
+
+Source/render/decoders/tga.h:
+
+Source/render/decoders/psd.h:
+
+Source/render/decoders/sgi.h:
+
+Source/render/decoders/xbm.h:
+
+Source/render/decoders/pdfimg.h:
 
 Source/render/decoders/jpeg.h:
 

@@ -43,6 +43,12 @@ SRC = \
 	Source/render/decoders/png.c \
 	Source/render/decoders/jpeg.c \
 	Source/render/decoders/svg.c \
+	Source/render/decoders/tif.c \
+	Source/render/decoders/tga.c \
+	Source/render/decoders/psd.c \
+	Source/render/decoders/sgi.c \
+	Source/render/decoders/xbm.c \
+	Source/render/decoders/pdfimg.c \
 	Source/render/decoders/webp.c \
 	Source/render/decoders/webp_vp8_data.c \
 	Source/render/decoders/webp_vp8.c \

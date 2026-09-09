@@ -1,0 +1,17 @@
+pdfimg.c:44:16:pdf_pixel_gray	8	static
+pdfimg.c:628:13:pdfv_add_pt	8	static
+pdfimg.c:996:16:pdfv_pixel_cb	4	static
+pdfimg.c:187:13:pdfv_fill	72	static
+pdfimg.c:669:16:pdfv_fill_val	8	static
+pdfimg.c:683:16:pdfv_stroke_val	80	static
+pdfimg.c:22:20:memstr_local	24	static
+pdfimg.c:430:12:pdfv_key_pos	40	static
+pdfimg.c:54:12:pdf_dict_value	48	static
+pdfimg.c:461:12:pdfv_floats_key	48	static
+pdfimg.c:311:13:pdfv_line	56	static
+pdfimg.c:75:23:pdf_stream_data.constprop	40	static
+pdfimg.c:369:13:pdfv_seg	64	static
+pdfimg.c:397:13:pdfv_seg_wrap	1320	static
+pdfimg.c:345:13:pdfv_stroke	48	static
+pdfimg.c:692:13:pdfv_run.constprop	1608	static
+pdfimg.c:1095:12:pdfimg_decode	184	static
