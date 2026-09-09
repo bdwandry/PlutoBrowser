@@ -45,7 +45,7 @@ static Setting g_settings[16] = {
     {"mode", "", 1, 1},       /* Constants.MODE_RAW_HTML = "html" (Lua default) */
     {"autoReader", "", 0, 1}, /* false */
     {"fontSize", "medium", 0, 0},
-    {"imageMode", "", 0, 1},  /* IMAGE_MODE_VIEWPORT — filled in storage_init */
+    {"imageMode", "viewport", 0, 0}, /* string name; Lua stores Constants names */
     {"invertCrank", "", 0, 1} /* false */
 };
 static int g_settingCount = 6;
@@ -345,7 +345,7 @@ void storage_load(void)
     storage_set_setting_int("mode", 1); /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_int("autoReader", 0);
     storage_set_setting_str("fontSize", "medium");
-    storage_set_setting_int("imageMode", 0); /* IMAGE_MODE_VIEWPORT index */
+    storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
     storage_set_setting_int("invertCrank", 0);
 
     char *line = g_loadLine;
@@ -663,7 +663,7 @@ void storage_init(PlaydateAPI *pd)
     logger_log("STORAGE: init enter");
     /* fill the two settings whose defaults come from Constants */
     storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
-    storage_set_setting_int("imageMode", 0);  /* IMAGE_MODE_VIEWPORT */
+    storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
     storage_load();
     logger_log("STORAGE: init exit");
 }

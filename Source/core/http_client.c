@@ -675,7 +675,22 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
             {
                 ctx->page = page;
                 ctx->id = g_requestId;
-                    pdtimer_perform_after_delay(g_pd, 20, about_timer_cb, ctx);
+                pdtimer_perform_after_delay(g_pd, 20, about_timer_cb, ctx);
+            }
+            else
+            {
+                /* Allocation failed: fail the request instead of hanging in
+                 * CONNECTING until the 60s watchdog (and, without this,
+                 * g_requestId is never bumped for this request, so a queued
+                 * image fetch would tag its TCP callback with the PREVIOUS
+                 * generation and be discarded as stale). */
+                if (g_cb.onError)
+                {
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "out of memory");
+                    g_cb.onError(msg);
+                }
+                reset_state();
             }
         }
         else
