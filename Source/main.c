@@ -1143,9 +1143,44 @@ static void submit_form(const char *formAction, const LayoutItem *inputBlock)
 }
 
 /* ── Settings change (reference SettingsPage.onChangeCallback) ──────────── */
+/* ── FPS overlay (Beta: user request) ──────────────────────────────────── */
+static int g_showFps = 0;              /* cached setting; re-read on boot/save */
+static unsigned int g_fpsFrames = 0;   /* frames since last sample window */
+static unsigned int g_fpsWindowStart = 0; /* ms timestamp of window start */
+static int g_fpsValue = 0;             /* last computed frames-per-second */
+static unsigned int g_fpsLastSampleMs = 0;
+static LCDFont *g_fpsFont = NULL;      /* bold body font, loaded once */
+
+/* Draw a small bold FPS number flush in the bottom-right corner.
+ * Runs AFTER every state's draw, in its own full-screen context with no
+ * clip, so nothing can clip it out (the visibility bug from the first
+ * attempt). 1px white backing keeps it readable over dark content. */
+static void draw_fps_overlay(void)
+{
+    if (!g_showFps || !g_fpsFont)
+    {
+        return;
+    }
+    PlaydateAPI *pd = pluto_pd();
+    char num[8];
+    snprintf(num, sizeof(num), "%d", g_fpsValue);
+    pd->graphics->pushContext(NULL);
+    pd->graphics->clearClipRect();
+    pd->graphics->setFont(g_fpsFont);
+    int w = pd->graphics->getTextWidth(g_fpsFont, num, strlen(num), kUTF8Encoding, 0);
+    int h = pd->graphics->getFontHeight(g_fpsFont);
+    int x = LCD_COLUMNS - w;          /* flush right */
+    int y = LCD_ROWS - h;             /* flush bottom, touching the border */
+    pd->graphics->fillRect(x - 1, y, w + 1, h, kColorWhite);
+    pd->graphics->setDrawMode(kDrawModeCopy);
+    pd->graphics->drawText(num, strlen(num), kUTF8Encoding, x, y);
+    pd->graphics->popContext();
+}
+
 static void settings_on_change(void)
 {
     currentBrowseMode = storage_setting_int("mode");
+    g_showFps = storage_setting_int("showFps");
     if (currentBrowseMode != MODE_READER && currentBrowseMode != MODE_RAW_HTML)
     {
         currentBrowseMode = MODE_READER;
@@ -1978,9 +2013,36 @@ static int updateFrame(void *userdata)
     /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
     if (frameCount % 300 == 0)
     {
-        logger_log("updateFrame: heartbeat frame=%u", frameCount);
+        logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d", frameCount, g_fpsValue, g_showFps);
     }
 
+
+
+    /* FPS sampling: frames over a rolling 500ms window (display runs 30 or
+     * 50 fps; the counter only dips below that when a frame runs long). */
+    g_fpsFrames++;
+    {
+        unsigned int now = pd->system->getCurrentTimeMilliseconds();
+        if (g_fpsWindowStart == 0)
+        {
+            g_fpsWindowStart = now;
+            g_fpsLastSampleMs = now;
+        }
+        else if (now - g_fpsLastSampleMs >= 500)
+        {
+            unsigned int span = now - g_fpsWindowStart;
+            if (span > 0)
+            {
+                g_fpsValue = (int)((g_fpsFrames * 1000u + span / 2) / span);
+            }
+            g_fpsFrames = 0;
+            g_fpsWindowStart = now;
+            g_fpsLastSampleMs = now;
+        }
+    }
+
+    /* FPS overlay: drawn after all state rendering so nothing can clip it. */
+    draw_fps_overlay();
 
 
     /* Phase 4: pump timers each frame. */
@@ -2029,7 +2091,11 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         settings_page_set_onchange_callback(settings_on_change);
         layout_init(pd);
 
-        /* Lua boot: currentBrowseMode = Storage.settings.mode. */
+        /* FPS overlay: cache the setting and load the bold font once. */
+        g_showFps = storage_setting_int("showFps");
+        g_fpsFont = style_font(PLUTO_FONT_BODY_BOLD);
+
+        /* Lua boot: currentBrowseMode = storage_setting_int("mode"). */
         currentBrowseMode = storage_setting_int("mode");
         if (currentBrowseMode != MODE_READER && currentBrowseMode != MODE_RAW_HTML)
         {

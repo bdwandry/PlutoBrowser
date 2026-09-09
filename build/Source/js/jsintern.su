@@ -1,0 +1,9 @@
+jsintern.c:95:13:dumpstringnode	32	static
+jsintern.c:117:13:jsS_freestringnode	16	static
+jsintern.c:78:23:jsS_insert	32	static
+jsintern.c:5:6:js_putc	16	static
+jsintern.c:20:6:js_puts	16	static
+jsintern.c:26:6:js_putm	24	static
+jsintern.c:108:6:jsS_dumpstrings	8	static
+jsintern.c:124:6:jsS_freestrings	0	static
+jsintern.c:130:13:js_intern	16	static

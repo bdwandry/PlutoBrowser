@@ -1,0 +1,5 @@
+jsboolean.c:3:13:jsB_new_Boolean	8	static
+jsboolean.c:8:13:jsB_Boolean	8	static
+jsboolean.c:20:13:Bp_valueOf	8	static
+jsboolean.c:13:13:Bp_toString	8	static
+jsboolean.c:27:6:jsB_initboolean	24	static

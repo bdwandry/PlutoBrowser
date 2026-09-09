@@ -1,0 +1,9 @@
+jsnumber.c:9:13:jsB_new_Number	8	static
+jsnumber.c:14:13:jsB_Number	8	static
+jsnumber.c:19:13:Np_valueOf	8	static
+jsnumber.c:115:13:numtostr	88	static
+jsnumber.c:160:13:Np_toPrecision	72	static
+jsnumber.c:144:13:Np_toExponential	72	static
+jsnumber.c:128:13:Np_toFixed	72	static
+jsnumber.c:26:13:Np_toString	184	static
+jsnumber.c:176:6:jsB_initnumber	24	static
