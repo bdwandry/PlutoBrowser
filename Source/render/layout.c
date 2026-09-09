@@ -2579,6 +2579,17 @@ void layout_evict_hovered_image(const char *currentHoveredSrc)
     {
         return;
     }
+    /* Track the CURRENT hover even on first entry (Lua stores
+     * Layout.hoveredImageSrc every frame; without this the C port never
+     * marked the hovered image, so the evict branch below could never fire
+     * and mouse-off unloads never happened). */
+    if (currentHoveredSrc && currentHoveredSrc[0])
+    {
+        snprintf(g_hoveredImageSrc, sizeof(g_hoveredImageSrc), "%s",
+                 currentHoveredSrc);
+        g_hasHoveredImage = 1;
+        return;
+    }
     if (g_hasHoveredImage && (!currentHoveredSrc ||
                               strcmp(g_hoveredImageSrc, currentHoveredSrc) != 0))
     {
@@ -2586,6 +2597,29 @@ void layout_evict_hovered_image(const char *currentHoveredSrc)
         g_hasHoveredImage = 0;
         g_hoveredImageSrc[0] = '\0';
     }
+}
+
+/* ── Bare-image hit test (#12c) ────────────────────────────────────────────
+ * Returns the LRI_IMAGE item under the given page coordinates, or NULL.
+ * Used by the HTML-mode click handler so unlinked <img> elements (google.com
+ * logo) can open the on-demand overlay too. */
+const LayoutItem *layout_image_at(int pageX, int pageY)
+{
+    int n = g_itemCount;
+    for (int i = n - 1; i >= 0; i--) /* topmost (last drawn) wins */
+    {
+        LayoutItem *it = g_items[i];
+        if (!it || it->type != LRI_IMAGE || !it->src || !it->src[0])
+        {
+            continue;
+        }
+        if (pageX >= it->x && pageX < it->x + it->w &&
+            pageY >= it->y && pageY < it->y + it->h)
+        {
+            return it;
+        }
+    }
+    return NULL;
 }
 
 /* ── On-demand overlay ───────────────────────────────────────────────────── */
@@ -2611,6 +2645,11 @@ int layout_has_on_demand_overlay(void)
 const char *layout_on_demand_href(void)
 {
     return g_overlay.href;
+}
+
+const char *layout_on_demand_src(void)
+{
+    return g_overlay.src;
 }
 
 void layout_draw_on_demand_overlay(void)

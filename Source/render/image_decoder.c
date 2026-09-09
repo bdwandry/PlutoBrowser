@@ -52,7 +52,8 @@ typedef struct ImgCacheEntry
     int present;
 } ImgCacheEntry;
 
-static ImgCacheEntry g_cache[IMGDEC_QUEUE_CAP * 2];
+#define IMGDEC_CACHE_CAP 256
+static ImgCacheEntry g_cache[IMGDEC_CACHE_CAP];
 static int g_cacheCount = 0;
 
 static char g_queue[IMGDEC_QUEUE_CAP][IMGDEC_URL_MAX];
@@ -84,7 +85,31 @@ static void cache_put(const char *url, LCDBitmap *bmp)
         e->present = 1;
         return;
     }
-    if (g_cacheCount >= (int)(sizeof(g_cache) / sizeof(g_cache[0]))) return;
+    if (g_cacheCount >= IMGDEC_CACHE_CAP)
+    {
+        /* Full: first drop a NEGATIVE entry (failed URLs are only hints),
+         * else drop the oldest entry (FIFO). Never drop silently on put. */
+        int victim = -1;
+        for (int i = 0; i < g_cacheCount; i++)
+        {
+            if (!g_cache[i].bmp)
+            {
+                victim = i;
+                break;
+            }
+        }
+        if (victim < 0)
+        {
+            victim = 0;
+        }
+        if (g_cache[victim].bmp)
+        {
+            pd->graphics->freeBitmap(g_cache[victim].bmp);
+        }
+        for (int j = victim + 1; j < g_cacheCount; j++)
+            g_cache[j - 1] = g_cache[j];
+        g_cacheCount--;
+    }
     e = &g_cache[g_cacheCount++];
     snprintf(e->url, IMGDEC_URL_MAX, "%s", url);
     e->bmp = bmp;
@@ -315,7 +340,6 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 
 static void http_on_error(const char *message)
 {
-    (void)message;
     cache_put(g_currentUrl, NULL);
     g_isDownloading = 0;
     pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
@@ -335,6 +359,12 @@ static void process_next(void)
 
     if (cache_find(url))
     {
+        /* Present (bitmap or Lua-parity `false`) → drop the queue entry.
+         * A failed URL keeps its negative entry, exactly like the reference,
+         * so an in-view per-frame enqueue() cannot loop forever on a host
+         * that always errors (seen live: api.flattr.com → 177 retries).
+         * Eviction modes delete the entry outright (imgdec_evict), which is
+         * what makes a later re-fetch legal. */
         process_next();
         return;
     }
@@ -385,6 +415,10 @@ void imgdec_enqueue(const char *src)
 void imgdec_evict(const char *src)
 {
     if (!src) return;
+    /* Don't delete the URL currently downloading: its callbacks would
+     * re-insert a fresh entry mid-flight (cache_put on completion), which
+     * desyncs the queue bookkeeping. */
+    if (g_isDownloading && strcmp(g_currentUrl, src) == 0) return;
     for (int i = 0; i < g_cacheCount; i++)
     {
         if (strncmp(g_cache[i].url, src, IMGDEC_URL_MAX) == 0)
@@ -416,6 +450,7 @@ int imgdec_is_cached(const char *src)
 {
     return cache_find(src) != NULL;
 }
+
 
 void imgdec_update(void)
 {

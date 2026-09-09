@@ -1150,20 +1150,18 @@ static void settings_on_change(void)
     {
         currentBrowseMode = MODE_READER;
     }
-    if (currentUrlObj)
+    /* User request: saving from a website RELOADS the current page (fresh
+     * fetch + re-render with the new settings) instead of re-rendering in
+     * place. No page open -> nothing to reload. */
+    if (currentUrlObj && currentUrlObj->normalized[0] &&
+        strcmp(currentUrlObj->normalized, "about:home") != 0)
     {
-        if (currentDoc && currentDoc->rawHtml && currentDoc->rawHtml[0])
-        {
-            render_body(currentDoc->rawHtml, currentUrlObj->normalized, 0);
-        }
-        else
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
-                     currentUrlObj->normalized);
-        }
+        navigate_to(currentUrlObj->normalized);
     }
 }
+
+
+
 
 static int updateFrame(void *userdata)
 {
@@ -1194,6 +1192,9 @@ static int updateFrame(void *userdata)
     }
 
     float crankChange = pd->system->getCrankChange();
+
+
+
 
     /* ── pendingNavUrl processing (Lua: top of updateFrame) ── */
     if (pendingNavUrlSet)
@@ -1242,6 +1243,11 @@ static int updateFrame(void *userdata)
     {
         bHoldActive = 0;
     }
+
+    /* Reset per-frame flags (Lua: Layout.onDemandConsumed = false each
+     * updateFrame). Without this the first on-demand overlay action blocks
+     * every later A-click in the page state. */
+    layout_clear_on_demand_consumed();
 
     /* ── B BUTTON HOLD STATE MACHINE (port of main.lua) ──
      * B press: start tracking; B held + Left/Right: history navigation
@@ -1578,13 +1584,44 @@ static int updateFrame(void *userdata)
                     }
                 }
 
-                /* (A) = left click: follow hovered link / activate input. */
+                /* (A) = left click: follow hovered link / activate input.
+                 * On-demand images: a click on ANY image (linked or bare)
+                 * opens the view/unload overlay (#12c — the Lua reference
+                 * only triggered through links, so bare <img> like the
+                 * google.com logo could never be loaded). */
+                int odHitImage = 0;
                 if ((btnPushed & (1 << 5)) &&
                     !(btnCurrent & (1 << 0)) && !(btnCurrent & (1 << 1)) &&
                     !layout_get_on_demand_consumed())
                 {
                     const LMLink *hitLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
-                    if (hitLink)
+                    if (!hitLink)
+                    {
+                        /* No link under the cursor: try a bare image hit. */
+                        const LayoutItem *imgItem = layout_image_at(
+                            mouseX, mouseY + scrollY);
+                        if (imgItem)
+                        {
+                            const char *im2 = storage_setting_str("imageMode");
+                            int imgMode2 = IMAGE_MODE_ALL;
+                            for (int m = 0; m < IMAGE_MODE_COUNT; m++)
+                            {
+                                if (im2 && strcmp(im2, IMAGE_MODE_NAMES[m]) == 0)
+                                {
+                                    imgMode2 = m;
+                                    break;
+                                }
+                            }
+                            if (imgMode2 == IMAGE_MODE_ONDEMAND)
+                            {
+                                layout_show_on_demand_overlay(
+                                    imgItem->src, imgItem->imgHref,
+                                    imgItem->alt);
+                                odHitImage = 1;
+                            }
+                        }
+                    }
+                    if (!odHitImage && hitLink)
                     {
                         const LMRectAux *primary = lm_rect_aux(hitLink->index, 0);
                         if (primary && primary->isToggle && primary->toggleKey)
@@ -1846,7 +1883,11 @@ static int updateFrame(void *userdata)
         {
             int prev = settings_page_previous_state();
             settings_page_close();
-            if (prev == STATE_HOME || prev == STATE_PAGE)
+            /* Lua: navigateTo("about:home") only when the previous state was
+             * HOME. A page restores its own state — settings_on_change already
+             * re-rendered it — so saving from a website returns to that
+             * website, not the home page. */
+            if (prev == STATE_HOME)
             {
                 go_home();
             }
@@ -1939,6 +1980,7 @@ static int updateFrame(void *userdata)
     {
         logger_log("updateFrame: heartbeat frame=%u", frameCount);
     }
+
 
 
     /* Phase 4: pump timers each frame. */

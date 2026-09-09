@@ -7,7 +7,7 @@
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
 > **CURRENT PHASE:** Beta bug-fixing round (user manual-testing reports, post-cleanup).
-> **CURRENT TASK:** Beta Bug Fix #11 — COMPLETE (Simulator + device verified). Home-page footer hints reworked: underlined "Buttons to Press:" header with extra space below the underline, then bulleted list — (A) Open / (B) Search/URL / Menu: Settings, one per line. No more right-edge cut-off.
+> **CURRENT TASK:** Beta Bug Fix #12 (+ #12b/#12c amendments) — COMPLETE. #12c: On-Demand overlay now triggers on ANY image click — bare <img> without a link wrapper (google.com logo) included — via a new layout_image_at() hit test; A toggles view/unload (2nd press evicts), B opens the image's link or cancels. Verified on benchmark site (linked images) and google.com (bare logo): overlay PASS, decode PASS, evict PASS, B dismiss PASS; device clean (a45f9335…, empty crashlog/errorlog). #12b: settings save from a website now fully RELOADS the current page (navigate_to refetch) instead of re-rendering in place; home stays home. Verified SETT2 battery (2nd navigate_to logged, state=PAGE doc=1) + device (ed10dc6a…, empty crashlog/errorlog). Image Mode re-implementation (all 5 modes work per spec: In-View Only loads/unloads with viewport, On-Demand click-to-load/unload + B follows image link, Hover loads on mouse-over and fully unloads on mouse-off, Disabled blocks everything, Render All loads everything) + settings save now returns to the page you were on (re-rendered via settings_on_change, matching the Lua onChangeCallback) instead of forcing home. Root cause of "modes never took effect": imageMode was declared an INT setting in storage but every reader/writer uses the STRING API — writes were silently dropped. Fixed the type + the negative-cache (In-View re-load after unload), per-frame onDemandConsumed reset, and hover-state set path.
 > (Earlier: PROJECT CLOSED — final cleanup (§23) complete with explicit user authorization. Battery scaffolding, scripted test windows (P12/P13/P14), the P33 benchmark window, P33b TLS probe, and all test-vector headers removed from main.c (6303 → 2029 lines); test seams (keyboard button-source, layout measure fn) removed from keyboard.c/layout.c; verbose per-op diagnostics quieted in http_client.c/image_decoder.c; battery-mode network gate removed from navigate_to; Makefile now builds the PDX with -k -s (no stray sources, stripped). Clean rebuild 0 warnings/0 errors (pdex.bin 175,413 B). Final verification: Simulator — boots to home page, user-initiated navigation to google.com succeeded end-to-end (TLS fetch → parse → layout → render → PNG logo decode 272x92 → storage persist), 9000+ frames, clean terminate, zero crashes. Device — MD5-verified deploy, boots to home page (defaults first-run path exercised), navigation to google.com succeeded (state=2, logo decoded, cookies+history saved), heartbeats stable, clean kEventTerminate, empty errorlog/crashlog. Logs: tests/logs/final_sim_cleanup.log, tests/logs/final_device_cleanup.log. All 38/38 Lua files remain fully ported and verified; no Lua runtime/bridge/fallback anywhere.
 > Last completed: **P32 — render/cloud_layout.lua (file #17, 152 lines) — COMPLETE in both environments.** Includes a new C JSON decoder (Source/util/json.[ch], RFC 8259: full grammar, \uXXXX + surrogate pairs, strict errors, bounded depth) replacing the Lua SDK's json.decode (no C-API equivalent). Simulator P32 5/5 + full regression green; device P32 ALL PASS (0 FAIL lines, empty errorlog/crashlog, md5 c85d1151…, 28s transfer). P24 idle-check interference permanently fixed by running the async P24 battery LAST (boot step 27).
 > P29 bugs found & fixed: (1) **vp8_precompute_filter_strengths was called BEFORE the filter header was parsed** (level still 0 → all fLimit=0 → loop filter was a silent no-op; the reference calls it after all headers, right before the MB loop) — this was the root cause of the V2/V5 chroma mismatch. (2) Chroma work arrays indexed down to −4/−1 by the mbX>0 shift-copy and TM's above-left read: Lua's "phantom keys" are behaviorally REAL (index −1 is read) — added a 4-byte VP8_UVPAD leading pad to uArr/vArr instead of skipping writes. (3) Battery checksum convention: the reference's `_testDecodeRaw` returns a w*h-entry array for VP8, so oracle checksums run over the first w*h rgb bytes (not w*h*3). All diagnostics (P29FILT/P29NOFILTER/P29TRACE/P29ROWS) removed from source after use; host-ASAN clean on all 4 vectors.
@@ -1888,3 +1888,110 @@ options, and extra space between the header underline and the list.
   row's vertical center. PASS
 - TC4 spacing: EXPECT extra space under underline before first item. ACT:
   first item 32px below header top (~20px below underline). PASS
+
+## Beta Bug Fix #12 — Image Mode (all 5) + settings save returns to page
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** None of the five Image Mode settings behaved per spec: In-View
+Only loaded images once and never re-loaded after scroll-out; Hover never
+rendered; On-Demand/Hover/Disabled semantics were inconsistent. Also, saving
+settings from a website dumped the user back to the home page instead of
+reloading the current page.
+
+**Root causes found (C port):**
+1. `imageMode` was registered in storage as an INT setting, but every reader
+   and writer uses the STRING API (`storage_setting_str` /
+   `storage_set_setting_str`) — writes were silently dropped, so no mode ever
+   took effect. (Same class of bug as the earlier `mode` setting bug.)
+2. Negative-cache: after an image was unloaded, the cache kept the failed
+   entry, so In-View Only never re-enqueued it on scroll-back.
+3. `onDemandConsumed` was never reset per frame (Lua resets it every frame),
+   so after the first on-demand interaction every later A-click was blocked.
+4. Hover mode: the eviction path existed but nothing ever SET the hover state,
+   so Hover could never render.
+5. Settings save always ran `go_home()` regardless of previous state.
+
+**Fixes:**
+- `Source/core/storage.c`: imageMode declared as a string setting.
+- `Source/render/image_decoder.c`: unloaded/failed entries are removed from
+  the cache so they can be re-requested (viewport re-entry, hover re-entry).
+- `Source/render/layout.c`: hover state is set when the cursor is over an
+  image in reader mode (Hover mode), cleared when it leaves.
+- `Source/main.c`: per-frame `onDemandConsumed = 0` (Lua parity); settings
+  save path restores the previous state; home stays home.
+- **AMENDED after user re-test (#12b):** settings save from a website must
+  fully RELOAD the current page, not re-render it in place.
+  `settings_on_change` now calls `navigate_to(currentUrlObj->normalized)`
+  (fresh fetch -> parse -> render with new settings) whenever a real page is
+  open; no page open -> nothing to reload. Verified by the SETT2 battery:
+  nav log #1 (example.com) -> settings open -> save -> **nav log #2
+  (http://example.com/ — the full reload)** -> state=2 PAGE doc=1 ->
+  `SETT2: ALL PASS`. Device: MD5-verified deploy (ed10dc6a6d1f…), clean
+  boot/run with user navigation + storage save, clean terminate, empty
+  crashlog/errorlog. SETT2 scaffolding removed; clean rebuild 0 errors.
+
+**Verification (Simulator, scripted IMGT battery — 11/11 PASS):**
+- TC1 viewport load: images enqueued + decoded when page opens. PASS
+- TC2 viewport unload: images unloaded when scrolled out of view. PASS
+- TC3 viewport reload: scrolling back re-enqueues + re-decodes. PASS
+- TC4 disabled: no enqueue, no decode, no draw. PASS
+- TC5 render-all: everything decodes regardless of position. PASS
+- TC6 on-demand load: click loads. PASS
+- TC7 on-demand unload: second click unloads. PASS
+- TC8 on-demand B: follows the image's link. PASS
+- TC9 hover load: mouse-over (reader mode) loads after decode completes. PASS
+- TC10 hover unload: mouse-off fully unloads from memory. PASS
+- TC11 settings save from page: navigated to example.com, opened settings,
+  pressed Save — state restored to the PAGE with doc intact (not home).
+  SETT battery: `action=save prev=2` → `state=2 (want 2 PAGE) doc=1` →
+  `SETT: ALL PASS`. PASS
+
+**Device:** MD5-verified deploy (25345c5f3bdf7a50…), clean boot, stable
+heartbeats through 2,457 frames, clean kEventTerminate, crashlog + errorlog
+EMPTY. (Pre-deploy crashlog from the old build was reviewed then cleared per
+AGENTS.md.)
+
+**Test scaffolding:** IMGT + SETT batteries and diag accessors removed after
+verification; clean rebuild 0 errors (pdex.bin 175,860 B).
+
+## Beta Bug Fix #12c — On-Demand overlay for ALL images (bare <img> too)
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** With Image Mode = On-Demand, clicking images showed no
+view/unload overlay. Worked on some images of the benchmark site but not on
+google.com's logo.
+
+**Fact-check (user report confirmed):** The overlay trigger only ran when the
+cursor was over a LINK. google.com's logo is a bare `<img id=hplogo>` with no
+`<a>` wrapper, so it could never open the overlay. The Lua reference has the
+same limitation; the user's spec ("click on any image") is broader, so the C
+port now implements the spec.
+
+**Fix:**
+- `Source/render/layout.[ch]`: new `layout_image_at(pageX, pageY)` — topmost
+  LRI_IMAGE item under page coordinates (bare-image hit test).
+- `Source/main.c` (HTML-mode click handler): when NO link is under the cursor
+  and Image Mode is On-Demand, hit-test bare images; if one is under the
+  cursor, open the same overlay with (src, imgHref, alt). Linked-image clicks
+  are unchanged (bare check only runs when linkHit == NULL).
+
+**Behavior (unchanged overlay semantics):**
+- A on image -> overlay box: title (alt), "(A) View Image" / "(A) Unload
+  Image" once loaded, "(B) Open Link" when the image has an href / "(B)
+  Cancel" when bare.
+- A again -> toggles: loads (enqueue+request) or unloads (evict+unrequest).
+- B -> follows the image's link, or cancels if none.
+
+**Verification (Simulator, scripted ODTEST battery):**
+- Benchmark site (linked image): hit YES, overlay appears, A enqueues,
+  SVG decodes (IMGDEC ok 266x200). PASS
+- google.com (bare logo): linkHit=NO bareHit=YES, A -> overlay PASS,
+  A -> decode PASS (IMGDEC ok 272x92), A -> evict PASS (decoded=0),
+  B -> overlay dismissed, state stays on page. PASS
+- Test scaffolding (ODTEST v1/v2, button injection) removed afterwards;
+  clean rebuild 0 errors.
+
+**Device:** MD5-verified deploy (a45f933575515b…), clean run; the user's own
+google.com click-test is visible in the device log (logo decode at 11:57:10),
+clean kEventTerminate, crashlog + errorlog EMPTY.
+

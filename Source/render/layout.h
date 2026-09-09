@@ -170,6 +170,9 @@ const LayoutItem *layout_item_at(int index); /* 0-based; NULL if out of range */
  * form_item_value() both see it immediately. Pass NULL to clear. */
 void layout_set_input_value(const LayoutItem *item, const char *text);
 const LayoutItem *layout_get_selected_input(void);
+
+/* Bare-image hit test: LRI_IMAGE item under page coords, or NULL (#12c). */
+const LayoutItem *layout_image_at(int pageX, int pageY);
 void layout_set_selected_input(const LayoutItem *item);
 int layout_get_on_demand_consumed(void);
 void layout_clear_on_demand_consumed(void);
@@ -188,6 +191,7 @@ const char *layout_handle_on_demand_input(unsigned int btnPushed);
 int layout_has_on_demand_overlay(void);
 /* The overlay's link href (Lua: Layout.onDemandOverlay.href). "" when none. */
 const char *layout_on_demand_href(void);
+const char *layout_on_demand_src(void);
 
 /* ── Test seams (vector parity vs the Lua reference harness) ─────────────── */
 /* Measure function: Lua Style.getTextWidth(font, text). Swappable so the
