@@ -1,0 +1,15 @@
+jsproperty.c:46:21:lookup	16	static
+jsproperty.c:106:21:unlinkproperty	32	static
+jsproperty.c:156:21:deleteproperty	32	static
+jsproperty.c:252:21:itwalk	32	static
+jsproperty.c:83:21:insert	48	static
+jsproperty.c:266:21:itflatten.isra.0	16	static
+jsproperty.c:165:12:jsV_newobject	24	static
+jsproperty.c:181:14:jsV_getownproperty	0	static
+jsproperty.c:186:14:jsV_getpropertyx	16	static
+jsproperty.c:199:14:jsV_getproperty	16	static
+jsproperty.c:221:14:jsV_setproperty	32	static
+jsproperty.c:237:6:jsV_delproperty	8	static
+jsproperty.c:276:12:jsV_newiterator	24	static
+jsproperty.c:300:13:jsV_nextiterator	16	static
+jsproperty.c:320:6:jsV_resizearray	56	static

@@ -36,7 +36,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 5
+#define OPTION_COUNT 6
 
 static int g_isOpen = 0;
 static int g_selectedIndex = 1;
@@ -52,6 +52,7 @@ static struct
     int mode;                     /* BrowseMode */
     int invertCrank;              /* 0/1 */
     char imageMode[16];           /* persisted name */
+    int showFps;                  /* 0/1 — FPS overlay */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -89,6 +90,7 @@ void settings_page_open(int prevState)
     const char *im = storage_setting_str("imageMode");
     snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
              im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_VIEWPORT]);
+    g_staged.showFps = storage_setting_int("showFps");
 }
 
 void settings_page_close(void)
@@ -102,6 +104,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("mode", g_staged.mode);
     storage_set_setting_int("invertCrank", g_staged.invertCrank);
     storage_set_setting_str("imageMode", g_staged.imageMode);
+    storage_set_setting_int("showFps", g_staged.showFps);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -155,6 +158,8 @@ const char *settings_page_staged_value(int optionIndex)
         return image_mode_label((ImageMode)(n >= 0 ? n : IMAGE_MODE_ALL));
     }
     case 5:
+        return g_staged.showFps ? "On" : "Off";
+    case 6:
         return "";
     default:
         return "";
@@ -215,6 +220,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             break;
         }
         case 5:
+            g_staged.showFps = !g_staged.showFps;
+            break;
+        case 6:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -257,6 +265,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             break;
         }
         case 5:
+            g_staged.showFps = !g_staged.showFps;
+            break;
+        case 6:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -268,7 +279,7 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
     }
     else if (pushed & BTN_A)
     {
-        if (g_selectedIndex == 5)
+        if (g_selectedIndex == 6)
         {
             /* Clear Cookies action: execute immediately */
             if (g_clearCookiesCb)
@@ -345,15 +356,16 @@ void settings_page_draw(void)
 
         static const char *const labels[OPTION_COUNT] = {
             "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-            "Clear Cookies"};
+            "Show FPS", "Clear Cookies"};
         int itemY = innerY + 24;
         int itemH = 26;
+        int itemGap = 1; /* 6 rows must fit the fixed panel with the footer */
 
         for (int i = 1; i <= OPTION_COUNT; i++)
         {
-            int iy = itemY + (i - 1) * (itemH + 4);
+            int iy = itemY + (i - 1) * (itemH + itemGap);
             int isSel = (i == g_selectedIndex);
-            int isAction = (i == 5);
+            int isAction = (i == 6);
 
             if (isSel)
             {
@@ -402,7 +414,7 @@ void settings_page_draw(void)
             pd->graphics->setDrawMode(kDrawModeCopy);
         }
 
-        int footerY = itemY + OPTION_COUNT * (itemH + 4) + 8;
+        int footerY = itemY + OPTION_COUNT * (itemH + itemGap) + 6;
         pd->graphics->setFont(fontSmall);
         const char *footer = "(B) Cancel  *  (A) Save & Close";
         pd->graphics->drawText(footer, strlen(footer), kUTF8Encoding, innerX,

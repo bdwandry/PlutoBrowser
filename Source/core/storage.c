@@ -46,9 +46,10 @@ static Setting g_settings[16] = {
     {"autoReader", "", 0, 1}, /* false */
     {"fontSize", "medium", 0, 0},
     {"imageMode", "viewport", 0, 0}, /* string name; Lua stores Constants names */
-    {"invertCrank", "", 0, 1} /* false */
+    {"invertCrank", "", 0, 1}, /* false */
+    {"showFps", "", 0, 1} /* false — FPS overlay off by default */
 };
-static int g_settingCount = 6;
+static int g_settingCount = 7;
 
 static int g_haveDefaults = 0;
 
@@ -346,6 +347,7 @@ void storage_load(void)
     storage_set_setting_int("autoReader", 0);
     storage_set_setting_str("fontSize", "medium");
     storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
+    storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("invertCrank", 0);
 
     char *line = g_loadLine;
@@ -664,6 +666,7 @@ void storage_init(PlaydateAPI *pd)
     /* fill the two settings whose defaults come from Constants */
     storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
+    storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_load();
     logger_log("STORAGE: init exit");
 }

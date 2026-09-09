@@ -1,0 +1,9 @@
+jsregexp.c:23:13:js_newregexpx	40	static
+jsregexp.c:146:13:jsB_new_RegExp	32	static
+jsregexp.c:192:13:jsB_RegExp	8	static
+jsregexp.c:102:13:Rp_test	160	static
+jsregexp.c:199:13:Rp_toString	32	static
+jsregexp.c:47:6:js_newregexp	0	static
+jsregexp.c:52:6:js_RegExp_prototype_exec	160	static
+jsregexp.c:225:13:Rp_exec	16	static
+jsregexp.c:230:6:jsB_initregexp	24	static

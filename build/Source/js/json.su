@@ -1,0 +1,14 @@
+json.c:223:13:fmtindent	24	static
+json.c:186:13:fmtstr	48	static
+json.c:111:13:jsonrevive	56	static
+json.c:175:13:fmtnum	72	static
+json.c:38:13:jsonexpect	24	static
+json.c:45:13:jsonvalue	16	static
+json.c:159:13:JSON_parse	8	static
+json.c:4:5:js_isnumberobject	16	static
+json.c:9:5:js_isstringobject	16	static
+json.c:311:12:fmtvalue	88	static
+json.c:367:13:JSON_stringify	56	static
+json.c:14:5:js_isbooleanobject	16	static
+json.c:19:5:js_isdateobject	16	static
+json.c:414:6:jsB_initjson	8	static
