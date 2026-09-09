@@ -20,6 +20,11 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
 /* Draw with the 300ms ease-out-cubic scale-in animation. */
 void settings_page_draw(void);
 
+/* Feed raw crank delta while the panel is open: scrolls the selection
+ * (clockwise = down). The panel consumes the motion entirely — the caller
+ * must zero its own crank state afterwards so the background never moves. */
+void settings_page_apply_crank(float crankChange);
+
 int settings_page_is_open(void);
 int settings_page_selected_index(void);
 int settings_page_previous_state(void);
