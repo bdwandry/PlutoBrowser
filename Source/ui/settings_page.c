@@ -38,8 +38,19 @@ extern PlaydateAPI *pluto_pd(void);
 
 #define OPTION_COUNT 6
 
+/* ── Scrolling list geometry ──────────────────────────────────────────────
+ * The panel is fixed-size; the row list scrolls under it as the browser
+ * grows more settings. Rows live between the title (24px) and the footer
+ * (18px); SETTINGS_ROW_PITCH is the per-row stride. */
+#define SETTINGS_TITLE_H 24
+#define SETTINGS_FOOTER_H 18
+#define SETTINGS_ITEM_H 26
+#define SETTINGS_ROW_PITCH (SETTINGS_ITEM_H + 2)
+
 static int g_isOpen = 0;
 static int g_selectedIndex = 1;
+static int g_scrollOffset = 0;   /* px scrolled down from the top of the list */
+static float g_crankAccum = 0.0f; /* accumulated crank degrees → row steps */
 static int g_previousState = 0;
 static unsigned int g_animStartMs = 0;
 static void (*g_onChangeCallback)(void) = NULL;
@@ -72,6 +83,93 @@ int settings_page_selected_index(void)
     return g_selectedIndex;
 }
 
+/* ── Scroll geometry helpers ────────────────────────────────────────────── */
+
+/* Height available for the row list inside the fixed panel. */
+static int settings_list_height(void)
+{
+    return BOX_H - 20 /* panel inner margins */ - SETTINGS_TITLE_H -
+           SETTINGS_FOOTER_H;
+}
+
+/* Max scroll offset: the bottom of the LAST row must sit at the list bottom.
+ * Both edges are in content space (measured from the panel's inner top). */
+static int settings_max_scroll(void)
+{
+    int contentBottom = SETTINGS_TITLE_H +
+                        (OPTION_COUNT - 1) * SETTINGS_ROW_PITCH +
+                        SETTINGS_ITEM_H;
+    int windowBottom = SETTINGS_TITLE_H + settings_list_height();
+    return contentBottom > windowBottom ? contentBottom - windowBottom : 0;
+}
+
+/* Clamp the scroll so the SELECTED row is always fully visible (keeps D-pad
+ * and crank scrolling consistent). */
+static int settings_clamped_scroll(void)
+{
+    int maxScroll = settings_max_scroll();
+    int scroll = g_scrollOffset;
+    if (scroll > maxScroll)
+    {
+        scroll = maxScroll;
+    }
+    if (scroll < 0)
+    {
+        scroll = 0;
+    }
+    /* keep the selected row fully on-screen */
+    int selTop = SETTINGS_TITLE_H + (g_selectedIndex - 1) * SETTINGS_ROW_PITCH;
+    int selBottom = selTop + SETTINGS_ITEM_H;
+    int listBottom = SETTINGS_TITLE_H + settings_list_height();
+    int minScroll = selBottom - listBottom;
+    int maxForSel = selTop - SETTINGS_TITLE_H;
+    if (minScroll > maxForSel)
+    {
+        minScroll = maxForSel;
+    }
+    if (scroll < minScroll)
+    {
+        scroll = minScroll;
+    }
+    if (scroll > maxForSel)
+    {
+        scroll = maxForSel;
+    }
+    return scroll;
+}
+
+void settings_page_apply_crank(float crankChange)
+{
+    if (!g_isOpen || crankChange == 0.0f)
+    {
+        return;
+    }
+    /* ~18deg of crank = one row, with sub-row remainder carried over. */
+    const float degPerRow = 18.0f;
+    g_crankAccum += crankChange;
+    int rows = (int)(g_crankAccum / degPerRow);
+    if (rows != 0)
+    {
+        g_crankAccum -= (float)rows * degPerRow;
+    }
+    while (rows > 0)
+    {
+        if (g_selectedIndex < OPTION_COUNT)
+        {
+            g_selectedIndex++;
+        }
+        rows--;
+    }
+    while (rows < 0)
+    {
+        if (g_selectedIndex > 1)
+        {
+            g_selectedIndex--;
+        }
+        rows++;
+    }
+}
+
 int settings_page_previous_state(void)
 {
     return g_previousState;
@@ -81,6 +179,8 @@ void settings_page_open(int prevState)
 {
     g_isOpen = 1;
     g_selectedIndex = 1;
+    g_scrollOffset = 0;
+    g_crankAccum = 0.0f;
     g_previousState = prevState;
     g_animStartMs = pluto_pd()->system->getCurrentTimeMilliseconds();
 
@@ -357,13 +457,41 @@ void settings_page_draw(void)
         static const char *const labels[OPTION_COUNT] = {
             "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
             "Show FPS", "Clear Cookies"};
-        int itemY = innerY + 24;
-        int itemH = 26;
-        int itemGap = 1; /* 6 rows must fit the fixed panel with the footer */
+        int itemY = innerY + SETTINGS_TITLE_H;      /* list top (after title) */
+        int itemH = SETTINGS_ITEM_H;
+        int itemGap = SETTINGS_ROW_PITCH - SETTINGS_ITEM_H;
+        int listH = settings_list_height();
+        int scroll = settings_clamped_scroll();
+        g_scrollOffset = scroll;
+
+        /* Edge arrows: indicate more rows beyond the visible window. */
+        if (scroll > 0)
+        { /* can scroll up */
+            int ax = innerX + innerW / 2;
+            int ay = itemY - 4;
+            pd->graphics->fillTriangle(ax - 4, ay + 3, ax + 4, ay + 3, ax, ay - 3,
+                                       kColorBlack);
+        }
+        if (scroll < settings_max_scroll())
+        { /* can scroll down */
+            int ax = innerX + innerW / 2;
+            int ay = itemY + listH + 3;
+            pd->graphics->fillTriangle(ax - 4, ay - 3, ax + 4, ay - 3, ax, ay + 3,
+                                       kColorBlack);
+        }
+
+        /* Push a sub-context clipped to the row area so partially scrolled
+         * rows cut off cleanly instead of bleeding over the title/footer. */
+        pd->graphics->pushContext(NULL);
+        pd->graphics->setClipRect(curX + 2, itemY, curW - 4, listH);
 
         for (int i = 1; i <= OPTION_COUNT; i++)
         {
-            int iy = itemY + (i - 1) * (itemH + itemGap);
+            int iy = itemY + (i - 1) * (itemH + itemGap) - scroll;
+            if (iy + itemH < itemY || iy > itemY + listH)
+            {
+                continue; /* fully outside the visible window */
+            }
             int isSel = (i == g_selectedIndex);
             int isAction = (i == 6);
 
@@ -414,7 +542,9 @@ void settings_page_draw(void)
             pd->graphics->setDrawMode(kDrawModeCopy);
         }
 
-        int footerY = itemY + OPTION_COUNT * (itemH + itemGap) + 6;
+        pd->graphics->popContext(); /* row-clip context */
+
+        int footerY = itemY + listH + 6;
         pd->graphics->setFont(fontSmall);
         const char *footer = "(B) Cancel  *  (A) Save & Close";
         pd->graphics->drawText(footer, strlen(footer), kUTF8Encoding, innerX,

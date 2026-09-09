@@ -1231,6 +1231,7 @@ static int updateFrame(void *userdata)
 
 
 
+
     /* ── pendingNavUrl processing (Lua: top of updateFrame) ── */
     if (pendingNavUrlSet)
     {
@@ -1244,7 +1245,17 @@ static int updateFrame(void *userdata)
     /* ── crank velocity physics (Lua parity) ── */
     {
         int keyboardActive = formKeyboardOpen || address_bar_is_open();
-        if (keyboardActive)
+        if (currentState == STATE_SETTINGS)
+        {
+            /* Settings panel consumes the crank entirely: it scrolls the
+             * settings list; the background page/home must not receive any
+             * motion (no velocity, no link-selection clear). */
+            settings_page_apply_crank(
+                storage_setting_int("invertCrank") ? -crankChange : crankChange);
+            crankChange = 0.0f;
+            crankVelocity = 0.0f;
+        }
+        else if (keyboardActive)
         {
             crankChange = 0.0f;
             crankVelocity = 0.0f;
@@ -2043,6 +2054,9 @@ static int updateFrame(void *userdata)
 
     /* FPS overlay: drawn after all state rendering so nothing can clip it. */
     draw_fps_overlay();
+
+
+
 
 
     /* Phase 4: pump timers each frame. */
