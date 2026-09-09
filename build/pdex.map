@@ -5840,41 +5840,41 @@ END GROUP
                 0x000000000000a8b0      0x1d8 build/Source/render/layout.o
  *fill*         0x000000000000aa88        0x8 
  .text.arena_word
-                0x000000000000aa90       0x74 build/Source/render/layout.o
- *fill*         0x000000000000ab04        0xc 
+                0x000000000000aa90       0x64 build/Source/render/layout.o
+ *fill*         0x000000000000aaf4        0xc 
  .text.item_new
-                0x000000000000ab10       0x6c build/Source/render/layout.o
- *fill*         0x000000000000ab7c        0x4 
+                0x000000000000ab00       0x6c build/Source/render/layout.o
+ *fill*         0x000000000000ab6c        0x4 
  .text.image_mode
-                0x000000000000ab80       0x1c build/Source/render/layout.o
- *fill*         0x000000000000ab9c        0x4 
+                0x000000000000ab70       0x1c build/Source/render/layout.o
+ *fill*         0x000000000000ab8c        0x4 
  .text.is_space_char.part.0
-                0x000000000000aba0        0xc build/Source/render/layout.o
- *fill*         0x000000000000abac        0x4 
+                0x000000000000ab90        0xc build/Source/render/layout.o
+ *fill*         0x000000000000ab9c        0x4 
  .text.od_requested.part.0
-                0x000000000000abb0       0x38 build/Source/render/layout.o
- *fill*         0x000000000000abe8        0x8 
+                0x000000000000aba0       0x38 build/Source/render/layout.o
+ *fill*         0x000000000000abd8        0x8 
  .text.flow_push_line
-                0x000000000000abf0       0x50 build/Source/render/layout.o
+                0x000000000000abe0       0x50 build/Source/render/layout.o
  .text.emit_flow.isra.0
-                0x000000000000ac40      0x344 build/Source/render/layout.o
- *fill*         0x000000000000af84        0xc 
+                0x000000000000ac30      0x344 build/Source/render/layout.o
+ *fill*         0x000000000000af74        0xc 
  .text.layout_draw_on_demand_overlay.part.0
-                0x000000000000af90      0x160 build/Source/render/layout.o
+                0x000000000000af80      0x160 build/Source/render/layout.o
  .text.break_lines
-                0x000000000000b0f0      0x2f4 build/Source/render/layout.o
- *fill*         0x000000000000b3e4        0xc 
+                0x000000000000b0e0      0x2f4 build/Source/render/layout.o
+ *fill*         0x000000000000b3d4        0xc 
  .text.layout_build_failed
-                0x000000000000b3f0        0xc build/Source/render/layout.o
-                0x000000000000b3f0                layout_build_failed
- *fill*         0x000000000000b3fc        0x4 
+                0x000000000000b3e0        0xc build/Source/render/layout.o
+                0x000000000000b3e0                layout_build_failed
+ *fill*         0x000000000000b3ec        0x4 
  .text.layout_init
-                0x000000000000b400        0xc build/Source/render/layout.o
-                0x000000000000b400                layout_init
- *fill*         0x000000000000b40c        0x4 
+                0x000000000000b3f0        0xc build/Source/render/layout.o
+                0x000000000000b3f0                layout_init
+ *fill*         0x000000000000b3fc        0x4 
  .text.layout_clear
-                0x000000000000b410       0xac build/Source/render/layout.o
-                0x000000000000b410                layout_clear
+                0x000000000000b400       0xbc build/Source/render/layout.o
+                0x000000000000b400                layout_clear
  *fill*         0x000000000000b4bc        0x4 
  .text.layout_normalize_align
                 0x000000000000b4c0       0xbc build/Source/render/layout.o
@@ -7472,9 +7472,9 @@ END GROUP
                 0x000000000003b874       0x26 build/Source/render/layout.o
                                          0x32 (size before relaxing)
  *fill*         0x000000000003b89a        0x2 
- .rodata.syms.11197
+ .rodata.syms.11202
                 0x000000000003b89c       0x34 build/Source/render/layout.o
- .rodata.vals.11196
+ .rodata.vals.11201
                 0x000000000003b8d0       0x34 build/Source/render/layout.o
  .rodata.bayer4x4
                 0x000000000003b904       0x10 build/Source/render/decoders/dither.o
@@ -8000,7 +8000,7 @@ END GROUP
 .igot.plt       0x00000000000408bc        0x0
  .igot.plt      0x00000000000408bc        0x0 build/Source/main.o
 
-.bss            0x00000000000408c0    0xb2938
+.bss            0x00000000000408c0    0xb2930
                 0x00000000000408c0                . = ALIGN (0x4)
                 0x00000000000408c0                __bss_start__ = .
  *(.bss*)
@@ -8211,7 +8211,7 @@ END GROUP
  .bss.g_queueCount
                 0x000000000007bb70        0x4 build/Source/render/image_decoder.o
  .bss.pd        0x000000000007bb74        0x4 build/Source/render/image_decoder.o
- .bss.buf.11183
+ .bss.buf.11188
                 0x000000000007bb78       0x20 build/Source/render/layout.o
  .bss.g_buildError
                 0x000000000007bb98        0x4 build/Source/render/layout.o
@@ -8241,158 +8241,154 @@ END GROUP
                 0x00000000000843c4        0x4 build/Source/render/layout.o
  .bss.g_totalHeight
                 0x00000000000843c8        0x4 build/Source/render/layout.o
- .bss.g_wordArena
+ .bss.g_wordChunks
                 0x00000000000843cc        0x4 build/Source/render/layout.o
- .bss.g_wordArenaCap
-                0x00000000000843d0        0x4 build/Source/render/layout.o
- .bss.g_wordArenaUsed
-                0x00000000000843d4        0x4 build/Source/render/layout.o
- .bss.trunc.11829
-                0x00000000000843d8      0x104 build/Source/render/layout.o
+ .bss.trunc.11834
+                0x00000000000843d0      0x104 build/Source/render/layout.o
  .bss.fixedBuilt
-                0x00000000000844dc        0x4 build/Source/render/decoders/inflate.o
+                0x00000000000844d4        0x4 build/Source/render/decoders/inflate.o
  .bss.fixedDist
-                0x00000000000844e0      0xd84 build/Source/render/decoders/inflate.o
- .bss.fixedLit  0x0000000000085264      0xd84 build/Source/render/decoders/inflate.o
- .bss.g.10439   0x0000000000085fe8    0x10170 build/Source/render/decoders/gif.o
+                0x00000000000844d8      0xd84 build/Source/render/decoders/inflate.o
+ .bss.fixedLit  0x000000000008525c      0xd84 build/Source/render/decoders/inflate.o
+ .bss.g.10439   0x0000000000085fe0    0x10170 build/Source/render/decoders/gif.o
  .bss.JPEG_IDCT_T
-                0x0000000000096158      0x100 build/Source/render/decoders/jpeg.o
+                0x0000000000096150      0x100 build/Source/render/decoders/jpeg.o
  .bss.jpeg_idct_ready
-                0x0000000000096258        0x4 build/Source/render/decoders/jpeg.o
+                0x0000000000096250        0x4 build/Source/render/decoders/jpeg.o
  .bss.attrs.10738
-                0x000000000009625c      0xc04 build/Source/render/decoders/svg.o
- .bss.g_svgCo   0x0000000000096e60     0x8008 build/Source/render/decoders/svg.o
- .bss.g_svgPts  0x000000000009ee68     0x8008 build/Source/render/decoders/svg.o
+                0x0000000000096254      0xc04 build/Source/render/decoders/svg.o
+ .bss.g_svgCo   0x0000000000096e58     0x8008 build/Source/render/decoders/svg.o
+ .bss.g_svgPts  0x000000000009ee60     0x8008 build/Source/render/decoders/svg.o
  .bss.g_tagAttrsRaw
-                0x00000000000a6e70      0x400 build/Source/render/decoders/svg.o
+                0x00000000000a6e68      0x400 build/Source/render/decoders/svg.o
  .bss.g_tagName
-                0x00000000000a7270       0x20 build/Source/render/decoders/svg.o
- .bss.st.10517  0x00000000000a7290      0xc04 build/Source/render/decoders/svg.o
+                0x00000000000a7268       0x20 build/Source/render/decoders/svg.o
+ .bss.st.10517  0x00000000000a7288      0xc04 build/Source/render/decoders/svg.o
  .bss.stack.10732
-                0x00000000000a7e94      0x200 build/Source/render/decoders/svg.o
- .bss.lzw_rev   0x00000000000a8094     0x1000 build/Source/render/decoders/tif.o
+                0x00000000000a7e8c      0x200 build/Source/render/decoders/svg.o
+ .bss.lzw_rev   0x00000000000a808c     0x1000 build/Source/render/decoders/tif.o
  .bss.lzw_state
-                0x00000000000a9094     0x4028 build/Source/render/decoders/tif.o
+                0x00000000000a908c     0x4028 build/Source/render/decoders/tif.o
  .bss.subs.10865
-                0x00000000000ad0bc    0x1e300 build/Source/render/decoders/pdfimg.o
+                0x00000000000ad0b4    0x1e300 build/Source/render/decoders/pdfimg.o
  .bss.big.10848
-                0x00000000000cb3bc    0x20000 build/Source/render/decoders/webp.o
+                0x00000000000cb3b4    0x20000 build/Source/render/decoders/webp.o
  .bss.codeLengthCodeLengths.10706
-                0x00000000000eb3bc       0x13 build/Source/render/decoders/webp.o
- *fill*         0x00000000000eb3cf        0x1 
+                0x00000000000eb3b4       0x13 build/Source/render/decoders/webp.o
+ *fill*         0x00000000000eb3c7        0x1 
  .bss.g_htreeGroups
-                0x00000000000eb3d0        0x4 build/Source/render/decoders/webp.o
+                0x00000000000eb3c8        0x4 build/Source/render/decoders/webp.o
  .bss.g_numHtreeGroupsMax
-                0x00000000000eb3d4        0x4 build/Source/render/decoders/webp.o
+                0x00000000000eb3cc        0x4 build/Source/render/decoders/webp.o
  .bss.lengths_table.10707
-                0x00000000000eb3d8      0x200 build/Source/render/decoders/webp.o
- .bss.VP8_LOG2  0x00000000000eb5d8      0x400 build/Source/render/decoders/webp_vp8.o
+                0x00000000000eb3d0      0x200 build/Source/render/decoders/webp.o
+ .bss.VP8_LOG2  0x00000000000eb5d0      0x400 build/Source/render/decoders/webp_vp8.o
  .bss.VP8_UARR_MEM
-                0x00000000000eb9d8      0x144 build/Source/render/decoders/webp_vp8.o
+                0x00000000000eb9d0      0x144 build/Source/render/decoders/webp_vp8.o
  .bss.VP8_VARR_MEM
-                0x00000000000ebb1c      0x144 build/Source/render/decoders/webp_vp8.o
- .bss.VP8_YARR  0x00000000000ebc60      0x280 build/Source/render/decoders/webp_vp8.o
+                0x00000000000ebb14      0x144 build/Source/render/decoders/webp_vp8.o
+ .bss.VP8_YARR  0x00000000000ebc58      0x280 build/Source/render/decoders/webp_vp8.o
  .bss.inited.10666
-                0x00000000000ebee0        0x4 build/Source/render/decoders/webp_vp8.o
+                0x00000000000ebed8        0x4 build/Source/render/decoders/webp_vp8.o
  .bss.vp8_wht_tmp
-                0x00000000000ebee4       0x40 build/Source/render/decoders/webp_vp8.o
+                0x00000000000ebedc       0x40 build/Source/render/decoders/webp_vp8.o
  .bss.g_cometAnimFrame
-                0x00000000000ebf24        0x4 build/Source/ui/chrome.o
+                0x00000000000ebf1c        0x4 build/Source/ui/chrome.o
  .bss.g_failedUrl
-                0x00000000000ebf28      0x100 build/Source/ui/error_page.o
+                0x00000000000ebf20      0x100 build/Source/ui/error_page.o
  .bss.g_marquee
-                0x00000000000ec028      0x100 build/Source/ui/home_page.o
+                0x00000000000ec020      0x100 build/Source/ui/home_page.o
  .bss.g_scrollY
-                0x00000000000ec128        0x4 build/Source/ui/home_page.o
+                0x00000000000ec120        0x4 build/Source/ui/home_page.o
  .bss.g_selectedIndex
-                0x00000000000ec12c        0x4 build/Source/ui/home_page.o
+                0x00000000000ec124        0x4 build/Source/ui/home_page.o
  .bss.g_targetScrollY
-                0x00000000000ec130        0x4 build/Source/ui/home_page.o
+                0x00000000000ec128        0x4 build/Source/ui/home_page.o
  .bss.g_scrollY
-                0x00000000000ec134        0x4 build/Source/ui/bookmarks_page.o
+                0x00000000000ec12c        0x4 build/Source/ui/bookmarks_page.o
  .bss.g_scrollY
-                0x00000000000ec138        0x4 build/Source/ui/history_page.o
+                0x00000000000ec130        0x4 build/Source/ui/history_page.o
  .bss.g_animStartMs
-                0x00000000000ec13c        0x4 build/Source/ui/settings_page.o
+                0x00000000000ec134        0x4 build/Source/ui/settings_page.o
  .bss.g_crankAccum
-                0x00000000000ec140        0x4 build/Source/ui/settings_page.o
- .bss.g_isOpen  0x00000000000ec144        0x4 build/Source/ui/settings_page.o
+                0x00000000000ec138        0x4 build/Source/ui/settings_page.o
+ .bss.g_isOpen  0x00000000000ec13c        0x4 build/Source/ui/settings_page.o
  .bss.g_onChangeCallback
-                0x00000000000ec148        0x4 build/Source/ui/settings_page.o
+                0x00000000000ec140        0x4 build/Source/ui/settings_page.o
  .bss.g_previousState
-                0x00000000000ec14c        0x4 build/Source/ui/settings_page.o
+                0x00000000000ec144        0x4 build/Source/ui/settings_page.o
  .bss.g_scrollOffset
-                0x00000000000ec150        0x4 build/Source/ui/settings_page.o
- .bss.g_staged  0x00000000000ec154       0x20 build/Source/ui/settings_page.o
+                0x00000000000ec148        0x4 build/Source/ui/settings_page.o
+ .bss.g_staged  0x00000000000ec14c       0x20 build/Source/ui/settings_page.o
  .bss.finalUrl.10554
-                0x00000000000ec174      0x300 build/Source/ui/address_bar.o
+                0x00000000000ec16c      0x300 build/Source/ui/address_bar.o
  .bss.g_inputText
-                0x00000000000ec474      0x200 build/Source/ui/address_bar.o
- .bss.g_isOpen  0x00000000000ec674        0x4 build/Source/ui/address_bar.o
+                0x00000000000ec46c      0x200 build/Source/ui/address_bar.o
+ .bss.g_isOpen  0x00000000000ec66c        0x4 build/Source/ui/address_bar.o
  .bss.g_keyboardShown
-                0x00000000000ec678        0x4 build/Source/ui/address_bar.o
+                0x00000000000ec670        0x4 build/Source/ui/address_bar.o
  .bss.g_onSubmit
-                0x00000000000ec67c        0x4 build/Source/ui/address_bar.o
+                0x00000000000ec674        0x4 build/Source/ui/address_bar.o
  .bss.g_onSubmitUserdata
-                0x00000000000ec680        0x4 build/Source/ui/address_bar.o
+                0x00000000000ec678        0x4 build/Source/ui/address_bar.o
  .bss.g_pendingSkipFrames
-                0x00000000000ec684        0x4 build/Source/ui/address_bar.o
+                0x00000000000ec67c        0x4 build/Source/ui/address_bar.o
  .bss.parsed.10557
-                0x00000000000ec688      0x794 build/Source/ui/address_bar.o
+                0x00000000000ec680      0x794 build/Source/ui/address_bar.o
  .bss.trimmed.10545
-                0x00000000000ece1c      0x200 build/Source/ui/address_bar.o
+                0x00000000000ece14      0x200 build/Source/ui/address_bar.o
  .bss.big.11403
-                0x00000000000ed01c      0x800 build/Source/html/document.o
+                0x00000000000ed014      0x800 build/Source/html/document.o
  .bss.cbuf.11451
-                0x00000000000ed81c      0x400 build/Source/html/document.o
+                0x00000000000ed814      0x400 build/Source/html/document.o
  .bss.lbuf.11220
-                0x00000000000edc1c       0x10 build/Source/html/document.o
+                0x00000000000edc14       0x10 build/Source/html/document.o
  .bss.lbuf.11495
-                0x00000000000edc2c      0x400 build/Source/html/document.o
+                0x00000000000edc24      0x400 build/Source/html/document.o
  .bss.lbuf.11512
-                0x00000000000ee02c      0x400 build/Source/html/document.o
+                0x00000000000ee024      0x400 build/Source/html/document.o
  .bss.lbuf.11518
-                0x00000000000ee42c      0x400 build/Source/html/document.o
+                0x00000000000ee424      0x400 build/Source/html/document.o
  .bss.lbuf.11534
-                0x00000000000ee82c      0x200 build/Source/html/document.o
- .bss.st.11218  0x00000000000eea2c      0xa44 build/Source/html/document.o
- .bss.st.11225  0x00000000000ef470      0xa44 build/Source/html/document.o
- .bss.st.11232  0x00000000000efeb4      0xa44 build/Source/html/document.o
- .bss.st.11240  0x00000000000f08f8      0xa44 build/Source/html/document.o
- .bss.st.11417  0x00000000000f133c      0xa44 build/Source/html/document.o
+                0x00000000000ee824      0x200 build/Source/html/document.o
+ .bss.st.11218  0x00000000000eea24      0xa44 build/Source/html/document.o
+ .bss.st.11225  0x00000000000ef468      0xa44 build/Source/html/document.o
+ .bss.st.11232  0x00000000000efeac      0xa44 build/Source/html/document.o
+ .bss.st.11240  0x00000000000f08f0      0xa44 build/Source/html/document.o
+ .bss.st.11417  0x00000000000f1334      0xa44 build/Source/html/document.o
  .bss.tbuf2.11581
-                0x00000000000f1d80      0x200 build/Source/html/document.o
+                0x00000000000f1d78      0x200 build/Source/html/document.o
  .bss.tmp.11106
-                0x00000000000f1f80      0x400 build/Source/html/document.o
+                0x00000000000f1f78      0x400 build/Source/html/document.o
  .bss.tmp.11261
-                0x00000000000f2380      0x400 build/Source/html/document.o
+                0x00000000000f2378      0x400 build/Source/html/document.o
  .bss.withPrefix.11522
-                0x00000000000f2780      0x44c build/Source/html/document.o
+                0x00000000000f2778      0x44c build/Source/html/document.o
  .bss.fontHeight
-                0x00000000000f2bcc        0x4 build/Source/keyboard/keyboard.o
+                0x00000000000f2bc4        0x4 build/Source/keyboard/keyboard.o
  .bss.keyboardFont
-                0x00000000000f2bd0        0x4 build/Source/keyboard/keyboard.o
+                0x00000000000f2bc8        0x4 build/Source/keyboard/keyboard.o
  .bss.menuColumn
-                0x00000000000f2bd4       0x10 build/Source/keyboard/keyboard.o
- .bss.g_count   0x00000000000f2be4        0x4 build/Source/core/tasks.o
- .bss.g_pd      0x00000000000f2be8        0x4 build/Source/core/tasks.o
+                0x00000000000f2bcc       0x10 build/Source/keyboard/keyboard.o
+ .bss.g_count   0x00000000000f2bdc        0x4 build/Source/core/tasks.o
+ .bss.g_pd      0x00000000000f2be0        0x4 build/Source/core/tasks.o
  .bss.g_progress
-                0x00000000000f2bec        0x4 build/Source/core/tasks.o
- .bss.g_queue   0x00000000000f2bf0      0x100 build/Source/core/tasks.o
- .bss.g_pd      0x00000000000f2cf0        0x4 build/Source/util/pdtimer.o
- .bss.g_slots   0x00000000000f2cf4      0x500 build/Source/util/pdtimer.o
+                0x00000000000f2be4        0x4 build/Source/core/tasks.o
+ .bss.g_queue   0x00000000000f2be8      0x100 build/Source/core/tasks.o
+ .bss.g_pd      0x00000000000f2ce8        0x4 build/Source/util/pdtimer.o
+ .bss.g_slots   0x00000000000f2cec      0x500 build/Source/util/pdtimer.o
  .bss.pdrealloc
-                0x00000000000f31f4        0x4 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+                0x00000000000f31ec        0x4 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
  *(COMMON)
  *(COM)
-                0x00000000000f31f8                . = ALIGN (0x4)
-                0x00000000000f31f8                __bss_end__ = .
+                0x00000000000f31f0                . = ALIGN (0x4)
+                0x00000000000f31f0                __bss_end__ = .
 
 /DISCARD/
  *(.ARM.exidx)
 OUTPUT(build/pdex.elf elf32-littlearm)
 
-.debug_info     0x0000000000000000   0x11a639
+.debug_info     0x0000000000000000   0x11a6b0
  .debug_info    0x0000000000000000     0xd7c2 build/Source/main.o
  .debug_info    0x000000000000d7c2     0x7a6c build/Source/core/logger.o
  .debug_info    0x000000000001522e      0xbec build/Source/core/constants.o
@@ -8404,47 +8400,47 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_info    0x000000000003064f     0x7e29 build/Source/render/style.o
  .debug_info    0x0000000000038478     0x88e0 build/Source/render/link_manager.o
  .debug_info    0x0000000000040d58     0x985d build/Source/render/image_decoder.o
- .debug_info    0x000000000004a5b5     0xf952 build/Source/render/layout.o
- .debug_info    0x0000000000059f07     0x1089 build/Source/render/decoders/scale.o
- .debug_info    0x000000000005af90     0x7ca3 build/Source/render/decoders/dither.o
- .debug_info    0x0000000000062c33     0x281b build/Source/render/decoders/inflate.o
- .debug_info    0x000000000006544e     0x1361 build/Source/render/decoders/bmp.o
- .debug_info    0x00000000000667af     0x1bba build/Source/render/decoders/gif.o
- .debug_info    0x0000000000068369     0x1909 build/Source/render/decoders/ico.o
- .debug_info    0x0000000000069c72     0x1cf5 build/Source/render/decoders/png.o
- .debug_info    0x000000000006b967     0x411b build/Source/render/decoders/jpeg.o
- .debug_info    0x000000000006fa82     0xa997 build/Source/render/decoders/svg.o
- .debug_info    0x000000000007a419     0x24f2 build/Source/render/decoders/tif.o
- .debug_info    0x000000000007c90b     0x1225 build/Source/render/decoders/tga.o
- .debug_info    0x000000000007db30     0x1267 build/Source/render/decoders/psd.o
- .debug_info    0x000000000007ed97     0x11e7 build/Source/render/decoders/sgi.o
- .debug_info    0x000000000007ff7e     0x10cf build/Source/render/decoders/xbm.o
- .debug_info    0x000000000008104d     0x470d build/Source/render/decoders/pdfimg.o
- .debug_info    0x000000000008575a     0x5b76 build/Source/render/decoders/webp.o
- .debug_info    0x000000000008b2d0      0x29c build/Source/render/decoders/webp_vp8_data.o
- .debug_info    0x000000000008b56c     0xad68 build/Source/render/decoders/webp_vp8.o
- .debug_info    0x00000000000962d4     0x2db0 build/Source/render/decoders/webp_container.o
- .debug_info    0x0000000000099084     0x8281 build/Source/ui/chrome.o
- .debug_info    0x00000000000a1305     0x7de1 build/Source/ui/hud.o
- .debug_info    0x00000000000a90e6     0x7f5c build/Source/ui/error_page.o
- .debug_info    0x00000000000b1042     0x8a52 build/Source/ui/home_page.o
- .debug_info    0x00000000000b9a94     0x7ef1 build/Source/ui/bookmarks_page.o
- .debug_info    0x00000000000c1985     0x7ef0 build/Source/ui/history_page.o
- .debug_info    0x00000000000c9875     0x88fd build/Source/ui/settings_page.o
- .debug_info    0x00000000000d2172     0x8902 build/Source/ui/address_bar.o
- .debug_info    0x00000000000daa74     0x1b58 build/Source/html/entities.o
- .debug_info    0x00000000000dc5cc     0x2614 build/Source/html/tokenizer.o
- .debug_info    0x00000000000debe0     0x25d7 build/Source/html/dom.o
- .debug_info    0x00000000000e11b7     0xfb74 build/Source/html/document.o
- .debug_info    0x00000000000f0d2b     0x5cbc build/Source/html/readability.o
- .debug_info    0x00000000000f69e7     0xa9d5 build/Source/keyboard/keyboard.o
- .debug_info    0x00000000001013bc     0x7ab6 build/Source/core/tasks.o
- .debug_info    0x0000000000108e72      0xfc7 build/Source/util/strbuf.o
- .debug_info    0x0000000000109e39     0x1519 build/Source/util/strutil.o
- .debug_info    0x000000000010b352     0x79fa build/Source/util/pdtimer.o
- .debug_info    0x0000000000112d4c     0x78ed build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_info    0x000000000004a5b5     0xf9c9 build/Source/render/layout.o
+ .debug_info    0x0000000000059f7e     0x1089 build/Source/render/decoders/scale.o
+ .debug_info    0x000000000005b007     0x7ca3 build/Source/render/decoders/dither.o
+ .debug_info    0x0000000000062caa     0x281b build/Source/render/decoders/inflate.o
+ .debug_info    0x00000000000654c5     0x1361 build/Source/render/decoders/bmp.o
+ .debug_info    0x0000000000066826     0x1bba build/Source/render/decoders/gif.o
+ .debug_info    0x00000000000683e0     0x1909 build/Source/render/decoders/ico.o
+ .debug_info    0x0000000000069ce9     0x1cf5 build/Source/render/decoders/png.o
+ .debug_info    0x000000000006b9de     0x411b build/Source/render/decoders/jpeg.o
+ .debug_info    0x000000000006faf9     0xa997 build/Source/render/decoders/svg.o
+ .debug_info    0x000000000007a490     0x24f2 build/Source/render/decoders/tif.o
+ .debug_info    0x000000000007c982     0x1225 build/Source/render/decoders/tga.o
+ .debug_info    0x000000000007dba7     0x1267 build/Source/render/decoders/psd.o
+ .debug_info    0x000000000007ee0e     0x11e7 build/Source/render/decoders/sgi.o
+ .debug_info    0x000000000007fff5     0x10cf build/Source/render/decoders/xbm.o
+ .debug_info    0x00000000000810c4     0x470d build/Source/render/decoders/pdfimg.o
+ .debug_info    0x00000000000857d1     0x5b76 build/Source/render/decoders/webp.o
+ .debug_info    0x000000000008b347      0x29c build/Source/render/decoders/webp_vp8_data.o
+ .debug_info    0x000000000008b5e3     0xad68 build/Source/render/decoders/webp_vp8.o
+ .debug_info    0x000000000009634b     0x2db0 build/Source/render/decoders/webp_container.o
+ .debug_info    0x00000000000990fb     0x8281 build/Source/ui/chrome.o
+ .debug_info    0x00000000000a137c     0x7de1 build/Source/ui/hud.o
+ .debug_info    0x00000000000a915d     0x7f5c build/Source/ui/error_page.o
+ .debug_info    0x00000000000b10b9     0x8a52 build/Source/ui/home_page.o
+ .debug_info    0x00000000000b9b0b     0x7ef1 build/Source/ui/bookmarks_page.o
+ .debug_info    0x00000000000c19fc     0x7ef0 build/Source/ui/history_page.o
+ .debug_info    0x00000000000c98ec     0x88fd build/Source/ui/settings_page.o
+ .debug_info    0x00000000000d21e9     0x8902 build/Source/ui/address_bar.o
+ .debug_info    0x00000000000daaeb     0x1b58 build/Source/html/entities.o
+ .debug_info    0x00000000000dc643     0x2614 build/Source/html/tokenizer.o
+ .debug_info    0x00000000000dec57     0x25d7 build/Source/html/dom.o
+ .debug_info    0x00000000000e122e     0xfb74 build/Source/html/document.o
+ .debug_info    0x00000000000f0da2     0x5cbc build/Source/html/readability.o
+ .debug_info    0x00000000000f6a5e     0xa9d5 build/Source/keyboard/keyboard.o
+ .debug_info    0x0000000000101433     0x7ab6 build/Source/core/tasks.o
+ .debug_info    0x0000000000108ee9      0xfc7 build/Source/util/strbuf.o
+ .debug_info    0x0000000000109eb0     0x1519 build/Source/util/strutil.o
+ .debug_info    0x000000000010b3c9     0x79fa build/Source/util/pdtimer.o
+ .debug_info    0x0000000000112dc3     0x78ed build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_abbrev   0x0000000000000000     0xf371
+.debug_abbrev   0x0000000000000000     0xf349
  .debug_abbrev  0x0000000000000000      0x812 build/Source/main.o
  .debug_abbrev  0x0000000000000812      0x3cc build/Source/core/logger.o
  .debug_abbrev  0x0000000000000bde      0x25b build/Source/core/constants.o
@@ -8456,47 +8452,47 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_abbrev  0x0000000000002b54      0x4d2 build/Source/render/style.o
  .debug_abbrev  0x0000000000003026      0x67f build/Source/render/link_manager.o
  .debug_abbrev  0x00000000000036a5      0x704 build/Source/render/image_decoder.o
- .debug_abbrev  0x0000000000003da9      0x7c2 build/Source/render/layout.o
- .debug_abbrev  0x000000000000456b      0x2bf build/Source/render/decoders/scale.o
- .debug_abbrev  0x000000000000482a      0x46a build/Source/render/decoders/dither.o
- .debug_abbrev  0x0000000000004c94      0x58f build/Source/render/decoders/inflate.o
- .debug_abbrev  0x0000000000005223      0x3ac build/Source/render/decoders/bmp.o
- .debug_abbrev  0x00000000000055cf      0x485 build/Source/render/decoders/gif.o
- .debug_abbrev  0x0000000000005a54      0x437 build/Source/render/decoders/ico.o
- .debug_abbrev  0x0000000000005e8b      0x3f6 build/Source/render/decoders/png.o
- .debug_abbrev  0x0000000000006281      0x635 build/Source/render/decoders/jpeg.o
- .debug_abbrev  0x00000000000068b6      0x63f build/Source/render/decoders/svg.o
- .debug_abbrev  0x0000000000006ef5      0x4c2 build/Source/render/decoders/tif.o
- .debug_abbrev  0x00000000000073b7      0x392 build/Source/render/decoders/tga.o
- .debug_abbrev  0x0000000000007749      0x379 build/Source/render/decoders/psd.o
- .debug_abbrev  0x0000000000007ac2      0x3a3 build/Source/render/decoders/sgi.o
- .debug_abbrev  0x0000000000007e65      0x2db build/Source/render/decoders/xbm.o
- .debug_abbrev  0x0000000000008140      0x5cc build/Source/render/decoders/pdfimg.o
- .debug_abbrev  0x000000000000870c      0x698 build/Source/render/decoders/webp.o
- .debug_abbrev  0x0000000000008da4       0x7c build/Source/render/decoders/webp_vp8_data.o
- .debug_abbrev  0x0000000000008e20      0x623 build/Source/render/decoders/webp_vp8.o
- .debug_abbrev  0x0000000000009443      0x563 build/Source/render/decoders/webp_container.o
- .debug_abbrev  0x00000000000099a6      0x41f build/Source/ui/chrome.o
- .debug_abbrev  0x0000000000009dc5      0x3ab build/Source/ui/hud.o
- .debug_abbrev  0x000000000000a170      0x3fe build/Source/ui/error_page.o
- .debug_abbrev  0x000000000000a56e      0x4e5 build/Source/ui/home_page.o
- .debug_abbrev  0x000000000000aa53      0x431 build/Source/ui/bookmarks_page.o
- .debug_abbrev  0x000000000000ae84      0x431 build/Source/ui/history_page.o
- .debug_abbrev  0x000000000000b2b5      0x5e3 build/Source/ui/settings_page.o
- .debug_abbrev  0x000000000000b898      0x5c1 build/Source/ui/address_bar.o
- .debug_abbrev  0x000000000000be59      0x4ca build/Source/html/entities.o
- .debug_abbrev  0x000000000000c323      0x58c build/Source/html/tokenizer.o
- .debug_abbrev  0x000000000000c8af      0x582 build/Source/html/dom.o
- .debug_abbrev  0x000000000000ce31      0x6eb build/Source/html/document.o
- .debug_abbrev  0x000000000000d51c      0x5b8 build/Source/html/readability.o
- .debug_abbrev  0x000000000000dad4      0x6a8 build/Source/keyboard/keyboard.o
- .debug_abbrev  0x000000000000e17c      0x3d5 build/Source/core/tasks.o
- .debug_abbrev  0x000000000000e551      0x3a0 build/Source/util/strbuf.o
- .debug_abbrev  0x000000000000e8f1      0x371 build/Source/util/strutil.o
- .debug_abbrev  0x000000000000ec62      0x3cd build/Source/util/pdtimer.o
- .debug_abbrev  0x000000000000f02f      0x342 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_abbrev  0x0000000000003da9      0x79a build/Source/render/layout.o
+ .debug_abbrev  0x0000000000004543      0x2bf build/Source/render/decoders/scale.o
+ .debug_abbrev  0x0000000000004802      0x46a build/Source/render/decoders/dither.o
+ .debug_abbrev  0x0000000000004c6c      0x58f build/Source/render/decoders/inflate.o
+ .debug_abbrev  0x00000000000051fb      0x3ac build/Source/render/decoders/bmp.o
+ .debug_abbrev  0x00000000000055a7      0x485 build/Source/render/decoders/gif.o
+ .debug_abbrev  0x0000000000005a2c      0x437 build/Source/render/decoders/ico.o
+ .debug_abbrev  0x0000000000005e63      0x3f6 build/Source/render/decoders/png.o
+ .debug_abbrev  0x0000000000006259      0x635 build/Source/render/decoders/jpeg.o
+ .debug_abbrev  0x000000000000688e      0x63f build/Source/render/decoders/svg.o
+ .debug_abbrev  0x0000000000006ecd      0x4c2 build/Source/render/decoders/tif.o
+ .debug_abbrev  0x000000000000738f      0x392 build/Source/render/decoders/tga.o
+ .debug_abbrev  0x0000000000007721      0x379 build/Source/render/decoders/psd.o
+ .debug_abbrev  0x0000000000007a9a      0x3a3 build/Source/render/decoders/sgi.o
+ .debug_abbrev  0x0000000000007e3d      0x2db build/Source/render/decoders/xbm.o
+ .debug_abbrev  0x0000000000008118      0x5cc build/Source/render/decoders/pdfimg.o
+ .debug_abbrev  0x00000000000086e4      0x698 build/Source/render/decoders/webp.o
+ .debug_abbrev  0x0000000000008d7c       0x7c build/Source/render/decoders/webp_vp8_data.o
+ .debug_abbrev  0x0000000000008df8      0x623 build/Source/render/decoders/webp_vp8.o
+ .debug_abbrev  0x000000000000941b      0x563 build/Source/render/decoders/webp_container.o
+ .debug_abbrev  0x000000000000997e      0x41f build/Source/ui/chrome.o
+ .debug_abbrev  0x0000000000009d9d      0x3ab build/Source/ui/hud.o
+ .debug_abbrev  0x000000000000a148      0x3fe build/Source/ui/error_page.o
+ .debug_abbrev  0x000000000000a546      0x4e5 build/Source/ui/home_page.o
+ .debug_abbrev  0x000000000000aa2b      0x431 build/Source/ui/bookmarks_page.o
+ .debug_abbrev  0x000000000000ae5c      0x431 build/Source/ui/history_page.o
+ .debug_abbrev  0x000000000000b28d      0x5e3 build/Source/ui/settings_page.o
+ .debug_abbrev  0x000000000000b870      0x5c1 build/Source/ui/address_bar.o
+ .debug_abbrev  0x000000000000be31      0x4ca build/Source/html/entities.o
+ .debug_abbrev  0x000000000000c2fb      0x58c build/Source/html/tokenizer.o
+ .debug_abbrev  0x000000000000c887      0x582 build/Source/html/dom.o
+ .debug_abbrev  0x000000000000ce09      0x6eb build/Source/html/document.o
+ .debug_abbrev  0x000000000000d4f4      0x5b8 build/Source/html/readability.o
+ .debug_abbrev  0x000000000000daac      0x6a8 build/Source/keyboard/keyboard.o
+ .debug_abbrev  0x000000000000e154      0x3d5 build/Source/core/tasks.o
+ .debug_abbrev  0x000000000000e529      0x3a0 build/Source/util/strbuf.o
+ .debug_abbrev  0x000000000000e8c9      0x371 build/Source/util/strutil.o
+ .debug_abbrev  0x000000000000ec3a      0x3cd build/Source/util/pdtimer.o
+ .debug_abbrev  0x000000000000f007      0x342 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_loc      0x0000000000000000    0x69e69
+.debug_loc      0x0000000000000000    0x69ea8
  .debug_loc     0x0000000000000000     0x344b build/Source/main.o
  .debug_loc     0x000000000000344b      0x253 build/Source/core/logger.o
  .debug_loc     0x000000000000369e       0x8c build/Source/core/constants.o
@@ -8508,44 +8504,44 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_loc     0x000000000000befd      0x80a build/Source/render/style.o
  .debug_loc     0x000000000000c707     0x1864 build/Source/render/link_manager.o
  .debug_loc     0x000000000000df6b     0x230f build/Source/render/image_decoder.o
- .debug_loc     0x000000000001027a     0x7e4a build/Source/render/layout.o
- .debug_loc     0x00000000000180c4      0xb46 build/Source/render/decoders/scale.o
- .debug_loc     0x0000000000018c0a      0x7a7 build/Source/render/decoders/dither.o
- .debug_loc     0x00000000000193b1     0x1f7e build/Source/render/decoders/inflate.o
- .debug_loc     0x000000000001b32f     0x1349 build/Source/render/decoders/bmp.o
- .debug_loc     0x000000000001c678     0x1431 build/Source/render/decoders/gif.o
- .debug_loc     0x000000000001daa9     0x1b57 build/Source/render/decoders/ico.o
- .debug_loc     0x000000000001f600     0x2b3b build/Source/render/decoders/png.o
- .debug_loc     0x000000000002213b     0x4246 build/Source/render/decoders/jpeg.o
- .debug_loc     0x0000000000026381     0x56cb build/Source/render/decoders/svg.o
- .debug_loc     0x000000000002ba4c     0x21af build/Source/render/decoders/tif.o
- .debug_loc     0x000000000002dbfb      0xc33 build/Source/render/decoders/tga.o
- .debug_loc     0x000000000002e82e     0x1018 build/Source/render/decoders/psd.o
- .debug_loc     0x000000000002f846     0x10a9 build/Source/render/decoders/sgi.o
- .debug_loc     0x00000000000308ef      0xb58 build/Source/render/decoders/xbm.o
- .debug_loc     0x0000000000031447     0x4f53 build/Source/render/decoders/pdfimg.o
- .debug_loc     0x000000000003639a     0x6b8e build/Source/render/decoders/webp.o
- .debug_loc     0x000000000003cf28     0xba89 build/Source/render/decoders/webp_vp8.o
- .debug_loc     0x00000000000489b1     0x2866 build/Source/render/decoders/webp_container.o
- .debug_loc     0x000000000004b217      0x5dc build/Source/ui/chrome.o
- .debug_loc     0x000000000004b7f3      0x50e build/Source/ui/hud.o
- .debug_loc     0x000000000004bd01      0x345 build/Source/ui/error_page.o
- .debug_loc     0x000000000004c046      0xea3 build/Source/ui/home_page.o
- .debug_loc     0x000000000004cee9      0x4b3 build/Source/ui/bookmarks_page.o
- .debug_loc     0x000000000004d39c      0x4b3 build/Source/ui/history_page.o
- .debug_loc     0x000000000004d84f      0xc88 build/Source/ui/settings_page.o
- .debug_loc     0x000000000004e4d7      0x908 build/Source/ui/address_bar.o
- .debug_loc     0x000000000004eddf      0xf2b build/Source/html/entities.o
- .debug_loc     0x000000000004fd0a     0x1c37 build/Source/html/tokenizer.o
- .debug_loc     0x0000000000051941     0x1664 build/Source/html/dom.o
- .debug_loc     0x0000000000052fa5     0xda59 build/Source/html/document.o
- .debug_loc     0x00000000000609fe     0x4495 build/Source/html/readability.o
- .debug_loc     0x0000000000064e93     0x2f71 build/Source/keyboard/keyboard.o
- .debug_loc     0x0000000000067e04      0x478 build/Source/core/tasks.o
- .debug_loc     0x000000000006827c      0x663 build/Source/util/strbuf.o
- .debug_loc     0x00000000000688df     0x10b3 build/Source/util/strutil.o
- .debug_loc     0x0000000000069992      0x2bb build/Source/util/pdtimer.o
- .debug_loc     0x0000000000069c4d      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_loc     0x000000000001027a     0x7e89 build/Source/render/layout.o
+ .debug_loc     0x0000000000018103      0xb46 build/Source/render/decoders/scale.o
+ .debug_loc     0x0000000000018c49      0x7a7 build/Source/render/decoders/dither.o
+ .debug_loc     0x00000000000193f0     0x1f7e build/Source/render/decoders/inflate.o
+ .debug_loc     0x000000000001b36e     0x1349 build/Source/render/decoders/bmp.o
+ .debug_loc     0x000000000001c6b7     0x1431 build/Source/render/decoders/gif.o
+ .debug_loc     0x000000000001dae8     0x1b57 build/Source/render/decoders/ico.o
+ .debug_loc     0x000000000001f63f     0x2b3b build/Source/render/decoders/png.o
+ .debug_loc     0x000000000002217a     0x4246 build/Source/render/decoders/jpeg.o
+ .debug_loc     0x00000000000263c0     0x56cb build/Source/render/decoders/svg.o
+ .debug_loc     0x000000000002ba8b     0x21af build/Source/render/decoders/tif.o
+ .debug_loc     0x000000000002dc3a      0xc33 build/Source/render/decoders/tga.o
+ .debug_loc     0x000000000002e86d     0x1018 build/Source/render/decoders/psd.o
+ .debug_loc     0x000000000002f885     0x10a9 build/Source/render/decoders/sgi.o
+ .debug_loc     0x000000000003092e      0xb58 build/Source/render/decoders/xbm.o
+ .debug_loc     0x0000000000031486     0x4f53 build/Source/render/decoders/pdfimg.o
+ .debug_loc     0x00000000000363d9     0x6b8e build/Source/render/decoders/webp.o
+ .debug_loc     0x000000000003cf67     0xba89 build/Source/render/decoders/webp_vp8.o
+ .debug_loc     0x00000000000489f0     0x2866 build/Source/render/decoders/webp_container.o
+ .debug_loc     0x000000000004b256      0x5dc build/Source/ui/chrome.o
+ .debug_loc     0x000000000004b832      0x50e build/Source/ui/hud.o
+ .debug_loc     0x000000000004bd40      0x345 build/Source/ui/error_page.o
+ .debug_loc     0x000000000004c085      0xea3 build/Source/ui/home_page.o
+ .debug_loc     0x000000000004cf28      0x4b3 build/Source/ui/bookmarks_page.o
+ .debug_loc     0x000000000004d3db      0x4b3 build/Source/ui/history_page.o
+ .debug_loc     0x000000000004d88e      0xc88 build/Source/ui/settings_page.o
+ .debug_loc     0x000000000004e516      0x908 build/Source/ui/address_bar.o
+ .debug_loc     0x000000000004ee1e      0xf2b build/Source/html/entities.o
+ .debug_loc     0x000000000004fd49     0x1c37 build/Source/html/tokenizer.o
+ .debug_loc     0x0000000000051980     0x1664 build/Source/html/dom.o
+ .debug_loc     0x0000000000052fe4     0xda59 build/Source/html/document.o
+ .debug_loc     0x0000000000060a3d     0x4495 build/Source/html/readability.o
+ .debug_loc     0x0000000000064ed2     0x2f71 build/Source/keyboard/keyboard.o
+ .debug_loc     0x0000000000067e43      0x478 build/Source/core/tasks.o
+ .debug_loc     0x00000000000682bb      0x663 build/Source/util/strbuf.o
+ .debug_loc     0x000000000006891e     0x10b3 build/Source/util/strutil.o
+ .debug_loc     0x00000000000699d1      0x2bb build/Source/util/pdtimer.o
+ .debug_loc     0x0000000000069c8c      0x21c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
 .debug_aranges  0x0000000000000000     0x1710
  .debug_aranges
@@ -8649,7 +8645,7 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_aranges
                 0x00000000000016d8       0x38 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_ranges   0x0000000000000000    0x11288
+.debug_ranges   0x0000000000000000    0x11270
  .debug_ranges  0x0000000000000000      0xa08 build/Source/main.o
  .debug_ranges  0x0000000000000a08       0x38 build/Source/core/logger.o
  .debug_ranges  0x0000000000000a40       0x18 build/Source/core/constants.o
@@ -8661,46 +8657,46 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_ranges  0x0000000000002080       0xc8 build/Source/render/style.o
  .debug_ranges  0x0000000000002148      0x318 build/Source/render/link_manager.o
  .debug_ranges  0x0000000000002460      0x300 build/Source/render/image_decoder.o
- .debug_ranges  0x0000000000002760     0x12e0 build/Source/render/layout.o
- .debug_ranges  0x0000000000003a40      0x120 build/Source/render/decoders/scale.o
- .debug_ranges  0x0000000000003b60       0xb8 build/Source/render/decoders/dither.o
- .debug_ranges  0x0000000000003c18      0x5c8 build/Source/render/decoders/inflate.o
- .debug_ranges  0x00000000000041e0      0x170 build/Source/render/decoders/bmp.o
- .debug_ranges  0x0000000000004350      0x3a0 build/Source/render/decoders/gif.o
- .debug_ranges  0x00000000000046f0      0x288 build/Source/render/decoders/ico.o
- .debug_ranges  0x0000000000004978      0x4d8 build/Source/render/decoders/png.o
- .debug_ranges  0x0000000000004e50      0xeb8 build/Source/render/decoders/jpeg.o
- .debug_ranges  0x0000000000005d08      0xe58 build/Source/render/decoders/svg.o
- .debug_ranges  0x0000000000006b60      0x658 build/Source/render/decoders/tif.o
- .debug_ranges  0x00000000000071b8      0x128 build/Source/render/decoders/tga.o
- .debug_ranges  0x00000000000072e0       0xf0 build/Source/render/decoders/psd.o
- .debug_ranges  0x00000000000073d0      0x128 build/Source/render/decoders/sgi.o
- .debug_ranges  0x00000000000074f8       0xb8 build/Source/render/decoders/xbm.o
- .debug_ranges  0x00000000000075b0      0x8a0 build/Source/render/decoders/pdfimg.o
- .debug_ranges  0x0000000000007e50     0x1170 build/Source/render/decoders/webp.o
- .debug_ranges  0x0000000000008fc0     0x2758 build/Source/render/decoders/webp_vp8.o
- .debug_ranges  0x000000000000b718      0x688 build/Source/render/decoders/webp_container.o
- .debug_ranges  0x000000000000bda0       0x48 build/Source/ui/chrome.o
- .debug_ranges  0x000000000000bde8       0x30 build/Source/ui/hud.o
- .debug_ranges  0x000000000000be18       0x88 build/Source/ui/error_page.o
- .debug_ranges  0x000000000000bea0       0xf8 build/Source/ui/home_page.o
- .debug_ranges  0x000000000000bf98       0xc8 build/Source/ui/bookmarks_page.o
- .debug_ranges  0x000000000000c060       0xc8 build/Source/ui/history_page.o
- .debug_ranges  0x000000000000c128      0x198 build/Source/ui/settings_page.o
- .debug_ranges  0x000000000000c2c0      0x1b8 build/Source/ui/address_bar.o
- .debug_ranges  0x000000000000c478      0x260 build/Source/html/entities.o
- .debug_ranges  0x000000000000c6d8      0x360 build/Source/html/tokenizer.o
- .debug_ranges  0x000000000000ca38      0x668 build/Source/html/dom.o
- .debug_ranges  0x000000000000d0a0     0x2f78 build/Source/html/document.o
- .debug_ranges  0x0000000000010018      0xa40 build/Source/html/readability.o
- .debug_ranges  0x0000000000010a58      0x578 build/Source/keyboard/keyboard.o
- .debug_ranges  0x0000000000010fd0       0x68 build/Source/core/tasks.o
- .debug_ranges  0x0000000000011038       0x70 build/Source/util/strbuf.o
- .debug_ranges  0x00000000000110a8      0x168 build/Source/util/strutil.o
- .debug_ranges  0x0000000000011210       0x50 build/Source/util/pdtimer.o
- .debug_ranges  0x0000000000011260       0x28 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_ranges  0x0000000000002760     0x12c8 build/Source/render/layout.o
+ .debug_ranges  0x0000000000003a28      0x120 build/Source/render/decoders/scale.o
+ .debug_ranges  0x0000000000003b48       0xb8 build/Source/render/decoders/dither.o
+ .debug_ranges  0x0000000000003c00      0x5c8 build/Source/render/decoders/inflate.o
+ .debug_ranges  0x00000000000041c8      0x170 build/Source/render/decoders/bmp.o
+ .debug_ranges  0x0000000000004338      0x3a0 build/Source/render/decoders/gif.o
+ .debug_ranges  0x00000000000046d8      0x288 build/Source/render/decoders/ico.o
+ .debug_ranges  0x0000000000004960      0x4d8 build/Source/render/decoders/png.o
+ .debug_ranges  0x0000000000004e38      0xeb8 build/Source/render/decoders/jpeg.o
+ .debug_ranges  0x0000000000005cf0      0xe58 build/Source/render/decoders/svg.o
+ .debug_ranges  0x0000000000006b48      0x658 build/Source/render/decoders/tif.o
+ .debug_ranges  0x00000000000071a0      0x128 build/Source/render/decoders/tga.o
+ .debug_ranges  0x00000000000072c8       0xf0 build/Source/render/decoders/psd.o
+ .debug_ranges  0x00000000000073b8      0x128 build/Source/render/decoders/sgi.o
+ .debug_ranges  0x00000000000074e0       0xb8 build/Source/render/decoders/xbm.o
+ .debug_ranges  0x0000000000007598      0x8a0 build/Source/render/decoders/pdfimg.o
+ .debug_ranges  0x0000000000007e38     0x1170 build/Source/render/decoders/webp.o
+ .debug_ranges  0x0000000000008fa8     0x2758 build/Source/render/decoders/webp_vp8.o
+ .debug_ranges  0x000000000000b700      0x688 build/Source/render/decoders/webp_container.o
+ .debug_ranges  0x000000000000bd88       0x48 build/Source/ui/chrome.o
+ .debug_ranges  0x000000000000bdd0       0x30 build/Source/ui/hud.o
+ .debug_ranges  0x000000000000be00       0x88 build/Source/ui/error_page.o
+ .debug_ranges  0x000000000000be88       0xf8 build/Source/ui/home_page.o
+ .debug_ranges  0x000000000000bf80       0xc8 build/Source/ui/bookmarks_page.o
+ .debug_ranges  0x000000000000c048       0xc8 build/Source/ui/history_page.o
+ .debug_ranges  0x000000000000c110      0x198 build/Source/ui/settings_page.o
+ .debug_ranges  0x000000000000c2a8      0x1b8 build/Source/ui/address_bar.o
+ .debug_ranges  0x000000000000c460      0x260 build/Source/html/entities.o
+ .debug_ranges  0x000000000000c6c0      0x360 build/Source/html/tokenizer.o
+ .debug_ranges  0x000000000000ca20      0x668 build/Source/html/dom.o
+ .debug_ranges  0x000000000000d088     0x2f78 build/Source/html/document.o
+ .debug_ranges  0x0000000000010000      0xa40 build/Source/html/readability.o
+ .debug_ranges  0x0000000000010a40      0x578 build/Source/keyboard/keyboard.o
+ .debug_ranges  0x0000000000010fb8       0x68 build/Source/core/tasks.o
+ .debug_ranges  0x0000000000011020       0x70 build/Source/util/strbuf.o
+ .debug_ranges  0x0000000000011090      0x168 build/Source/util/strutil.o
+ .debug_ranges  0x00000000000111f8       0x50 build/Source/util/pdtimer.o
+ .debug_ranges  0x0000000000011248       0x28 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_macro    0x0000000000000000     0xb349
+.debug_macro    0x0000000000000000     0xb34f
  .debug_macro   0x0000000000000000      0x4db build/Source/main.o
  .debug_macro   0x00000000000004db      0xaa8 build/Source/main.o
  .debug_macro   0x0000000000000f83       0x22 build/Source/main.o
@@ -8771,51 +8767,51 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_macro   0x0000000000003b96      0x2ac build/Source/render/style.o
  .debug_macro   0x0000000000003e42      0x2af build/Source/render/link_manager.o
  .debug_macro   0x00000000000040f1      0x3b9 build/Source/render/image_decoder.o
- .debug_macro   0x00000000000044aa      0x344 build/Source/render/layout.o
- .debug_macro   0x00000000000047ee      0x11f build/Source/render/layout.o
- .debug_macro   0x000000000000490d      0x156 build/Source/render/decoders/scale.o
- .debug_macro   0x0000000000004a63      0x2a6 build/Source/render/decoders/dither.o
- .debug_macro   0x0000000000004d09      0x16e build/Source/render/decoders/inflate.o
- .debug_macro   0x0000000000004e77      0x2b4 build/Source/render/decoders/bmp.o
- .debug_macro   0x000000000000512b      0x2be build/Source/render/decoders/gif.o
- .debug_macro   0x00000000000053e9      0x2c2 build/Source/render/decoders/ico.o
- .debug_macro   0x00000000000056ab      0x2d5 build/Source/render/decoders/png.o
- .debug_macro   0x0000000000005980      0x2ff build/Source/render/decoders/jpeg.o
- .debug_macro   0x0000000000005c7f      0x31a build/Source/render/decoders/svg.o
- .debug_macro   0x0000000000005f99      0x2cd build/Source/render/decoders/tif.o
- .debug_macro   0x0000000000006266      0x2cd build/Source/render/decoders/tga.o
- .debug_macro   0x0000000000006533      0x2cd build/Source/render/decoders/psd.o
- .debug_macro   0x0000000000006800      0x2cd build/Source/render/decoders/sgi.o
- .debug_macro   0x0000000000006acd      0x2d6 build/Source/render/decoders/xbm.o
- .debug_macro   0x0000000000006da3      0x307 build/Source/render/decoders/pdfimg.o
- .debug_macro   0x00000000000070aa      0x30c build/Source/render/decoders/webp.o
- .debug_macro   0x00000000000073b6       0x73 build/Source/render/decoders/webp_vp8_data.o
- .debug_macro   0x0000000000007429       0x8e build/Source/render/decoders/webp_vp8_data.o
- .debug_macro   0x00000000000074b7       0x51 build/Source/render/decoders/webp_vp8_data.o
- .debug_macro   0x0000000000007508      0x33f build/Source/render/decoders/webp_vp8.o
- .debug_macro   0x0000000000007847      0x2f1 build/Source/render/decoders/webp_container.o
- .debug_macro   0x0000000000007b38      0x2e3 build/Source/ui/chrome.o
- .debug_macro   0x0000000000007e1b      0x2d5 build/Source/ui/hud.o
- .debug_macro   0x00000000000080f0      0x2f3 build/Source/ui/error_page.o
- .debug_macro   0x00000000000083e3      0x2f6 build/Source/ui/home_page.o
- .debug_macro   0x00000000000086d9      0x2fd build/Source/ui/bookmarks_page.o
- .debug_macro   0x00000000000089d6      0x2fd build/Source/ui/history_page.o
- .debug_macro   0x0000000000008cd3      0x350 build/Source/ui/settings_page.o
- .debug_macro   0x0000000000009023      0x2ef build/Source/ui/address_bar.o
- .debug_macro   0x0000000000009312       0x5e build/Source/ui/address_bar.o
- .debug_macro   0x0000000000009370      0x2f3 build/Source/html/entities.o
- .debug_macro   0x0000000000009663      0x2f4 build/Source/html/tokenizer.o
- .debug_macro   0x0000000000009957      0x2f8 build/Source/html/dom.o
- .debug_macro   0x0000000000009c4f      0x330 build/Source/html/document.o
- .debug_macro   0x0000000000009f7f      0x32a build/Source/html/readability.o
- .debug_macro   0x000000000000a2a9      0x306 build/Source/keyboard/keyboard.o
- .debug_macro   0x000000000000a5af      0x2be build/Source/core/tasks.o
- .debug_macro   0x000000000000a86d      0x2c3 build/Source/util/strbuf.o
- .debug_macro   0x000000000000ab30      0x2c5 build/Source/util/strutil.o
- .debug_macro   0x000000000000adf5      0x2b2 build/Source/util/pdtimer.o
- .debug_macro   0x000000000000b0a7      0x2a2 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_macro   0x00000000000044aa      0x34a build/Source/render/layout.o
+ .debug_macro   0x00000000000047f4      0x11f build/Source/render/layout.o
+ .debug_macro   0x0000000000004913      0x156 build/Source/render/decoders/scale.o
+ .debug_macro   0x0000000000004a69      0x2a6 build/Source/render/decoders/dither.o
+ .debug_macro   0x0000000000004d0f      0x16e build/Source/render/decoders/inflate.o
+ .debug_macro   0x0000000000004e7d      0x2b4 build/Source/render/decoders/bmp.o
+ .debug_macro   0x0000000000005131      0x2be build/Source/render/decoders/gif.o
+ .debug_macro   0x00000000000053ef      0x2c2 build/Source/render/decoders/ico.o
+ .debug_macro   0x00000000000056b1      0x2d5 build/Source/render/decoders/png.o
+ .debug_macro   0x0000000000005986      0x2ff build/Source/render/decoders/jpeg.o
+ .debug_macro   0x0000000000005c85      0x31a build/Source/render/decoders/svg.o
+ .debug_macro   0x0000000000005f9f      0x2cd build/Source/render/decoders/tif.o
+ .debug_macro   0x000000000000626c      0x2cd build/Source/render/decoders/tga.o
+ .debug_macro   0x0000000000006539      0x2cd build/Source/render/decoders/psd.o
+ .debug_macro   0x0000000000006806      0x2cd build/Source/render/decoders/sgi.o
+ .debug_macro   0x0000000000006ad3      0x2d6 build/Source/render/decoders/xbm.o
+ .debug_macro   0x0000000000006da9      0x307 build/Source/render/decoders/pdfimg.o
+ .debug_macro   0x00000000000070b0      0x30c build/Source/render/decoders/webp.o
+ .debug_macro   0x00000000000073bc       0x73 build/Source/render/decoders/webp_vp8_data.o
+ .debug_macro   0x000000000000742f       0x8e build/Source/render/decoders/webp_vp8_data.o
+ .debug_macro   0x00000000000074bd       0x51 build/Source/render/decoders/webp_vp8_data.o
+ .debug_macro   0x000000000000750e      0x33f build/Source/render/decoders/webp_vp8.o
+ .debug_macro   0x000000000000784d      0x2f1 build/Source/render/decoders/webp_container.o
+ .debug_macro   0x0000000000007b3e      0x2e3 build/Source/ui/chrome.o
+ .debug_macro   0x0000000000007e21      0x2d5 build/Source/ui/hud.o
+ .debug_macro   0x00000000000080f6      0x2f3 build/Source/ui/error_page.o
+ .debug_macro   0x00000000000083e9      0x2f6 build/Source/ui/home_page.o
+ .debug_macro   0x00000000000086df      0x2fd build/Source/ui/bookmarks_page.o
+ .debug_macro   0x00000000000089dc      0x2fd build/Source/ui/history_page.o
+ .debug_macro   0x0000000000008cd9      0x350 build/Source/ui/settings_page.o
+ .debug_macro   0x0000000000009029      0x2ef build/Source/ui/address_bar.o
+ .debug_macro   0x0000000000009318       0x5e build/Source/ui/address_bar.o
+ .debug_macro   0x0000000000009376      0x2f3 build/Source/html/entities.o
+ .debug_macro   0x0000000000009669      0x2f4 build/Source/html/tokenizer.o
+ .debug_macro   0x000000000000995d      0x2f8 build/Source/html/dom.o
+ .debug_macro   0x0000000000009c55      0x330 build/Source/html/document.o
+ .debug_macro   0x0000000000009f85      0x32a build/Source/html/readability.o
+ .debug_macro   0x000000000000a2af      0x306 build/Source/keyboard/keyboard.o
+ .debug_macro   0x000000000000a5b5      0x2be build/Source/core/tasks.o
+ .debug_macro   0x000000000000a873      0x2c3 build/Source/util/strbuf.o
+ .debug_macro   0x000000000000ab36      0x2c5 build/Source/util/strutil.o
+ .debug_macro   0x000000000000adfb      0x2b2 build/Source/util/pdtimer.o
+ .debug_macro   0x000000000000b0ad      0x2a2 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_line     0x0000000000000000    0x47434
+.debug_line     0x0000000000000000    0x4745b
  .debug_line    0x0000000000000000     0x36d5 build/Source/main.o
  .debug_line    0x00000000000036d5      0x624 build/Source/core/logger.o
  .debug_line    0x0000000000003cf9      0x30d build/Source/core/constants.o
@@ -8827,47 +8823,47 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_line    0x000000000000b0b5      0x926 build/Source/render/style.o
  .debug_line    0x000000000000b9db     0x104f build/Source/render/link_manager.o
  .debug_line    0x000000000000ca2a     0x14e7 build/Source/render/image_decoder.o
- .debug_line    0x000000000000df11     0x5397 build/Source/render/layout.o
- .debug_line    0x00000000000132a8      0x825 build/Source/render/decoders/scale.o
- .debug_line    0x0000000000013acd      0x6f5 build/Source/render/decoders/dither.o
- .debug_line    0x00000000000141c2     0x14fb build/Source/render/decoders/inflate.o
- .debug_line    0x00000000000156bd      0x9b4 build/Source/render/decoders/bmp.o
- .debug_line    0x0000000000016071     0x1232 build/Source/render/decoders/gif.o
- .debug_line    0x00000000000172a3     0x109d build/Source/render/decoders/ico.o
- .debug_line    0x0000000000018340     0x12fe build/Source/render/decoders/png.o
- .debug_line    0x000000000001963e     0x2160 build/Source/render/decoders/jpeg.o
- .debug_line    0x000000000001b79e     0x32fa build/Source/render/decoders/svg.o
- .debug_line    0x000000000001ea98     0x1764 build/Source/render/decoders/tif.o
- .debug_line    0x00000000000201fc      0x9ec build/Source/render/decoders/tga.o
- .debug_line    0x0000000000020be8      0xa2c build/Source/render/decoders/psd.o
- .debug_line    0x0000000000021614      0x9db build/Source/render/decoders/sgi.o
- .debug_line    0x0000000000021fef      0x9df build/Source/render/decoders/xbm.o
- .debug_line    0x00000000000229ce     0x284f build/Source/render/decoders/pdfimg.o
- .debug_line    0x000000000002521d     0x30b1 build/Source/render/decoders/webp.o
- .debug_line    0x00000000000282ce      0x20d build/Source/render/decoders/webp_vp8_data.o
- .debug_line    0x00000000000284db     0x5d1d build/Source/render/decoders/webp_vp8.o
- .debug_line    0x000000000002e1f8     0x19ae build/Source/render/decoders/webp_container.o
- .debug_line    0x000000000002fba6      0x7ff build/Source/ui/chrome.o
- .debug_line    0x00000000000303a5      0x6c5 build/Source/ui/hud.o
- .debug_line    0x0000000000030a6a      0x80a build/Source/ui/error_page.o
- .debug_line    0x0000000000031274      0xd49 build/Source/ui/home_page.o
- .debug_line    0x0000000000031fbd      0x84e build/Source/ui/bookmarks_page.o
- .debug_line    0x000000000003280b      0x84a build/Source/ui/history_page.o
- .debug_line    0x0000000000033055      0xdfb build/Source/ui/settings_page.o
- .debug_line    0x0000000000033e50      0xcdf build/Source/ui/address_bar.o
- .debug_line    0x0000000000034b2f      0xceb build/Source/html/entities.o
- .debug_line    0x000000000003581a     0x1163 build/Source/html/tokenizer.o
- .debug_line    0x000000000003697d     0x1361 build/Source/html/dom.o
- .debug_line    0x0000000000037cde     0x827b build/Source/html/document.o
- .debug_line    0x000000000003ff59     0x2d6f build/Source/html/readability.o
- .debug_line    0x0000000000042cc8     0x1f98 build/Source/keyboard/keyboard.o
- .debug_line    0x0000000000044c60      0x7a6 build/Source/core/tasks.o
- .debug_line    0x0000000000045406      0x7d2 build/Source/util/strbuf.o
- .debug_line    0x0000000000045bd8      0xb7b build/Source/util/strutil.o
- .debug_line    0x0000000000046753      0x76b build/Source/util/pdtimer.o
- .debug_line    0x0000000000046ebe      0x576 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_line    0x000000000000df11     0x53be build/Source/render/layout.o
+ .debug_line    0x00000000000132cf      0x825 build/Source/render/decoders/scale.o
+ .debug_line    0x0000000000013af4      0x6f5 build/Source/render/decoders/dither.o
+ .debug_line    0x00000000000141e9     0x14fb build/Source/render/decoders/inflate.o
+ .debug_line    0x00000000000156e4      0x9b4 build/Source/render/decoders/bmp.o
+ .debug_line    0x0000000000016098     0x1232 build/Source/render/decoders/gif.o
+ .debug_line    0x00000000000172ca     0x109d build/Source/render/decoders/ico.o
+ .debug_line    0x0000000000018367     0x12fe build/Source/render/decoders/png.o
+ .debug_line    0x0000000000019665     0x2160 build/Source/render/decoders/jpeg.o
+ .debug_line    0x000000000001b7c5     0x32fa build/Source/render/decoders/svg.o
+ .debug_line    0x000000000001eabf     0x1764 build/Source/render/decoders/tif.o
+ .debug_line    0x0000000000020223      0x9ec build/Source/render/decoders/tga.o
+ .debug_line    0x0000000000020c0f      0xa2c build/Source/render/decoders/psd.o
+ .debug_line    0x000000000002163b      0x9db build/Source/render/decoders/sgi.o
+ .debug_line    0x0000000000022016      0x9df build/Source/render/decoders/xbm.o
+ .debug_line    0x00000000000229f5     0x284f build/Source/render/decoders/pdfimg.o
+ .debug_line    0x0000000000025244     0x30b1 build/Source/render/decoders/webp.o
+ .debug_line    0x00000000000282f5      0x20d build/Source/render/decoders/webp_vp8_data.o
+ .debug_line    0x0000000000028502     0x5d1d build/Source/render/decoders/webp_vp8.o
+ .debug_line    0x000000000002e21f     0x19ae build/Source/render/decoders/webp_container.o
+ .debug_line    0x000000000002fbcd      0x7ff build/Source/ui/chrome.o
+ .debug_line    0x00000000000303cc      0x6c5 build/Source/ui/hud.o
+ .debug_line    0x0000000000030a91      0x80a build/Source/ui/error_page.o
+ .debug_line    0x000000000003129b      0xd49 build/Source/ui/home_page.o
+ .debug_line    0x0000000000031fe4      0x84e build/Source/ui/bookmarks_page.o
+ .debug_line    0x0000000000032832      0x84a build/Source/ui/history_page.o
+ .debug_line    0x000000000003307c      0xdfb build/Source/ui/settings_page.o
+ .debug_line    0x0000000000033e77      0xcdf build/Source/ui/address_bar.o
+ .debug_line    0x0000000000034b56      0xceb build/Source/html/entities.o
+ .debug_line    0x0000000000035841     0x1163 build/Source/html/tokenizer.o
+ .debug_line    0x00000000000369a4     0x1361 build/Source/html/dom.o
+ .debug_line    0x0000000000037d05     0x827b build/Source/html/document.o
+ .debug_line    0x000000000003ff80     0x2d6f build/Source/html/readability.o
+ .debug_line    0x0000000000042cef     0x1f98 build/Source/keyboard/keyboard.o
+ .debug_line    0x0000000000044c87      0x7a6 build/Source/core/tasks.o
+ .debug_line    0x000000000004542d      0x7d2 build/Source/util/strbuf.o
+ .debug_line    0x0000000000045bff      0xb7b build/Source/util/strutil.o
+ .debug_line    0x000000000004677a      0x76b build/Source/util/pdtimer.o
+ .debug_line    0x0000000000046ee5      0x576 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
 
-.debug_str      0x0000000000000000    0x15dad
+.debug_str      0x0000000000000000    0x15daf
  .debug_str     0x0000000000000000     0xdbea build/Source/main.o
                                        0xe2f3 (size before relaxing)
  .debug_str     0x000000000000dbea       0x71 build/Source/core/logger.o
@@ -8890,83 +8886,83 @@ OUTPUT(build/pdex.elf elf32-littlearm)
                                        0xc14b (size before relaxing)
  .debug_str     0x000000000000f505      0x323 build/Source/render/image_decoder.o
                                        0xc736 (size before relaxing)
- .debug_str     0x000000000000f828      0x83c build/Source/render/layout.o
-                                       0xdc64 (size before relaxing)
- .debug_str     0x0000000000010064       0xcd build/Source/render/decoders/scale.o
+ .debug_str     0x000000000000f828      0x83e build/Source/render/layout.o
+                                       0xdc70 (size before relaxing)
+ .debug_str     0x0000000000010066       0xcd build/Source/render/decoders/scale.o
                                        0x6e41 (size before relaxing)
- .debug_str     0x0000000000010131       0xa0 build/Source/render/decoders/dither.o
+ .debug_str     0x0000000000010133       0xa0 build/Source/render/decoders/dither.o
                                        0xbcf3 (size before relaxing)
- .debug_str     0x00000000000101d1      0x31d build/Source/render/decoders/inflate.o
+ .debug_str     0x00000000000101d3      0x31d build/Source/render/decoders/inflate.o
                                        0x711b (size before relaxing)
- .debug_str     0x00000000000104ee       0xe5 build/Source/render/decoders/bmp.o
+ .debug_str     0x00000000000104f0       0xe5 build/Source/render/decoders/bmp.o
                                        0x8d43 (size before relaxing)
- .debug_str     0x00000000000105d3      0x22a build/Source/render/decoders/gif.o
+ .debug_str     0x00000000000105d5      0x22a build/Source/render/decoders/gif.o
                                        0x8f53 (size before relaxing)
- .debug_str     0x00000000000107fd       0xb8 build/Source/render/decoders/ico.o
+ .debug_str     0x00000000000107ff       0xb8 build/Source/render/decoders/ico.o
                                        0x8e09 (size before relaxing)
- .debug_str     0x00000000000108b5      0x17b build/Source/render/decoders/png.o
+ .debug_str     0x00000000000108b7      0x17b build/Source/render/decoders/png.o
                                        0x8f6c (size before relaxing)
- .debug_str     0x0000000000010a30      0x3d0 build/Source/render/decoders/jpeg.o
+ .debug_str     0x0000000000010a32      0x3d0 build/Source/render/decoders/jpeg.o
                                        0x91d6 (size before relaxing)
- .debug_str     0x0000000000010e00      0x2f6 build/Source/render/decoders/svg.o
+ .debug_str     0x0000000000010e02      0x2f6 build/Source/render/decoders/svg.o
                                        0xc912 (size before relaxing)
- .debug_str     0x00000000000110f6      0x1bb build/Source/render/decoders/tif.o
+ .debug_str     0x00000000000110f8      0x1bb build/Source/render/decoders/tif.o
                                        0x8f47 (size before relaxing)
- .debug_str     0x00000000000112b1       0xd5 build/Source/render/decoders/tga.o
+ .debug_str     0x00000000000112b3       0xd5 build/Source/render/decoders/tga.o
                                        0x8db1 (size before relaxing)
- .debug_str     0x0000000000011386       0x7f build/Source/render/decoders/psd.o
+ .debug_str     0x0000000000011388       0x7f build/Source/render/decoders/psd.o
                                        0x8dbc (size before relaxing)
- .debug_str     0x0000000000011405       0x89 build/Source/render/decoders/sgi.o
+ .debug_str     0x0000000000011407       0x89 build/Source/render/decoders/sgi.o
                                        0x8d84 (size before relaxing)
- .debug_str     0x000000000001148e       0x59 build/Source/render/decoders/xbm.o
+ .debug_str     0x0000000000011490       0x59 build/Source/render/decoders/xbm.o
                                        0x9579 (size before relaxing)
- .debug_str     0x00000000000114e7      0x309 build/Source/render/decoders/pdfimg.o
+ .debug_str     0x00000000000114e9      0x309 build/Source/render/decoders/pdfimg.o
                                        0x90d3 (size before relaxing)
- .debug_str     0x00000000000117f0      0x953 build/Source/render/decoders/webp.o
+ .debug_str     0x00000000000117f2      0x953 build/Source/render/decoders/webp.o
                                        0x9bb8 (size before relaxing)
- .debug_str     0x0000000000012143       0x27 build/Source/render/decoders/webp_vp8_data.o
+ .debug_str     0x0000000000012145       0x27 build/Source/render/decoders/webp_vp8_data.o
                                        0x3e3f (size before relaxing)
- .debug_str     0x000000000001216a      0xc7e build/Source/render/decoders/webp_vp8.o
+ .debug_str     0x000000000001216c      0xc7e build/Source/render/decoders/webp_vp8.o
                                        0xa0af (size before relaxing)
- .debug_str     0x0000000000012de8      0x2fd build/Source/render/decoders/webp_container.o
+ .debug_str     0x0000000000012dea      0x2fd build/Source/render/decoders/webp_container.o
                                        0x9574 (size before relaxing)
- .debug_str     0x00000000000130e5       0x9b build/Source/ui/chrome.o
+ .debug_str     0x00000000000130e7       0x9b build/Source/ui/chrome.o
                                        0xc04b (size before relaxing)
- .debug_str     0x0000000000013180       0x67 build/Source/ui/hud.o
+ .debug_str     0x0000000000013182       0x67 build/Source/ui/hud.o
                                        0xbf49 (size before relaxing)
- .debug_str     0x00000000000131e7       0xff build/Source/ui/error_page.o
+ .debug_str     0x00000000000131e9       0xff build/Source/ui/error_page.o
                                        0xc097 (size before relaxing)
- .debug_str     0x00000000000132e6      0x1e4 build/Source/ui/home_page.o
+ .debug_str     0x00000000000132e8      0x1e4 build/Source/ui/home_page.o
                                        0xc281 (size before relaxing)
- .debug_str     0x00000000000134ca       0x85 build/Source/ui/bookmarks_page.o
+ .debug_str     0x00000000000134cc       0x85 build/Source/ui/bookmarks_page.o
                                        0xc084 (size before relaxing)
- .debug_str     0x000000000001354f       0x35 build/Source/ui/history_page.o
+ .debug_str     0x0000000000013551       0x35 build/Source/ui/history_page.o
                                        0xc07e (size before relaxing)
- .debug_str     0x0000000000013584      0x35e build/Source/ui/settings_page.o
+ .debug_str     0x0000000000013586      0x35e build/Source/ui/settings_page.o
                                        0xc4ae (size before relaxing)
- .debug_str     0x00000000000138e2      0x13e build/Source/ui/address_bar.o
+ .debug_str     0x00000000000138e4      0x13e build/Source/ui/address_bar.o
                                        0xc4b5 (size before relaxing)
- .debug_str     0x0000000000013a20      0x22a build/Source/html/entities.o
+ .debug_str     0x0000000000013a22      0x22a build/Source/html/entities.o
                                        0x9743 (size before relaxing)
- .debug_str     0x0000000000013c4a      0x229 build/Source/html/tokenizer.o
+ .debug_str     0x0000000000013c4c      0x229 build/Source/html/tokenizer.o
                                        0x9803 (size before relaxing)
- .debug_str     0x0000000000013e73      0x215 build/Source/html/dom.o
+ .debug_str     0x0000000000013e75      0x215 build/Source/html/dom.o
                                        0x9897 (size before relaxing)
- .debug_str     0x0000000000014088      0x903 build/Source/html/document.o
+ .debug_str     0x000000000001408a      0x903 build/Source/html/document.o
                                        0xa25d (size before relaxing)
- .debug_str     0x000000000001498b      0x45b build/Source/html/readability.o
+ .debug_str     0x000000000001498d      0x45b build/Source/html/readability.o
                                        0xa439 (size before relaxing)
- .debug_str     0x0000000000014de6      0xcf4 build/Source/keyboard/keyboard.o
+ .debug_str     0x0000000000014de8      0xcf4 build/Source/keyboard/keyboard.o
                                        0xcbfe (size before relaxing)
- .debug_str     0x0000000000015ada       0x83 build/Source/core/tasks.o
+ .debug_str     0x0000000000015adc       0x83 build/Source/core/tasks.o
                                        0xbd91 (size before relaxing)
- .debug_str     0x0000000000015b5d       0x46 build/Source/util/strbuf.o
+ .debug_str     0x0000000000015b5f       0x46 build/Source/util/strbuf.o
                                        0x8d66 (size before relaxing)
- .debug_str     0x0000000000015ba3       0xd3 build/Source/util/strutil.o
+ .debug_str     0x0000000000015ba5       0xd3 build/Source/util/strutil.o
                                        0x95cf (size before relaxing)
- .debug_str     0x0000000000015c76       0xb6 build/Source/util/pdtimer.o
+ .debug_str     0x0000000000015c78       0xb6 build/Source/util/pdtimer.o
                                        0xbd21 (size before relaxing)
- .debug_str     0x0000000000015d2c       0x81 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_str     0x0000000000015d2e       0x81 build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
                                        0xbd5d (size before relaxing)
 
 .comment        0x0000000000000000       0x79
@@ -9315,7 +9311,7 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .ARM.attributes
                 0x0000000000001c03       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libc.a(lib_a-errno.o)
 
-.debug_frame    0x0000000000000000     0x8a08
+.debug_frame    0x0000000000000000     0x89fc
  .debug_frame   0x0000000000000000      0x640 build/Source/main.o
  .debug_frame   0x0000000000000640       0xc8 build/Source/core/logger.o
  .debug_frame   0x0000000000000708       0x40 build/Source/core/constants.o
@@ -9327,132 +9323,132 @@ OUTPUT(build/pdex.elf elf32-littlearm)
  .debug_frame   0x000000000000135c      0x128 build/Source/render/style.o
  .debug_frame   0x0000000000001484      0x354 build/Source/render/link_manager.o
  .debug_frame   0x00000000000017d8      0x468 build/Source/render/image_decoder.o
- .debug_frame   0x0000000000001c40      0x7cc build/Source/render/layout.o
- .debug_frame   0x000000000000240c      0x124 build/Source/render/decoders/scale.o
- .debug_frame   0x0000000000002530       0xe8 build/Source/render/decoders/dither.o
- .debug_frame   0x0000000000002618      0x26c build/Source/render/decoders/inflate.o
- .debug_frame   0x0000000000002884       0xa8 build/Source/render/decoders/bmp.o
- .debug_frame   0x000000000000292c       0xb0 build/Source/render/decoders/gif.o
- .debug_frame   0x00000000000029dc       0xdc build/Source/render/decoders/ico.o
- .debug_frame   0x0000000000002ab8       0x70 build/Source/render/decoders/png.o
- .debug_frame   0x0000000000002b28      0x2f4 build/Source/render/decoders/jpeg.o
- .debug_frame   0x0000000000002e1c      0x23c build/Source/render/decoders/svg.o
- .debug_frame   0x0000000000003058      0x15c build/Source/render/decoders/tif.o
- .debug_frame   0x00000000000031b4       0x74 build/Source/render/decoders/tga.o
- .debug_frame   0x0000000000003228       0x6c build/Source/render/decoders/psd.o
- .debug_frame   0x0000000000003294       0xc0 build/Source/render/decoders/sgi.o
- .debug_frame   0x0000000000003354       0xc8 build/Source/render/decoders/xbm.o
- .debug_frame   0x000000000000341c      0x408 build/Source/render/decoders/pdfimg.o
- .debug_frame   0x0000000000003824      0x3dc build/Source/render/decoders/webp.o
- .debug_frame   0x0000000000003c00      0x86c build/Source/render/decoders/webp_vp8.o
- .debug_frame   0x000000000000446c      0x22c build/Source/render/decoders/webp_container.o
- .debug_frame   0x0000000000004698       0x60 build/Source/ui/chrome.o
- .debug_frame   0x00000000000046f8       0x8c build/Source/ui/hud.o
- .debug_frame   0x0000000000004784       0xb8 build/Source/ui/error_page.o
- .debug_frame   0x000000000000483c      0x164 build/Source/ui/home_page.o
- .debug_frame   0x00000000000049a0       0xdc build/Source/ui/bookmarks_page.o
- .debug_frame   0x0000000000004a7c       0xdc build/Source/ui/history_page.o
- .debug_frame   0x0000000000004b58      0x148 build/Source/ui/settings_page.o
- .debug_frame   0x0000000000004ca0      0x268 build/Source/ui/address_bar.o
- .debug_frame   0x0000000000004f08      0x14c build/Source/html/entities.o
- .debug_frame   0x0000000000005054      0x1b8 build/Source/html/tokenizer.o
- .debug_frame   0x000000000000520c      0x26c build/Source/html/dom.o
- .debug_frame   0x0000000000005478      0xb10 build/Source/html/document.o
- .debug_frame   0x0000000000005f88      0x2c4 build/Source/html/readability.o
- .debug_frame   0x000000000000624c      0x4ec build/Source/keyboard/keyboard.o
- .debug_frame   0x0000000000006738      0x128 build/Source/core/tasks.o
- .debug_frame   0x0000000000006860      0x174 build/Source/util/strbuf.o
- .debug_frame   0x00000000000069d4      0x258 build/Source/util/strutil.o
- .debug_frame   0x0000000000006c2c       0xd4 build/Source/util/pdtimer.o
- .debug_frame   0x0000000000006d00       0x5c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
- .debug_frame   0x0000000000006d5c       0xac /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_addsubdf3.o)
- .debug_frame   0x0000000000006e08       0x50 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_muldivdf3.o)
- .debug_frame   0x0000000000006e58       0xc4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_cmpdf2.o)
- .debug_frame   0x0000000000006f1c       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_fixdfsi.o)
- .debug_frame   0x0000000000006f40       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_fixunsdfsi.o)
- .debug_frame   0x0000000000006f64       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_truncdfsf2.o)
- .debug_frame   0x0000000000006f88       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_aeabi_ldivmod.o)
- .debug_frame   0x0000000000006fcc       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_aeabi_uldivmod.o)
- .debug_frame   0x0000000000006ff8       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_udivmoddi4.o)
- .debug_frame   0x000000000000702c       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atof.o)
- .debug_frame   0x000000000000704c       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atoi.o)
- .debug_frame   0x000000000000707c       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atol.o)
- .debug_frame   0x00000000000070ac       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-calloc.o)
- .debug_frame   0x00000000000070cc       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-callocr.o)
- .debug_frame   0x00000000000070f4       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-malloc.o)
- .debug_frame   0x0000000000007124       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memcmp.o)
- .debug_frame   0x0000000000007160       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memmove.o)
- .debug_frame   0x00000000000071a0       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memset.o)
- .debug_frame   0x00000000000071d8       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-qsort.o)
- .debug_frame   0x000000000000721c       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-realloc.o)
- .debug_frame   0x000000000000723c       0x9c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-snprintf.o)
- .debug_frame   0x00000000000072d8       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sprintf.o)
- .debug_frame   0x0000000000007354       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sscanf.o)
- .debug_frame   0x00000000000073d4       0x8c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-stdio.o)
- .debug_frame   0x0000000000007460       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcasecmp.o)
- .debug_frame   0x00000000000074a4       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcat.o)
- .debug_frame   0x00000000000074cc       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strchr.o)
- .debug_frame   0x000000000000750c       0x68 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcmp.o)
- .debug_frame   0x0000000000007574       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcpy.o)
- .debug_frame   0x0000000000007594       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strdup.o)
- .debug_frame   0x00000000000075b4       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strdup_r.o)
- .debug_frame   0x00000000000075e0       0x48 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncasecmp.o)
- .debug_frame   0x0000000000007628       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncat.o)
- .debug_frame   0x0000000000007658       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncmp.o)
- .debug_frame   0x00000000000076b0       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncpy.o)
- .debug_frame   0x00000000000076e8       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strrchr.o)
- .debug_frame   0x000000000000771c       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strstr.o)
- .debug_frame   0x00000000000077a4      0x134 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
- .debug_frame   0x00000000000078d8       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtok.o)
- .debug_frame   0x00000000000078f8       0x5c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtok_r.o)
- .debug_frame   0x0000000000007954       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtol.o)
- .debug_frame   0x00000000000079d4       0x90 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoll.o)
- .debug_frame   0x0000000000007a64       0x68 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
- .debug_frame   0x0000000000007acc       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
- .debug_frame   0x0000000000007b24       0x60 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-vsnprintf.o)
- .debug_frame   0x0000000000007b84       0xc4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-dtoa.o)
- .debug_frame   0x0000000000007c48       0x8c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-gethex.o)
- .debug_frame   0x0000000000007cd4       0x70 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-hexnan.o)
- .debug_frame   0x0000000000007d44       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-iswspace.o)
- .debug_frame   0x0000000000007d64       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-iswspace_l.o)
- .debug_frame   0x0000000000007d84       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
- .debug_frame   0x0000000000007da4       0x54 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
- .debug_frame   0x0000000000007df8       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-localeconv.o)
- .debug_frame   0x0000000000007e38       0x64 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbrtowc.o)
- .debug_frame   0x0000000000007e9c       0x4c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbtowc_r.o)
- .debug_frame   0x0000000000007ee8      0x278 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
- .debug_frame   0x0000000000008160       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-s_frexp.o)
- .debug_frame   0x000000000000818c       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-s_nan.o)
- .debug_frame   0x00000000000081ac       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sccl.o)
- .debug_frame   0x00000000000081ec       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sf_nan.o)
- .debug_frame   0x000000000000820c       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strnlen.o)
- .debug_frame   0x000000000000823c       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoul.o)
- .debug_frame   0x00000000000082b8       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoull.o)
- .debug_frame   0x0000000000008340       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfiprintf.o)
- .debug_frame   0x00000000000083c8       0xc0 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfiscanf.o)
- .debug_frame   0x0000000000008488       0x5c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-ungetc.o)
- .debug_frame   0x00000000000084e4       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-wctomb_r.o)
- .debug_frame   0x0000000000008520       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_unorddf2.o)
- .debug_frame   0x0000000000008540       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_fixdfdi.o)
- .debug_frame   0x0000000000008578       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_fixunsdfdi.o)
- .debug_frame   0x00000000000085a4       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_ceil.o)
- .debug_frame   0x00000000000085d4       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_cos.o)
- .debug_frame   0x0000000000008610       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_floor.o)
- .debug_frame   0x0000000000008640       0x64 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-wf_pow.o)
- .debug_frame   0x00000000000086a4       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
- .debug_frame   0x0000000000008720       0x74 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_pow.o)
- .debug_frame   0x0000000000008794       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_sqrt.o)
- .debug_frame   0x00000000000087b4       0x70 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_cos.o)
- .debug_frame   0x0000000000008824       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
- .debug_frame   0x000000000000887c       0x48 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_sin.o)
- .debug_frame   0x00000000000088c4       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_fabs.o)
- .debug_frame   0x00000000000088e4       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_matherr.o)
- .debug_frame   0x0000000000008904       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_scalbn.o)
- .debug_frame   0x0000000000008930       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_fabs.o)
- .debug_frame   0x0000000000008950       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_finite.o)
- .debug_frame   0x0000000000008978       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_rint.o)
- .debug_frame   0x00000000000089ac       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_scalbn.o)
- .debug_frame   0x00000000000089e8       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libc.a(lib_a-errno.o)
+ .debug_frame   0x0000000000001c40      0x7c0 build/Source/render/layout.o
+ .debug_frame   0x0000000000002400      0x124 build/Source/render/decoders/scale.o
+ .debug_frame   0x0000000000002524       0xe8 build/Source/render/decoders/dither.o
+ .debug_frame   0x000000000000260c      0x26c build/Source/render/decoders/inflate.o
+ .debug_frame   0x0000000000002878       0xa8 build/Source/render/decoders/bmp.o
+ .debug_frame   0x0000000000002920       0xb0 build/Source/render/decoders/gif.o
+ .debug_frame   0x00000000000029d0       0xdc build/Source/render/decoders/ico.o
+ .debug_frame   0x0000000000002aac       0x70 build/Source/render/decoders/png.o
+ .debug_frame   0x0000000000002b1c      0x2f4 build/Source/render/decoders/jpeg.o
+ .debug_frame   0x0000000000002e10      0x23c build/Source/render/decoders/svg.o
+ .debug_frame   0x000000000000304c      0x15c build/Source/render/decoders/tif.o
+ .debug_frame   0x00000000000031a8       0x74 build/Source/render/decoders/tga.o
+ .debug_frame   0x000000000000321c       0x6c build/Source/render/decoders/psd.o
+ .debug_frame   0x0000000000003288       0xc0 build/Source/render/decoders/sgi.o
+ .debug_frame   0x0000000000003348       0xc8 build/Source/render/decoders/xbm.o
+ .debug_frame   0x0000000000003410      0x408 build/Source/render/decoders/pdfimg.o
+ .debug_frame   0x0000000000003818      0x3dc build/Source/render/decoders/webp.o
+ .debug_frame   0x0000000000003bf4      0x86c build/Source/render/decoders/webp_vp8.o
+ .debug_frame   0x0000000000004460      0x22c build/Source/render/decoders/webp_container.o
+ .debug_frame   0x000000000000468c       0x60 build/Source/ui/chrome.o
+ .debug_frame   0x00000000000046ec       0x8c build/Source/ui/hud.o
+ .debug_frame   0x0000000000004778       0xb8 build/Source/ui/error_page.o
+ .debug_frame   0x0000000000004830      0x164 build/Source/ui/home_page.o
+ .debug_frame   0x0000000000004994       0xdc build/Source/ui/bookmarks_page.o
+ .debug_frame   0x0000000000004a70       0xdc build/Source/ui/history_page.o
+ .debug_frame   0x0000000000004b4c      0x148 build/Source/ui/settings_page.o
+ .debug_frame   0x0000000000004c94      0x268 build/Source/ui/address_bar.o
+ .debug_frame   0x0000000000004efc      0x14c build/Source/html/entities.o
+ .debug_frame   0x0000000000005048      0x1b8 build/Source/html/tokenizer.o
+ .debug_frame   0x0000000000005200      0x26c build/Source/html/dom.o
+ .debug_frame   0x000000000000546c      0xb10 build/Source/html/document.o
+ .debug_frame   0x0000000000005f7c      0x2c4 build/Source/html/readability.o
+ .debug_frame   0x0000000000006240      0x4ec build/Source/keyboard/keyboard.o
+ .debug_frame   0x000000000000672c      0x128 build/Source/core/tasks.o
+ .debug_frame   0x0000000000006854      0x174 build/Source/util/strbuf.o
+ .debug_frame   0x00000000000069c8      0x258 build/Source/util/strutil.o
+ .debug_frame   0x0000000000006c20       0xd4 build/Source/util/pdtimer.o
+ .debug_frame   0x0000000000006cf4       0x5c build//Users/bwandrych/Developer/PlaydateSDK/C_API/buildsupport/setup.o
+ .debug_frame   0x0000000000006d50       0xac /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_addsubdf3.o)
+ .debug_frame   0x0000000000006dfc       0x50 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_muldivdf3.o)
+ .debug_frame   0x0000000000006e4c       0xc4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_cmpdf2.o)
+ .debug_frame   0x0000000000006f10       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_fixdfsi.o)
+ .debug_frame   0x0000000000006f34       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_fixunsdfsi.o)
+ .debug_frame   0x0000000000006f58       0x24 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_truncdfsf2.o)
+ .debug_frame   0x0000000000006f7c       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_aeabi_ldivmod.o)
+ .debug_frame   0x0000000000006fc0       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_aeabi_uldivmod.o)
+ .debug_frame   0x0000000000006fec       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_udivmoddi4.o)
+ .debug_frame   0x0000000000007020       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atof.o)
+ .debug_frame   0x0000000000007040       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atoi.o)
+ .debug_frame   0x0000000000007070       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-atol.o)
+ .debug_frame   0x00000000000070a0       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-calloc.o)
+ .debug_frame   0x00000000000070c0       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-callocr.o)
+ .debug_frame   0x00000000000070e8       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-malloc.o)
+ .debug_frame   0x0000000000007118       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memcmp.o)
+ .debug_frame   0x0000000000007154       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memmove.o)
+ .debug_frame   0x0000000000007194       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-memset.o)
+ .debug_frame   0x00000000000071cc       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-qsort.o)
+ .debug_frame   0x0000000000007210       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-realloc.o)
+ .debug_frame   0x0000000000007230       0x9c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-snprintf.o)
+ .debug_frame   0x00000000000072cc       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sprintf.o)
+ .debug_frame   0x0000000000007348       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sscanf.o)
+ .debug_frame   0x00000000000073c8       0x8c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-stdio.o)
+ .debug_frame   0x0000000000007454       0x44 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcasecmp.o)
+ .debug_frame   0x0000000000007498       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcat.o)
+ .debug_frame   0x00000000000074c0       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strchr.o)
+ .debug_frame   0x0000000000007500       0x68 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcmp.o)
+ .debug_frame   0x0000000000007568       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strcpy.o)
+ .debug_frame   0x0000000000007588       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strdup.o)
+ .debug_frame   0x00000000000075a8       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strdup_r.o)
+ .debug_frame   0x00000000000075d4       0x48 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncasecmp.o)
+ .debug_frame   0x000000000000761c       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncat.o)
+ .debug_frame   0x000000000000764c       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncmp.o)
+ .debug_frame   0x00000000000076a4       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strncpy.o)
+ .debug_frame   0x00000000000076dc       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strrchr.o)
+ .debug_frame   0x0000000000007710       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strstr.o)
+ .debug_frame   0x0000000000007798      0x134 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtod.o)
+ .debug_frame   0x00000000000078cc       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtok.o)
+ .debug_frame   0x00000000000078ec       0x5c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtok_r.o)
+ .debug_frame   0x0000000000007948       0x80 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtol.o)
+ .debug_frame   0x00000000000079c8       0x90 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoll.o)
+ .debug_frame   0x0000000000007a58       0x68 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfprintf.o)
+ .debug_frame   0x0000000000007ac0       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfscanf.o)
+ .debug_frame   0x0000000000007b18       0x60 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-vsnprintf.o)
+ .debug_frame   0x0000000000007b78       0xc4 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-dtoa.o)
+ .debug_frame   0x0000000000007c3c       0x8c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-gethex.o)
+ .debug_frame   0x0000000000007cc8       0x70 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-gdtoa-hexnan.o)
+ .debug_frame   0x0000000000007d38       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-iswspace.o)
+ .debug_frame   0x0000000000007d58       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-iswspace_l.o)
+ .debug_frame   0x0000000000007d78       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-lnumeric.o)
+ .debug_frame   0x0000000000007d98       0x54 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-locale.o)
+ .debug_frame   0x0000000000007dec       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-localeconv.o)
+ .debug_frame   0x0000000000007e2c       0x64 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbrtowc.o)
+ .debug_frame   0x0000000000007e90       0x4c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mbtowc_r.o)
+ .debug_frame   0x0000000000007edc      0x278 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-mprec.o)
+ .debug_frame   0x0000000000008154       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-s_frexp.o)
+ .debug_frame   0x0000000000008180       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-s_nan.o)
+ .debug_frame   0x00000000000081a0       0x40 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sccl.o)
+ .debug_frame   0x00000000000081e0       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-sf_nan.o)
+ .debug_frame   0x0000000000008200       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strnlen.o)
+ .debug_frame   0x0000000000008230       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoul.o)
+ .debug_frame   0x00000000000082ac       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-strtoull.o)
+ .debug_frame   0x0000000000008334       0x88 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfiprintf.o)
+ .debug_frame   0x00000000000083bc       0xc0 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-svfiscanf.o)
+ .debug_frame   0x000000000000847c       0x5c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-ungetc.o)
+ .debug_frame   0x00000000000084d8       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libg.a(lib_a-wctomb_r.o)
+ .debug_frame   0x0000000000008514       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_arm_unorddf2.o)
+ .debug_frame   0x0000000000008534       0x38 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_fixdfdi.o)
+ .debug_frame   0x000000000000856c       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/thumb/v7e-m+fp/hard/libgcc.a(_fixunsdfdi.o)
+ .debug_frame   0x0000000000008598       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_ceil.o)
+ .debug_frame   0x00000000000085c8       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_cos.o)
+ .debug_frame   0x0000000000008604       0x30 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_floor.o)
+ .debug_frame   0x0000000000008634       0x64 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-wf_pow.o)
+ .debug_frame   0x0000000000008698       0x7c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-e_rem_pio2.o)
+ .debug_frame   0x0000000000008714       0x74 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_pow.o)
+ .debug_frame   0x0000000000008788       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-ef_sqrt.o)
+ .debug_frame   0x00000000000087a8       0x70 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_cos.o)
+ .debug_frame   0x0000000000008818       0x58 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_rem_pio2.o)
+ .debug_frame   0x0000000000008870       0x48 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-k_sin.o)
+ .debug_frame   0x00000000000088b8       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_fabs.o)
+ .debug_frame   0x00000000000088d8       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_matherr.o)
+ .debug_frame   0x00000000000088f8       0x2c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-s_scalbn.o)
+ .debug_frame   0x0000000000008924       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_fabs.o)
+ .debug_frame   0x0000000000008944       0x28 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_finite.o)
+ .debug_frame   0x000000000000896c       0x34 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_rint.o)
+ .debug_frame   0x00000000000089a0       0x3c /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libm.a(lib_a-sf_scalbn.o)
+ .debug_frame   0x00000000000089dc       0x20 /usr/local/playdate/gcc-arm-none-eabi-9-2019-q4-major/bin/../lib/gcc/arm-none-eabi/9.2.1/../../../../arm-none-eabi/lib/thumb/v7e-m+fp/hard/libc.a(lib_a-errno.o)
 
 Cross Reference Table
 
