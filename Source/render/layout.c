@@ -66,32 +66,50 @@ static OnDemandOverlay g_overlay;
 static char g_odRequested[ONDEMAND_MAP_MAX][512];
 static int g_odRequestedCount = 0;
 
-/* word-text arena: breakLines words live here until layout_clear() */
-static char *g_wordArena = NULL;
-static size_t g_wordArenaUsed = 0;
-static size_t g_wordArenaCap = 0;
+/* word-text arena: breakLines words live here until layout_clear().
+ *
+ * Implemented as a CHUNK LIST, not one growing buffer: LayoutItems borrow
+ * word pointers for the lifetime of the layout, so the storage must NEVER
+ * move. The previous single-buffer arena called realloc() on growth, which
+ * invalidated every word pointer emitted before the growth — first-ever
+ * layout built from an empty arena always grew (4096 → …) and the earliest
+ * words rendered as garbage/underlines until the next full layout (whose
+ * arena already had capacity) redrew them correctly. Chunked allocation
+ * gives stable pointers for the whole build. */
+typedef struct WordChunk
+{
+    struct WordChunk *next;
+    size_t used;
+    size_t cap;
+    char data[]; /* flexible array member */
+} WordChunk;
+
+#define WORD_CHUNK_SIZE 16384
+static WordChunk *g_wordChunks = NULL;
 
 static const char *arena_word(const char *s)
 {
     size_t n = strlen(s) + 1;
-    if (g_wordArenaUsed + n > g_wordArenaCap)
+    if (n > WORD_CHUNK_SIZE)
     {
-        size_t nc = g_wordArenaCap ? g_wordArenaCap * 2 : 4096;
-        while (nc < g_wordArenaUsed + n)
-        {
-            nc *= 2;
-        }
-        char *na = (char *)realloc(g_wordArena, nc);
-        if (!na)
+        return s; /* single word larger than a chunk: caller-owned fallback */
+    }
+    WordChunk *c = g_wordChunks;
+    if (!c || c->used + n > c->cap)
+    {
+        c = (WordChunk *)malloc(sizeof(WordChunk) + WORD_CHUNK_SIZE);
+        if (!c)
         {
             return s; /* fall back to caller-owned storage */
         }
-        g_wordArena = na;
-        g_wordArenaCap = nc;
+        c->used = 0;
+        c->cap = WORD_CHUNK_SIZE;
+        c->next = g_wordChunks;
+        g_wordChunks = c;
     }
-    char *dst = g_wordArena + g_wordArenaUsed;
+    char *dst = c->data + c->used;
     memcpy(dst, s, n);
-    g_wordArenaUsed += n;
+    c->used += n;
     return dst;
 }
 
@@ -141,7 +159,15 @@ void layout_clear(void)
     g_overlay.present = 0;
     g_odRequestedCount = 0;
     g_onDemandConsumed = 0;
-    g_wordArenaUsed = 0;
+    /* Free the whole word-arena chunk list. */
+    WordChunk *c = g_wordChunks;
+    while (c)
+    {
+        WordChunk *nx = c->next;
+        free(c);
+        c = nx;
+    }
+    g_wordChunks = NULL;
 }
 
 /* ── Measurement (Style.getTextWidth) ────────────────────────────────────── */
