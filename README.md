@@ -56,7 +56,7 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 | **D-Pad Left / Right** | Move between grid columns. |
 | **A** | Open the selected bookmark. |
 | **B** | Open the Address Bar & search. |
-| **Crank** | Scroll the grid. |
+| **Crank** | Select bookmarks one by one (Settings button included) — the page scrolls along; past the last card it free-scrolls to the bottom. |
 
 ### Loading Screen
 
