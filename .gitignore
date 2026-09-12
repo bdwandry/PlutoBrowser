@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# Freebuff agent workspace metadata
+.freebuff/
+
 # Build outputs (recreate with: make)
 /build/
 *.pdx
