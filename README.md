@@ -1,0 +1,278 @@
+# Pluto Browser for Playdate
+
+**Pluto Browser** is a fast, standalone, general-purpose web browser built specifically for the **Playdate handheld console** and **Playdate Simulator** — written in **native C** for maximum performance on device.
+
+Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web address, search the internet, fill out forms, click hyperlinks, and render HTML headings, paragraphs, lists, blockquotes, code blocks, tables, and images (SVG, WebP, JPEG, PNG, GIF, BMP, ICO, TIFF, TGA and more) with 1-bit monochrome graphics on the 400x240 sharp LCD screen.
+
+---
+
+## Hardware Controls & Shortcuts
+
+### Global
+
+| Control | Action |
+| :--- | :--- |
+| **Physical Crank** | Scroll pages & list screens with kinetic inertia; moves the mouse cursor in HTML mode. |
+| **A Button** | Confirm / follow the focused link / activate a form input / open the selected item. |
+| **B Button (hold)** | Arm the Address Bar for keyboard launch; release to open the on-screen keyboard. |
+| **B + Left** | **Back** in page history (while address bar is armed). |
+| **B + Right** | **Forward** in page history (while address bar is armed). |
+| **A + Left** | **Back** in page history (while on a page). |
+| **A + Right** | **Forward** in page history (while on a page). |
+| **Menu** | Open Playdate system menu (Home-Page, View mode, Settings, History, Clear Cookies). |
+
+### Reader Mode
+
+| Control | Action |
+| :--- | :--- |
+| **D-Pad Down** | Jump to the next link on the page (scroll down if none nearby). |
+| **D-Pad Up** | Jump to the previous link on the page (scroll up if none nearby). |
+| **A** | Follow the focused link / activate a form input. |
+| **B** | Open the Address Bar pre-filled with the current URL. |
+| **Crank** | Scroll with inertia. |
+
+### HTML Mode (virtual mouse cursor)
+
+| Control | Action |
+| :--- | :--- |
+| **D-Pad (hold)** | Move the mouse cursor in that direction. |
+| **Crank** | Move the cursor up / down. |
+| **Cursor near screen edge** | Auto-scroll the page. |
+| **A** | Left-click the hovered link / activate a form input. |
+| **B** | Open the Address Bar. |
+| **Hovering a link** | URL status bar appears at the bottom of the screen. |
+
+### Home Page (Speed Dial)
+
+| Control | Action |
+| :--- | :--- |
+| **D-Pad Up / Down** | Move between grid rows. |
+| **D-Pad Left / Right** | Move between grid columns. |
+| **A** | Open the selected bookmark. |
+| **B** | Open the Address Bar & search. |
+| **Crank** | Scroll the grid. |
+
+### Loading Screen
+
+| Control | Action |
+| :--- | :--- |
+| **B** | Cancel the page load. |
+| **Left** | Cancel the load and go **Back** in history. |
+
+### Error Page
+
+| Control | Action |
+| :--- | :--- |
+| **Left / Up** and **Right / Down** | Cycle through **Retry / Search / Home**. |
+| **A** | Confirm the highlighted option. |
+| **Left** | Go **Back** in history. |
+
+### Bookmarks & History Pages
+
+| Control | Action |
+| :--- | :--- |
+| **D-Pad Up / Down** | Navigate the list. |
+| **A** | Open the selected entry. |
+| **B** | Close and return to the Home Page. |
+
+---
+
+## Key Features
+
+### Navigation & Search
+- **Anywhere URL & Search Navigation**: Type any website address or search terms directly.
+- **Multiple Search Engines**: DuckDuckGo Lite, FrogFind, Wiby, Wikipedia Search.
+- **Full Browsing History**: Back/forward navigation with persistent history (50 entries) stored to disk.
+- **Bookmarks**: Save and manage bookmarks, persisted to disk.
+- **Default Speed Dial**: 10 pre-loaded bookmarks on the home page (Wikipedia, DuckDuckGo Lite, FrogFind, Wiby and more).
+
+### Rendering
+- **Dual Browsing Modes**:
+  - **Reader Mode**: Distills articles for clean, distraction-free reading.
+  - **HTML Mode**: Full visual layout with virtual mouse cursor, interactive forms, and clickable elements.
+- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`.
+- **Form Support**: Text inputs, checkboxes, radio buttons, dropdowns, submit buttons, hidden fields, and `<button>` elements. Forms are submitted per the HTML spec (hidden inputs included, submit button name/value always appended).
+- **Inline Styles**: Bold, italic, underline, strikethrough, code, small, sub/superscript, text alignment.
+- **`<base href>` Support**: Resolves relative URLs correctly when a base element is present.
+- **Meta Refresh Redirect**: Automatically follows `<meta http-equiv="refresh">` redirects after the specified delay.
+
+### Image Decoding
+- **SVG**: Full path rendering (M, L, H, V, C, S, T, A, Z commands), transforms, viewBox, CSS styles.
+- **WebP (VP8)**: Lossy and lossless sub-images, full image decoding pipeline.
+- **JPEG**: Baseline DCT decoding with Huffman tables.
+- **PNG**: Interlaced and non-interlaced, palette and truecolor, transparency.
+- **GIF**: Animated and static, frame-by-frame rendering.
+- **BMP**: 1-bit and 8-bit bitmaps with palette support.
+- **ICO**: Favicon extraction from website icons.
+- **Extra Formats**: TIFF, TGA, PSD, SGI, XBM and PDF-embedded image decoding.
+- **1-bit Dithering**: Ordered dithering for grayscale-to-monochrome conversion.
+
+### Image Rendering Modes
+Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how images are downloaded, cached, and displayed to optimize memory usage and frame rate on the physical Playdate hardware.
+
+| Mode | Behavior |
+| :--- | :--- |
+| **Render All** | Downloads and renders every image on the page in the background. Full visual fidelity at the cost of memory and initial load time. |
+| **In-View Only** (default) | Downloads images only when they scroll into the visible viewport. Automatically evicts (frees) images from memory when they scroll off-screen with a 200px buffer. Best balance of visual quality and memory on device. |
+| **On-Demand** | Shows a placeholder card for each image. Tapping an image opens a choice overlay: **(A) View Image** to download and render it, or **(B) Open Link** to follow the hyperlink. Loaded images can be tapped again to **Unload** them from memory. Maximum control over what gets downloaded. |
+| **Hover** | Shows a `[Hover]` placeholder until the cursor (HTML mode) or link selector (Reader mode) moves over the image, then temporarily loads and renders it. The image is evicted from memory as soon as the cursor/selection moves away. Good for quick previews without long-term memory cost. |
+| **Disabled** | Shows an `[Image Off]` placeholder for every image. No images are downloaded or rendered. Maximum frame rate on physical device for text-heavy browsing. |
+
+### Networking
+- **Dual-Engine HTTP/HTTPS**: Native async socket communication using Playdate OS 2.7+ (`playdate.network.http` & `https`).
+- **HTTP Redirect Handling**: Follows 301/302 redirects with depth tracking.
+- **Chunked Transfer**: Supports chunked transfer-encoding.
+- **Cookie Jar**: Session cookie persistence across requests.
+- **Character Encoding Detection**: Scans `<meta charset>`, `<meta http-equiv="Content-Type">`, BOM markers, and chardet heuristics.
+
+### User Interface
+- **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, battery level, reader/HTML mode toggle.
+- **Address Bar**: On-screen keyboard for URL entry and search.
+- **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
+- **Link Preview**: Bottom HUD displays `-> https://...` for D-pad-selected links in reader mode.
+- **Scrollbar**: Visual scrollbar with thumb position indicator.
+- **Error Page**: Retry / Search / Home options on load failure.
+- **Reader Mode Toggle**: Switch between article-distilled reader and full HTML rendering from the system menu.
+
+### Internal Pages
+- `about:home` — Speed Dial start page
+- `about:acidtest` — HTML & image rendering test suite
+- `about:blank` — Blank page
+
+---
+
+## Building & Sideloading
+
+### 1. Build via Terminal
+Requires the [Playdate SDK](https://play.date/dev/) with `PLAYDATE_SDK_PATH` set (or an `SDKRoot` entry in `~/.Playdate/config`).
+
+From the project root:
+```bash
+make
+```
+Or directly using `pdc`:
+```bash
+pdc Source PlutoBrowser.pdx
+```
+
+### 2. Run in Playdate Simulator
+```bash
+make simulator
+```
+Or double-click `PlutoBrowser.pdx` or open it with the Simulator app.
+
+### 3. Sideload to Physical Playdate Console
+1. **Via Web Sideload**:
+   - Go to [play.date/account/sideload](https://play.date/account/sideload).
+   - Zip `PlutoBrowser.pdx` (e.g. `zip -r PlutoBrowser.pdx.zip PlutoBrowser.pdx`) and drag & drop it onto the webpage.
+   - On your Playdate, navigate to **Settings > Games > Sideloaded** and download.
+2. **Via USB Disk Mode**:
+   - Connect Playdate via USB.
+   - On device: **Settings > System > Reboot to Data Disk**.
+   - Copy `PlutoBrowser.pdx` into the `Games/` directory on the Playdate USB drive.
+   - Eject the disk.
+
+---
+
+## Project Architecture
+
+```
+PlutoBrowser/
+├── PlutoBrowser.pdx/           # Compiled Playdate binary bundle (gitignored)
+├── Makefile                    # Build and launch automation
+├── README.md                   # This file
+├── AGENTS.md                   # Device deploy & log-collection workflow
+├── MASTER_TODO.md              # Development roadmap & phase history
+├── tests/                      # Host tests, vector generators, reference outputs
+│   ├── gen_p*_vectors.py       # Deterministic test-vector generators (ffmpeg-validated)
+│   ├── p*_host_test.c          # Host-side harnesses for C modules
+│   ├── lua_reference/          # Per-phase Lua reference outputs used to diff the C port
+│   └── logs/                   # Simulator & device run logs
+└── Source/                     # Full C codebase & assets
+    ├── main.c                  # Main loop, state machine, input handling, form submission
+    ├── pdxinfo                 # Package metadata (bundle ID, version)
+    ├── icon.png                # Launcher icon
+    │
+    ├── core/                   # Foundational systems
+    │   ├── constants.c         # Screen geometry, view states, search engines, image rendering modes
+    │   ├── url.c               # URL parser, normalizer, relative resolver, search query builder
+    │   ├── http_client.c       # Async HTTP/HTTPS client, redirect following, chunked transfer
+    │   ├── storage.c           # Persistent datastore for bookmarks, history, & settings
+    │   ├── cookie_jar.c        # Session cookie persistence across requests
+    │   ├── encoding.c          # Character encoding detection (charset, BOM, chardet)
+    │   ├── tasks.c             # Cooperative task scheduler for async operations
+    │   └── logger.c            # Debug logging
+    │
+    ├── html/                   # HTML parsing & document model
+    │   ├── tokenizer.c         # HTML sanitizer & token parser
+    │   ├── dom.c               # DOM tree builder from token stream
+    │   ├── document.c          # Block hierarchy builder, form parsing, meta refresh detection
+    │   ├── entities.c          # HTML entity decoder (&amp; &#123; etc.)
+    │   ├── readability.c       # Article distillation for reader mode
+    │   └── jsenv.c             # Sandboxed JavaScript environment hooks (muJS-based)
+    │
+    ├── render/                 # Layout & visual rendering
+    │   ├── style.c             # Typography, font metrics, Roobert font family
+    │   ├── layout.c            # Flow layout engine, line breaking, culling, image mode rendering, form element rendering
+    │   ├── cloud_layout.c      # Alternative layout engine for cloud/home page cards
+    │   ├── link_manager.c      # Link selection, hitbox tracking, hover detection
+    │   ├── image_decoder.c     # Image decode dispatcher, 1-bit dithering, caching, per-image evict
+    │   └── decoders/           # Format-specific image decoders
+    │       ├── svg.c           # SVG path rendering (M/L/H/V/C/S/T/A/Z), transforms, styles
+    │       ├── webp.c          # WebP (VP8) lossy & lossless decoding
+    │       ├── webp_vp8.c      # VP8 bitstream decoder
+    │       ├── webp_vp8_data.c # VP8 bitstream tables
+    │       ├── webp_container.c# WebP container parsing
+    │       ├── jpeg.c          # Baseline JPEG DCT decoding
+    │       ├── png.c           # PNG interlaced/palette/truecolor decoding
+    │       ├── gif.c           # GIF animated & static frame decoding
+    │       ├── bmp.c           # BMP 1-bit & 8-bit bitmap decoding
+    │       ├── ico.c           # ICO favicon extraction
+    │       ├── tif.c           # TIFF decoding
+    │       ├── tga.c           # TGA decoding
+    │       ├── psd.c           # PSD decoding
+    │       ├── sgi.c           # SGI decoding
+    │       ├── xbm.c           # XBM decoding
+    │       ├── pdfimg.c        # PDF-embedded image extraction
+    │       ├── inflate.c       # DEFLATE decompression (used by PNG, GIF, WebP)
+    │       ├── dither.c        # Ordered dithering for grayscale-to-monochrome
+    │       └── scale.c         # Image scaling utilities
+    │
+    ├── ui/                     # User interface components
+    │   ├── chrome.c            # Top toolbar (URL, SSL lock, page title, progress, battery)
+    │   ├── address_bar.c       # URL entry & search bar with on-screen keyboard
+    │   ├── home_page.c         # Speed dial grid start page
+    │   ├── hud.c               # Scrollbar, link preview bar, URL hover status bar
+    │   ├── error_page.c        # Error page with retry / search / home options
+    │   ├── bookmarks_page.c    # Bookmarks list & management
+    │   ├── history_page.c      # Browsing history viewer
+    │   └── settings_page.c     # Settings overlay (search engine, browse mode, image mode, invert crank, clear cookies)
+    │
+    ├── keyboard/               # On-screen keyboard component
+    │   └── keyboard.c          # Full QWERTY input for address bar & form fields
+    │
+    ├── util/                   # Small shared utilities
+    │   ├── json.c              # JSON parser (datastore format)
+    │   ├── strbuf.c            # Growable string buffer
+    │   ├── strutil.c           # String helpers
+    │   └── pdtimer.c           # Timer API bindings
+    │
+    ├── js/                     # Vendored muJS — a lightweight ES5 JavaScript engine
+    │
+    ├── fonts/                  # Roobert font family (Playdate .fnt format)
+    │   ├── Roobert-20-Medium.fnt
+    │   ├── Roobert-20-Medium-extended.fnt
+    │   ├── Roobert-11-Medium.fnt
+    │   ├── Roobert-11-Medium-Halved.fnt
+    │   ├── Roobert-11-Medium-Numerals.fnt
+    │   ├── Roobert-11-Medium-extended.fnt
+    │   ├── Roobert-11-Mono-Condensed.fnt
+    │   ├── Roobert-10-Bold.fnt
+    │   └── Roobert-10-Bold-Halved.fnt
+    │
+    ├── images/                 # UI images
+    │   └── home_banner.png     # Home page banner graphic
+    │
+    └── assets/                 # Launcher cards & icons
+        └── launcher/           # Playdate launcher card assets
+```
