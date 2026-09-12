@@ -1177,10 +1177,30 @@ static void draw_fps_overlay(void)
     pd->graphics->popContext();
 }
 
+/* ── Display FPS (Playdate: 30 fps default, 50 fps max per SDK docs) ───── */
+/* Apply the displayFps setting to the OS display + the keyboard component's
+ * key-repeat timing (which is frame-count based). Called once at boot and
+ * again whenever settings are saved. */
+static void apply_display_fps(void)
+{
+    int fps = storage_setting_int("displayFps");
+    if (fps != 50)
+    {
+        fps = 30; /* only 30 or 50 are valid; 30 is the OS default */
+    }
+    pd->display->setRefreshRate((float)fps);
+    if (g_kb)
+    {
+        keyboardApi.setRefreshRate(g_kb, (float)fps);
+    }
+    logger_log("DISPLAY: refresh rate set to %d fps", fps);
+}
+
 static void settings_on_change(void)
 {
     currentBrowseMode = storage_setting_int("mode");
     g_showFps = storage_setting_int("showFps");
+    apply_display_fps();
     if (currentBrowseMode != MODE_READER && currentBrowseMode != MODE_RAW_HTML)
     {
         currentBrowseMode = MODE_READER;
@@ -2129,6 +2149,9 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
          * would crash). */
         g_kb = keyboardApi.newKeyboard();
         keyboardApi.setPlaydateUpdateCallback(g_kb, updateFrame, NULL);
+        /* Display refresh target: apply AFTER the keyboard exists so its
+         * key-repeat timing is derived from the same rate. */
+        apply_display_fps();
         /* Replace the Lua run loop with our native update function. */
         pd->system->setUpdateCallback(updateFrame, NULL);
         break;

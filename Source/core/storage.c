@@ -47,9 +47,10 @@ static Setting g_settings[16] = {
     {"fontSize", "medium", 0, 0},
     {"imageMode", "viewport", 0, 0}, /* string name; Lua stores Constants names */
     {"invertCrank", "", 0, 1}, /* false */
-    {"showFps", "", 0, 1} /* false — FPS overlay off by default */
+    {"showFps", "", 0, 1}, /* false — FPS overlay off by default */
+    {"displayFps", "", 30, 1} /* display refresh target: 30 or 50 fps (Playdate max) */
 };
-static int g_settingCount = 7;
+static int g_settingCount = 8;
 
 static int g_haveDefaults = 0;
 
@@ -349,6 +350,7 @@ void storage_load(void)
     storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("invertCrank", 0);
+    storage_set_setting_int("displayFps", 30); /* 30 fps default per Playdate SDK */
 
     char *line = g_loadLine;
     char section[32] = "";
@@ -667,6 +669,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
+    storage_set_setting_int("displayFps", 30); /* 30 fps default per Playdate SDK */
     storage_load();
     logger_log("STORAGE: init exit");
 }
