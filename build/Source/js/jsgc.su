@@ -1,7 +1,0 @@
-jsgc.c:64:13:jsG_markfunction	24	static
-jsgc.c:83:13:jsG_markproperty	16	static
-jsgc.c:9:13:jsG_freefunction	16	static
-jsgc.c:17:13:jsG_freeproperty	16	static
-jsgc.c:33:13:jsG_freeobject	16	static
-jsgc.c:139:6:js_gc	376	static
-jsgc.c:260:6:js_freestate	16	static

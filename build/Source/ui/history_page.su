@@ -1,5 +1,0 @@
-history_page.c:38:14:dup_url	16	static
-history_page.c:27:6:history_page_open	0	static
-history_page.c:33:5:history_page_selected_index	0	static
-history_page.c:49:7:history_page_handle_input	8	static
-history_page.c:86:6:history_page_draw	176	static

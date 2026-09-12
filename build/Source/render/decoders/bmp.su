@@ -1,2 +1,0 @@
-bmp.c:56:16:bmp_pixel_gray	16	static
-bmp.c:140:12:bmp_decode	360	static

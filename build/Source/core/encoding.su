@@ -1,7 +1,0 @@
-encoding.c:28:13:utf8_encode	24	static
-encoding.c:62:14:from_single_byte	32	static
-encoding.c:88:14:from_utf16	48	static
-encoding.c:142:12:normalize_charset.part.0.constprop	24	static
-encoding.c:180:20:ci_strstr.constprop	16	static
-encoding.c:345:5:encoding_is_utf8	8	static
-encoding.c:382:7:encoding_to_utf8	224	static

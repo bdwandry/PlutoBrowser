@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Build outputs (recreate with: make)
+/build/
+*.pdx
+
+# Playdate compiler intermediates
+Source/pdex.elf
+Source/pdex.dylib
+
+# Device/simulator test logs (root-level; tests/logs fixtures stay tracked)
+/logs/
+/devlogs/

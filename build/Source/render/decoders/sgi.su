@@ -1,3 +1,0 @@
-sgi.c:23:16:sgi_pixel_gray	8	static
-sgi.c:185:19:sgi_finish	72	static
-sgi.c:70:12:sgi_decode	96	static

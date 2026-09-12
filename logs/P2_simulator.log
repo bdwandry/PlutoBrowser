@@ -1,8 +1,0 @@
-=== PlutoBrowser crash log ===
-gamePath: com.bryanwandrych.plutobrowser
-[14:04:05 #1] P1 grow: len=2890 cap=4096 head=|chunk0||chunk1| tail=nk298||chunk299|
-[14:04:05 #2] P1 fmt: [str][X][%][-42]
-[14:04:05 #3] ERROR: P2 error-path test: injected diagnostic error  ||  at Source/main.c:100
-[14:04:05 #4] === PlutoBrowser boot (Phase 0 scaffold) ===
-[14:04:05 #5] eventHandler: kEventInit, osversion=30101
-[14:04:05 #6] updateFrame: first frame executed

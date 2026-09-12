@@ -1,6 +1,0 @@
-jsrepr.c:6:13:reprnum	64	static
-jsrepr.c:15:13:reprstr	48	static
-jsrepr.c:151:13:reprvalue	72	static
-jsrepr.c:242:6:js_repr	32	static
-jsrepr.c:268:13:js_torepr	16	static
-jsrepr.c:275:13:js_tryrepr	32	static
