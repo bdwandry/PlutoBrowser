@@ -1,319 +1,382 @@
-// address_bar.c — P29: C port of CometBrowser Source/ui/address_bar.lua.
-//
-// Address bar controller: armed pill -> system-style on-screen keyboard
-// (vendored Raphcal C port) -> submit decision (search query vs URL).
-//
-// Lua parity notes:
-//   - open() prefills currentUrl unless it matches ^about:
-//   - launchKeyboard() refuses while B is held so B+Left/Right work first,
-//     and only once per open
-//   - keyboardWillHide(submitted): trim whitespace; empty or cancelled just
-//     closes (skipInputFrames=2); otherwise search-query vs URL.parse
-//     normalized feeds onSubmitCallback
-//   - cancel(): hides keyboard, clears callbacks
-//   - drawOverlay(): two layouts (armed pill vs keyboard-side box with a
-//     vertically-wrapped mono text)
-
-#include "ui/address_bar.h"
+/*
+ * PlutoBrowser — address_bar.c
+ * Address Bar & Web Search Controller (port of Source/ui/address_bar.lua).
+ *
+ * Preserved behavior (Lua reference):
+ *  - open(): isOpen=true, keyboardShown=false, prefill = currentUrl unless
+ *    it matches ^about: (empty otherwise).
+ *  - launchKeyboard(): no-op if not open or already shown or B held; installs
+ *    willHide/textChanged, show(inputText).
+ *  - willHide(submitted): submitted + trimmed text non-empty →
+ *    isSearchQuery ? buildSearchUrl(engine.url, text) : parse(text).normalized;
+ *    close; skipInputFrames=2; fire onSubmit(finalUrl). Cancel OR empty
+ *    submit → close; skipInputFrames=2; no callback.
+ *  - cancel(): hide keyboard if shown, close, drop submit callback.
+ *  - drawOverlay(): white rounded box, black border; compact rect
+ *    (10,6,380x48) when keyboard hidden, tall (4,4,192x232) when shown;
+ *    clipped label "Enter URL or Search:" (body-bold) + input text (mono);
+ *    text wraps when keyboard shown (14px line height), single line otherwise.
+ */
+#include "address_bar.h"
 
 #include <string.h>
 
-#include "../core/constants.h"
-#include "../core/logger.h"
-#include "../core/storage.h"
-#include "../core/url.h"
-#include "../render/style.h"
-#include "../util/mem.h"
-#include "../util/strbuf.h"
+#include "pd_api.h"
+#include "core/constants.h"
+#include "core/url.h"
+#include "core/storage.h"
+#include "render/style.h"
+#include "keyboard/keyboard.h"
+#include "core/logger.h"
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define AB_HAS_PD 1
-#endif
+extern PlaydateAPI *playdate; /* keyboard port contract */
 
-static PlaydateAPI* s_pd = NULL;
-static PDKeyboard* s_kb = NULL;
-static int (*s_updateFn)(void*) = NULL;
-static void* s_updateUd = NULL;
+void pluto_free(void *p); /* SDK realloc(0) wrapper (defined in main.c) */
 
-static int s_isOpen = 0;
-static int s_keyboardShown = 0;
-static int s_skipInputFrames = 0;
-static char s_inputText[PLUTO_URL_INPUT_MAX];
+/* Shared keyboard instance (defined in main.c, Phase 13). */
+PDKeyboard *app_keyboard(void);
 
-static AbSubmitFn s_onSubmit = NULL;
-static void* s_submitUd = NULL;
+/* ── Lua-reference state ──────────────────────────────────────────────────── */
+static int g_isOpen = 0;
+static int g_keyboardShown = 0;
+static char g_inputText[512] = "";
+static AddressBarSubmitFn g_onSubmit = NULL;
+static void *g_onSubmitUserdata = NULL;
 
-void ab_trim(char* text) {
-    if (text == NULL) return;
+/* Lua global skipInputFrames is owned by main; the bar requests frames. */
+static int g_pendingSkipFrames = 0;
 
-    /* leading */
-    char* p = text;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
-           *p == '\v' || *p == '\f') {
-        p++;
-    }
-
-    /* trailing */
-    char* end = p + strlen(p);
-    while (end > p) {
-        char c = *(end - 1);
-        if (!(c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-              c == '\v' || c == '\f')) {
-            break;
-        }
-        end--;
-    }
-
-    size_t len = (size_t)(end - p);
-    if (p != text) memmove(text, p, len);
-    text[len] = '\0';
+static void ab_close(void)
+{
+    g_isOpen = 0;
+    g_keyboardShown = 0;
 }
 
-int ab_build_final_url(const char* text, char* out, size_t cap) {
-    if (out == NULL || cap == 0) return 0;
-    out[0] = '\0';
+/* ── Submit routing (Lua willHide submitted branch) ─────────────────────────
+ * Shared by the real keyboard willHide callback and the test hook. */
+static void ab_route_submit(const char *rawText)
+{
+    static char trimmed[512]; /* hoisted: device gameTask stack is tiny */
+    snprintf(trimmed, sizeof(trimmed), "%s", rawText ? rawText : "");
 
-    const char* t = (text != NULL) ? text : "";
-    char trimmed[PLUTO_URL_INPUT_MAX];
-    snprintf(trimmed, sizeof(trimmed), "%s", t);
-    ab_trim(trimmed);
-    if (trimmed[0] == '\0') {
-        return 0;
+    /* Lua: gsub("^%s*(.-)%s*$", "%1") — trim surrounding whitespace. */
+    char *s = trimmed;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+    {
+        s++;
     }
-
-    if (url_is_search_query(trimmed)) {
-        PlutoSettings* st = storage_settings();
-        int idx = st ? st->searchEngine : 1;
-        if (idx < 1 || idx > PLUTO_SEARCH_ENGINE_COUNT) idx = 1;
-        const PlutoSearchEngine* engine = &PLUTO_SEARCH_ENGINES[idx - 1];
-        StrBuf sb;
-        sb_init(&sb);
-        url_build_search_url(engine->url, trimmed, &sb);
-        snprintf(out, cap, "%s", sb.data ? sb.data : "");
-        sb_free(&sb);
-    } else {
-        PlutoUrl parsed;
-        url_parse(trimmed, &parsed);
-        snprintf(out, cap, "%s", parsed.normalized);
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
+    {
+        e--;
     }
-    return 1;
-}
+    *e = '\0';
 
-int ab_should_launch_keyboard(int isOpen, int keyboardShown, int bHeld) {
-    if (!isOpen || keyboardShown) return 0;
-    if (bHeld) return 0; // B+Left/Right navigation wins first
-    return 1;
-}
+    g_pendingSkipFrames = 2; /* Lua: skipInputFrames = 2 on every exit path */
 
-int ab_is_open(void) { return s_isOpen; }
-
-int ab_keyboard_shown(void) { return s_keyboardShown; }
-
-const char* ab_input_text(void) { return s_inputText; }
-
-int ab_pop_input_skip(void) {
-    if (s_skipInputFrames > 0) {
-        s_skipInputFrames--;
-        return 1;
-    }
-    return 0;
-}
-
-int ab_input_skip_remaining(void) { return s_skipInputFrames; }
-
-#ifdef AB_HAS_PD
-
-static void close_after_hide(void) {
-    s_isOpen = 0;
-    s_keyboardShown = 0;
-    s_skipInputFrames = 2;
-}
-
-static void kb_text_changed(void* userdata) {
-    (void)userdata;
-    char* text = NULL;
-    unsigned int count = 0;
-    keyboardApi.getText(s_kb, &text, &count);
-    if (text != NULL) {
-        snprintf(s_inputText, sizeof(s_inputText), "%s",
-                 (count > 0) ? text : "");
-        pluto_free(text);
-    }
-}
-
-static void kb_will_hide(int submitted, void* userdata) {
-    (void)userdata;
-
-    if (submitted && ab_build_final_url(s_inputText, s_inputText,
-                                        sizeof(s_inputText))) {
-        char finalUrl[PLUTO_URL_NORMALIZED_MAX];
-        snprintf(finalUrl, sizeof(finalUrl), "%s", s_inputText);
-
-        close_after_hide();
-        PLUTO_LOG("[P29] submit -> %s", finalUrl);
-        if (s_onSubmit != NULL) {
-            s_onSubmit(finalUrl, s_submitUd);
-        }
+    if (s[0] == '\0')
+    {
+        /* Empty submit: close, no callback (Lua parity). */
+        ab_close();
+        g_onSubmit = NULL;
+        g_onSubmitUserdata = NULL;
         return;
     }
 
-    /* cancelled, or empty-after-trim submit: plain cancel path */
-    close_after_hide();
+    static char finalUrl[768]; /* hoisted: device gameTask stack is tiny */
+    if (url_is_search_query(s))
+    {
+        /* searchEngine is stored 1-based (Lua table parity: settings page
+         * clamps 1..N and indexes Constants.SEARCH_ENGINES[searchEngine]). */
+        int engineIdx = storage_setting_int("searchEngine");
+        if (engineIdx < 1 || engineIdx > SEARCH_ENGINE_COUNT)
+        {
+            engineIdx = 1;
+        }
+        char *built = url_build_search_url(SEARCH_ENGINES[engineIdx - 1].url, s);
+        if (built)
+        {
+            snprintf(finalUrl, sizeof(finalUrl), "%s", built);
+            pluto_free(built);
+        }
+        else
+        {
+            finalUrl[0] = '\0';
+        }
+    }
+    else
+    {
+        static UrlParsed parsed; /* hoisted: device gameTask stack is tiny */
+        memset(&parsed, 0, sizeof(parsed));
+        if (url_parse(s, &parsed) == 0) /* 0 = success (was inverted: URL submits never fired) */
+        {
+            snprintf(finalUrl, sizeof(finalUrl), "%s", parsed.normalized);
+        }
+        else
+        {
+            finalUrl[0] = '\0';
+        }
+    }
+
+    ab_close();
+
+    if (finalUrl[0] != '\0')
+    {
+        logger_log("AddressBar submit: %s", finalUrl);
+        if (g_onSubmit)
+        {
+            AddressBarSubmitFn cb = g_onSubmit;
+            void *ud = g_onSubmitUserdata;
+            g_onSubmit = NULL;
+            g_onSubmitUserdata = NULL;
+            cb(finalUrl, ud);
+        }
+    }
 }
 
-void ab_init(PlaydateAPI* pd, int (*mainUpdate)(void*), void* updateUd) {
-    s_pd = pd;
-    s_updateFn = mainUpdate;
-    s_updateUd = updateUd;
-    s_kb = keyboardApi.newKeyboard();
-    if (s_kb == NULL) {
-        PLUTO_ERROR("[P29] keyboard instance allocation failed");
+/* ── Keyboard callbacks (Lua installed the same way in launchKeyboard) ────── */
+
+static void ab_keyboard_will_hide(int submitted, void *ud)
+{
+    (void)ud;
+    if (submitted)
+    {
+        char *txt = NULL;
+        unsigned int n = 0;
+        keyboardApi.getText(app_keyboard(), &txt, &n);
+        char buf[512] = "";
+        if (txt)
+        {
+            snprintf(buf, sizeof(buf), "%s", txt);
+            pluto_free(txt);
+        }
+        ab_route_submit(buf);
         return;
     }
-    keyboardApi.setRefreshRate(s_kb, 30.0f);
-    keyboardApi.setPlaydateUpdateCallback(s_kb, mainUpdate, updateUd);
-    PLUTO_LOG("[P29] address bar ready (vendored C keyboard)");
+
+    /* Cancel: close + skip frames, no callback (Lua parity). */
+    g_pendingSkipFrames = 2;
+    ab_close();
+    g_onSubmit = NULL;
+    g_onSubmitUserdata = NULL;
 }
 
-void ab_open(const char* currentUrl, AbSubmitFn onSubmit, void* userdata) {
-    s_isOpen = 1;
-    s_keyboardShown = 0;
-    s_onSubmit = onSubmit;
-    s_submitUd = userdata;
+static void ab_keyboard_text_changed(void *ud)
+{
+    (void)ud;
+    /* Lua: AddressBar.inputText = playdate.keyboard.text or "". */
+    char *txt = NULL;
+    unsigned int n = 0;
+    keyboardApi.getText(app_keyboard(), &txt, &n);
+    if (txt)
+    {
+        snprintf(g_inputText, sizeof(g_inputText), "%s", txt);
+        pluto_free(txt);
+    }
+    else
+    {
+        g_inputText[0] = '\0';
+    }
+}
 
-    /* Lua: initialText = "" unless currentUrl exists and not ^about: */
-    const char* initial = "";
-    if (currentUrl != NULL &&
-        strncmp(currentUrl, "about:", 6) != 0) {
+/* ── Public API ───────────────────────────────────────────────────────────── */
+
+void address_bar_init(void)
+{
+    g_isOpen = 0;
+    g_keyboardShown = 0;
+    g_inputText[0] = '\0';
+    g_onSubmit = NULL;
+    g_onSubmitUserdata = NULL;
+    g_pendingSkipFrames = 0;
+}
+
+void address_bar_open(const char *currentUrl, AddressBarSubmitFn onSubmit,
+                      void *userdata)
+{
+    g_isOpen = 1;
+    g_keyboardShown = 0;
+    g_onSubmit = onSubmit;
+    g_onSubmitUserdata = userdata;
+
+    const char *initial = "";
+    if (currentUrl && strncmp(currentUrl, "about:", 6) != 0)
+    {
         initial = currentUrl;
     }
-    snprintf(s_inputText, sizeof(s_inputText), "%s", initial);
-    /* Keyboard is NOT shown here; launches on B release (launchKeyboard),
-     * letting Left/Right navigate back/forward while armed. */
+    snprintf(g_inputText, sizeof(g_inputText), "%s", initial);
+    /* Keyboard is NOT shown here; it launches on B release (Lua parity). */
 }
 
-void ab_launch_keyboard(void) {
-    PDButtons down, pushed, released;
-    s_pd->system->getButtonState(&down, &pushed, &released);
-    if (!ab_should_launch_keyboard(s_isOpen, s_keyboardShown,
-                                   (down & kButtonB) != 0)) {
+void address_bar_launch_keyboard(void)
+{
+    if (!g_isOpen || g_keyboardShown)
+    {
         return;
     }
-    s_keyboardShown = 1;
-
-    /* Lua order: nil didHide + textChanged, then assign willHide and
-     * textChanged, then show(prefill). */
-    keyboardApi.setKeyboardDidHideCallback(s_kb, NULL, NULL);
-    keyboardApi.setTextChangedCallback(s_kb, NULL, NULL);
-    keyboardApi.setKeyboardWillHideCallback(s_kb, kb_will_hide, NULL);
-    keyboardApi.setTextChangedCallback(s_kb, kb_text_changed, NULL);
-    keyboardApi.show(s_kb, s_inputText,
-                     (unsigned int)strlen(s_inputText));
-}
-
-void ab_cancel(void) {
-    if (s_keyboardShown) {
-        keyboardApi.hide(s_kb); // fires willHide(0) -> closes like Lua
+    /* Don't show keyboard while B is held (lets B+Left/Right work first). */
+    PDButtons current = 0, pushed = 0, released = 0;
+    playdate->system->getButtonState(&current, &pushed, &released);
+    if (current & (1 << 4)) /* kButtonB */
+    {
+        return;
     }
-    s_isOpen = 0;
-    s_keyboardShown = 0;
-    s_onSubmit = NULL;
-    s_submitUd = NULL;
-    keyboardApi.setKeyboardWillHideCallback(s_kb, NULL, NULL);
-    keyboardApi.setTextChangedCallback(s_kb, NULL, NULL);
-    keyboardApi.setKeyboardDidHideCallback(s_kb, NULL, NULL);
+
+    g_keyboardShown = 1;
+
+    /* The keyboard port requires the app update callback to be armed before
+     * show() (Phase 13 contract; main owns it and arms it at boot). */
+    PDKeyboard *kb = app_keyboard();
+    keyboardApi.setKeyboardWillHideCallback(kb, ab_keyboard_will_hide, NULL);
+    keyboardApi.setTextChangedCallback(kb, ab_keyboard_text_changed, NULL);
+    keyboardApi.show(kb, g_inputText, (unsigned int)strlen(g_inputText));
 }
 
-void ab_draw_overlay(void) {
-    if (!s_isOpen) return;
+void address_bar_cancel(void)
+{
+    PDKeyboard *kb = app_keyboard();
+    if (g_keyboardShown && keyboardApi.isVisible(kb))
+    {
+        keyboardApi.hide(kb);
+    }
+    ab_close();
+    g_onSubmit = NULL;
+    g_onSubmitUserdata = NULL;
+}
 
+int address_bar_is_open(void)
+{
+    return g_isOpen;
+}
+
+int address_bar_keyboard_shown(void)
+{
+    return g_keyboardShown;
+}
+
+void address_bar_sync_text(void)
+{
+    if (!g_keyboardShown)
+    {
+        return;
+    }
+    char *txt = NULL;
+    unsigned int n = 0;
+    keyboardApi.getText(app_keyboard(), &txt, &n);
+    if (txt)
+    {
+        snprintf(g_inputText, sizeof(g_inputText), "%s", txt);
+        pluto_free(txt);
+    }
+}
+
+int address_bar_consume_skip_frames(void)
+{
+    int v = g_pendingSkipFrames;
+    g_pendingSkipFrames = 0;
+    return v;
+}
+
+const char *address_bar_input_text(void)
+{
+    return g_inputText;
+}
+
+/* Test hook: routes text through the real submit path without the keyboard
+ * (P13 already verified raw keyboard input end-to-end). */
+void address_bar_test_submit(const char *text)
+{
+    ab_route_submit(text);
+}
+
+/* ── drawOverlay (Lua geometry preserved) ─────────────────────────────────── */
+
+void address_bar_draw_overlay(void)
+{
+    if (!g_isOpen)
+    {
+        return;
+    }
+
+    PlaydateAPI *pd = playdate;
     int boxX, boxY, boxW, boxH;
-    if (s_keyboardShown) {
+    if (g_keyboardShown)
+    {
         boxX = 4;
         boxY = 4;
         boxW = 192;
-        boxH = PLUTO_SCREEN_HEIGHT - 8;
-    } else {
+        boxH = SCREEN_HEIGHT - 8; /* 232 */
+    }
+    else
+    {
         boxX = 10;
         boxY = 6;
-        boxW = PLUTO_SCREEN_WIDTH - 20;
+        boxW = SCREEN_WIDTH - 20; /* 380 */
         boxH = 48;
     }
 
-    s_pd->graphics->fillRoundRect(boxX, boxY, boxW, boxH, 6, kColorWhite);
-    s_pd->graphics->drawRoundRect(boxX, boxY, boxW, boxH, 6, 1,
-                                  kColorBlack);
+    pd->graphics->fillRoundRect(boxX, boxY, boxW, boxH, 6, kColorWhite);
+    pd->graphics->drawRoundRect(boxX, boxY, boxW, boxH, 6, 1, kColorBlack);
 
-    /* clip to box interior */
-    s_pd->graphics->pushContext(NULL);
-    s_pd->graphics->setClipRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4);
+    /* Clip to box interior. */
+    pd->graphics->pushContext(NULL);
+    pd->graphics->setClipRect(boxX + 2, boxY + 2, boxW - 4, boxH - 4);
 
-    int innerX = boxX + 10;
-    int innerY = boxY + 10;
-    int innerW = boxW - 20;
+    const int innerX = boxX + 10;
+    const int innerY = boxY + 10;
+    const int innerW = boxW - 20;
 
-    int sz = 16;
-    PlutoFont* font = style_get_body_font(1 /*bold*/, 0, &sz);
-    if (font == NULL) font = style_get_small_font(); // gfx.getFont() chain
-    s_pd->graphics->setFont(font);
-    s_pd->graphics->drawText("Enter URL or Search:", strlen(
-                                 "Enter URL or Search:"),
-                             kASCIIEncoding, (int)innerX, (int)innerY);
+    LCDFont *bodyBold = style_font(PLUTO_FONT_BODY_BOLD);
+    pd->graphics->setFont(bodyBold);
+    pd->graphics->drawText("Enter URL or Search:", strlen("Enter URL or Search:"),
+                           kASCIIEncoding, innerX, innerY);
 
-    const char* txt = s_inputText;
-    PlutoFont* monoFont = style_get_mono_font();
-    if (monoFont == NULL) monoFont = font;
-    s_pd->graphics->setFont(monoFont);
+    const char *txt = g_inputText;
+    LCDFont *mono = style_font(PLUTO_FONT_MONO);
+    pd->graphics->setFont(mono);
 
-    size_t txtLen = strlen(txt);
-    if (s_keyboardShown) {
-        /* wrap text to fill the box vertically */
+    if (g_keyboardShown)
+    {
+        /* Wrap text to fill the box vertically (Lua char-loop parity). */
         int lineY = innerY + 22;
         const int lineHeight = 14;
-        size_t lineStart = 0, i = 0;
-        while (i < txtLen) {
-            char ch[2] = { txt[i], '\0' };
-            i++;
-            /* test width of line..i */
-            char testLine[PLUTO_URL_INPUT_MAX];
-            size_t segLen = i - lineStart;
-            if (segLen >= sizeof(testLine)) segLen = sizeof(testLine) - 1;
-            memcpy(testLine, txt + lineStart, segLen);
-            testLine[segLen] = '\0';
+        size_t len = strlen(txt);
+        size_t lineStart = 0;
+        char lineBuf[256];
 
-            if (style_get_text_width(monoFont, testLine) > innerW &&
-                i - lineStart > 1) {
-                /* flush previous segment (without the new char) */
-                segLen = (i - 1) - lineStart;
-                s_pd->graphics->drawText(txt + lineStart, segLen,
-                                         kUTF8Encoding, innerX, lineY);
+        for (size_t i = 0; i < len; i++)
+        {
+            size_t testLen = i - lineStart + 1;
+            if (testLen >= sizeof(lineBuf))
+            {
+                testLen = sizeof(lineBuf) - 1; /* safety: never overflow */
+            }
+            memcpy(lineBuf, txt + lineStart, testLen);
+            lineBuf[testLen] = '\0';
+
+            int tw = style_get_text_width(PLUTO_FONT_MONO, lineBuf);
+            if (tw > innerW && i > lineStart)
+            {
+                pd->graphics->drawText(lineBuf, strlen(lineBuf), kASCIIEncoding,
+                                       innerX, lineY);
                 lineY += lineHeight;
-                lineStart = i - 1;
-                if (lineY > boxY + boxH - 14) break;
+                lineStart = i;
+                if (lineY > boxY + boxH - 14)
+                {
+                    break;
+                }
             }
         }
-        if (lineStart < txtLen && lineY <= boxY + boxH - 14) {
-            s_pd->graphics->drawText(txt + lineStart, txtLen - lineStart,
-                                     kUTF8Encoding, innerX, lineY);
+        if (lineStart < len && lineY <= boxY + boxH - 14)
+        {
+            const char *rest = txt + lineStart;
+            pd->graphics->drawText(rest, strlen(rest), kASCIIEncoding, innerX, lineY);
         }
-    } else {
-        s_pd->graphics->drawText(txt, txtLen, kUTF8Encoding, innerX,
-                                 innerY + 22);
+    }
+    else
+    {
+        pd->graphics->drawText(txt, strlen(txt), kASCIIEncoding, innerX, innerY + 22);
     }
 
-    s_pd->graphics->popContext();
+    pd->graphics->popContext();
 }
-
-#else /* host build */
-
-void ab_init(PlaydateAPI* pd, int (*mainUpdate)(void*), void* updateUd) {
-    (void)pd; (void)mainUpdate; (void)updateUd;
-}
-void ab_open(const char* currentUrl, AbSubmitFn onSubmit, void* ud) {
-    (void)currentUrl; (void)onSubmit; (void)ud;
-}
-void ab_launch_keyboard(void) {}
-void ab_cancel(void) {}
-void ab_draw_overlay(void) {}
-
-#endif

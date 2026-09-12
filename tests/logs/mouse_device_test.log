@@ -1,0 +1,85 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[02:39:22 #1] === PlutoBrowser boot ===
+[02:39:22 #2] eventHandler: kEventInit, osversion=30101
+[02:39:22 #3] STORAGE: init enter
+[02:39:22 #4] STORAGE: load enter
+[02:39:22 #5] STORAGE: file opened, parsing
+[02:39:22 #6] STORAGE: init exit
+[02:39:22 #7] KB new: entering
+[02:39:22 #8] KB new: allocated
+[02:39:22 #9] KB load: font...
+[02:39:22 #10] KB load: font ok h=36
+[02:39:22 #11] KB load: menu-space ok
+[02:39:22 #12] KB load: menu-ok ok
+[02:39:22 #13] KB load: menu-del ok
+[02:39:22 #14] KB load: menu-cancel ok
+[02:39:22 #15] KB new: font+images loaded
+[02:39:22 #16] updateFrame: first frame executed
+[02:39:25 #17] navigate_to: https://google.com
+[02:39:25 #18] state -> 1 (frame 102)
+[02:39:32 #19] updateFrame: heartbeat frame=300
+[02:39:37 #20] STORAGE: save open
+[02:39:37 #21] STORAGE: save writing (bm=9 hist=2)
+[02:39:37 #22] STORAGE: save close
+[02:39:37 #23] STORAGE: save exit
+[02:39:37 #24] state -> 2 (frame 441)
+[02:39:43 #25] updateFrame: heartbeat frame=600
+[02:39:45 #26] IMGDEC ok https://www.google.com/images/branding/google_wordmark/v1/1x/googlelogo_color_white_background_272x92dp.png kind=1 272x92 (2478 bytes)
+[02:39:53 #27] updateFrame: heartbeat frame=900
+[02:39:55 #28] navigate_to: https://accounts.google.com/ServiceLogin?hl=en&passive=true&continue=https://www.google.com/&ec=GAZAmgQ
+[02:39:55 #29] state -> 1 (frame 971)
+[02:40:02 #30] updateFrame: heartbeat frame=1200
+[02:40:15 #31] updateFrame: heartbeat frame=1500
+[02:40:17 #32] STORAGE: save open
+[02:40:17 #33] STORAGE: save writing (bm=9 hist=3)
+[02:40:17 #34] STORAGE: save close
+[02:40:17 #35] STORAGE: save exit
+[02:40:17 #36] state -> 2 (frame 1504)
+[02:40:20 #37] navigate_to: https://google.com
+[02:40:20 #38] state -> 1 (frame 1607)
+[02:40:21 #39] navigate_to: about:home
+[02:40:21 #40] state -> 0 (frame 1629)
+[02:40:25 #41] navigate_to: https://motherfuckingwebsite.com
+[02:40:25 #42] state -> 1 (frame 1750)
+[02:40:26 #43] updateFrame: heartbeat frame=1800
+[02:40:29 #44] STORAGE: save open
+[02:40:29 #45] STORAGE: save writing (bm=9 hist=4)
+[02:40:29 #46] STORAGE: save close
+[02:40:29 #47] STORAGE: save exit
+[02:40:29 #48] state -> 2 (frame 1875)
+[02:40:36 #49] updateFrame: heartbeat frame=2100
+[02:40:46 #50] updateFrame: heartbeat frame=2400
+[02:40:48 #51] navigate_to: about:home
+[02:40:48 #52] state -> 0 (frame 2447)
+[02:40:56 #53] updateFrame: heartbeat frame=2700
+[02:41:04 #54] main: B-release opened address bar (keyboard)
+[02:41:06 #55] updateFrame: heartbeat frame=3000
+[02:41:10 #56] navigate_to: https://google.com
+[02:41:10 #57] state -> 1 (frame 3116)
+[02:41:16 #58] updateFrame: heartbeat frame=3300
+[02:41:19 #59] navigate_to: about:home
+[02:41:19 #60] state -> 0 (frame 3379)
+[02:41:20 #61] navigate_to: https://google.com
+[02:41:20 #62] state -> 1 (frame 3424)
+[02:41:22 #63] AddressBar submit: https://html.duckduckgo.com/html/?q=Test
+[02:41:22 #64] navigate_to: https://html.duckduckgo.com/html/?q=Test
+[02:41:26 #65] updateFrame: heartbeat frame=3600
+[02:41:29 #66] state -> 3 (frame 3685)
+[02:41:36 #67] updateFrame: heartbeat frame=3900
+[02:41:42 #68] navigate_to: https://html.duckduckgo.com/html/?q=Test
+[02:41:42 #69] state -> 1 (frame 4092)
+[02:41:45 #70] STORAGE: save open
+[02:41:45 #71] STORAGE: save writing (bm=9 hist=5)
+[02:41:45 #72] STORAGE: save close
+[02:41:45 #73] STORAGE: save exit
+[02:41:45 #74] state -> 2 (frame 4183)
+[02:41:46 #75] updateFrame: heartbeat frame=4200
+[02:41:54 #76] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.speedtest.net.ico sync 256x128 (101988 bytes)
+[02:41:57 #77] updateFrame: heartbeat frame=4500
+[02:42:00 #78] IMGDEC ok https://external-content.duckduckgo.com/ip3/fast.com.ico kind=1 32x32 (2288 bytes)
+[02:42:02 #79] IMGDEC ok https://external-content.duckduckgo.com/ip3/speed.cloudflare.com.ico kind=1 96x96 (2485 bytes)
+[02:42:07 #80] updateFrame: heartbeat frame=4800
+[02:42:09 #81] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.merriam-webster.com.ico kind=1 32x32 (2259 bytes)
+[02:42:11 #82] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.16personalities.com.ico kind=1 32x32 (4012 bytes)
+[02:42:12 #83] eventHandler: kEventTerminate, frames=4958

@@ -1,0 +1,36 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[12:02:54 #1] === PlutoBrowser boot ===
+[12:02:54 #2] eventHandler: kEventInit, osversion=30101
+[12:02:54 #3] STORAGE: init enter
+[12:02:54 #4] STORAGE: load enter
+[12:02:54 #5] STORAGE: file opened, parsing
+[12:02:54 #6] STORAGE: init exit
+[12:02:54 #7] KB new: entering
+[12:02:54 #8] KB new: allocated
+[12:02:54 #9] KB load: font...
+[12:02:54 #10] KB load: font ok h=36
+[12:02:54 #11] KB load: menu-space ok
+[12:02:54 #12] KB load: menu-ok ok
+[12:02:54 #13] KB load: menu-del ok
+[12:02:54 #14] KB load: menu-cancel ok
+[12:02:54 #15] KB new: font+images loaded
+[12:02:54 #16] updateFrame: first frame executed
+[12:03:04 #17] updateFrame: heartbeat frame=300
+[12:03:14 #18] updateFrame: heartbeat frame=600
+[12:03:17 #19] KBTEST A: navigating to DuckDuckGo Lite
+[12:03:17 #20] navigate_to: https://html.duckduckgo.com/html/
+[12:03:17 #21] state -> 1 (frame 701)
+[12:03:22 #22] STORAGE: save open
+[12:03:22 #23] STORAGE: save writing (bm=10 hist=2)
+[12:03:22 #24] STORAGE: save close
+[12:03:23 #25] STORAGE: save exit
+[12:03:23 #26] state -> 2 (frame 866)
+[12:03:23 #27] KBTEST B: input found (name=q placeholder= currValue='')
+[12:03:23 #28] KBTEST renderer-value 'playdate hello' PASS
+[12:03:23 #29] KBTEST submit-value 'playdate hello' PASS
+[12:03:24 #30] updateFrame: heartbeat frame=900
+[12:03:32 #31] main: B-release opened address bar (keyboard)
+[12:03:34 #32] updateFrame: heartbeat frame=1200
+[12:03:43 #33] updateFrame: heartbeat frame=1500
+[12:03:49 #34] eventHandler: kEventTerminate, frames=1679

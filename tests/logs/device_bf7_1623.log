@@ -1,0 +1,33 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[20:22:11 #1] === PlutoBrowser boot ===
+[20:22:11 #2] eventHandler: kEventInit, osversion=30101
+[20:22:11 #3] STORAGE: init enter
+[20:22:11 #4] STORAGE: load enter
+[20:22:11 #5] STORAGE: no data file -> defaults
+[20:22:11 #6] STORAGE: defaults done (bm=10)
+[20:22:11 #7] STORAGE: save enter
+[20:22:11 #8] STORAGE: save open
+[20:22:11 #9] STORAGE: save writing (bm=10 hist=0)
+[20:22:11 #10] STORAGE: save close
+[20:22:11 #11] STORAGE: save exit
+[20:22:11 #12] STORAGE: save done
+[20:22:11 #13] STORAGE: init exit
+[20:22:11 #14] KB new: entering
+[20:22:11 #15] KB new: allocated
+[20:22:11 #16] KB load: font...
+[20:22:11 #17] KB load: font ok h=36
+[20:22:11 #18] KB load: menu-space ok
+[20:22:11 #19] KB load: menu-ok ok
+[20:22:11 #20] KB load: menu-del ok
+[20:22:11 #21] KB load: menu-cancel ok
+[20:22:11 #22] KB new: font+images loaded
+[20:22:11 #23] updateFrame: first frame executed
+[20:22:21 #24] updateFrame: heartbeat frame=300
+[20:22:31 #25] updateFrame: heartbeat frame=600
+[20:22:40 #26] updateFrame: heartbeat frame=900
+[20:22:50 #27] updateFrame: heartbeat frame=1200
+[20:23:00 #28] updateFrame: heartbeat frame=1500
+[20:23:10 #29] updateFrame: heartbeat frame=1800
+[20:23:20 #30] updateFrame: heartbeat frame=2100
+[20:23:25 #31] eventHandler: kEventTerminate, frames=2261

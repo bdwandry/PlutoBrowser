@@ -1,444 +1,464 @@
-// entities.c — HTML entity decoder & UTF-8 sanitizer
-// (C port of html/entities.lua).
-//
-// Ground truth: host-Lua oracle p06_oracle.lua on the REAL entities.lua.
-// Verified quirks preserved:
-//   - fast path: text without '&' and without bytes >=0x80 is returned
-//     VERBATIM (raw control bytes included)
-//   - numeric/named passes only run when '&' present; fixed UTF-8 cleanup +
-//     transliteration only run when a high byte was present
-//   - NAMED table: Lua constructor duplicate keys resolve LAST-WINS
-//     ("not" -> "not "); values like " deg"/"in "/"not " keep exact spacing;
-//     &frac12; etc. contain digits and NEVER match %a+ -> stay verbatim
-//   - unknown names become " name "; case-sensitive (&AMP; -> " AMP ")
-//   - decimal branch specials include 0x201A/0x201E; hex branch does NOT
-//     (source asymmetry): &#x201a; -> " "
-//   - step 4: literal UTF-8 sequence rewrites applied sequentially
-//   - step 5 final loop: printable 32..126 + \n\r\t kept; lead C2..DF with a
-//     following byte decodes cp=((b%0x20)*64)+(c%0x40) through T (or " ");
-//     lead E0..EF with two more bytes -> " " advance 3; anything else ->
-//     " " advance 1 (truncated tails therefore widen)
-//   - Tasks.yieldCheck() once per input byte of the final loop
-#include <stdio.h>
-#include <string.h>
-
-#include "../core/tasks.h"
-#include "../util/mem.h"
-#include "../util/strbuf.h"
+/*
+ * PlutoBrowser — entities.c
+ * HTML Entity Decoder & UTF-8 Sanitizer (port of Source/html/entities.lua).
+ *
+ * Structure mirrors the Lua reference pass-for-pass (see entities.h). The Lua
+ * implementation chains several gsub passes and then a byte loop; this port
+ * reproduces the same observable output, including the multi-pass cascade
+ * behavior for double-encoded entities.
+ */
 #include "entities.h"
 
-static struct PlaydateAPI* s_pd = NULL;
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-void entities_init(struct PlaydateAPI* pd) { s_pd = pd; }
+#include "pd_api.h"
+#include "util/strbuf.h"
 
-// ------------------------------------------------ named entities ----
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+PlaydateAPI *pluto_pd(void);
+void pluto_free(void *p);
 
-typedef struct NamedEnt {
-    const char* name;
-    const char* value;
-} NamedEnt;
-
-// Transcribed from NAMED_ENTITIES in html/entities.lua.
-// Duplicate Lua keys resolved last-wins ("not", prime/Prime harmless).
-static const NamedEnt NAMED[] = {
-    {"quot", "\""},       {"amp", "&"},         {"apos", "'"},
-    {"lt", "<"},          {"gt", ">"},          {"nbsp", " "},
-    {"ensp", " "},        {"emsp", " "},        {"thinsp", " "},
-    {"hairsp", " "},      {"zwsp", ""},
-    {"NegativeMediumSpace", " "}, {"VeryThinSpace", " "},
-    {"ThinSpace", " "},
-    {"iexcl", "!"},       {"cent", "c"},        {"pound", "L"},
-    {"curren", "$"},      {"yen", "Y"},         {"brvbar", "|"},
-    {"sect", "#"},        {"uml", ".."},        {"copy", "(c)"},
-    {"ordf", "a"},        {"laquo", "<<"},      {"not", "not "},
-    {"shy", ""},          {"reg", "(R)"},       {"macr", "-"},
-    {"deg", " deg"},      {"plusmn", "+/-"},    {"sup2", "^2"},
-    {"sup3", "^3"},
-    {"minus", "-"},       {"plus", "+"},        {"times", "x"},
-    {"divide", "/"},
-    {"radic", "sqrt"},    {"infin", "inf"},     {"ne", "!="},
-    {"le", "<="},         {"ge", ">="},
-    {"asymp", "~"},       {"sim", "~"},         {"cong", "~"},
-    {"sdot", "*"},
-    {"in", "in "},        {"notin", "not "},    {"sum", "sum "},
-    {"prod", "prod "},    {"int", "int "},
-    {"part", "d"},        {"Delta", "D"},       {"pi", "pi"},
-    {"alpha", "alpha"},
-    {"rarr", "->"},       {"larr", "<-"},       {"uarr", "^"},
-    {"darr", "v"},
-    {"and", "and "},      {"or", "or "},
-    {"prime", "'"},       {"Prime", "\""},      {"ang", "L"},
-    {"perp", "_|_"},
-    {"acute", "'"},
-    {"micro", "u"},
-    {"para", "P"},
-    {"middot", "*"},
-    {"cedil", ","},
-    {"sup1", "^1"},
-    {"ordm", "o"},
-    {"raquo", ">>"},
-    {"frac14", "1/4"},    {"frac12", "1/2"},    {"frac34", "3/4"},
-    {"iquest", "?"},
-    {"Agrave", "A"}, {"Aacute", "A"}, {"Acirc", "A"}, {"Atilde", "A"},
-    {"Auml", "A"},   {"Aring", "A"},
-    {"Egrave", "E"}, {"Eacute", "E"}, {"Ecirc", "E"}, {"Euml", "E"},
-    {"Igrave", "I"}, {"Iacute", "I"}, {"Icirc", "I"}, {"Iuml", "I"},
-    {"Ograve", "O"}, {"Oacute", "O"}, {"Ocirc", "O"}, {"Otilde", "O"},
-    {"Ouml", "O"},
-    {"Ugrave", "U"}, {"Uacute", "U"}, {"Ucirc", "U"}, {"Uuml", "U"},
-    {"agrave", "a"}, {"aacute", "a"}, {"acirc", "a"}, {"atilde", "a"},
-    {"auml", "a"},   {"aring", "a"},
-    {"egrave", "e"}, {"eacute", "e"}, {"ecirc", "e"}, {"euml", "e"},
-    {"igrave", "i"}, {"iacute", "i"}, {"icirc", "i"}, {"iuml", "i"},
-    {"ograve", "o"}, {"oacute", "o"}, {"ocirc", "o"}, {"otilde", "o"},
-    {"ouml", "o"},
-    {"ugrave", "u"}, {"uacute", "u"}, {"ucirc", "u"}, {"uuml", "u"},
-    {"mdash", " -- "},
-    {"ndash", " - "},
-    {"lsquo", "'"},
-    {"rsquo", "'"},
-    {"ldquo", "\""},
-    {"rdquo", "\""},
-    {"hellip", "..."},
-    {"trade", "(TM)"},
-    {"bull", "*"},
-    {"euro", "EUR"},
-    {"check", "[v]"},
-    {"cross", "[x]"},
-};
-
-static const char* named_lookup(const char* name, size_t len)
+/* ── Named entity table (Lua NAMED_ENTITIES, entries in reference order) ─── */
+typedef struct
 {
-    size_t i;
-    for (i = 0; i < sizeof(NAMED) / sizeof(NAMED[0]); i++) {
-        if (strlen(NAMED[i].name) == len &&
-            memcmp(NAMED[i].name, name, len) == 0) {
-            return NAMED[i].value;
+    const char *name;
+    const char *repl;
+} NamedEntity;
+
+static const NamedEntity NAMED_ENTITIES[] = {
+    { "quot", "\"" },
+    { "amp", "&" },
+    { "apos", "'" },
+    { "lt", "<" },
+    { "gt", ">" },
+    { "nbsp", " " },
+    { "ensp", " " }, { "emsp", " " }, { "thinsp", " " }, { "hairsp", " " }, { "zwsp", "" },
+    { "NegativeMediumSpace", " " }, { "VeryThinSpace", " " }, { "ThinSpace", " " },
+    { "iexcl", "!" },
+    { "cent", "c" },
+    { "pound", "L" },
+    { "curren", "$" },
+    { "yen", "Y" },
+    { "brvbar", "|" },
+    { "sect", "#" },
+    { "uml", ".." },
+    { "copy", "(c)" },
+    { "ordf", "a" },
+    { "laquo", "<<" },
+    { "shy", "" },
+    { "reg", "(R)" },
+    { "macr", "-" },
+    { "deg", " deg" },
+    { "plusmn", "+/-" },
+    { "sup2", "^2" },
+    { "sup3", "^3" },
+    { "minus", "-" }, { "plus", "+" }, { "times", "x" }, { "divide", "/" },
+    { "radic", "sqrt" }, { "infin", "inf" }, { "ne", "!=" }, { "le", "<=" }, { "ge", ">=" },
+    { "asymp", "~" }, { "sim", "~" }, { "cong", "~" }, { "sdot", "*" },
+    { "in", "in " }, { "notin", "not in " }, { "sum", "sum " }, { "prod", "prod " }, { "int", "int " },
+    { "part", "d" }, { "Delta", "D" }, { "pi", "pi" }, { "alpha", "alpha" },
+    { "rarr", "->" }, { "larr", "<-" }, { "uarr", "^" }, { "darr", "v" },
+    { "and", "and " }, { "or", "or " },
+    { "prime", "'" }, { "Prime", "\"" }, { "ang", "L" }, { "perp", "_|_" },
+    { "acute", "'" },
+    { "micro", "u" },
+    { "para", "P" },
+    { "middot", "*" },
+    { "cedil", "," },
+    { "sup1", "^1" },
+    { "ordm", "o" },
+    { "raquo", ">>" },
+    { "frac14", "1/4" },
+    { "frac12", "1/2" },
+    { "frac34", "3/4" },
+    { "iquest", "?" },
+    { "Agrave", "A" }, { "Aacute", "A" }, { "Acirc", "A" }, { "Atilde", "A" }, { "Auml", "A" }, { "Aring", "A" },
+    { "Egrave", "E" }, { "Eacute", "E" }, { "Ecirc", "E" }, { "Euml", "E" },
+    { "Igrave", "I" }, { "Iacute", "I" }, { "Icirc", "I" }, { "Iuml", "I" },
+    { "Ograve", "O" }, { "Oacute", "O" }, { "Ocirc", "O" }, { "Otilde", "O" }, { "Ouml", "O" },
+    { "Ugrave", "U" }, { "Uacute", "U" }, { "Ucirc", "U" }, { "Uuml", "U" },
+    { "agrave", "a" }, { "aacute", "a" }, { "acirc", "a" }, { "atilde", "a" }, { "auml", "a" }, { "aring", "a" },
+    { "egrave", "e" }, { "eacute", "e" }, { "ecirc", "e" }, { "euml", "e" },
+    { "igrave", "i" }, { "iacute", "i" }, { "icirc", "i" }, { "iuml", "i" },
+    { "ograve", "o" }, { "oacute", "o" }, { "ocirc", "o" }, { "otilde", "o" }, { "ouml", "o" },
+    { "ugrave", "u" }, { "uacute", "u" }, { "ucirc", "u" }, { "uuml", "u" },
+    { "mdash", " -- " },
+    { "ndash", " - " },
+    { "lsquo", "'" },
+    { "rsquo", "'" },
+    { "ldquo", "\"" },
+    { "rdquo", "\"" },
+    { "hellip", "..." },
+    { "trade", "(TM)" },
+    { "bull", "*" },
+    { "euro", "EUR" },
+    { "check", "[v]" },
+    { "cross", "[x]" },
+};
+#define NAMED_ENTITY_COUNT (sizeof(NAMED_ENTITIES) / sizeof(NAMED_ENTITIES[0]))
+
+/* Lua tables silently overwrite duplicate keys; resolve "not" (defined with
+ * '~' then later with 'not ') the same way — last assignment wins. */
+static const char *named_lookup(const char *name, size_t len)
+{
+    if (len == 3 && strncmp(name, "not", 3) == 0)
+    {
+        return "not "; /* duplicate-key overwrite parity */
+    }
+    for (size_t i = 0; i < NAMED_ENTITY_COUNT; i++)
+    {
+        if (strlen(NAMED_ENTITIES[i].name) == len &&
+            strncmp(NAMED_ENTITIES[i].name, name, len) == 0)
+        {
+            return NAMED_ENTITIES[i].repl;
         }
     }
     return NULL;
 }
 
-// --------------------------------------------------- MATH_CP map ----
-
-static const char* math_cp_lookup(unsigned num)
+/* ── MATH_CP map (shared by the numeric passes) ──────────────────────────── */
+typedef struct
 {
-    switch (num) {
-    case 176: return "deg";   case 177: return "+/-";
-    case 178: return "^2";    case 179: return "^3";
-    case 183: return "*";     case 215: return "x";
-    case 247: return "/";     case 960: return "pi";
-    case 916: return "D";
-    case 8706: return "d";    case 8712: return "in ";
-    case 8719: return "prod ";
-    case 8721: return "sum "; case 8722: return "-";
-    case 8730: return "sqrt"; case 8734: return "inf";
-    case 8747: return "int ";
-    case 8776: return "~";    case 8800: return "!=";
-    case 8804: return "<=";   case 8805: return ">=";
-    case 8592: return "<-";   case 8593: return "^";
-    case 8594: return "->";   case 8595: return "v";
-    default: return NULL;
-    }
-}
+    long cp;
+    const char *repl;
+} MathCp;
 
-// Decimal branch specials (&#NNN;). Hex branch differs (no 201A/201E!).
-static const char* dec_special(unsigned num)
-{
-    switch (num) {
-    case 160:
-    case 8239:
-    case 8201:
-    case 8200: return " ";
-    case 8211: return " - ";
-    case 8212: return " -- ";
-    case 8216:
-    case 8217:
-    case 8218: return "'";
-    case 8220:
-    case 8221:
-    case 8222: return "\"";
-    case 8230: return "...";
-    case 8226: return "*";
-    default: return NULL;
-    }
-}
-
-// Hex branch specials (&#xNN;): NO 0x201A / 0x201E cases (source asymmetry).
-static const char* hex_special(unsigned num)
-{
-    switch (num) {
-    case 0xA0:
-    case 0x202F:
-    case 0x2009: return " ";
-    case 0x2013: return " - ";
-    case 0x2014: return " -- ";
-    case 0x2018:
-    case 0x2019: return "'";
-    case 0x201C:
-    case 0x201D: return "\"";
-    case 0x2026: return "...";
-    case 0x2022: return "*";
-    default: return NULL;
-    }
-}
-
-// numeric entity body shared by both branches
-static void append_num_entity(StrBuf* out, unsigned long long num,
-                              const char* (*special)(unsigned))
-{
-    const char* m;
-    if (num > 0xFFFFFFFFull) {
-        sb_append_char(out, ' '); // huge values land here like Lua floats
-        return;
-    }
-    m = special((unsigned)num);
-    if (m != NULL) {
-        sb_append_str(out, m);
-        return;
-    }
-    m = math_cp_lookup((unsigned)num);
-    if (m != NULL) {
-        sb_append_str(out, m);
-        return;
-    }
-    if (num >= 32 && num <= 126) {
-        sb_append_char(out, (char)(unsigned char)num);
-        return;
-    }
-    sb_append_char(out, ' ');
-}
-
-// ------------------------------------------- numeric entity passes ----
-
-// Replaces "&#<digits>;" (hexMode=0) or "&#[xX]<hexdigits>;" (hexMode=1).
-// Single left-to-right pass, replacements never rescanned (gsub parity).
-static int replace_numeric(char** ptext, size_t* plen, int hexMode)
-{
-    StrBuf out;
-    const char* text = *ptext;
-    size_t len = *plen;
-    size_t i = 0;
-    int changed = 0;
-
-    sb_init(&out);
-    while (i < len) {
-        char c = text[i];
-        if (c != '&') {
-            sb_append_char(&out, c);
-            i++;
-            continue;
-        }
-        {
-            size_t p = i + 1;
-            unsigned long long value = 0;
-            int digits = 0;
-            int overflow = 0;
-            int ok = 0;
-
-            // Both forms share the literal '&#': & #[xX] hex | & # dec.
-            if (p < len && text[p] == '#') {
-                p++;
-                if (!hexMode) {
-                    while (p < len && text[p] >= '0' && text[p] <= '9') {
-                        unsigned d = (unsigned)(text[p] - '0');
-                        digits++;
-                        if (value > 0xFFFFFFFFull) {
-                            overflow = 1;
-                        } else {
-                            value = value * 10 + d;
-                        }
-                        p++;
-                    }
-                    ok = digits > 0 && p < len && text[p] == ';';
-                    if (ok) {
-                        p++;
-                    }
-                } else if (p < len &&
-                           (text[p] == 'x' || text[p] == 'X')) {
-                    p++;
-                    while (p < len) {
-                        char h = text[p];
-                        unsigned d;
-                        if (h >= '0' && h <= '9') {
-                            d = (unsigned)(h - '0');
-                        } else if (h >= 'a' && h <= 'f') {
-                            d = (unsigned)(h - 'a' + 10);
-                        } else if (h >= 'A' && h <= 'F') {
-                            d = (unsigned)(h - 'A' + 10);
-                        } else {
-                            break;
-                        }
-                        digits++;
-                        if (value > 0xFFFFFFFFull) {
-                            overflow = 1;
-                        } else {
-                            value = value * 16 + d;
-                        }
-                        p++;
-                    }
-                    ok = digits > 0 && p < len && text[p] == ';';
-                    if (ok) {
-                        p++;
-                    }
-                }
-                // NOTE: "&#x..;" simply fails the decimal branch
-                // (digits==0), exactly like the Lua pattern &#(%d+);.
-            }
-            if (ok) {
-                append_num_entity(&out, overflow ? 0xFFFFFFFFull + 1 : value,
-                                  hexMode ? hex_special : dec_special);
-                i = p;
-                changed = 1;
-                continue;
-            }
-        }
-        sb_append_char(&out, '&');
-        i++;
-    }
-
-    if (changed) {
-        pluto_free(*ptext);
-        *ptext = sb_detach(&out);
-        *plen = strlen(*ptext); // replacements are ASCII-only
-        return 1;
-    }
-    sb_free(&out);
-    return 0;
-}
-
-// ------------------------------------------------ named pass ----
-
-static int replace_named(char** ptext, size_t* plen)
-{
-    StrBuf out;
-    const char* text = *ptext;
-    size_t len = *plen;
-    size_t i = 0;
-    int changed = 0;
-
-    sb_init(&out);
-    while (i < len) {
-        char c = text[i];
-        if (c != '&') {
-            sb_append_char(&out, c);
-            i++;
-            continue;
-        }
-        {
-            size_t p = i + 1;
-            size_t start = p;
-            while (p < len && ((text[p] >= 'a' && text[p] <= 'z') ||
-                               (text[p] >= 'A' && text[p] <= 'Z'))) {
-                p++;
-            }
-            if (p > start && p < len && text[p] == ';') {
-                const char* v = named_lookup(text + start, p - start);
-                if (v != NULL) {
-                    sb_append_str(&out, v);
-                } else {
-                    sb_append_char(&out, ' ');
-                    sb_append(&out, text + start, p - start);
-                    sb_append_char(&out, ' ');
-                }
-                i = p + 1;
-                changed = 1;
-                continue;
-            }
-        }
-        sb_append_char(&out, '&');
-        i++;
-    }
-
-    if (changed) {
-        pluto_free(*ptext);
-        *ptext = sb_detach(&out);
-        *plen = strlen(*ptext);
-        return 1;
-    }
-    sb_free(&out);
-    return 0;
-}
-
-// ------------------------------------- step 4: fixed sequences ----
-
-typedef struct SeqRepl {
-    const char* seq;   // raw bytes
-    size_t seqLen;
-    const char* repl;
-} SeqRepl;
-
-#define S3(a, b, c) ((const char[]) {(char)a, (char)b, (char)c})
-#define S2(a, b) ((const char[]) {(char)a, (char)b})
-
-static const SeqRepl FIXED_SEQS[] = {
-    {S3(0xEF, 0xBB, 0xBF), 3, ""},        // BOM
-    {S2(0xC2, 0xA0), 2, " "},             // NBSP
-    {S3(0xE2, 0x80, 0x93), 3, " - "},     // en dash
-    {S3(0xE2, 0x80, 0x94), 3, " -- "},    // em dash
-    {S3(0xE2, 0x80, 0x98), 3, "'"},       // left single quote
-    {S3(0xE2, 0x80, 0x99), 3, "'"},       // right single quote
-    {S3(0xE2, 0x80, 0x9C), 3, "\""},      // left double quote
-    {S3(0xE2, 0x80, 0x9D), 3, "\""},      // right double quote
-    {S3(0xE2, 0x80, 0xA6), 3, "..."},     // ellipsis
-    {S3(0xE2, 0x80, 0xA2), 3, "*"},       // bullet
-    {S2(0xC2, 0xB7), 2, "*"},             // middle dot
-    {S3(0xE2, 0x88, 0x92), 3, "-"},       // minus sign
-    {S2(0xC2, 0xB1), 2, "+/-"},           // plus-minus
-    {S3(0xE2, 0x88, 0x9A), 3, "sqrt"},    // square root
-    {S3(0xE2, 0x88, 0x9E), 3, "inf"},     // infinity
-    {S3(0xE2, 0x89, 0xA4), 3, "<="},      // less-equal
-    {S3(0xE2, 0x89, 0xA5), 3, ">="},      // greater-equal
-    {S3(0xE2, 0x89, 0xA0), 3, "!="},      // not-equal
-    {S3(0xE2, 0x89, 0x88), 3, "~"},       // almost-equal
-    {S3(0xE2, 0x88, 0x91), 3, "sum "},    // n-ary summation
-    {S3(0xE2, 0x88, 0x8F), 3, "prod "},   // n-ary product
-    {S3(0xE2, 0x88, 0x88), 3, "in "},     // element-of
-    {S3(0xE2, 0x88, 0xA3), 3, "|"},       // divides
-    {S3(0xE2, 0x86, 0x92), 3, "->"},      // right arrow
-    {S3(0xE2, 0x86, 0x90), 3, "<-"},      // left arrow
-    {S3(0xE2, 0x86, 0x91), 3, "^"},       // up arrow
-    {S3(0xE2, 0x86, 0x93), 3, "v"},       // down arrow
+static const MathCp MATH_CP[] = {
+    { 176, "deg" }, { 177, "+/-" }, { 178, "^2" }, { 179, "^3" }, { 183, "*" },
+    { 215, "x" }, { 247, "/" }, { 960, "pi" }, { 916, "D" },
+    { 8706, "d" }, { 8712, "in " }, { 8719, "prod " }, { 8721, "sum " },
+    { 8722, "-" }, { 8730, "sqrt" }, { 8734, "inf" }, { 8747, "int " },
+    { 8776, "~" }, { 8800, "!=" }, { 8804, "<=" }, { 8805, ">=" },
+    { 8592, "<-" }, { 8593, "^" }, { 8594, "->" }, { 8595, "v" },
 };
+#define MATH_CP_COUNT (sizeof(MATH_CP) / sizeof(MATH_CP[0]))
 
-static void apply_fixed_sequences(StrBuf* out, const char* text, size_t len)
+static const char *math_cp_lookup(long cp)
 {
-    size_t nSeq = sizeof(FIXED_SEQS) / sizeof(FIXED_SEQS[0]);
-    StrBuf cur;
-    size_t s;
-
-    sb_init(&cur);
-    sb_append(&cur, text, len);
-
-    for (s = 0; s < nSeq; s++) {
-        const SeqRepl* r = &FIXED_SEQS[s];
-        StrBuf next;
-        size_t i = 0;
-        sb_init(&next);
-        while (i < cur.len) {
-            if (cur.len - i >= r->seqLen &&
-                memcmp(cur.data + i, r->seq, r->seqLen) == 0) {
-                sb_append_str(&next, r->repl);
-                i += r->seqLen;
-            } else {
-                sb_append_char(&next, cur.data[i]);
-                i++;
-            }
+    for (size_t i = 0; i < MATH_CP_COUNT; i++)
+    {
+        if (MATH_CP[i].cp == cp)
+        {
+            return MATH_CP[i].repl;
         }
-        pluto_free(cur.data);
-        cur = next;
     }
-    sb_append_buf(out, &cur); // may alias? no — must differ
-    pluto_free(cur.data);
+    return NULL;
 }
 
-// --------------------------------------- step 5: transliteration ----
-
-static const char* translit_lookup(unsigned cp)
+/* ── Numeric codepoint → ASCII (shared tail of both numeric passes) ──────── */
+static const char *cp_special_or_math(long num, int hexPass)
 {
-    switch (cp) {
-    case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5:
-        return "A";
+    if (hexPass)
+    {
+        if (num == 0xA0 || num == 0x202F || num == 0x2009)
+        {
+            return " ";
+        }
+        if (num == 0x2013)
+        {
+            return " - ";
+        }
+        if (num == 0x2014)
+        {
+            return " -- ";
+        }
+        if (num == 0x2018 || num == 0x2019)
+        {
+            return "'";
+        }
+        if (num == 0x201C || num == 0x201D)
+        {
+            return "\"";
+        }
+        if (num == 0x2026)
+        {
+            return "...";
+        }
+        if (num == 0x2022)
+        {
+            return "*";
+        }
+    }
+    else
+    {
+        if (num == 160 || num == 8239 || num == 8201 || num == 8200)
+        {
+            return " ";
+        }
+        if (num == 8211)
+        {
+            return " - ";
+        }
+        if (num == 8212)
+        {
+            return " -- ";
+        }
+        if (num == 8216 || num == 8217 || num == 8218)
+        {
+            return "'";
+        }
+        if (num == 8220 || num == 8221 || num == 8222)
+        {
+            return "\"";
+        }
+        if (num == 8230)
+        {
+            return "...";
+        }
+        if (num == 8226)
+        {
+            return "*";
+        }
+    }
+    return math_cp_lookup(num);
+}
+
+/* Append the ASCII translation of `num` to sb. 0 ok, -1 alloc failure. */
+static int append_cp_translation(StrBuf *sb, long num, int hexPass)
+{
+    const char *m = cp_special_or_math(num, hexPass);
+    if (m)
+    {
+        return strbuf_append(sb, m);
+    }
+    if (num >= 32 && num <= 126)
+    {
+        return strbuf_append_char(sb, (char)num);
+    }
+    return strbuf_append_char(sb, ' ');
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pass 1/2/3: entity decoding (decimal, hex, named). Each pass scans once,
+ * left to right, replacing the first complete &…; pattern at each position —
+ * the same single-sweep-with-atomic-replacement semantics as Lua gsub.
+ */
+static int decode_numeric_pass(StrBuf *out, const char *text, int hexPass)
+{
+    const char *p = text;
+    while (*p)
+    {
+        const char *amp = strchr(p, '&');
+        if (!amp)
+        {
+            if (strbuf_append(out, p) != 0)
+            {
+                return -1;
+            }
+            break;
+        }
+        if (amp > p && strbuf_append_n(out, p, (size_t)(amp - p)) != 0)
+        {
+            return -1;
+        }
+        p = amp;
+        const char *q = p + 1;
+        if (*q != '#')
+        {
+            goto literal; /* numeric entities always start &# */
+        }
+        q++;
+        if (hexPass)
+        {
+            if (*q != 'x' && *q != 'X')
+            {
+                goto literal;
+            }
+            q++;
+            const char *h = q;
+            while (isxdigit((unsigned char)*q))
+            {
+                q++;
+            }
+            if (q == h || *q != ';' || (q - h) > 7)
+            {
+                goto literal;
+            }
+            char hexbuf[8];
+            memcpy(hexbuf, h, (size_t)(q - h));
+            hexbuf[q - h] = '\0';
+            if (append_cp_translation(out, strtol(hexbuf, NULL, 16), hexPass) != 0)
+            {
+                return -1;
+            }
+            p = q + 1;
+            continue;
+        }
+        else
+        {
+            if (!isdigit((unsigned char)*q))
+            {
+                goto literal;
+            }
+            const char *d = q;
+            while (isdigit((unsigned char)*q))
+            {
+                q++;
+            }
+            if (*q != ';' || (q - d) > 8)
+            {
+                goto literal;
+            }
+            char decbuf[10];
+            memcpy(decbuf, d, (size_t)(q - d));
+            decbuf[q - d] = '\0';
+            if (append_cp_translation(out, strtol(decbuf, NULL, 10), hexPass) != 0)
+            {
+                return -1;
+            }
+            p = q + 1;
+            continue;
+        }
+    literal:
+        /* Not a valid entity for this pass: emit '&' and continue after it. */
+        if (strbuf_append_char(out, '&') != 0)
+        {
+            return -1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int decode_named_pass(StrBuf *out, const char *text)
+{
+    const char *p = text;
+    while (*p)
+    {
+        const char *amp = strchr(p, '&');
+        if (!amp)
+        {
+            if (strbuf_append(out, p) != 0)
+            {
+                return -1;
+            }
+            break;
+        }
+        if (amp > p && strbuf_append_n(out, p, (size_t)(amp - p)) != 0)
+        {
+            return -1;
+        }
+        p = amp;
+        const char *q = p + 1;
+        const char *n = q;
+        while (isalpha((unsigned char)*q))
+        {
+            q++;
+        }
+        if (q == n || *q != ';' || (q - n) > 24)
+        {
+            if (strbuf_append_char(out, '&') != 0)
+            {
+                return -1;
+            }
+            p++;
+            continue;
+        }
+        const char *repl = named_lookup(n, (size_t)(q - n));
+        /* Lua: return NAMED_ENTITIES[name] or (" " .. name .. " ") — the
+         * unknown replacement is a single " name " token (no extra space). */
+        if (repl)
+        {
+            if (strbuf_append(out, repl) != 0)
+            {
+                return -1;
+            }
+        }
+        else if (strbuf_appendf(out, " %.*s ", (int)(q - n), n) != 0)
+        {
+            return -1;
+        }
+        p = q + 1;
+    }
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pass 4: UTF-8 multi-byte sequence cleanup (Lua's ordered gsub list).
+ */
+typedef struct
+{
+    const char *seq;
+    const char *repl;
+} ByteSeq;
+
+static const ByteSeq UTF8_CLEANUP[] = {
+    { "\xef\xbb\xbf", "" },
+    { "\xc2\xa0", " " },
+    { "\xe2\x80\x93", " - " },
+    { "\xe2\x80\x94", " -- " },
+    { "\xe2\x80\x98", "'" },
+    { "\xe2\x80\x99", "'" },
+    { "\xe2\x80\x9c", "\"" },
+    { "\xe2\x80\x9d", "\"" },
+    { "\xe2\x80\xa6", "..." },
+    { "\xe2\x80\xa2", "*" },
+    { "\xc2\xb7", "*" },
+    { "\xe2\x88\x92", "-" },
+    { "\xc2\xb1", "+/-" },
+    { "\xe2\x88\x9a", "sqrt" },
+    { "\xe2\x88\x9e", "inf" },
+    { "\xe2\x89\xa4", "<=" },
+    { "\xe2\x89\xa5", ">=" },
+    { "\xe2\x89\xa0", "!=" },
+    { "\xe2\x89\x88", "~" },
+    { "\xe2\x88\x91", "sum " },
+    { "\xe2\x88\x8f", "prod " },
+    { "\xe2\x88\x88", "in " },
+    { "\xe2\x88\xa3", "|" },
+    { "\xe2\x86\x92", "->" },
+    { "\xe2\x86\x90", "<-" },
+    { "\xe2\x86\x91", "^" },
+    { "\xe2\x86\x93", "v" },
+};
+#define UTF8_CLEANUP_COUNT (sizeof(UTF8_CLEANUP) / sizeof(UTF8_CLEANUP[0]))
+
+static int utf8_cleanup_pass(StrBuf *out, const char *text)
+{
+    size_t n = strlen(text);
+    size_t i = 0;
+    while (i < n)
+    {
+        int matched = 0;
+        for (size_t s = 0; s < UTF8_CLEANUP_COUNT && !matched; s++)
+        {
+            size_t sl = strlen(UTF8_CLEANUP[s].seq);
+            if (i + sl <= n && memcmp(text + i, UTF8_CLEANUP[s].seq, sl) == 0)
+            {
+                if (strbuf_append(out, UTF8_CLEANUP[s].repl) != 0)
+                {
+                    return -1;
+                }
+                i += sl;
+                matched = 1;
+            }
+        }
+        if (!matched)
+        {
+            if (strbuf_append_char(out, text[i]) != 0)
+            {
+                return -1;
+            }
+            i++;
+        }
+    }
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pass 5: transliteration + cleaning byte loop (Lua's T table / M() entries).
+ * 2-byte sequences whose combined codepoint is in the table map to the table
+ * string; any other high byte (or overlong 3/4-byte lead) becomes ' '.
+ */
+static const char *translit_lookup(unsigned int cp)
+{
+    switch (cp)
+    {
+    case 0xC0: case 0xC1: case 0xC2: case 0xC3: case 0xC4: case 0xC5: return "A";
     case 0xC6: return "AE";
     case 0xC7: return "C";
     case 0xC8: case 0xC9: case 0xCA: case 0xCB: return "E";
@@ -452,8 +472,7 @@ static const char* translit_lookup(unsigned cp)
     case 0xDD: return "Y";
     case 0xDE: return "TH";
     case 0xDF: return "ss";
-    case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: case 0xE5:
-        return "a";
+    case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE4: case 0xE5: return "a";
     case 0xE6: return "ae";
     case 0xE7: return "c";
     case 0xE8: case 0xE9: case 0xEA: case 0xEB: return "e";
@@ -467,216 +486,284 @@ static const char* translit_lookup(unsigned cp)
     case 0xFD: return "y";
     case 0xFE: return "th";
     case 0xFF: return "y";
-
-    case 0x100: return "A"; case 0x101: return "a";
-    case 0x102: return "A"; case 0x103: return "a";
-    case 0x104: return "A"; case 0x105: return "a";
-    case 0x10C: return "C"; case 0x10D: return "c";
-    case 0x10E: return "D"; case 0x10F: return "d";
-    case 0x110: return "D"; case 0x111: return "d";
-    case 0x112: return "E"; case 0x113: return "e";
-    case 0x11A: return "E"; case 0x11B: return "e";
-    case 0x11E: return "G"; case 0x11F: return "g";
-    case 0x120: return "G"; case 0x121: return "g";
-    case 0x124: return "H"; case 0x125: return "h";
-    case 0x126: return "H"; case 0x127: return "h";
-    case 0x12A: return "I"; case 0x12B: return "i";
-    case 0x130: return "I"; case 0x131: return "i";
-    case 0x134: return "J"; case 0x135: return "j";
-    case 0x136: return "K"; case 0x137: return "k";
-    case 0x138: return "k";
-    case 0x13B: return "L"; case 0x13C: return "l";
-    case 0x13D: return "L"; case 0x13E: return "l";
-    case 0x141: return "L"; case 0x142: return "l";
-    case 0x143: return "N"; case 0x144: return "n";
-    case 0x145: return "N"; case 0x146: return "n";
-    case 0x147: return "N"; case 0x148: return "n";
-    case 0x150: return "O"; case 0x151: return "o";
-    case 0x152: return "OE"; case 0x153: return "oe";
-    case 0x154: return "R"; case 0x155: return "r";
-    case 0x158: return "R"; case 0x159: return "r";
-    case 0x15A: return "S"; case 0x15B: return "s";
-    case 0x15C: return "S"; case 0x15D: return "s";
-    case 0x15E: return "S"; case 0x15F: return "s";
-    case 0x160: return "S"; case 0x161: return "s";
-    case 0x162: return "T"; case 0x163: return "t";
-    case 0x164: return "T"; case 0x165: return "t";
-    case 0x166: return "T"; case 0x167: return "t";
-    case 0x16A: return "U"; case 0x16B: return "u";
-    case 0x16C: return "U"; case 0x16D: return "u";
-    case 0x16E: return "U"; case 0x16F: return "u";
-    case 0x170: return "U"; case 0x171: return "u";
-    case 0x172: return "U"; case 0x173: return "u";
-    case 0x174: return "W"; case 0x175: return "w";
-    case 0x176: return "Y"; case 0x177: return "y";
+    /* Lua Latin Extended-A block (0x100–0x17E) */
+    case 0x100: case 0x102: case 0x104: return "A";
+    case 0x101: case 0x103: case 0x105: return "a";
+    case 0x10C: return "C";
+    case 0x10D: return "c";
+    case 0x10E: case 0x110: return "D";
+    case 0x10F: case 0x111: return "d";
+    case 0x112: return "E";
+    case 0x113: return "e";
+    case 0x11A: return "E";
+    case 0x11B: return "e";
+    case 0x11E: case 0x120: return "G";
+    case 0x11F: case 0x121: return "g";
+    case 0x124: case 0x126: return "H";
+    case 0x125: case 0x127: return "h";
+    case 0x12A: return "I";
+    case 0x12B: return "i";
+    case 0x130: return "I";
+    case 0x131: return "i";
+    case 0x134: return "J";
+    case 0x135: return "j";
+    case 0x136: return "K";
+    case 0x137: case 0x138: return "k";
+    case 0x13B: case 0x13D: case 0x141: return "L";
+    case 0x13C: case 0x13E: case 0x142: return "l";
+    case 0x143: case 0x145: case 0x147: return "N";
+    case 0x144: case 0x146: case 0x148: return "n";
+    case 0x150: return "O";
+    case 0x151: return "o";
+    case 0x152: return "OE";
+    case 0x153: return "oe";
+    case 0x154: case 0x158: return "R";
+    case 0x155: case 0x159: return "r";
+    case 0x15A: case 0x15C: case 0x15E: case 0x160: return "S";
+    case 0x15B: case 0x15D: case 0x15F: case 0x161: return "s";
+    case 0x162: case 0x164: case 0x166: return "T";
+    case 0x163: case 0x165: case 0x167: return "t";
+    case 0x16A: case 0x16C: case 0x16E: case 0x170: case 0x172: return "U";
+    case 0x16B: case 0x16D: case 0x16F: case 0x171: case 0x173: return "u";
+    case 0x174: return "W";
+    case 0x175: return "w";
+    case 0x176: return "Y";
+    case 0x177: return "y";
     case 0x178: return "Y";
-    case 0x179: return "Z"; case 0x17A: return "z";
-    case 0x17B: return "Z"; case 0x17C: return "z";
-    case 0x17D: return "Z"; case 0x17E: return "z";
+    case 0x179: case 0x17B: case 0x17D: return "Z";
+    case 0x17A: case 0x17C: case 0x17E: return "z";
     default: return NULL;
     }
 }
 
-// Final sanitize pass. Runs ONLY when the original text had high bytes.
-// Mirrors the Lua byte loop exactly, including its index conditions:
-//   b 192..223 needs ONE more byte; b 224..239 needs TWO more bytes;
-//   truncated leads fall into the catch-all " " and the leftover
-//   continuation bytes become separate " " entries.
-static void utf8_cleanup_pass(char** ptext, size_t* plen)
+static int translit_clean_pass(StrBuf *out, const char *text)
 {
-    StrBuf out;
-    const char* text = *ptext;
-    size_t len = *plen;
+    size_t n = strlen(text);
     size_t i = 0;
-
-    sb_init(&out);
-    while (i < len) {
+    while (i < n)
+    {
         unsigned char b = (unsigned char)text[i];
-
-        tasks_yield_check();
-
-        if ((b >= 32 && b <= 126) || b == 10 || b == 13 || b == 9) {
-            sb_append_char(&out, (char)b);
-            i += 1;
-        } else if (b >= 192 && b <= 223 && i + 1 < len) {
-            unsigned char cb = (unsigned char)text[i + 1];
-            unsigned cp = ((b % 0x20) * 64) + (cb % 0x40);
-            const char* t = translit_lookup(cp);
-            if (t != NULL) {
-                sb_append_str(&out, t);
-            } else {
-                sb_append_char(&out, ' ');
+        if ((b >= 32 && b <= 126) || b == 10 || b == 13 || b == 9)
+        {
+            if (strbuf_append_char(out, (char)b) != 0)
+            {
+                return -1;
+            }
+            i++;
+        }
+        else if (b >= 192 && b <= 223 && i < n - 1)
+        {
+            unsigned char c = (unsigned char)text[i + 1];
+            unsigned int cp = ((b % 0x20) * 64) + (c % 0x40);
+            const char *t = translit_lookup(cp);
+            if (strbuf_append(out, t ? t : " ") != 0)
+            {
+                return -1;
             }
             i += 2;
-        } else if (b >= 224 && b <= 239 && i + 2 < len) {
-            sb_append_char(&out, ' ');
-            i += 3;
-        } else {
-            sb_append_char(&out, ' ');
-            i += 1;
         }
-    }
-
-    pluto_free(*ptext);
-    *ptext = sb_detach(&out);
-    *plen = strlen(*ptext);
-}
-
-// ------------------------------------------------------ decode ----
-
-char* entities_decode(const char* text, size_t len, size_t* outLen)
-{
-    char* buf;
-    size_t blen;
-    int hasAmp = 0;
-    int hasHigh = 0;
-    size_t i;
-
-    if (outLen != NULL) {
-        *outLen = 0;
-    }
-    if (text == NULL || len == 0) {
-        buf = (char*)pluto_malloc(1);
-        if (buf != NULL) {
-            buf[0] = '\0';
-        }
-        return buf;
-    }
-
-    for (i = 0; i < len; i++) {
-        unsigned char b = (unsigned char)text[i];
-        if (b == '&') {
-            hasAmp = 1;
-        } else if (b >= 0x80) {
-            hasHigh = 1;
-        }
-    }
-
-    // Fast path: no '&' and no high byte -> nothing can ever decode.
-    if (!hasAmp && !hasHigh) {
-        buf = (char*)pluto_malloc(len + 1);
-        memcpy(buf, text, len);
-        buf[len] = '\0';
-        if (outLen != NULL) {
-            *outLen = len;
-        }
-        return buf;
-    }
-
-    buf = (char*)pluto_malloc(len + 1);
-    memcpy(buf, text, len);
-    buf[len] = '\0';
-    blen = len;
-
-    if (hasAmp) {
-        replace_numeric(&buf, &blen, 0);
-        replace_numeric(&buf, &blen, 1);
-        replace_named(&buf, &blen);
-        if (!hasHigh) {
-            if (outLen != NULL) {
-                *outLen = blen;
+        else if (b >= 224 && b <= 239 && i + 1 < n - 1)
+        {
+            if (strbuf_append_char(out, ' ') != 0)
+            {
+                return -1;
             }
-            return buf;
+            i += 3;
+        }
+        else
+        {
+            if (strbuf_append_char(out, ' ') != 0)
+            {
+                return -1;
+            }
+            i++;
         }
     }
-
-    // Steps 4+5: only reachable when high bytes are present.
-    {
-        StrBuf staged;
-        sb_init(&staged);
-        apply_fixed_sequences(&staged, buf, blen);
-        pluto_free(buf);
-        buf = sb_detach(&staged);
-        blen = strlen(buf);
-
-        utf8_cleanup_pass(&buf, &blen);
-    }
-
-    if (outLen != NULL) {
-        *outLen = blen;
-    }
-    return buf;
+    return 0;
 }
 
-// ------------------------------------------------------ encode ----
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Public API
+ */
 
-char* entities_encode(const char* text, size_t len, size_t* outLen)
+char *entities_decode(const char *text)
 {
-    StrBuf out;
-    size_t i;
-
-    if (outLen != NULL) {
-        *outLen = 0;
-    }
-    if (text == NULL || len == 0) {
-        char* empty = (char*)pluto_malloc(1);
-        if (empty != NULL) {
+    if (!text || !text[0])
+    {
+        char *empty = (char *)PLUTO_MALLOC(1);
+        if (empty)
+        {
             empty[0] = '\0';
         }
         return empty;
     }
 
-    sb_init(&out);
-    for (i = 0; i < len; i++) {
-        char c = text[i];
-        if (c == '&') {
-            sb_append_str(&out, "&amp;");
-        } else if (c == '<') {
-            sb_append_str(&out, "&lt;");
-        } else if (c == '>') {
-            sb_append_str(&out, "&gt;");
-        } else if (c == '"') {
-            sb_append_str(&out, "&quot;");
-        } else {
-            sb_append_char(&out, c);
+    /* Fast path: no '&' and no byte >= 0x80 → unchanged (Lua parity). */
+    int hasAmp = 0, hasHigh = 0;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++)
+    {
+        if (*p == '&')
+        {
+            hasAmp = 1;
         }
+        else if (*p >= 0x80)
+        {
+            hasHigh = 1;
+        }
+    }
+    if (!hasAmp && !hasHigh)
+    {
+        char *dup = (char *)PLUTO_MALLOC(strlen(text) + 1);
+        if (dup)
+        {
+            strcpy(dup, text);
+        }
+        return dup;
     }
 
+    /* Pass 1: decimal numeric entities. */
+    StrBuf s1;
+    if (strbuf_init(&s1) != 0)
     {
-        char* s = sb_detach(&out);
-        if (outLen != NULL) {
-            *outLen = strlen(s);
-        }
-        return s;
+        return NULL;
     }
+    if (hasAmp)
+    {
+        if (decode_numeric_pass(&s1, text, 0) != 0)
+        {
+            strbuf_free(&s1);
+            return NULL;
+        }
+    }
+    else
+    {
+        strbuf_append(&s1, text);
+    }
+
+    /* Pass 2: hex numeric entities. */
+    StrBuf s2;
+    if (strbuf_init(&s2) != 0)
+    {
+        strbuf_free(&s1);
+        return NULL;
+    }
+    if (hasAmp)
+    {
+        if (decode_numeric_pass(&s2, s1.data, 1) != 0)
+        {
+            strbuf_free(&s1);
+            strbuf_free(&s2);
+            return NULL;
+        }
+        strbuf_free(&s1);
+    }
+    else
+    {
+        strbuf_append(&s2, s1.data);
+        strbuf_free(&s1);
+    }
+
+    /* Pass 3: named entities. */
+    StrBuf s3;
+    if (strbuf_init(&s3) != 0)
+    {
+        strbuf_free(&s2);
+        return NULL;
+    }
+    if (hasAmp)
+    {
+        if (decode_named_pass(&s3, s2.data) != 0)
+        {
+            strbuf_free(&s2);
+            strbuf_free(&s3);
+            return NULL;
+        }
+        strbuf_free(&s2);
+        /* Lua: `if not hasHigh then return text end` — pure-ASCII input with
+         * entities skips the byte cleanup. */
+        if (!hasHigh)
+        {
+            return strbuf_detach(&s3);
+        }
+    }
+    else
+    {
+        strbuf_append(&s3, s2.data);
+        strbuf_free(&s2);
+    }
+
+    /* Pass 4: UTF-8 sequence cleanup. */
+    StrBuf s4;
+    if (strbuf_init(&s4) != 0)
+    {
+        strbuf_free(&s3);
+        return NULL;
+    }
+    if (utf8_cleanup_pass(&s4, s3.data) != 0)
+    {
+        strbuf_free(&s3);
+        strbuf_free(&s4);
+        return NULL;
+    }
+    strbuf_free(&s3);
+
+    /* Pass 5: transliterate + strip. */
+    StrBuf s5;
+    if (strbuf_init(&s5) != 0)
+    {
+        strbuf_free(&s4);
+        return NULL;
+    }
+    if (translit_clean_pass(&s5, s4.data) != 0)
+    {
+        strbuf_free(&s4);
+        strbuf_free(&s5);
+        return NULL;
+    }
+    strbuf_free(&s4);
+
+    return strbuf_detach(&s5);
+}
+
+char *entities_encode(const char *text)
+{
+    static const char *amp = "&amp;";
+    static const char *lt = "&lt;";
+    static const char *gt = "&gt;";
+    static const char *quot = "&quot;";
+
+    StrBuf sb;
+    if (strbuf_init(&sb) != 0)
+    {
+        return NULL;
+    }
+    if (text)
+    {
+        for (const char *p = text; *p; p++)
+        {
+            const char *rep = NULL;
+            switch (*p)
+            {
+            case '&': rep = amp; break;
+            case '<': rep = lt; break;
+            case '>': rep = gt; break;
+            case '"': rep = quot; break;
+            default: break;
+            }
+            if (rep)
+            {
+                if (strbuf_append(&sb, rep) != 0)
+                {
+                    strbuf_free(&sb);
+                    return NULL;
+                }
+            }
+            else if (strbuf_append_char(&sb, *p) != 0)
+            {
+                strbuf_free(&sb);
+                return NULL;
+            }
+        }
+    }
+    return strbuf_detach(&sb);
 }

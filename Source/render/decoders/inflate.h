@@ -1,36 +1,46 @@
-#ifndef PLUTO_RENDER_DECODERS_INFLATE_H
-#define PLUTO_RENDER_DECODERS_INFLATE_H
+/*
+ * PlutoBrowser — inflate.h
+ * Port of Source/render/decoders/inflate.lua (reference, 427 lines).
+ *
+ * Lua → C function map:
+ *   createBitStream + bs:readBits/alignByte → inf_bitstream (static)
+ *   buildHuffmanTable / decodeSymbol        → inf_build_table / inf_decode_symbol
+ *   getFixedTables                          → inf_fixed_tables (static, cached)
+ *   Inflate.decompress(data)                → inflate_decompress()
+ *   Inflate.createStream(data) + s:read(n)  → inflate_stream_new()/inflate_stream_read()
+ *   Tasks.yieldCheck()                      → document deviation below
+ *
+ * Deviations (documented, behavior-preserving):
+ *   - Output is a heap byte buffer (caller frees via free()), not a Lua
+ *     string built through string.char chunking.
+ *   - Tasks.yieldCheck() call sites are preserved as comments; the one-shot
+ *     decompress is called from task step functions that already yield per
+ *     frame at a higher level (tasks module gives the same frame budgeting).
+ *   - The streaming window is a 64KB ring (Lua compacts its table at >65536
+ *     entries down to the last 32768 — identical observable output).
+ *   - Length/dist tables, canonical-Huffman construction (bit-reversed
+ *     LSB-first codes, stable-by-symbol order), zlib header autodetect
+ *     (CM=8 + (cmf*256+flg)%31==0, preset-dict skip), BFINAL/BTYPE flow,
+ *     and all `or 0`/`or 1` fallbacks are preserved exactly.
+ */
+#ifndef PLUTO_INFLATE_H
+#define PLUTO_INFLATE_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* C port of Source/render/decoders/inflate.lua (Inflate).
- *
- * Pure DEFLATE/zlib decompressor. LSB-first bit stream, canonical Huffman
- * tables, stored/fixed/dynamic blocks. A zlib CMF/FLG header is detected
- * and skipped (including preset dictionary); raw deflate streams decode
- * as-is. Faithful quirks preserved:
- *  - btype==3 blocks fall through silently (loop re-reads headers)
- *  - match copies that reach before the start of output emit 0 bytes
- *  - truncated input returns whatever was decoded so far
- */
+/* One-shot decompress of a zlib-wrapped OR raw deflate stream.
+ * Returns a malloc'd buffer (caller frees) and sets *outLen, or NULL.
+ * Mirrors Inflate.decompress including its nil-on-short-input behavior. */
+uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen);
 
-/* One-shot: decodes data[0..len) into a freshly pluto_malloc'd buffer.
- * Returns bytes written and sets *out; returns -1 only when len < 2
- * (mirrors Lua nil). Output may be shorter than expected on truncation. */
-long inflate_decompress(const uint8_t* data, size_t len,
-                        uint8_t** out, size_t* outLen);
-
+/* Streaming inflate (Lua Inflate.createStream). Keeps a 64KB window;
+ * read() returns up to *outLen bytes (owned by the stream until the next
+ * read) or NULL at end of stream. */
 typedef struct InflateStream InflateStream;
 
-/* Streaming decoder keeping a sliding window so callers can consume
- * output in chunks (PNG row streaming). NULL on OOM / len < 2. */
-InflateStream* inflate_stream_new(const uint8_t* data, size_t len);
+InflateStream *inflate_stream_new(const uint8_t *data, size_t len);
+const uint8_t *inflate_stream_read(InflateStream *s, size_t want, size_t *outLen);
+void inflate_stream_free(InflateStream *s);
 
-/* Copies up to n decoded bytes into buf; returns count, 0 == end of
- * stream (Lua nil). */
-size_t inflate_stream_read(InflateStream* s, uint8_t* buf, size_t n);
-
-void inflate_stream_free(InflateStream* s);
-
-#endif
+#endif /* PLUTO_INFLATE_H */

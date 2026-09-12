@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     'host_test/math_diag'
-relocations:     []
-...

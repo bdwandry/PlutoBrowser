@@ -1,207 +1,158 @@
-// tasks.c — cooperative task scheduler (C port of Source/core/tasks.lua).
-//
-// Lua ground truth captured on host Lua 5.5 (p05_oracle.lua):
-//   - run(): isRunning true immediately; progress reset to 0 immediately;
-//     job first advances on the NEXT update(); callbacks fire during the
-//     update in which the job finishes.
-//   - update() resumes ONLY queue[1] (head), at most one job per frame.
-//   - done path: progress forced to 1, head removed, gc scheduled,
-//     onComplete(result) via pcall. error path: progress LEFT AS-IS,
-//     head removed, gc scheduled, onError(tostring(err)) via pcall.
-//   - yieldCheck(): shared global counter; every 64th call checks
-//     (inside && now-frameStart >= 500); outside a job it never yields.
-//     With +20ms per iteration a 1000-iteration loop spans 16 frames.
-//   - cancelAll(): no-op on empty queue (progress untouched, no GC);
-//     otherwise drops every job with NO callbacks, zeroes progress,
-//     schedules GC.
-//   - scheduleGC(): drains within ONE update regardless of completion
-//     (pcall quirk clears `done` flag unconditionally).
-//   - reportProgress clamps to [0,1], monotonic.
-#include <stdarg.h>
-#include <stdio.h>
+/*
+ * PlutoBrowser — tasks.c
+ * Cooperative scheduler (port of Source/core/tasks.lua). See tasks.h.
+ */
 #include <string.h>
 
-#include "pd_api.h"
+#include "core/tasks.h"
 
-#include "../util/dynarray.h"
-#include "logger.h"
-#include "tasks.h"
+/* Lua reference values: 500ms frame budget, clock check every 64 iterations. */
+#define FRAME_BUDGET_MS 500
+#define CHECK_EVERY 64
 
-typedef struct PlutoJob {
-    PlutoTaskStepFn step;
-    void* ctx;
-    PlutoTaskCtxFreeFn ctxFree;
-    PlutoTaskDoneFn onComplete;
-    PlutoTaskFailFn onError;
-    void* ud;
-    char err[192];
-} PlutoJob;
+static TaskCtx g_queue[TASKS_MAX];
+static int g_count = 0;
+static float g_progress = 0;
+static int g_gcPending = 0; /* placeholder: C frees are explicit; kept for parity */
+static PlaydateAPI *g_pd = NULL;
 
-static struct PlaydateAPI* s_pd = NULL;
-static DynArray s_queue; // PlutoJob
-static int s_inside = 0;
-static unsigned s_counter = 0;
-static unsigned s_frameStartMs = 0;
-static double s_progress = 0.0;
-static int s_gcPending = 0;
-static char s_errBuf[192];
-static PlutoTaskClockFn s_clockFn = NULL;
-
-unsigned tasks_default_clock(void)
+void tasks_init(PlaydateAPI *pd)
 {
-    if (s_pd != NULL) {
-        return s_pd->system->getCurrentTimeMilliseconds();
+    g_pd = pd;
+    memset(g_queue, 0, sizeof(g_queue));
+    g_count = 0;
+    g_progress = 0;
+}
+
+void tasks_report_progress(float f)
+{
+    if (f > 1.0f)
+    {
+        f = 1.0f;
+    }
+    if (f < 0.0f)
+    {
+        f = 0.0f;
+    }
+    if (f > g_progress)
+    {
+        g_progress = f;
+    }
+}
+
+float tasks_get_progress(void)
+{
+    return g_progress;
+}
+
+int tasks_is_running(void)
+{
+    return g_count > 0;
+}
+
+int tasks_run(TaskStepFn step, void *initialData, TaskDoneFn onDone, TaskErrorFn onError, void *userdata)
+{
+    if (g_count >= TASKS_MAX)
+    {
+        return -1;
+    }
+    TaskCtx *t = &g_queue[g_count];
+    memset(t, 0, sizeof(*t));
+    t->active = 1;
+    t->step = step;
+    t->data = initialData;
+    t->onDone = onDone;
+    t->onError = onError;
+    t->userdata = userdata;
+    t->pd = g_pd;
+    g_count++;
+    g_progress = 0;
+    return 0;
+}
+
+int tasks_yield_check(TaskCtx *ctx)
+{
+    static int counter = 0;
+    counter++;
+    if (counter >= CHECK_EVERY)
+    {
+        counter = 0;
+        if (ctx && ctx->active && ctx->pd)
+        {
+            if (ctx->pd->system->getCurrentTimeMilliseconds() - ctx->frameStartMs >= FRAME_BUDGET_MS)
+            {
+                return 1; /* caller should return from its step now */
+            }
+        }
     }
     return 0;
 }
 
-static unsigned now_ms(void)
-{
-    if (s_clockFn != NULL) {
-        return s_clockFn();
-    }
-    return tasks_default_clock();
-}
-
-void tasks_set_clock_fn(PlutoTaskClockFn clockFn) { s_clockFn = clockFn; }
-
-void tasks_init(struct PlaydateAPI* pd)
-{
-    s_pd = pd;
-    da_init(&s_queue, sizeof(PlutoJob));
-    s_inside = 0;
-    s_counter = 0;
-    s_frameStartMs = 0;
-    s_progress = 0.0;
-    s_gcPending = 0;
-}
-
-void tasks_run(PlutoTaskStepFn step, void* ctx, PlutoTaskCtxFreeFn ctxFree,
-               PlutoTaskDoneFn onComplete, PlutoTaskFailFn onError, void* ud)
-{
-    PlutoJob job;
-    memset(&job, 0, sizeof(job));
-    job.step = step;
-    job.ctx = ctx;
-    job.ctxFree = ctxFree;
-    job.onComplete = onComplete;
-    job.onError = onError;
-    job.ud = ud;
-
-    // Lua parity: progress resets even while another job is mid-flight.
-    s_progress = 0.0;
-
-    da_push(&s_queue, &job);
-    PLUTO_LOG("[P05] task queued (queue=%d)", (int)s_queue.count);
-}
-
-int tasks_is_running(void) { return s_queue.count > 0 ? 1 : 0; }
-
 void tasks_cancel_all(void)
 {
-    size_t i;
-    if (s_queue.count == 0) {
-        return; // Lua parity: empty queue -> full no-op
+    if (g_count > 0)
+    {
+        g_count = 0;
+        g_progress = 0;
+        g_gcPending = 1;
     }
-    for (i = 0; i < s_queue.count; i++) {
-        PlutoJob* j = (PlutoJob*)da_get(&s_queue, i);
-        if (j != NULL && j->ctxFree != NULL) {
-            j->ctxFree(j->ctx);
-        }
-    }
-    s_queue.count = 0;
-    s_progress = 0.0;
-    s_gcPending = 1;
-    PLUTO_LOG("[P05] cancelAll dropped all tasks");
-}
-
-void tasks_schedule_gc(void) { s_gcPending = 1; }
-
-static void drain_gc(void)
-{
-    // Lua: up to 4 collectgarbage("step"); the pcall wrapper clears the
-    // pending flag within this same update either way (verified quirk).
-    // C has no GC -> log-only note (MASTER_TODO P05).
-    s_gcPending = 0;
-    PLUTO_LOG("[P05] gc drain (no-op in C)");
 }
 
 void tasks_update(void)
 {
-    if (s_queue.count > 0) {
-        PlutoJob* job = (PlutoJob*)da_get(&s_queue, 0);
-        PlutoJob finished;
-        int st;
+    if (g_count == 0)
+    {
+        /* Spread "GC" (here: nothing to collect; placeholder keeps parity
+         * with the Lua module's gcPending flag) — cleared immediately. */
+        g_gcPending = 0;
+        return;
+    }
 
-        s_frameStartMs = now_ms();
-        s_errBuf[0] = '\0';
+    TaskCtx *task = &g_queue[0];
+    task->frameStartMs = g_pd->system->getCurrentTimeMilliseconds();
 
-        s_inside = 1;
-        st = job->step(job->ctx);
-        s_inside = 0;
+    int keepGoing = 0;
+    /* The step function returns 0 when finished, or (via yield) non-zero to
+     * pause. A step that returns -1 signals an error. */
+    int result = task->step(task);
+    if (result > 0)
+    {
+        return; /* still running (yielded or more work) */
+    }
 
-        if (st == PLUTO_TASK_YIELD) {
-            // stays queued; next resume happens next frame
-        } else {
-            finished = *job;
-            da_remove_at(&s_queue, 0);
-            tasks_schedule_gc();
-            if (st == PLUTO_TASK_DONE) {
-                s_progress = 1.0;
-                PLUTO_LOG("[P05] task done");
-                if (finished.onComplete != NULL) {
-                    finished.onComplete(finished.ctx, finished.ud);
-                }
-            } else {
-                const char* msg =
-                    s_errBuf[0] != '\0' ? s_errBuf : "task error";
-                PLUTO_LOG("[P05] task error: %s", msg);
-                if (finished.onError != NULL) {
-                    finished.onError(msg, finished.ud);
-                }
-            }
-            if (finished.ctxFree != NULL) {
-                finished.ctxFree(finished.ctx);
-            }
+    /* Finished (0) or error (-1). Capture the callback state BEFORE shifting
+     * the queue down — after the shift `task` would alias the next entry. */
+    TaskStepFn step = task->step;
+    void *data = task->data;
+    TaskDoneFn onDone = task->onDone;
+    TaskErrorFn onError = task->onError;
+    void *userdata = task->userdata;
+
+    task->active = 0;
+    /* shift the queue down */
+    for (int i = 1; i < g_count; i++)
+    {
+        g_queue[i - 1] = g_queue[i];
+    }
+    g_count--;
+    g_gcPending = 1;
+
+    if (result < 0)
+    {
+        /* error path */
+        g_progress = 0;
+        if (onError)
+        {
+            onError(data ? (const char *)data : "task error", userdata);
         }
+        (void)step;
+        return;
     }
 
-    if (s_gcPending) {
-        drain_gc();
-    }
-}
-
-int tasks_yield_check(void)
-{
-    s_counter++;
-    if (s_counter >= PLUTO_TASK_CHECK_EVERY) {
-        s_counter = 0;
-        if (s_inside && now_ms() - s_frameStartMs >=
-                            PLUTO_TASK_FRAME_BUDGET_MS) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void tasks_set_error(const char* fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(s_errBuf, sizeof(s_errBuf), fmt, ap);
-    va_end(ap);
-}
-
-void tasks_report_progress(double f)
-{
-    if (f > 1.0) {
-        f = 1.0;
-    } else if (f < 0.0) {
-        f = 0.0;
-    }
-    if (f > s_progress) {
-        s_progress = f;
+    /* normal completion */
+    g_progress = 1;
+    if (onDone)
+    {
+        onDone(data, userdata);
     }
 }
-
-double tasks_get_progress(void) { return s_progress; }

@@ -1,21 +1,19 @@
-#ifndef PLUTO_UI_BOOKMARKS_PAGE_H
-#define PLUTO_UI_BOOKMARKS_PAGE_H
+/*
+ * PlutoBrowser — bookmarks_page.h
+ * Bookmarks manager view (port of Source/ui/bookmarks_page.lua).
+ */
+#ifndef PLUTO_BOOKMARKS_PAGE_H
+#define PLUTO_BOOKMARKS_PAGE_H
 
-#include <stddef.h>
+void bookmarks_page_open(void);
 
-#include "pd_api.h"
-#include "ui/list_core.h"
+/* Feed pushed-button mask. Returns bookmark URL to open (caller frees via
+ * pluto_free), "close" (caller frees), or NULL. */
+char *bookmarks_page_handle_input(unsigned int pushed);
 
-// C port of CometBrowser Source/ui/bookmarks_page.lua (BookmarksPage).
-// Row list of Storage.bookmarks(): 34px rows, title/url clips, crank
-// scroll x2, selection inversion, B closes, A opens the row URL.
+/* Draw. crankChange scrolls the list. */
+void bookmarks_page_draw(float crankChange);
 
-void     bm_init_pd(PlaydateAPI* pd);
-void     bm_open(void);
-LpAction bm_handle_input(LrButton btn, char* outUrl, size_t cap);
-void     bm_draw(double crankChange);
+int bookmarks_page_selected_index(void);
 
-int      bm_selected_index(void);
-double   bm_scroll_y(void);
-
-#endif
+#endif /* PLUTO_BOOKMARKS_PAGE_H */
