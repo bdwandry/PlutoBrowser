@@ -4,6 +4,8 @@
 
 Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web address, search the internet, fill out forms, click hyperlinks, and render HTML headings, paragraphs, lists, blockquotes, code blocks, tables, and images (SVG, WebP, JPEG, PNG, GIF, BMP, ICO, TIFF, TGA and more) with 1-bit monochrome graphics on the 400x240 sharp LCD screen.
 
+> **Pluto Browser is a port of [CometBrowser](https://github.com/bdwandry/CometBrowser)**, originally written entirely in Lua. It has now been natively ported to C code with Pluto Browser.
+
 ---
 
 ## Hardware Controls & Shortcuts
