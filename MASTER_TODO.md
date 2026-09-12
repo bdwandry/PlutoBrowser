@@ -2024,3 +2024,125 @@ clean kEventTerminate, crashlog + errorlog EMPTY.
 **Still unsupported (by design):** AVIF (AV1 codec) and JP2 (JPEG2000 wavelet/MQ) — 100k+-line international codec standards, out of scope for hand-porting; both fail gracefully to the unsupported-image path exactly like the Lua reference.
 
 **TEMP scaffolding to revert:** main.c auto-launch of the benchmark URL (marked `TEMP(IMGFMT)`) — remove when user resumes Home-Page boot.
+
+## Beta Bug Fix #14 — Home-page crank: selection follows the crank (Settings reachable, every bookmark selectable)
+
+**Status:** COMPLETE (verified Simulator + device)
+**Reported:** On the home page the crank only scrolled; the highlight was
+still governed by D-pad rules, so (1) cranking down never selected the
+bottom-row bookmark (the free scroll ran past it — the last card of an
+odd-count grid was never selectable at all), (2) with the Settings button
+highlighted you could not crank back up to it once a bookmark was selected,
+and (3) after scrolling down to the bookmarks you could get stranded away
+from the selection.
+
+**Root causes (Source/ui/home_page.c):**
+- `home_page_draw` accumulated `crankChange * 1.5` into `g_targetScrollY`
+  with NO upper clamp — the view scrolled past the last row into
+  unbounded footer space while the selection never moved.
+- The auto-scroll bottom threshold (`SCREEN_HEIGHT-40`) could not fully
+  reveal the 46px card.
+- `selectedAbsY` still used the pre-BF10 offset (`CONTENT_Y+12+148` vs the
+  real `CONTENT_Y+4+160`) — a 4px stale value.
+
+**Fix:**
+- New `home_page_handle_crank(crankChange)`: the crank moves the SELECTION
+  in reading order (index 0 = Settings button, then every card 1..count),
+  one bookmark per 18° of crank travel — a 2-card grid row per 36°, the
+  exact legacy ×1.5 scroll speed, so the crank feel is unchanged.
+  Sub-degree motion accumulates in `g_crankFrac` (no step below 18°).
+  `g_crankTarget` anchors the gesture so down-then-up returns to the
+  exact item you came from; any button press ends the gesture
+  (`home_page_handle_input`, plus B-hold via `home_page_end_crank_gesture`).
+- Cranking past the final card free-scrolls into the footer at the grid
+  pitch; `home_page_update_scroll` clamps `g_targetScrollY` to the real
+  content bottom (`home_content_bottom` = 24+4+172+rows*54+80+8; 318px
+  for the default 10 speed dials) and to 0 at the top.
+- Split out `home_page_update_scroll()` from `draw()` (easing 0.3 + 0.5
+  snap unchanged) and wired the crank call in `main.c` STATE_HOME next to
+  the button handling, so crank + buttons apply once per frame in order.
+- Bottom reveal threshold `SCREEN_HEIGHT-40` → `SCREEN_HEIGHT-46` so the
+  bottom-row card is selected AND fully visible; fixed the stale 4px
+  `selectedAbsY` offset. invertCrank still flips the direction.
+- main.c: crank call moved inside `skipInputFrames` gate (Lua parity —
+  input-suppressed frames must not move the home selection).
+
+**Test scaffolding:** TEMP(BF13) scripted crank battery in main.c ran in the
+Simulator (verified traversal down 1→10, freescroll clamped 372→318,
+return to 0, heartbeats stable) and REMOVED; clean rebuild 0 errors
+(pdex.bin 192,229 B, MD5 35ed6855e3d3cb107aeb603c50f0eb4e).
+
+**Verification:**
+- Host harness `tests/bf14_home_crank_host_test.c` (real home_page.c +
+  faked storage/logger/style): 19/19 PASS at count=10 (crank-down reaches
+  the last bookmark, scroll clamp, crank-up returns to Settings incl.
+  after free-scroll, down-then-up re-anchors, sub-threshold ignored,
+  A-on-Settings opens settings, odd counts selectable, D-pad regressions,
+  gesture reset on button, invertCrank); green at counts 1/2/3/5/11/20/29.
+- Simulator: clean boot, zero errors (also verified live by the user via
+  scroll-wheel crank emulation: sel walked 1→10, freescroll clamped,
+  back to 0, clean terminate). Simulator killed immediately after tests.
+- Device: MD5-verified deploy (35ed6855e3d3cb107aeb603c50f0eb4e), user's
+  own on-device crank test captured in the log — sel=1…sel=10 (bottom-left
+  card of the last row included), freescroll tgt clamped at exactly 318
+  (= content bottom − screen height), clean `kEventTerminate, frames=2935`,
+  crashlog + errorlog EMPTY. Log preserved: `tests/logs/bf14_device.log`.
+
+**Test Cases:**
+- TC1 crank-down: EXPECT last bookmark selectable from Settings. ACT:
+  sel walked 1→10 on device. PASS
+- TC2 odd counts: EXPECT bottom-left (odd) card selectable. ACT: host TC8
+  at count=11/29 PASS.
+- TC3 crank-up: EXPECT Settings reachable after deep scroll/free-scroll.
+  ACT: sel→0 in host TC3/TC6 and on device. PASS
+- TC4 scroll clamp: EXPECT no overscroll past content bottom. ACT: target
+  clamped at 372→318 (10 bookmarks) in sim + device logs. PASS
+- TC5 D-pad regressions: EXPECT unchanged row/column wrap. ACT: host
+  TC9a-d PASS.
+- TC6 settings: EXPECT A on Settings still opens settings. ACT: host TC7
+  PASS; sim log `state -> 6`. PASS
+
+## Beta Bug Fix #14c — Home-page crank step retuned to a TRUE quarter turn (90°)
+
+**Status:** COMPLETE (verified Simulator + device; deploy completed after
+the device was reconnected).
+
+**Fix (one constant + comments):** HOME_CRANK_STEP_PX 18 -> 25 (BF14b,
+never deployed) -> **90** (BF14c). Reading order, gesture anchoring,
+footer free-scroll clamp, D-pad behavior and all page-scrolling speeds are
+untouched (home page only, per user instruction). The define lives in
+home_page.h so the host harness drives the exact production value.
+
+**Verification:**
+- Host harness: green at counts 1/3/10/11/29 incl. new sub-threshold cases
+  (80° < 90° must not step).
+- Simulator: clean boot on the 90° build, heartbeats stable, zero errors;
+  simulator killed immediately after (flaky first-launch retry loop used,
+  a known Simulator quirk).
+- Clean rebuild 0 errors (pdex.bin 192,230 B, MD5 157ba343776055a389ce8ad80a809fc6).
+- Device: MD5-verified deploy (157ba343776055a389ce8ad80a809fc6), user's
+  live crank test captured in the log — 79 crank events, a clean walk
+  down sel=1…10 and back up to 0, 15 clamped footer free-scrolls, clean
+  `kEventTerminate, frames=3727`, crashlog + errorlog EMPTY. Log
+  preserved: `tests/logs/bf14c_device.log`.
+
+## Beta Bug Fix #14d — Home-page crank step: 45° per bookmark (user request)
+
+**Status:** COMPLETE (verified Simulator + device)
+**User request:** "I want 45 degrees" — replace the 90° quarter-turn step
+(#14c) with exactly 45° per bookmark.
+
+**Fix (one constant + comments + test values):** HOME_CRANK_STEP_PX
+90 -> **45**. History: 18 -> 25 -> 90 -> 45 (all user-tuned). Reading
+order, gesture anchoring, footer free-scroll clamp, D-pad behavior, and
+all page-scrolling speeds untouched (home page only). Host-harness
+sub-threshold probes updated to 40° (40 < 45 must not step).
+
+**Verification:**
+- Host harness: green at counts 1/3/10/11/29.
+- Simulator: clean boot, heartbeats stable, zero errors; simulator killed
+  immediately after.
+- Device: MD5-verified deploy (2806f6bf95402108faa89db2e7892ce6), user's
+  live crank test captured (151 crank events, clean terminate at 4,185
+  frames incl. a settings round-trip, crashlog + errorlog EMPTY). Log
+  preserved: `tests/logs/bf14d_device_45deg.log`.

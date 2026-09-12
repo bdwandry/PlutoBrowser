@@ -1323,6 +1323,11 @@ static int updateFrame(void *userdata)
     if (currentState == STATE_HOME || currentState == STATE_PAGE)
     {
         int bDown = (btnCurrent & (1 << 4)) ? 1 : 0; /* kButtonB */
+        /* BF14: a B hold ends the home-page crank gesture. */
+        if (currentState == STATE_HOME && (btnPushed & (1 << 4)))
+        {
+            home_page_end_crank_gesture();
+        }
         unsigned int nowMs = pd->system->getCurrentTimeMilliseconds();
 
         if (bDown)
@@ -1419,6 +1424,9 @@ static int updateFrame(void *userdata)
                 navigate_to(selUrl);
                 pluto_free(selUrl);
             }
+            /* BF14: crank moves the selection (Settings button included);
+             * draw() then follows it with the clamped scroll target. */
+            home_page_handle_crank(crankChange);
         }
         home_page_draw(crankChange);
         break;
