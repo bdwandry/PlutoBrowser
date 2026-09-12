@@ -10,6 +10,23 @@
  * bottom off scrolling glyphs — its height now comes from the actual font
  * height instead of the reference's hardcoded 15px. Horizontal scrolling
  * behavior is unchanged.
+ * BF14 fix (user-requested): the crank now SCROLLS AND SELECTS together.
+ * Previously crankChange only accumulated g_targetScrollY while the
+ * selection was clamped to D-pad rules, so the highlight could get stuck:
+ * scrolling down never selected the bottom-row bookmark (the scroll ran
+ * past it, and odd counts leave the last row's second cell empty), and
+ * once the free scroll pushed a selected card off the top the Settings
+ * button was unreachable by crank. Now the crank moves the selection in
+ * READING ORDER (Settings = index 0, then every card 1..count) and the
+ * scroll target follows the selection, clamped to the real content
+ * bottom. Cranking past the final card free-scrolls into the footer (also
+ * clamped); every bookmark is selectable and Settings is always reachable
+ * scrolling back up.
+ * BF14b (user feedback): step eased 18° -> 25°; BF14c: -> 90° (a quarter
+ * turn); BF14d (user request "I want 45 degrees"): -> **45° per bookmark**
+ * (half a quarter turn). HOME PAGE only; page scrolling elsewhere is
+ * untouched. Keep the define in home_page.h so the host test drives the
+ * exact production value.
  */
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +35,7 @@
 #include "ui/home_page.h"
 #include "core/constants.h"
 #include "core/storage.h"
+#include "core/logger.h"
 #include "render/style.h"
 #include "pd_api.h"
 
@@ -34,6 +52,21 @@ extern void pluto_free(void *p);
 static int g_selectedIndex = 0;
 static float g_scrollY = 0;
 static float g_targetScrollY = 0;
+
+/* BF14 crank-selection state. The crank moves the selection through the
+ * bookmark list in READING ORDER (Settings = index 0, then every card
+ * 1..count) so every bookmark is crank-selectable, and the scroll target
+ * follows the selection. g_crankTarget anchors the selection index for the
+ * current crank gesture so down-then-up returns to the exact item you came
+ * from; any button push ends the gesture (handle_input resets it). */
+#define HOME_CRANK_STEP_PX 45.0f /* BF14d: one bookmark per 45° of crank
+                                  * travel (user request "I want 45 degrees";
+                                  * history 18 -> 25 -> 90 -> 45). Reading
+                                  * order crosses a 2-card grid row every
+                                  * 90°. Defined in home_page.h so the host
+                                  * test stays in sync with production. */
+static float g_crankFrac = 0.0f; /* sub-step remainder, crank degrees */
+static int g_crankTarget = -1;   /* selection anchor; -1 = no gesture */
 
 /* marquee state per card (Lua keyed "t<i>"/"d<i>"; we track per index) */
 typedef struct
@@ -52,6 +85,8 @@ void home_page_reset(void)
     g_selectedIndex = 0;
     g_scrollY = 0;
     g_targetScrollY = 0;
+    g_crankFrac = 0.0f;
+    g_crankTarget = -1;
     memset(g_marquee, 0, sizeof(g_marquee));
 }
 
@@ -68,6 +103,153 @@ int home_page_scroll_y(void)
 static int bookmark_count(void)
 {
     return storage_bookmark_count();
+}
+
+/* ── BF14: crank-driven selection + bounded scroll ─────────────────────── */
+
+/* Absolute (unscrolled) Y of the first pixel BELOW all home content.
+ * draw() builds the same chain: startY = CONTENT_Y+4 → settings row
+ * (+100+22) → section header (+14) → grid (+24) → rows*(46+8) → footer
+ * header (+12) → footer list (+76+4) → bottom margin (8). Keep in sync. */
+static int home_content_bottom(int count)
+{
+    int rows = (count + 1) / 2; /* grid rows used by cards */
+    return CONTENT_Y + 4 + 172 + rows * (46 + 8) + 80 + 8;
+}
+
+/* Crank → selection (BF14). One bookmark step per HOME_CRANK_STEP_PX
+ * degrees of crank travel (45° after BF14d — see
+ * home_page.h). Reading
+ * order walks Settings = index 0 then every card, so the highlight passes
+ * through every bookmark; the scroll target follows the selection (see
+ * home_page_update_scroll). Cranking past the final card free-scrolls
+ * into the footer. invertCrank flips the direction (as the old scroll
+ * did). */
+void home_page_handle_crank(float crankChange)
+{
+    if (crankChange == 0.0f)
+    {
+        return;
+    }
+
+    int count = bookmark_count();
+    if (count < 0)
+    {
+        count = 0;
+    }
+
+    float dir = storage_setting_int("invertCrank") ? -1.0f : 1.0f;
+    g_crankFrac += crankChange * dir;
+
+    int steps = (int)(g_crankFrac / HOME_CRANK_STEP_PX); /* truncate to 0 */
+    g_crankFrac -= (float)steps * HOME_CRANK_STEP_PX;
+    if (steps == 0)
+    {
+        return;
+    }
+
+    if (g_crankTarget < 0)
+    {
+        /* New gesture: anchor at the current selection (defensively clamped
+         * to the live count). */
+        g_crankTarget = g_selectedIndex > count ? count : g_selectedIndex;
+    }
+    g_crankTarget += steps;
+
+    if (g_crankTarget > count)
+    {
+        g_crankTarget = count;
+        if (count > 0 && g_selectedIndex == count)
+        {
+            /* Already on the final card: keep scrolling into the footer at
+             * the grid-row pitch; update_scroll clamps to content bottom. */
+            g_targetScrollY += (float)steps * (46 + 8);
+            logger_log("home: crank freescroll tgt=%d", (int)g_targetScrollY);
+            return;
+        }
+    }
+    if (g_crankTarget < 0)
+    {
+        g_crankTarget = 0; /* top: Settings button */
+    }
+
+    if (g_crankTarget != g_selectedIndex)
+    {
+        g_selectedIndex = g_crankTarget;
+        logger_log("home: crank sel=%d count=%d", g_selectedIndex, count);
+    }
+}
+
+/* End the crank gesture without moving the selection (BF14): called when a
+ * B-hold starts on the home page so the next crank re-anchors from wherever
+ * the selection ended up. */
+void home_page_end_crank_gesture(void)
+{
+    g_crankTarget = -1;
+    g_crankFrac = 0.0f;
+}
+
+/* Scroll target follows the selection (BF14), clamped to the content, then
+ * eased. Split out of draw() so the host test can drive it without a
+ * graphics vtable. */
+void home_page_update_scroll(void)
+{
+    int count = bookmark_count();
+
+    /* Auto-scroll to keep the selected item visible */
+    if (g_selectedIndex == 0)
+    {
+        g_targetScrollY = 0;
+    }
+    else if (count > 0)
+    {
+        int row = (g_selectedIndex - 1) / 2;
+        /* BF14: CONTENT_Y+4+160 matches cardsStartY = startY+160 exactly
+         * (was +12+148 — 4px stale after the BF10 layout shift). */
+        int selectedAbsY = CONTENT_Y + 4 + 160 + row * (46 + 8);
+        int displayY = (int)(selectedAbsY - g_targetScrollY);
+        if (displayY > SCREEN_HEIGHT - 46)
+        {
+            /* BF14: was SCREEN_HEIGHT-40 — the whole 46px card must fit so
+             * the bottom-row bookmark is selected AND fully visible. */
+            g_targetScrollY = (float)(selectedAbsY - SCREEN_HEIGHT + 46);
+        }
+        else if (displayY < CONTENT_Y + 10)
+        {
+            float t = (float)(selectedAbsY - CONTENT_Y - 10);
+            g_targetScrollY = t > 0 ? t : 0;
+        }
+    }
+
+    /* BF14: never scroll past the end of the content. Previously the free
+     * crank scroll could run arbitrarily far below the last row, which is
+     * how the selection ended up stranded away from the view. */
+    {
+        int maxScroll = home_content_bottom(count) - SCREEN_HEIGHT;
+        if (maxScroll < 0)
+        {
+            maxScroll = 0;
+        }
+        if (g_targetScrollY > (float)maxScroll)
+        {
+            g_targetScrollY = (float)maxScroll;
+        }
+        if (g_targetScrollY < 0)
+        {
+            g_targetScrollY = 0;
+        }
+    }
+
+    /* Smooth scroll toward target */
+    g_scrollY += (g_targetScrollY - g_scrollY) * 0.3f;
+    if (g_targetScrollY - g_scrollY < 0.5f && g_scrollY - g_targetScrollY < 0.5f)
+    {
+        g_scrollY = g_targetScrollY;
+    }
+    if (g_scrollY < 0)
+    {
+        g_scrollY = 0;
+    }
 }
 
 /* Oscillating marquee, faithful to drawMarquee(): speed 50 px/s, dwell 1s.
@@ -133,6 +315,15 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
 {
     int count = bookmark_count();
     int isOnSettingsBtn = (g_selectedIndex == 0);
+
+    if (pushed != 0)
+    {
+        /* BF14: any button press ends the crank gesture; the next crank
+         * starts fresh from wherever the selection ended up. (pushed is
+         * the full button mask, so B/address-bar presses are covered.) */
+        g_crankTarget = -1;
+        g_crankFrac = 0.0f;
+    }
 
     if (pushed & BTN_DOWN)
     {
@@ -215,47 +406,14 @@ void home_page_draw(float crankChange)
     LCDFont *fontBold = style_font(PLUTO_FONT_BODY_BOLD);
     LCDFont *fontSmall = style_font(PLUTO_FONT_SMALL);
 
-    if (crankChange != 0.0f)
-    {
-        int dir = storage_setting_int("invertCrank") ? -1 : 1;
-        g_targetScrollY += crankChange * 1.5f * dir;
-        if (g_targetScrollY < 0)
-        {
-            g_targetScrollY = 0;
-        }
-    }
-
-    /* Auto-scroll to keep the selected item visible */
-    if (g_selectedIndex == 0)
-    {
-        g_targetScrollY = 0;
-    }
-    else if (count > 0)
-    {
-        int row = (g_selectedIndex - 1) / 2;
-        int selectedAbsY = CONTENT_Y + 12 + 148 + row * (46 + 8);
-        int displayY = (int)(selectedAbsY - g_targetScrollY);
-        if (displayY > SCREEN_HEIGHT - 40)
-        {
-            g_targetScrollY = (float)(selectedAbsY - SCREEN_HEIGHT + 40);
-        }
-        else if (displayY < CONTENT_Y + 10)
-        {
-            float t = (float)(selectedAbsY - CONTENT_Y - 10);
-            g_targetScrollY = t > 0 ? t : 0;
-        }
-    }
-
-    /* Smooth scroll toward target */
-    g_scrollY += (g_targetScrollY - g_scrollY) * 0.3f;
-    if (g_targetScrollY - g_scrollY < 0.5f && g_scrollY - g_targetScrollY < 0.5f)
-    {
-        g_scrollY = g_targetScrollY;
-    }
-    if (g_scrollY < 0)
-    {
-        g_scrollY = 0;
-    }
+    /* BF14: the crank moves the SELECTION (Settings button included) —
+     * main.c feeds crank deltas to home_page_handle_crank() alongside the
+     * button handling; draw() only follows the selection with the scroll
+     * target, clamped to the real content bottom. update_scroll is a
+     * separate function so the host test can drive it without a graphics
+     * vtable. */
+    (void)crankChange; /* selection handled by the caller since BF14 */
+    home_page_update_scroll();
 
     int startY = CONTENT_Y + 4 - (int)g_scrollY; /* BF10: was +12 — banner sat 8px below the chrome leaving a white strip; shifting the whole page up puts the banner flush under the chrome */
 
