@@ -1,2 +1,0 @@
-tga.c:105:16:tga_pixel_gray	8	static
-tga.c:116:12:tga_decode	144	static

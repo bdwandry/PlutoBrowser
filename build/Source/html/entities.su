@@ -1,4 +1,0 @@
-entities.c:221:12:append_cp_translation	4	static
-entities.c:240:12:decode_numeric_pass	48	static
-entities.c:589:7:entities_decode	120	static
-entities.c:728:7:entities_encode	40	static

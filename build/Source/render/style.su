@@ -1,9 +1,0 @@
-style.c:20:17:load_or_null	16	static
-style.c:34:6:style_init	16	static
-style.c:62:10:style_font	0	static
-style.c:71:5:style_get_text_width	24	static
-style.c:87:10:style_get_heading_font	0	static
-style.c:124:10:style_get_body_font	0	static
-style.c:141:10:style_get_inline_font	4	static
-style.c:170:6:style_test_set_fonts	4	static
-style.c:176:6:style_test_set_fonts_ex	8	static

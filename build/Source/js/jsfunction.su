@@ -1,9 +1,0 @@
-jsfunction.c:3:13:jsB_Function	40	static
-jsfunction.c:180:13:Fp_bind	24	static
-jsfunction.c:156:13:constructbound	32	static
-jsfunction.c:131:13:callbound	32	static
-jsfunction.c:118:13:Fp_call	16	static
-jsfunction.c:95:13:Fp_apply	16	static
-jsfunction.c:46:13:Fp_toString	48	static
-jsfunction.c:41:13:jsB_Function_prototype	0	static
-jsfunction.c:215:6:jsB_initfunction	24	static

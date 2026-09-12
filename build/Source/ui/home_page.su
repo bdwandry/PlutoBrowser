@@ -1,6 +1,0 @@
-home_page.c:78:13:draw_marquee.constprop	48	static
-home_page.c:50:6:home_page_reset	8	static
-home_page.c:58:5:home_page_selected_index	0	static
-home_page.c:63:5:home_page_scroll_y	0	static
-home_page.c:132:7:home_page_handle_input	16	static
-home_page.c:210:6:home_page_draw	128	static

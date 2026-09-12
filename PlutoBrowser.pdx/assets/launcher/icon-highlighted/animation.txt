@@ -1,2 +1,0 @@
-loopCount = 0
-frames = 1, 2, 3

@@ -1,4 +1,0 @@
-setup.c:10:5:eventHandlerShim	4	static
-stdlib.h:291:8:_malloc_r	0	static
-stdlib.h:294:8:_realloc_r	0	static
-stdlib.h:293:6:_free_r	0	static
