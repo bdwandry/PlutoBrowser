@@ -1,0 +1,316 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[21:57:25 #1] === PlutoBrowser boot ===
+[21:57:25 #2] eventHandler: kEventInit, osversion=30101
+[21:57:25 #3] STORAGE: init enter
+[21:57:25 #4] STORAGE: load enter
+[21:57:25 #5] STORAGE: no data file -> defaults
+[21:57:25 #6] STORAGE: defaults done (bm=10)
+[21:57:25 #7] STORAGE: save enter
+[21:57:25 #8] STORAGE: save open
+[21:57:25 #9] STORAGE: save writing (bm=10 hist=0)
+[21:57:25 #10] STORAGE: save close
+[21:57:25 #11] STORAGE: save exit
+[21:57:25 #12] STORAGE: save done
+[21:57:25 #13] STORAGE: init exit
+[21:57:25 #14] KB new: entering
+[21:57:25 #15] KB new: allocated
+[21:57:25 #16] KB load: font...
+[21:57:25 #17] KB load: font ok h=36
+[21:57:25 #18] KB load: menu-space ok
+[21:57:25 #19] KB load: menu-ok ok
+[21:57:25 #20] KB load: menu-del ok
+[21:57:25 #21] KB load: menu-cancel ok
+[21:57:25 #22] KB new: font+images loaded
+[21:57:25 #23] DISPLAY: refresh rate set to 30 fps
+[21:57:25 #24] updateFrame: first frame executed
+[21:57:27 #25] home: crank sel=1 count=10
+[21:57:27 #26] home: crank sel=2 count=10
+[21:57:27 #27] home: crank sel=3 count=10
+[21:57:27 #28] home: crank sel=4 count=10
+[21:57:27 #29] home: crank sel=5 count=10
+[21:57:27 #30] home: crank sel=6 count=10
+[21:57:28 #31] home: crank sel=7 count=10
+[21:57:28 #32] home: crank sel=8 count=10
+[21:57:28 #33] home: crank sel=9 count=10
+[21:57:28 #34] home: crank sel=10 count=10
+[21:57:28 #35] home: crank freescroll tgt=264
+[21:57:28 #36] home: crank freescroll tgt=318
+[21:57:28 #37] home: crank freescroll tgt=372
+[21:57:28 #38] home: crank freescroll tgt=372
+[21:57:28 #39] home: crank freescroll tgt=372
+[21:57:29 #40] home: crank freescroll tgt=372
+[21:57:29 #41] home: crank freescroll tgt=372
+[21:57:29 #42] home: crank freescroll tgt=372
+[21:57:29 #43] home: crank freescroll tgt=372
+[21:57:29 #44] home: crank freescroll tgt=372
+[21:57:29 #45] home: crank freescroll tgt=372
+[21:57:29 #46] home: crank freescroll tgt=372
+[21:57:29 #47] home: crank freescroll tgt=372
+[21:57:29 #48] home: crank freescroll tgt=372
+[21:57:29 #49] home: crank freescroll tgt=372
+[21:57:29 #50] home: crank freescroll tgt=372
+[21:57:30 #51] home: crank sel=9 count=10
+[21:57:30 #52] home: crank sel=8 count=10
+[21:57:30 #53] home: crank sel=7 count=10
+[21:57:30 #54] home: crank sel=6 count=10
+[21:57:30 #55] home: crank sel=5 count=10
+[21:57:30 #56] home: crank sel=4 count=10
+[21:57:30 #57] home: crank sel=3 count=10
+[21:57:30 #58] home: crank sel=2 count=10
+[21:57:30 #59] home: crank sel=1 count=10
+[21:57:30 #60] home: crank sel=0 count=10
+[21:57:31 #61] home: crank sel=1 count=10
+[21:57:31 #62] home: crank sel=2 count=10
+[21:57:31 #63] home: crank sel=3 count=10
+[21:57:31 #64] home: crank sel=4 count=10
+[21:57:31 #65] home: crank sel=5 count=10
+[21:57:31 #66] home: crank sel=6 count=10
+[21:57:31 #67] home: crank sel=7 count=10
+[21:57:31 #68] home: crank sel=8 count=10
+[21:57:31 #69] home: crank sel=9 count=10
+[21:57:31 #70] home: crank sel=10 count=10
+[21:57:31 #71] home: crank freescroll tgt=264
+[21:57:31 #72] home: crank freescroll tgt=318
+[21:57:31 #73] home: crank freescroll tgt=372
+[21:57:31 #74] home: crank freescroll tgt=372
+[21:57:32 #75] home: crank freescroll tgt=372
+[21:57:32 #76] home: crank freescroll tgt=372
+[21:57:32 #77] home: crank freescroll tgt=372
+[21:57:32 #78] home: crank freescroll tgt=372
+[21:57:32 #79] home: crank freescroll tgt=372
+[21:57:32 #80] home: crank freescroll tgt=372
+[21:57:32 #81] home: crank freescroll tgt=372
+[21:57:32 #82] home: crank freescroll tgt=372
+[21:57:32 #83] home: crank freescroll tgt=372
+[21:57:32 #84] home: crank freescroll tgt=372
+[21:57:33 #85] home: crank sel=9 count=10
+[21:57:33 #86] home: crank sel=8 count=10
+[21:57:34 #87] home: crank sel=9 count=10
+[21:57:34 #88] home: crank sel=10 count=10
+[21:57:34 #89] home: crank freescroll tgt=370
+[21:57:35 #90] home: crank sel=9 count=10
+[21:57:35 #91] home: crank sel=8 count=10
+[21:57:35 #92] home: crank sel=7 count=10
+[21:57:35 #93] home: crank sel=6 count=10
+[21:57:35 #94] updateFrame: heartbeat frame=300 fps=31 overlay=0
+[21:57:35 #95] home: crank sel=5 count=10
+[21:57:35 #96] home: crank sel=4 count=10
+[21:57:35 #97] home: crank sel=3 count=10
+[21:57:35 #98] home: crank sel=2 count=10
+[21:57:35 #99] home: crank sel=1 count=10
+[21:57:35 #100] home: crank sel=0 count=10
+[21:57:36 #101] home: crank sel=1 count=10
+[21:57:36 #102] home: crank sel=2 count=10
+[21:57:37 #103] home: crank sel=3 count=10
+[21:57:37 #104] home: crank sel=4 count=10
+[21:57:37 #105] home: crank sel=5 count=10
+[21:57:37 #106] home: crank sel=6 count=10
+[21:57:37 #107] home: crank sel=7 count=10
+[21:57:37 #108] home: crank sel=8 count=10
+[21:57:38 #109] home: crank sel=9 count=10
+[21:57:38 #110] home: crank sel=10 count=10
+[21:57:38 #111] home: crank freescroll tgt=264
+[21:57:38 #112] home: crank freescroll tgt=318
+[21:57:38 #113] home: crank freescroll tgt=372
+[21:57:39 #114] home: crank sel=9 count=10
+[21:57:39 #115] home: crank sel=8 count=10
+[21:57:39 #116] home: crank sel=7 count=10
+[21:57:39 #117] home: crank sel=6 count=10
+[21:57:39 #118] home: crank sel=5 count=10
+[21:57:39 #119] home: crank sel=4 count=10
+[21:57:39 #120] home: crank sel=3 count=10
+[21:57:39 #121] home: crank sel=2 count=10
+[21:57:39 #122] home: crank sel=1 count=10
+[21:57:39 #123] home: crank sel=0 count=10
+[21:57:40 #124] home: crank sel=1 count=10
+[21:57:40 #125] home: crank sel=2 count=10
+[21:57:40 #126] home: crank sel=3 count=10
+[21:57:40 #127] home: crank sel=4 count=10
+[21:57:40 #128] home: crank sel=5 count=10
+[21:57:40 #129] home: crank sel=6 count=10
+[21:57:40 #130] home: crank sel=7 count=10
+[21:57:41 #131] home: crank sel=8 count=10
+[21:57:41 #132] home: crank sel=9 count=10
+[21:57:41 #133] home: crank sel=10 count=10
+[21:57:41 #134] home: crank freescroll tgt=264
+[21:57:41 #135] home: crank freescroll tgt=318
+[21:57:41 #136] home: crank freescroll tgt=372
+[21:57:41 #137] home: crank freescroll tgt=372
+[21:57:41 #138] home: crank freescroll tgt=372
+[21:57:41 #139] home: crank freescroll tgt=372
+[21:57:41 #140] home: crank freescroll tgt=372
+[21:57:41 #141] home: crank freescroll tgt=372
+[21:57:41 #142] home: crank freescroll tgt=372
+[21:57:42 #143] home: crank freescroll tgt=426
+[21:57:42 #144] home: crank freescroll tgt=372
+[21:57:42 #145] home: crank freescroll tgt=372
+[21:57:42 #146] home: crank freescroll tgt=372
+[21:57:42 #147] home: crank freescroll tgt=372
+[21:57:42 #148] home: crank freescroll tgt=372
+[21:57:43 #149] home: crank freescroll tgt=426
+[21:57:43 #150] home: crank freescroll tgt=372
+[21:57:43 #151] home: crank sel=9 count=10
+[21:57:43 #152] home: crank sel=6 count=10
+[21:57:43 #153] home: crank sel=4 count=10
+[21:57:43 #154] home: crank sel=3 count=10
+[21:57:43 #155] home: crank sel=1 count=10
+[21:57:43 #156] home: crank sel=0 count=10
+[21:57:44 #157] home: crank sel=1 count=10
+[21:57:44 #158] home: crank sel=2 count=10
+[21:57:44 #159] home: crank sel=3 count=10
+[21:57:44 #160] home: crank sel=4 count=10
+[21:57:44 #161] home: crank sel=5 count=10
+[21:57:44 #162] home: crank sel=6 count=10
+[21:57:44 #163] home: crank sel=7 count=10
+[21:57:44 #164] home: crank sel=8 count=10
+[21:57:44 #165] home: crank sel=9 count=10
+[21:57:44 #166] home: crank sel=10 count=10
+[21:57:44 #167] home: crank freescroll tgt=264
+[21:57:44 #168] home: crank freescroll tgt=318
+[21:57:44 #169] home: crank freescroll tgt=372
+[21:57:44 #170] home: crank freescroll tgt=372
+[21:57:44 #171] home: crank freescroll tgt=372
+[21:57:44 #172] home: crank freescroll tgt=372
+[21:57:44 #173] home: crank freescroll tgt=372
+[21:57:45 #174] home: crank freescroll tgt=372
+[21:57:45 #175] home: crank freescroll tgt=372
+[21:57:45 #176] home: crank freescroll tgt=372
+[21:57:45 #177] home: crank freescroll tgt=372
+[21:57:45 #178] updateFrame: heartbeat frame=600 fps=31 overlay=0
+[21:57:45 #179] home: crank freescroll tgt=372
+[21:57:45 #180] home: crank freescroll tgt=372
+[21:57:45 #181] home: crank sel=9 count=10
+[21:57:45 #182] home: crank sel=8 count=10
+[21:57:45 #183] home: crank sel=7 count=10
+[21:57:45 #184] home: crank sel=6 count=10
+[21:57:45 #185] home: crank sel=5 count=10
+[21:57:45 #186] home: crank sel=4 count=10
+[21:57:45 #187] home: crank sel=3 count=10
+[21:57:45 #188] home: crank sel=2 count=10
+[21:57:46 #189] home: crank sel=1 count=10
+[21:57:46 #190] home: crank sel=0 count=10
+[21:57:51 #191] home: crank freescroll tgt=264
+[21:57:51 #192] home: crank freescroll tgt=318
+[21:57:51 #193] home: crank freescroll tgt=372
+[21:57:51 #194] home: crank freescroll tgt=372
+[21:57:51 #195] home: crank freescroll tgt=372
+[21:57:51 #196] home: crank freescroll tgt=372
+[21:57:51 #197] home: crank freescroll tgt=372
+[21:57:51 #198] home: crank freescroll tgt=372
+[21:57:51 #199] home: crank freescroll tgt=372
+[21:57:51 #200] home: crank freescroll tgt=372
+[21:57:52 #201] home: crank freescroll tgt=372
+[21:57:52 #202] home: crank freescroll tgt=372
+[21:57:52 #203] home: crank freescroll tgt=372
+[21:57:55 #204] updateFrame: heartbeat frame=900 fps=30 overlay=0
+[21:57:56 #205] home: crank sel=1 count=10
+[21:57:56 #206] home: crank sel=2 count=10
+[21:57:56 #207] home: crank sel=3 count=10
+[21:57:56 #208] home: crank sel=5 count=10
+[21:57:56 #209] home: crank sel=6 count=10
+[21:57:56 #210] home: crank sel=7 count=10
+[21:57:56 #211] home: crank sel=9 count=10
+[21:57:56 #212] home: crank sel=10 count=10
+[21:57:56 #213] home: crank freescroll tgt=264
+[21:57:56 #214] home: crank freescroll tgt=318
+[21:57:56 #215] home: crank freescroll tgt=426
+[21:57:56 #216] home: crank freescroll tgt=426
+[21:57:56 #217] home: crank freescroll tgt=426
+[21:57:56 #218] home: crank freescroll tgt=372
+[21:57:56 #219] home: crank freescroll tgt=372
+[21:57:56 #220] home: crank freescroll tgt=372
+[21:57:56 #221] home: crank freescroll tgt=372
+[21:57:57 #222] home: crank freescroll tgt=426
+[21:57:57 #223] home: crank freescroll tgt=426
+[21:57:57 #224] home: crank freescroll tgt=372
+[21:57:57 #225] home: crank freescroll tgt=372
+[21:57:57 #226] home: crank freescroll tgt=372
+[21:57:57 #227] home: crank freescroll tgt=372
+[21:57:57 #228] home: crank freescroll tgt=426
+[21:57:57 #229] home: crank freescroll tgt=372
+[21:57:57 #230] home: crank freescroll tgt=372
+[21:57:57 #231] home: crank freescroll tgt=372
+[21:57:57 #232] home: crank freescroll tgt=372
+[21:57:57 #233] home: crank freescroll tgt=372
+[21:57:57 #234] home: crank freescroll tgt=372
+[21:58:01 #235] home: crank freescroll tgt=372
+[21:58:03 #236] home: crank sel=9 count=10
+[21:58:03 #237] home: crank sel=8 count=10
+[21:58:05 #238] updateFrame: heartbeat frame=1200 fps=30 overlay=0
+[21:58:15 #239] updateFrame: heartbeat frame=1500 fps=30 overlay=0
+[21:58:25 #240] updateFrame: heartbeat frame=1800 fps=30 overlay=0
+[21:58:34 #241] updateFrame: heartbeat frame=2100 fps=30 overlay=0
+[21:58:36 #242] main: home Settings opened (state=6)
+[21:58:36 #243] state -> 6 (frame 2146)
+[21:58:42 #244] STORAGE: save open
+[21:58:42 #245] STORAGE: save writing (bm=10 hist=0)
+[21:58:42 #246] STORAGE: save close
+[21:58:42 #247] STORAGE: save exit
+[21:58:42 #248] DISPLAY: refresh rate set to 50 fps
+[21:58:42 #249] navigate_to: about:home
+[21:58:42 #250] state -> 0 (frame 2337)
+[21:58:44 #251] updateFrame: heartbeat frame=2400 fps=50 overlay=1
+[21:58:46 #252] home: crank sel=6 count=10
+[21:58:46 #253] home: crank sel=7 count=10
+[21:58:46 #254] home: crank sel=8 count=10
+[21:58:46 #255] home: crank sel=9 count=10
+[21:58:46 #256] home: crank sel=10 count=10
+[21:58:46 #257] home: crank freescroll tgt=264
+[21:58:47 #258] home: crank freescroll tgt=318
+[21:58:47 #259] home: crank freescroll tgt=372
+[21:58:47 #260] home: crank freescroll tgt=372
+[21:58:47 #261] home: crank freescroll tgt=372
+[21:58:47 #262] home: crank freescroll tgt=372
+[21:58:47 #263] home: crank freescroll tgt=372
+[21:58:47 #264] home: crank freescroll tgt=372
+[21:58:47 #265] home: crank freescroll tgt=372
+[21:58:48 #266] home: crank sel=9 count=10
+[21:58:48 #267] home: crank sel=8 count=10
+[21:58:48 #268] home: crank sel=7 count=10
+[21:58:48 #269] home: crank sel=6 count=10
+[21:58:48 #270] home: crank sel=5 count=10
+[21:58:48 #271] home: crank sel=4 count=10
+[21:58:48 #272] home: crank sel=3 count=10
+[21:58:48 #273] home: crank sel=2 count=10
+[21:58:48 #274] home: crank sel=1 count=10
+[21:58:48 #275] home: crank sel=0 count=10
+[21:58:49 #276] home: crank sel=1 count=10
+[21:58:49 #277] home: crank sel=2 count=10
+[21:58:49 #278] home: crank sel=3 count=10
+[21:58:49 #279] home: crank sel=4 count=10
+[21:58:49 #280] home: crank sel=5 count=10
+[21:58:49 #281] home: crank sel=6 count=10
+[21:58:49 #282] home: crank sel=7 count=10
+[21:58:49 #283] home: crank sel=8 count=10
+[21:58:50 #284] home: crank sel=9 count=10
+[21:58:50 #285] updateFrame: heartbeat frame=2700 fps=50 overlay=1
+[21:58:50 #286] home: crank sel=10 count=10
+[21:58:50 #287] home: crank freescroll tgt=264
+[21:58:50 #288] home: crank freescroll tgt=318
+[21:58:50 #289] home: crank freescroll tgt=372
+[21:58:50 #290] home: crank freescroll tgt=372
+[21:58:50 #291] home: crank freescroll tgt=372
+[21:58:51 #292] home: crank sel=9 count=10
+[21:58:51 #293] home: crank sel=8 count=10
+[21:58:51 #294] home: crank sel=7 count=10
+[21:58:51 #295] home: crank sel=6 count=10
+[21:58:51 #296] home: crank sel=5 count=10
+[21:58:51 #297] home: crank sel=4 count=10
+[21:58:51 #298] home: crank sel=3 count=10
+[21:58:52 #299] home: crank sel=2 count=10
+[21:58:52 #300] home: crank sel=1 count=10
+[21:58:52 #301] home: crank sel=0 count=10
+[21:58:52 #302] home: crank sel=1 count=10
+[21:58:52 #303] home: crank sel=2 count=10
+[21:58:53 #304] home: crank sel=3 count=10
+[21:58:53 #305] home: crank sel=4 count=10
+[21:58:53 #306] home: crank sel=5 count=10
+[21:58:53 #307] home: crank sel=6 count=10
+[21:58:53 #308] home: crank sel=7 count=10
+[21:58:53 #309] home: crank sel=8 count=10
+[21:58:53 #310] home: crank sel=9 count=10
+[21:58:53 #311] home: crank sel=10 count=10
+[21:58:54 #312] home: crank freescroll tgt=264
+[21:58:54 #313] home: crank freescroll tgt=318
+[21:58:54 #314] eventHandler: kEventTerminate, frames=2935
