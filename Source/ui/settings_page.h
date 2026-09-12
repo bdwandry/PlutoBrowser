@@ -1,55 +1,40 @@
-#ifndef PLUTO_UI_SETTINGS_PAGE_H
-#define PLUTO_UI_SETTINGS_PAGE_H
-
-#include <stddef.h>
+/*
+ * PlutoBrowser — settings_page.h
+ * Settings menu overlay (port of Source/ui/settings_page.lua).
+ */
+#ifndef PLUTO_SETTINGS_PAGE_H
+#define PLUTO_SETTINGS_PAGE_H
 
 #include "pd_api.h"
 
-// C port of CometBrowser Source/ui/settings_page.lua (SettingsPage).
-//
-// Staged-settings overlay: open() snapshots Storage.settings into a staged
-// copy; LEFT/RIGHT cycle the selected option; A saves (Storage.save +
-// onChange callback) unless the row is the immediate-action "Clear
-// Cookies"; B discards. Draw animates an ease-out-cubic 300ms grow-from-
-// center box; content appears after t>0.4.
+/* SettingsPage.open(prevState): snapshot staged settings, reset selection. */
+void settings_page_open(int prevState);
 
-typedef enum {
-    SP_BTN_UP,
-    SP_BTN_DOWN,
-    SP_BTN_LEFT,
-    SP_BTN_RIGHT,
-    SP_BTN_A,
-    SP_BTN_B
-} SpButton;
+/* SettingsPage.close(). */
+void settings_page_close(void);
 
-typedef enum {
-    SP_ACT_NONE = 0,
-    SP_ACT_SAVED,   // A on a non-action row: applied + persisted + closed
-    SP_ACT_CLOSED   // B: discarded + closed
-} SpAction;
+/* Feed pushed-button mask. Returns "save" / "close" (caller frees) or NULL.
+ * clearCookiesCb fires when the Clear Cookies action is adjusted/activated. */
+char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(void));
 
-#define SP_OPTION_COUNT 6 // Search Engine / Browse Mode / Invert Crank /
-                          // Image Mode / Clear Cookies / Protocol
+/* Draw with the 300ms ease-out-cubic scale-in animation. */
+void settings_page_draw(void);
 
-typedef void (*SpOnChangeFn)(void);
+/* Feed raw crank delta while the panel is open: scrolls the selection
+ * (clockwise = down). The panel consumes the motion entirely — the caller
+ * must zero its own crank state afterwards so the background never moves. */
+void settings_page_apply_crank(float crankChange);
 
-void sp_init_pd(PlaydateAPI* pd);
-void sp_set_on_change(SpOnChangeFn cb);
+int settings_page_is_open(void);
+int settings_page_selected_index(void);
+int settings_page_previous_state(void);
 
-void sp_open(const char* prevState);
-void sp_close(void);
-SpAction sp_handle_input(SpButton btn);
-void sp_draw(void);
+/* Test support: value strings currently staged ("HTML"/"Reader", "On"/"Off",
+ * engine name, image-mode label). */
+const char *settings_page_staged_value(int optionIndex);
 
-int         sp_is_open(void);
-int         sp_selected_index(void);
-const char* sp_previous_state(void);
+/* Register the change callback (reference SettingsPage.onChangeCallback):
+ * fired by save_and_close after settings are persisted. */
+void settings_page_set_onchange_callback(void (*fn)(void));
 
-/* Staged getValue() renderings (Lua strings) */
-const char* sp_staged_engine_name(void);
-const char* sp_staged_mode_label(void);    /* "HTML" / "Reader"      */
-const char* sp_staged_invert_label(void);  /* "On" / "Off"           */
-const char* sp_staged_image_label(void);   /* IMAGE_MODE_LABELS[...] */
-const char* sp_staged_protocol_label(void);/* PROTOCOL label: "HTTP"/"TCP" */
-
-#endif
+#endif /* PLUTO_SETTINGS_PAGE_H */

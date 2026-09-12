@@ -1,706 +1,590 @@
-// json.c — minimal JSON parser, writer, and builders.
-
-#include "json.h"
-
-#include <math.h>
-#include <stdio.h>
+/*
+ * PlutoBrowser — json.c
+ * See json.h. Recursive-descent parser over a NUL-terminated string.
+ * Depth is bounded by JSON_MAX_DEPTH to keep stack use fixed (device safety);
+ * deeper nesting reports an error, exactly like the Lua decoder's limits.
+ */
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
-#include "mem.h"
+#include "util/json.h"
 
 #define JSON_MAX_DEPTH 64
 
-// ---------------------------------------------------------------- shared --
-
-void json_free(JsonValue* v)
+typedef struct
 {
-    size_t i;
-    if (v == NULL) {
-        return;
-    }
-    if (v->type == JSON_STRING) {
-        pluto_free(v->str);
-    } else if (v->type == JSON_ARRAY || v->type == JSON_OBJECT) {
-        for (i = 0; i < v->count; i++) {
-            json_free(v->items[i]);
-            if (v->keys != NULL) {
-                pluto_free(v->keys[i]);
-            }
-        }
-        pluto_free(v->items);
-        pluto_free(v->keys);
-    }
-    pluto_free(v);
-}
-
-const JsonValue* json_obj_get(const JsonValue* obj, const char* key)
-{
-    size_t i;
-    if (obj == NULL || obj->type != JSON_OBJECT || key == NULL) {
-        return NULL;
-    }
-    for (i = 0; i < obj->count; i++) {
-        if (strcmp(obj->keys[i], key) == 0) {
-            return obj->items[i];
-        }
-    }
-    return NULL;
-}
-
-const JsonValue* json_arr_get(const JsonValue* arr, size_t i)
-{
-    if (arr == NULL || arr->type != JSON_ARRAY || i >= arr->count) {
-        return NULL;
-    }
-    return arr->items[i];
-}
-
-size_t json_arr_count(const JsonValue* v)
-{
-    if (v == NULL || (v->type != JSON_ARRAY && v->type != JSON_OBJECT)) {
-        return 0;
-    }
-    return v->count;
-}
-
-int json_is_null(const JsonValue* v)
-{
-    return v == NULL || v->type == JSON_NULL;
-}
-
-double json_num(const JsonValue* v, double dflt)
-{
-    if (v == NULL || v->type != JSON_NUMBER) {
-        return dflt;
-    }
-    return v->number;
-}
-
-int json_bool_val(const JsonValue* v, int dflt)
-{
-    if (v == NULL || v->type != JSON_BOOL) {
-        return dflt;
-    }
-    return v->boolean;
-}
-
-const char* json_str(const JsonValue* v, size_t* lenOut)
-{
-    if (v == NULL || v->type != JSON_STRING) {
-        if (lenOut != NULL) *lenOut = 0;
-        return NULL;
-    }
-    if (lenOut != NULL) *lenOut = v->strLen;
-    return v->str;
-}
-
-// ---------------------------------------------------------------- parser --
-
-typedef struct {
-    const char* p;    // cursor
-    const char* end;
-    const char* start; // input start (for error offsets)
-    char err[128];
+    const char *p;
+    const char *end;
     int depth;
-} JParser;
+} Parser;
 
-static void jerr(JParser* jp, const char* msg)
+static JsonValue *parse_value(Parser *ps);
+
+static JsonValue *value_new(JsonType t)
 {
-    if (jp->err[0] == '\0') {
-        snprintf(jp->err, sizeof(jp->err), "%s at offset %u", msg,
-                 (unsigned)(jp->p - jp->start));
-    }
-}
-
-static void jskip_ws(JParser* jp)
-{
-    while (jp->p < jp->end) {
-        char c = *jp->p;
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            jp->p++;
-        } else {
-            break;
-        }
-    }
-}
-
-static int j_hex4(JParser* jp, unsigned* out)
-{
-    int i;
-    unsigned v = 0;
-    for (i = 0; i < 4; i++) {
-        char c;
-        if (jp->p >= jp->end) {
-            jerr(jp, "truncated \\u escape");
-            return 0;
-        }
-        c = *jp->p++;
-        v <<= 4;
-        if (c >= '0' && c <= '9')      v |= (unsigned)(c - '0');
-        else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10);
-        else { jerr(jp, "bad hex digit in \\u escape"); return 0; }
-    }
-    *out = v;
-    return 1;
-}
-
-static int j_utf8_encode(StrBuf* sb, unsigned cp)
-{
-    if (cp < 0x80) {
-        return sb_append_char(sb, (char)cp);
-    }
-    if (cp < 0x800) {
-        return sb_append_char(sb, (char)(0xC0 | (cp >> 6))) &&
-               sb_append_char(sb, (char)(0x80 | (cp & 0x3F)));
-    }
-    if (cp < 0x10000) {
-        return sb_append_char(sb, (char)(0xE0 | (cp >> 12))) &&
-               sb_append_char(sb, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
-               sb_append_char(sb, (char)(0x80 | (cp & 0x3F)));
-    }
-    return sb_append_char(sb, (char)(0xF0 | (cp >> 18))) &&
-           sb_append_char(sb, (char)(0x80 | ((cp >> 12) & 0x3F))) &&
-           sb_append_char(sb, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
-           sb_append_char(sb, (char)(0x80 | (cp & 0x3F)));
-}
-
-// Parses a JSON string body starting after the opening quote.
-static char* j_parse_string_raw(JParser* jp, size_t* outLen)
-{
-    StrBuf sb;
-    sb_init(&sb);
-    while (jp->p < jp->end) {
-        unsigned char c = (unsigned char)*jp->p;
-        if (c == '"') {
-            jp->p++;
-            *outLen = sb.len;
-            return sb_detach(&sb);
-        }
-        if (c == '\\') {
-            jp->p++;
-            if (jp->p >= jp->end) {
-                jerr(jp, "truncated escape");
-                break;
-            }
-            {
-                char e = *jp->p++;
-                switch (e) {
-                    case '"':  if (!sb_append_char(&sb, '"')) goto oom; break;
-                    case '\\': if (!sb_append_char(&sb, '\\')) goto oom; break;
-                    case '/':  if (!sb_append_char(&sb, '/')) goto oom; break;
-                    case 'b':  if (!sb_append_char(&sb, '\b')) goto oom; break;
-                    case 'f':  if (!sb_append_char(&sb, '\f')) goto oom; break;
-                    case 'n':  if (!sb_append_char(&sb, '\n')) goto oom; break;
-                    case 'r':  if (!sb_append_char(&sb, '\r')) goto oom; break;
-                    case 't':  if (!sb_append_char(&sb, '\t')) goto oom; break;
-                    case 'u': {
-                        unsigned cp;
-                        if (!j_hex4(jp, &cp)) break;
-                        if (cp >= 0xD800 && cp <= 0xDBFF) { // high surrogate
-                            unsigned lo;
-                            if (jp->p + 1 < jp->end && jp->p[0] == '\\' &&
-                                jp->p[1] == 'u') {
-                                jp->p += 2;
-                                if (!j_hex4(jp, &lo)) break;
-                                if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                                    cp = 0x10000 + ((cp - 0xD800) << 10) +
-                                         (lo - 0xDC00);
-                                } else {
-                                    // unpaired: emit replacement char
-                                    cp = 0xFFFD;
-                                    jp->p -= 2;
-                                }
-                            } else {
-                                cp = 0xFFFD;
-                            }
-                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
-                            cp = 0xFFFD; // unpaired low surrogate
-                        }
-                        if (!j_utf8_encode(&sb, cp)) goto oom;
-                        break;
-                    }
-                    default:
-                        jerr(jp, "bad escape character");
-                        goto fail;
-                }
-            }
-            continue;
-        }
-        if (c < 0x20) {
-            jerr(jp, "control character in string");
-            break;
-        }
-        if (!sb_append_char(&sb, (char)c)) goto oom;
-        jp->p++;
-    }
-    if (jp->err[0] == '\0') {
-        jerr(jp, "unterminated string");
-    }
-fail:
-    sb_free(&sb);
-    return NULL;
-oom:
-    jerr(jp, "out of memory");
-    sb_free(&sb);
-    return NULL;
-}
-
-static JsonValue* j_parse_value(JParser* jp);
-
-static JsonValue* j_parse_number(JParser* jp)
-{
-    char buf[64];
-    size_t n = 0;
-    const char* start = jp->p;
-    char* endp;
-    double d;
-    JsonValue* v;
-
-    // Sign, digits, fraction, and exponent chars are all collected verbatim
-    // so strtod sees the full token.
-    while (jp->p < jp->end &&
-           ((*jp->p >= '0' && *jp->p <= '9') || *jp->p == '.' ||
-            *jp->p == 'e' || *jp->p == 'E' || *jp->p == '+' || *jp->p == '-')) {
-        if (n + 1 < sizeof(buf)) {
-            buf[n++] = *jp->p;
-        } else {
-            jerr(jp, "number too long");
-            return NULL;
-        }
-        jp->p++;
-    }
-    if (n == 0) {
-        jerr(jp, "bad number");
-        return NULL;
-    }
-    buf[n] = '\0';
-    d = strtod(buf, &endp);
-    if (endp == buf) {
-        jp->p = start;
-        jerr(jp, "bad number");
-        return NULL;
-    }
-    v = json_new_number(d);
-    if (v == NULL) {
-        jerr(jp, "out of memory");
+    JsonValue *v = (JsonValue *)calloc(1, sizeof(JsonValue));
+    if (v)
+    {
+        v->type = t;
     }
     return v;
 }
 
-static int j_lit(JParser* jp, const char* word)
+void json_free(JsonValue *v)
 {
-    size_t n = strlen(word);
-    if ((size_t)(jp->end - jp->p) >= n && memcmp(jp->p, word, n) == 0) {
-        jp->p += n;
-        return 1;
+    if (!v)
+    {
+        return;
     }
-    return 0;
+    free(v->string);
+    for (size_t i = 0; i < v->count; i++)
+    {
+        json_free(v->items[i]);
+        if (v->keys)
+        {
+            free(v->keys[i]);
+        }
+    }
+    free(v->items);
+    free(v->keys);
+    free(v);
 }
 
-static int j_grow(JsonValue* v)
+static void skip_ws(Parser *ps)
 {
-    if (v->count < v->cap) {
+    while (ps->p < ps->end)
+    {
+        char c = *ps->p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        {
+            ps->p++;
+        }
+        else
+        {
+            break;
+        }
+    }
+}
+
+static int read_hex4(Parser *ps, unsigned *out)
+{
+    unsigned val = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        if (ps->p >= ps->end)
+        {
+            return 0;
+        }
+        char c = *ps->p++;
+        val <<= 4;
+        if (c >= '0' && c <= '9')
+        {
+            val |= (unsigned)(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f')
+        {
+            val |= (unsigned)(c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F')
+        {
+            val |= (unsigned)(c - 'A' + 10);
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    *out = val;
+    return 1;
+}
+
+/* Appends the UTF-8 encoding of cp to buf. */
+static size_t utf8_encode(unsigned cp, char *buf)
+{
+    if (cp < 0x80)
+    {
+        buf[0] = (char)cp;
         return 1;
     }
+    if (cp < 0x800)
     {
-        size_t nc = (v->cap == 0) ? 8 : v->cap * 2;
-        JsonValue** ni = (JsonValue**)pluto_realloc(v->items, nc * sizeof(JsonValue*));
-        char** nk = NULL;
-        if (ni == NULL) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000)
+    {
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    buf[0] = (char)(0xF0 | (cp >> 18));
+    buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    buf[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+typedef struct
+{
+    char *data;
+    size_t len, cap;
+} StrBuf;
+
+static int sb_put(StrBuf *sb, const char *s, size_t n)
+{
+    if (sb->len + n + 1 > sb->cap)
+    {
+        size_t nc = sb->cap ? sb->cap * 2 : 32;
+        while (nc < sb->len + n + 1)
+        {
+            nc *= 2;
+        }
+        char *nd = (char *)realloc(sb->data, nc);
+        if (!nd)
+        {
+            return 0;
+        }
+        sb->data = nd;
+        sb->cap = nc;
+    }
+    memcpy(sb->data + sb->len, s, n);
+    sb->len += n;
+    sb->data[sb->len] = '\0';
+    return 1;
+}
+
+static int sb_put_utf8(StrBuf *sb, unsigned cp)
+{
+    char tmp[4];
+    size_t n = utf8_encode(cp, tmp);
+    return sb_put(sb, tmp, n);
+}
+
+/* Parses an escape sequence (the backslash is already consumed). */
+static int parse_escape(Parser *ps, StrBuf *sb)
+{
+    if (ps->p >= ps->end)
+    {
+        return 0;
+    }
+    char c = *ps->p++;
+    switch (c)
+    {
+    case '"':
+        return sb_put(sb, "\"", 1);
+    case '\\':
+        return sb_put(sb, "\\", 1);
+    case '/':
+        return sb_put(sb, "/", 1);
+    case 'b':
+        return sb_put(sb, "\b", 1);
+    case 'f':
+        return sb_put(sb, "\f", 1);
+    case 'n':
+        return sb_put(sb, "\n", 1);
+    case 'r':
+        return sb_put(sb, "\r", 1);
+    case 't':
+        return sb_put(sb, "\t", 1);
+    case 'u':
+    {
+        unsigned cp;
+        if (!read_hex4(ps, &cp))
+        {
+            return 0;
+        }
+        /* Surrogate pair handling (RFC 8259 §7.2). */
+        if (cp >= 0xD800 && cp <= 0xDBFF)
+        {
+            if (ps->end - ps->p < 2 || ps->p[0] != '\\' || ps->p[1] != 'u')
+            {
+                return 0;
+            }
+            ps->p += 2;
+            unsigned lo;
+            if (!read_hex4(ps, &lo) || lo < 0xDC00 || lo > 0xDFFF)
+            {
+                return 0;
+            }
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        }
+        else if (cp >= 0xDC00 && cp <= 0xDFFF)
+        {
+            return 0; /* lone low surrogate */
+        }
+        return sb_put_utf8(sb, cp);
+    }
+    default:
+        return 0;
+    }
+}
+
+static char *parse_string_raw(Parser *ps)
+{
+    if (ps->p >= ps->end || *ps->p != '"')
+    {
+        return NULL;
+    }
+    ps->p++;
+    StrBuf sb = {0};
+    while (ps->p < ps->end)
+    {
+        unsigned char c = (unsigned char)*ps->p;
+        if (c == '"')
+        {
+            ps->p++;
+            if (!sb.data && sb.len == 0)
+            {
+                /* Empty string still needs a valid heap pointer. */
+                sb.data = (char *)malloc(1);
+                if (sb.data)
+                {
+                    sb.data[0] = '\0';
+                }
+            }
+            return sb.data; /* ownership passes to caller; NULL on OOM */
+        }
+        if (c == '\\')
+        {
+            ps->p++;
+            if (!parse_escape(ps, &sb))
+            {
+                goto fail;
+            }
+        }
+        else if (c < 0x20)
+        {
+            goto fail; /* raw control characters are invalid JSON */
+        }
+        else
+        {
+            ps->p++;
+            if (!sb_put(&sb, (const char *)&c, 1))
+            {
+                goto fail;
+            }
+        }
+    }
+fail:
+    free(sb.data);
+    return NULL;
+}
+
+static JsonValue *parse_number(Parser *ps)
+{
+    const char *start = ps->p;
+    if (ps->p < ps->end && *ps->p == '-')
+    {
+        ps->p++;
+    }
+    if (ps->p >= ps->end || *ps->p < '0' || *ps->p > '9')
+    {
+        return NULL;
+    }
+    while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9')
+    {
+        ps->p++;
+    }
+    if (ps->p < ps->end && *ps->p == '.')
+    {
+        ps->p++;
+        if (ps->p >= ps->end || *ps->p < '0' || *ps->p > '9')
+        {
+            return NULL;
+        }
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9')
+        {
+            ps->p++;
+        }
+    }
+    if (ps->p < ps->end && (*ps->p == 'e' || *ps->p == 'E'))
+    {
+        ps->p++;
+        if (ps->p < ps->end && (*ps->p == '+' || *ps->p == '-'))
+        {
+            ps->p++;
+        }
+        if (ps->p >= ps->end || *ps->p < '0' || *ps->p > '9')
+        {
+            return NULL;
+        }
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9')
+        {
+            ps->p++;
+        }
+    }
+    JsonValue *v = value_new(JSON_NUMBER);
+    if (!v)
+    {
+        return NULL;
+    }
+    v->number = strtod(start, NULL);
+    return v;
+}
+
+static int container_add(JsonValue *v, char *key, JsonValue *item)
+{
+    if (v->count == v->cap)
+    {
+        size_t nc = v->cap ? v->cap * 2 : 4;
+        JsonValue **ni = (JsonValue **)realloc(v->items, nc * sizeof(*ni));
+        if (!ni)
+        {
             return 0;
         }
         v->items = ni;
-        if (v->type == JSON_OBJECT) {
-            nk = (char**)pluto_realloc(v->keys, nc * sizeof(char*));
-            if (nk == NULL) {
-                return 0;
-            }
-            v->keys = nk;
+        char **nk = (char **)realloc(v->keys, nc * sizeof(*nk));
+        if (!nk)
+        {
+            v->items = (JsonValue **)realloc(v->items, v->cap * sizeof(*ni));
+            return 0;
         }
+        v->keys = nk;
         v->cap = nc;
     }
+    v->items[v->count] = item;
+    v->keys[v->count] = key; /* arrays keep NULL keys */
+    v->count++;
     return 1;
 }
 
-static JsonValue* j_parse_value(JParser* jp)
+static JsonValue *parse_object(Parser *ps)
 {
-    JsonValue* v;
-
-    jskip_ws(jp);
-    if (jp->p >= jp->end) {
-        jerr(jp, "unexpected end of input");
+    ps->p++; /* '{' */
+    JsonValue *v = value_new(JSON_OBJECT);
+    if (!v)
+    {
         return NULL;
     }
-    if (++jp->depth > JSON_MAX_DEPTH) {
-        jerr(jp, "nesting too deep");
-        jp->depth--;
-        return NULL;
+    skip_ws(ps);
+    if (ps->p < ps->end && *ps->p == '}')
+    {
+        ps->p++;
+        return v;
     }
-
-    switch (*jp->p) {
-        case '{': {
-            jp->p++;
-            v = json_new_object();
-            if (v == NULL) { jerr(jp, "out of memory"); break; }
-            jskip_ws(jp);
-            if (jp->p < jp->end && *jp->p == '}') {
-                jp->p++;
-                break;
-            }
-            while (jp->p < jp->end) {
-                size_t klen;
-                char* key;
-                JsonValue* val;
-                jskip_ws(jp);
-                if (jp->p >= jp->end || *jp->p != '"') {
-                    jerr(jp, "expected object key");
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                jp->p++;
-                key = j_parse_string_raw(jp, &klen);
-                if (key == NULL) {
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                jskip_ws(jp);
-                if (jp->p >= jp->end || *jp->p != ':') {
-                    jerr(jp, "expected ':' after object key");
-                    pluto_free(key);
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                jp->p++;
-                val = j_parse_value(jp);
-                if (val == NULL) {
-                    pluto_free(key);
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                if (!j_grow(v)) {
-                    jerr(jp, "out of memory");
-                    pluto_free(key);
-                    json_free(val);
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                v->keys[v->count] = key;
-                v->items[v->count] = val;
-                v->count++;
-                jskip_ws(jp);
-                if (jp->p < jp->end && *jp->p == ',') {
-                    jp->p++;
-                    continue;
-                }
-                if (jp->p < jp->end && *jp->p == '}') {
-                    jp->p++;
-                    break;
-                }
-                jerr(jp, "expected ',' or '}' in object");
-                json_free(v);
-                v = NULL;
-                break;
-            }
-            break;
-        }
-        case '[': {
-            jp->p++;
-            v = json_new_array();
-            if (v == NULL) { jerr(jp, "out of memory"); break; }
-            jskip_ws(jp);
-            if (jp->p < jp->end && *jp->p == ']') {
-                jp->p++;
-                break;
-            }
-            while (jp->p < jp->end) {
-                JsonValue* item = j_parse_value(jp);
-                if (item == NULL) {
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                if (!j_grow(v)) {
-                    jerr(jp, "out of memory");
-                    json_free(item);
-                    json_free(v);
-                    v = NULL;
-                    break;
-                }
-                v->items[v->count++] = item;
-                jskip_ws(jp);
-                if (jp->p < jp->end && *jp->p == ',') {
-                    jp->p++;
-                    continue;
-                }
-                if (jp->p < jp->end && *jp->p == ']') {
-                    jp->p++;
-                    break;
-                }
-                jerr(jp, "expected ',' or ']' in array");
-                json_free(v);
-                v = NULL;
-                break;
-            }
-            break;
-        }
-        case '"': {
-            size_t slen;
-            char* s;
-            jp->p++;
-            s = j_parse_string_raw(jp, &slen);
-            if (s == NULL) {
-                v = NULL;
-                break;
-            }
-            v = json_new_null();
-            if (v == NULL) {
-                pluto_free(s);
-                jerr(jp, "out of memory");
-                break;
-            }
-            v->type = JSON_STRING;
-            v->str = s;
-            v->strLen = slen;
-            break;
-        }
-        case 't':
-            if (j_lit(jp, "true")) {
-                v = json_new_bool(1);
-                if (v == NULL) jerr(jp, "out of memory");
-            } else {
-                jerr(jp, "bad literal");
-                v = NULL;
-            }
-            break;
-        case 'f':
-            if (j_lit(jp, "false")) {
-                v = json_new_bool(0);
-                if (v == NULL) jerr(jp, "out of memory");
-            } else {
-                jerr(jp, "bad literal");
-                v = NULL;
-            }
-            break;
-        case 'n':
-            if (j_lit(jp, "null")) {
-                v = json_new_null();
-                if (v == NULL) jerr(jp, "out of memory");
-            } else {
-                jerr(jp, "bad literal");
-                v = NULL;
-            }
-            break;
-        default:
-            if (*jp->p == '-' || (*jp->p >= '0' && *jp->p <= '9')) {
-                v = j_parse_number(jp);
-            } else {
-                jerr(jp, "unexpected character");
-                v = NULL;
-            }
-            break;
-    }
-
-    jp->depth--;
-    return v;
-}
-
-JsonValue* json_parse(const char* text, size_t len, char err[128])
-{
-    JParser jp;
-    JsonValue* v;
-
-    if (text == NULL) {
-        if (err) snprintf(err, 128, "null input");
-        return NULL;
-    }
-    jp.p = text;
-    jp.end = text + len;
-    jp.start = text;
-    jp.err[0] = '\0';
-    jp.depth = 0;
-
-    v = j_parse_value(&jp);
-    if (v != NULL) {
-        jskip_ws(&jp);
-        if (jp.p != jp.end) {
-            jerr(&jp, "trailing data after value");
+    for (;;)
+    {
+        skip_ws(ps);
+        char *key = parse_string_raw(ps);
+        if (!key)
+        {
             json_free(v);
-            v = NULL;
+            return NULL;
+        }
+        skip_ws(ps);
+        if (ps->p >= ps->end || *ps->p != ':')
+        {
+            free(key);
+            json_free(v);
+            return NULL;
+        }
+        ps->p++;
+        skip_ws(ps);
+        JsonValue *item = parse_value(ps);
+        if (!item)
+        {
+            free(key);
+            json_free(v);
+            return NULL;
+        }
+        if (!container_add(v, key, item))
+        {
+            free(key);
+            json_free(item);
+            json_free(v);
+            return NULL;
+        }
+        skip_ws(ps);
+        if (ps->p < ps->end && *ps->p == ',')
+        {
+            ps->p++;
+            continue;
+        }
+        if (ps->p < ps->end && *ps->p == '}')
+        {
+            ps->p++;
+            return v;
+        }
+        json_free(v);
+        return NULL;
+    }
+}
+
+static JsonValue *parse_array(Parser *ps)
+{
+    ps->p++; /* '[' */
+    JsonValue *v = value_new(JSON_ARRAY);
+    if (!v)
+    {
+        return NULL;
+    }
+    skip_ws(ps);
+    if (ps->p < ps->end && *ps->p == ']')
+    {
+        ps->p++;
+        return v;
+    }
+    for (;;)
+    {
+        skip_ws(ps);
+        JsonValue *item = parse_value(ps);
+        if (!item)
+        {
+            json_free(v);
+            return NULL;
+        }
+        if (!container_add(v, NULL, item))
+        {
+            json_free(item);
+            json_free(v);
+            return NULL;
+        }
+        skip_ws(ps);
+        if (ps->p < ps->end && *ps->p == ',')
+        {
+            ps->p++;
+            continue;
+        }
+        if (ps->p < ps->end && *ps->p == ']')
+        {
+            ps->p++;
+            return v;
+        }
+        json_free(v);
+        return NULL;
+    }
+}
+
+static JsonValue *parse_value(Parser *ps)
+{
+    skip_ws(ps);
+    if (ps->p >= ps->end)
+    {
+        return NULL;
+    }
+    if (++ps->depth > JSON_MAX_DEPTH)
+    {
+        ps->depth--;
+        return NULL;
+    }
+    JsonValue *v = NULL;
+    char c = *ps->p;
+    if (c == '"')
+    {
+        char *s = parse_string_raw(ps);
+        if (s)
+        {
+            v = value_new(JSON_STRING);
+            if (v)
+            {
+                v->string = s;
+            }
+            else
+            {
+                free(s);
+            }
         }
     }
-    if (err != NULL) {
-        snprintf(err, 128, "%s", jp.err);
+    else if (c == '{')
+    {
+        v = parse_object(ps);
+    }
+    else if (c == '[')
+    {
+        v = parse_array(ps);
+    }
+    else if (c == 't')
+    {
+        if (ps->end - ps->p >= 4 && strncmp(ps->p, "true", 4) == 0)
+        {
+            ps->p += 4;
+            v = value_new(JSON_BOOL);
+            if (v)
+            {
+                v->boolean = 1;
+            }
+        }
+    }
+    else if (c == 'f')
+    {
+        if (ps->end - ps->p >= 5 && strncmp(ps->p, "false", 5) == 0)
+        {
+            ps->p += 5;
+            v = value_new(JSON_BOOL);
+        }
+    }
+    else if (c == 'n')
+    {
+        if (ps->end - ps->p >= 4 && strncmp(ps->p, "null", 4) == 0)
+        {
+            ps->p += 4;
+            v = value_new(JSON_NULL);
+        }
+    }
+    else
+    {
+        v = parse_number(ps);
+    }
+    ps->depth--;
+    return v;
+}
+
+JsonValue *json_decode(const char *text)
+{
+    if (!text)
+    {
+        return NULL;
+    }
+    Parser ps = {text, text + strlen(text), 0};
+    JsonValue *v = parse_value(&ps);
+    if (!v)
+    {
+        return NULL;
+    }
+    skip_ws(&ps);
+    if (ps.p != ps.end)
+    {
+        json_free(v);
+        return NULL; /* trailing garbage */
     }
     return v;
 }
 
-// ---------------------------------------------------------------- writer --
-
-static int j_write_escaped(StrBuf* out, const char* s, size_t n)
+JsonValue *json_get(const JsonValue *v, const char *key)
 {
-    size_t i;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        switch (c) {
-            case '"':  if (!sb_append_str(out, "\\\"")) return 0; break;
-            case '\\': if (!sb_append_str(out, "\\\\")) return 0; break;
-            case '\b': if (!sb_append_str(out, "\\b")) return 0; break;
-            case '\f': if (!sb_append_str(out, "\\f")) return 0; break;
-            case '\n': if (!sb_append_str(out, "\\n")) return 0; break;
-            case '\r': if (!sb_append_str(out, "\\r")) return 0; break;
-            case '\t': if (!sb_append_str(out, "\\t")) return 0; break;
-            default:
-                if (c < 0x20) {
-                    if (!sb_printf(out, "\\u%04x", (unsigned)c)) return 0;
-                } else if (!sb_append_char(out, (char)c)) {
-                    return 0;
-                }
-                break;
+    if (!v || v->type != JSON_OBJECT || !key)
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < v->count; i++)
+    {
+        if (v->keys[i] && strcmp(v->keys[i], key) == 0)
+        {
+            return v->items[i];
         }
     }
+    return NULL;
+}
+
+int json_as_string(const JsonValue *v, const char **out)
+{
+    if (!v || v->type != JSON_STRING || !v->string)
+    {
+        return 0;
+    }
+    *out = v->string;
     return 1;
 }
 
-static int j_write_num(StrBuf* out, double d)
+int json_as_number(const JsonValue *v, double *out)
 {
-    if (d == (double)(long long)d && d > -9.0e15 && d < 9.0e15) {
-        return sb_printf(out, "%lld", (long long)d);
-    }
-    return sb_printf(out, "%.14g", d);
-}
-
-static int j_write_inner(const JsonValue* v, StrBuf* out)
-{
-    size_t i;
-    switch (v->type) {
-        case JSON_NULL:   return sb_append_str(out, "null");
-        case JSON_BOOL:   return sb_append_str(out, v->boolean ? "true" : "false");
-        case JSON_NUMBER: return j_write_num(out, v->number);
-        case JSON_STRING:
-            if (!sb_append_char(out, '"')) return 0;
-            if (!j_write_escaped(out, v->str, v->strLen)) return 0;
-            return sb_append_char(out, '"');
-        case JSON_ARRAY:
-            if (!sb_append_char(out, '[')) return 0;
-            for (i = 0; i < v->count; i++) {
-                if (i > 0 && !sb_append_char(out, ',')) return 0;
-                if (!j_write_inner(v->items[i], out)) return 0;
-            }
-            return sb_append_char(out, ']');
-        case JSON_OBJECT:
-            if (!sb_append_char(out, '{')) return 0;
-            for (i = 0; i < v->count; i++) {
-                if (i > 0 && !sb_append_char(out, ',')) return 0;
-                if (!sb_append_char(out, '"')) return 0;
-                if (!j_write_escaped(out, v->keys[i], strlen(v->keys[i]))) return 0;
-                if (!sb_append_str(out, "\":")) return 0;
-                if (!j_write_inner(v->items[i], out)) return 0;
-            }
-            return sb_append_char(out, '}');
-    }
-    return 0;
-}
-
-int json_write(const JsonValue* v, StrBuf* out)
-{
-    if (v == NULL) {
-        return sb_append_str(out, "null");
-    }
-    return j_write_inner(v, out);
-}
-
-// -------------------------------------------------------------- builders --
-
-static JsonValue* j_alloc(JsonType t)
-{
-    JsonValue* v = (JsonValue*)pluto_malloc(sizeof(JsonValue));
-    if (v == NULL) {
-        return NULL;
-    }
-    memset(v, 0, sizeof(*v));
-    v->type = t;
-    return v;
-}
-
-JsonValue* json_new_null(void)   { return j_alloc(JSON_NULL); }
-JsonValue* json_new_bool(int b)
-{
-    JsonValue* v = j_alloc(JSON_BOOL);
-    if (v) v->boolean = b ? 1 : 0;
-    return v;
-}
-JsonValue* json_new_number(double n)
-{
-    JsonValue* v = j_alloc(JSON_NUMBER);
-    if (v) v->number = n;
-    return v;
-}
-JsonValue* json_new_string_len(const char* s, size_t n)
-{
-    JsonValue* v = j_alloc(JSON_STRING);
-    if (v == NULL) return NULL;
-    v->str = (char*)pluto_malloc(n + 1);
-    if (v->str == NULL) {
-        pluto_free(v);
-        return NULL;
-    }
-    memcpy(v->str, s, n);
-    v->str[n] = '\0';
-    v->strLen = n;
-    return v;
-}
-JsonValue* json_new_string(const char* s)
-{
-    return json_new_string_len(s, strlen(s));
-}
-JsonValue* json_new_array(void)  { return j_alloc(JSON_ARRAY); }
-JsonValue* json_new_object(void) { return j_alloc(JSON_OBJECT); }
-
-int json_obj_set(JsonValue* obj, const char* key, JsonValue* val)
-{
-    size_t i;
-    if (obj == NULL || obj->type != JSON_OBJECT || key == NULL) {
-        json_free(val);
+    if (!v || v->type != JSON_NUMBER)
+    {
         return 0;
     }
-    for (i = 0; i < obj->count; i++) {
-        if (strcmp(obj->keys[i], key) == 0) { // replace
-            json_free(obj->items[i]);
-            obj->items[i] = val;
-            return 1;
-        }
-    }
-    if (!j_grow(obj)) {
-        json_free(val);
-        return 0;
-    }
-    obj->keys[obj->count] = pluto_strdup(key);
-    if (obj->keys[obj->count] == NULL) {
-        json_free(val);
-        return 0;
-    }
-    obj->items[obj->count] = val;
-    obj->count++;
-    return 1;
-}
-
-int json_arr_append(JsonValue* arr, JsonValue* val)
-{
-    if (arr == NULL || arr->type != JSON_ARRAY) {
-        json_free(val);
-        return 0;
-    }
-    if (!j_grow(arr)) {
-        json_free(val);
-        return 0;
-    }
-    arr->items[arr->count++] = val;
+    *out = v->number;
     return 1;
 }

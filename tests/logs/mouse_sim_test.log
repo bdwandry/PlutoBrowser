@@ -1,0 +1,49 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[02:34:49 #1] === PlutoBrowser boot ===
+[02:34:49 #2] eventHandler: kEventInit, osversion=30101
+[02:34:49 #3] STORAGE: init enter
+[02:34:49 #4] STORAGE: load enter
+[02:34:49 #5] STORAGE: file opened, parsing
+[02:34:49 #6] STORAGE: init exit
+[02:34:49 #7] KB new: entering
+[02:34:49 #8] KB new: allocated
+[02:34:49 #9] KB load: font...
+[02:34:49 #10] KB load: font ok h=36
+[02:34:49 #11] KB load: menu-space ok
+[02:34:49 #12] KB load: menu-ok ok
+[02:34:49 #13] KB load: menu-del ok
+[02:34:49 #14] KB load: menu-cancel ok
+[02:34:49 #15] KB new: font+images loaded
+[02:34:49 #16] updateFrame: first frame executed
+[02:34:59 #17] updateFrame: heartbeat frame=300
+[02:35:07 #18] navigate_to: https://en.wikipedia.org/wiki/Main_Page
+[02:35:07 #19] state -> 1 (frame 549)
+[02:35:09 #20] updateFrame: heartbeat frame=600
+[02:35:11 #21] STORAGE: save open
+[02:35:11 #22] STORAGE: save writing (bm=9 hist=2)
+[02:35:11 #23] STORAGE: save close
+[02:35:11 #24] STORAGE: save exit
+[02:35:11 #25] state -> 2 (frame 669)
+[02:35:12 #26] IMGDEC ok https://en.wikipedia.org/static/images/icons/enwiki-25.svg sync 200x200 (115918 bytes)
+[02:35:12 #27] IMGDEC ok https://en.wikipedia.org/static/images/mobile/copyright/wikipedia-wordmark-en-25.svg sync 280x44 (9865 bytes)
+[02:35:12 #28] IMGDEC ok https://en.wikipedia.org/static/images/mobile/copyright/wikipedia-tagline-en-25.svg sync 280x22 (15219 bytes)
+[02:35:13 #29] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/c/c3/Olivia_Rodrigo_with_Dr_Fauci_1.png/250px-Olivia_Rodrigo_with_Dr_Fauci_1.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 250x147 (121494 bytes)
+[02:35:13 #30] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/e/e1/Gamrayeclipseg22.jpg/250px-Gamrayeclipseg22.jpg?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=0 250x167 (8221 bytes)
+[02:35:13 #31] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/2/28/Gloria_Steinem_1977_%C2%A9Lynn_Gilbert_%28cropped%29.jpg/250px-Gloria_Steinem_1977_%C2%A9Lynn_Gilbert_%28cropped%29.jpg?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=0 250x44 (22456 bytes)
+[02:35:13 #32] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/7/77/Severn_Bridge_from_Beachley_%28cropped%29.jpg/250px-Severn_Bridge_from_Beachley_%28cropped%29.jpg?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=0 250x187 (13613 bytes)
+[02:35:14 #33] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/9/9a/Lilium_bulbiferum_var._bulbiferum_01.JPG/500px-Lilium_bulbiferum_var._bulbiferum_01.JPG?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=0 250x139 (55301 bytes)
+[02:35:14 #34] IMGDEC ok https://thumb.wikimedia.org/wikipedia/en/thumb/4/4a/Commons-logo.svg/40px-Commons-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x54 (2148 bytes)
+[02:35:14 #35] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/a/a6/MediaWiki-2020-icon.svg/40px-MediaWiki-2020-icon.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x40 (2787 bytes)
+[02:35:14 #36] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/7/75/Wikimedia_Community_Logo.svg/40px-Wikimedia_Community_Logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x40 (2672 bytes)
+[02:35:14 #37] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/f/fa/Wikibooks-logo.svg/40px-Wikibooks-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x40 (2621 bytes)
+[02:35:15 #38] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/f/ff/Wikidata-logo.svg/60px-Wikidata-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 60x34 (555 bytes)
+[02:35:15 #39] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/0/0c/Wikifunctions-logo.svg/40px-Wikifunctions-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x41 (1998 bytes)
+[02:35:15 #40] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/f/fa/Wikiquote-logo.svg/40px-Wikiquote-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x48 (2358 bytes)
+[02:35:15 #41] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/4/4c/Wikisource-logo.svg/40px-Wikisource-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x42 (2665 bytes)
+[02:35:15 #42] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/d/df/Wikispecies-logo.svg/40px-Wikispecies-logo.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x47 (3560 bytes)
+[02:35:16 #43] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/0/0b/Wikiversity_logo_2017.svg/60px-Wikiversity_logo_2017.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 60x50 (1408 bytes)
+[02:35:16 #44] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/d/dd/Wikivoyage-Logo-v3-icon.svg/40px-Wikivoyage-Logo-v3-icon.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x40 (1075 bytes)
+[02:35:16 #45] IMGDEC ok https://thumb.wikimedia.org/wikipedia/commons/thumb/9/99/Wiktionary-logo-en-v2.svg/40px-Wiktionary-logo-en-v2.svg.png?utm_source=en.wikipedia.org&utm_campaign=parser&utm_content=thumbnail kind=1 40x40 (1993 bytes)
+[02:35:16 #46] IMGDEC ok https://en.wikipedia.org/static/images/footer/wikimedia.svg sync 100x100 (742 bytes)
+[02:35:19 #47] eventHandler: kEventTerminate, frames=832

@@ -1,20 +1,19 @@
-#ifndef PLUTO_UI_HISTORY_PAGE_H
-#define PLUTO_UI_HISTORY_PAGE_H
+/*
+ * PlutoBrowser — history_page.h
+ * Browsing history view (port of Source/ui/history_page.lua).
+ */
+#ifndef PLUTO_HISTORY_PAGE_H
+#define PLUTO_HISTORY_PAGE_H
 
-#include <stddef.h>
+void history_page_open(void);
 
-#include "pd_api.h"
-#include "ui/list_core.h"
+/* Feed pushed-button mask. Returns history URL to open (caller frees via
+ * pluto_free), "close" (caller frees), or NULL. */
+char *history_page_handle_input(unsigned int pushed);
 
-// C port of CometBrowser Source/ui/history_page.lua (HistoryPage).
-// Same row-list layout as BookmarksPage over Storage.history().
+/* Draw. crankChange scrolls the list. */
+void history_page_draw(float crankChange);
 
-void     hi_init_pd(PlaydateAPI* pd);
-void     hi_open(void);
-LpAction hi_handle_input(LrButton btn, char* outUrl, size_t cap);
-void     hi_draw(double crankChange);
+int history_page_selected_index(void);
 
-int      hi_selected_index(void);
-double   hi_scroll_y(void);
-
-#endif
+#endif /* PLUTO_HISTORY_PAGE_H */

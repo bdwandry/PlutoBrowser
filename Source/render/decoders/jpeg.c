@@ -1,39 +1,30 @@
-// jpeg.c — C port of Source/render/decoders/jpeg.lua (JPEGDecoder).
-//
-// Baseline SOF0: full luma-only 8x8 IDCT decode; chroma coefficients are
-// consumed for bitstream sync but never upsampled (the Lua original only
-// renders Y). When the box filter is coarse (>=4x) or the source area is
-// large, blocks render as their DC value only (AC still consumed for
-// sync). Progressive SOF2 files are decoded from their DC scans alone;
-// AC scans trigger rendering of what is available. Arithmetic coding
-// (SOF9/10/11) is unsupported. Restart markers are consumed by the bit
-// reader and returned as-is into the stream (faithful quirk). The decode
-// loop yields cooperatively via tasks_yield_check().
-
-#include "render/decoders/jpeg.h"
-
-#include <math.h>
-#include <stdlib.h>
+/*
+ * PlutoBrowser — jpeg.c
+ * Port of Source/render/decoders/jpeg.lua (reference, 670 lines).
+ * See jpeg.h for the Lua→C function map and preserved semantics.
+ *
+ * Stack discipline (P22 rule): all large buffers live in BSS/static or heap;
+ * the public entry points stay shallow. The decoder is re-entrant across
+ * sequential calls because every table/state lives in the JpegState struct.
+ */
 #include <string.h>
-
-#include "core/tasks.h"
-#include "render/decoders/dither.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include "pd_api.h"
+#include "render/decoders/jpeg.h"
 #include "render/decoders/scale.h"
-#include "util/mem.h"
+#include "render/decoders/dither.h"
+#include "core/tasks.h"
+#include "core/logger.h"
 
-#if defined(TARGET_SIMULATOR) || defined(TARGET_PLAYDATE)
-#define PLUTO_JPEG_PD 1
-#endif
+extern PlaydateAPI *pluto_pd(void);
+extern void pluto_free(void *p);
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-#define JPEG_NIL (-1)
-#define IDCT_SCALE (4LL * 4096 * 4096)
-
-/* zigzag position -> natural (row-major) coefficient index */
-static const uint8_t kZigzag[64] = {
+/* ── Zigzag: zigzag[zz] = natural (row-major) index, zz = 0..63 (verbatim) ─ */
+static const uint8_t JPEG_ZIGZAG[64] = {
     0, 1, 8, 16, 9, 2, 3, 10,
     17, 24, 32, 25, 18, 11, 4, 5,
     12, 19, 26, 33, 40, 48, 41, 34,
@@ -44,470 +35,762 @@ static const uint8_t kZigzag[64] = {
     53, 60, 61, 54, 47, 55, 62, 63,
 };
 
-static long long g_idctT[64];
-static int g_tablesReady = 0;
+/* Fixed-point IDCT basis (verbatim):
+ * idctT[k*8+n] = floor(4096 * C(k) * cos((2n+1)k*pi/16) + 0.5) */
+static int JPEG_IDCT_T[64];
+static int jpeg_idct_ready = 0;
 
-static void ensure_tables(void) {
-    if (g_tablesReady) return;
+static void jpeg_idct_init(void)
+{
+    if (jpeg_idct_ready)
+    {
+        return;
+    }
     const double c0 = 0.707106781186548;
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < 8; k++)
+    {
         double c = (k == 0) ? c0 : 1.0;
-        for (int n = 0; n < 8; n++) {
-            double v = 4096.0 * c * cos((2 * n + 1) * k * M_PI / 16);
-            g_idctT[k * 8 + n] = (long long)floor(v + 0.5);
+        for (int n = 0; n < 8; n++)
+        {
+            double v = 4096.0 * c * cos((2 * n + 1) * k * 3.14159265358979323846 / 16.0);
+            JPEG_IDCT_T[k * 8 + n] = (int)floor(v + 0.5);
         }
     }
-    g_tablesReady = 1;
+    jpeg_idct_ready = 1;
 }
 
-static uint8_t clamp255ll(long long v) {
-    if (v < 0) return 0;
-    if (v > 255) return 255;
-    return (uint8_t)v;
-}
+#define JPEG_IDCT_SCALE (4 * 4096 * 4096)
 
-/* guarded accessors: -1 == Lua nil */
-static unsigned j_u16(const uint8_t* d, size_t len, size_t o) {
-    if (o >= len || o + 1 >= len) return 0;
-    return ((unsigned)d[o] << 8) | (unsigned)d[o + 1];  /* JPEG: big-endian */
-}
-static int j_byte(const uint8_t* d, size_t len, size_t o) {
-    return o < len ? d[o] : -1;
-}
-
-typedef struct {
-    const uint8_t* str;
+/* ── Bit reader (MSB-first, JPEG byte stuffing, restart/marker detection) ── */
+typedef struct
+{
+    const uint8_t *str;
     size_t len;
-    size_t pos;      /* 0-based; Lua reader used 1-based */
-    uint32_t bitBuf;
+    size_t pos;      /* 0-based index of the NEXT byte (Lua pos is 1-based) */
+    unsigned int bitBuf;
     int nbits;
-} JReader;
+    int eof;         /* a real marker stopped the stream */
+} JpegReader;
 
-static int jr_read_byte(JReader* r) {
-    if (r->pos >= r->len) return JPEG_NIL;
-    int b = r->str[r->pos];
+/* Next byte with stuffing removed; RST markers returned as-is; -1 at a real
+ * marker (the reader rewinds so the marker starts at the FF byte — the
+ * reference's `pos = pos - 1`). */
+static int jpeg_rd_byte(JpegReader *r)
+{
+    if (r->eof)
+    {
+        return -1;
+    }
+    if (r->pos >= r->len)
+    {
+        r->eof = 1;
+        return -1;
+    }
+    uint8_t b = r->str[r->pos];
     r->pos++;
-    if (b != 0xFF) return b;
-    if (r->pos >= r->len) return JPEG_NIL;
-    int n = r->str[r->pos];
-    if (n == 0x00) { r->pos++; return 0xFF; }
-    if (n >= 0xD0 && n <= 0xD7) { r->pos++; return n; }
-    r->pos--;   /* marker: rewind to the FF (Lua pos = pos - 1) */
-    return JPEG_NIL;
+    if (b == 0xFF)
+    {
+        if (r->pos >= r->len)
+        {
+            r->eof = 1;
+            return -1;
+        }
+        uint8_t n = r->str[r->pos];
+        if (n == 0x00)
+        {
+            r->pos++;
+            return 0xFF;
+        }
+        if (n >= 0xD0 && n <= 0xD7)
+        {
+            r->pos++;
+            return n; /* restart marker, part of the entropy stream */
+        }
+        r->pos--; /* rewind so the marker starts at the FF byte */
+        r->eof = 1;
+        return -1;
+    }
+    return b;
 }
 
-static int jr_read_bits(JReader* r, int n) {
-    while (r->nbits < n) {
-        int b = jr_read_byte(r);
-        if (b == JPEG_NIL) return JPEG_NIL;
-        r->bitBuf = (r->bitBuf << 8) | (uint32_t)b;
+static int jpeg_rd_bits(JpegReader *r, int n)
+{
+    if (n == 0)
+    {
+        return 0;
+    }
+    while (r->nbits < n)
+    {
+        int b = jpeg_rd_byte(r);
+        if (b < 0)
+        {
+            return -1;
+        }
+        r->bitBuf = (r->bitBuf << 8) | (unsigned)b;
         r->nbits += 8;
     }
-    int shift = r->nbits - n;
-    int v = (int)((r->bitBuf >> shift) & ((1u << n) - 1u));
+    int v = (int)((r->bitBuf >> (r->nbits - n)) & ((1u << n) - 1));
     r->nbits -= n;
-    r->bitBuf &= (r->nbits >= 32) ? 0xFFFFFFFFu : ((1u << r->nbits) - 1u);
+    r->bitBuf &= (r->nbits >= 32 || r->nbits < 0) ? 0 : ((1u << r->nbits) - 1);
     return v;
 }
 
-static int jr_expect_restart(JReader* r, int n) {
+/* Reset bit buffer; require exact RSTn (n = mcuIndex % 8). */
+static int jpeg_expect_restart(JpegReader *r, int mcuIndex)
+{
     r->nbits = 0;
-    int b = jr_read_byte(r);
-    if (b == JPEG_NIL) return 0;
-    if (b >= 0xD0 && b <= 0xD7 && (b - 0xD0) == (n % 8)) return 1;
+    r->bitBuf = 0;
+    int b = jpeg_rd_byte(r);
+    if (b < 0)
+    {
+        return 0;
+    }
+    if (b >= 0xD0 && b <= 0xD7 && (b - 0xD0) == (mcuIndex % 8))
+    {
+        return 1;
+    }
     return 0;
 }
 
-typedef struct {
-    int mincode[17], maxcode[17], valptr[17]; /* levels 1..16 */
+/* ── Canonical MSB-first Huffman tables ────────────────────────────────────── */
+#define HUFF_MAXCODE_LEN 17
+typedef struct
+{
+    int mincode[HUFF_MAXCODE_LEN];  /* [1..16] */
+    int maxcode[HUFF_MAXCODE_LEN];  /* [1..16] */
+    int valptr[HUFF_MAXCODE_LEN];   /* [1..16] */
     uint8_t values[256];
-    int nValues;
-} JHuff;
+    int valueCount;
+} JpegHuff;
 
-static JHuff* build_huff(const int counts[17], const uint8_t* values, int total) {
-    JHuff* t = (JHuff*)pluto_malloc(sizeof(JHuff));
-    if (!t) return NULL;
-    memset(t, 0, sizeof(*t));
-    int code = 0, k = 1;
-    for (int l = 1; l <= 16; l++) {
-        t->valptr[l] = k;
-        t->mincode[l] = code;
-        int c = counts[l];
-        t->maxcode[l] = (c == 0) ? (-1) : (code + c - 1);
-        k += c;
+static void jpeg_build_huff(JpegHuff *h, const uint8_t counts[16], const uint8_t *values, int total)
+{
+    memset(h, 0, sizeof(*h));
+    h->valueCount = total;
+    for (int i = 0; i < total && i < 256; i++)
+    {
+        h->values[i] = values[i];
+    }
+    int code = 0;
+    int k = 1; /* 1-based like the reference */
+    for (int l = 1; l <= 16; l++)
+    {
+        int c = counts[l - 1];
+        if (c != 0)
+        {
+            h->mincode[l] = code;
+            h->maxcode[l] = code + c - 1;
+            h->valptr[l] = k;
+            k += c;
+        }
+        else
+        {
+            h->mincode[l] = -1;
+            h->maxcode[l] = -1;
+            h->valptr[l] = k;
+        }
         code = (code + c) << 1;
     }
-    t->nValues = total;
-    memcpy(t->values, values, (size_t)(total > 256 ? 256 : total));
-    return t;
 }
 
-static int decode_symbol(JReader* r, const JHuff* t) {
+static int jpeg_decode_symbol(JpegReader *r, const JpegHuff *h)
+{
     int code = 0;
-    for (int l = 1; l <= 16; l++) {
-        int b = jr_read_bits(r, 1);
-        if (b == JPEG_NIL) return JPEG_NIL;
-        code = (code << 1) | b;
-        if (t->mincode[l] >= 0 && code <= t->maxcode[l]) {
-            int idx = t->valptr[l] - 1 + (code - t->mincode[l]);
-            if (idx < 0 || idx >= t->nValues || idx >= 256) return JPEG_NIL;
-            return t->values[idx];
+    for (int l = 1; l <= 16; l++)
+    {
+        int bit = jpeg_rd_bits(r, 1);
+        if (bit < 0)
+        {
+            return -1;
+        }
+        code = (code << 1) | bit;
+        int mn = h->mincode[l];
+        if (mn >= 0 && code >= mn && code <= h->maxcode[l])
+        {
+            int idx = h->valptr[l] + code - mn; /* 1-based */
+            if (idx < 1 || idx > h->valueCount)
+            {
+                return -1;
+            }
+            return h->values[idx - 1];
         }
     }
-    return JPEG_NIL;
+    return -1;
 }
 
-static int jpg_extend(int v, int s) {
-    if (s == 0) return 0;
-    return (v < (1 << (s - 1))) ? (v - (1 << s) + 1) : v;
+static int jpeg_extend(int val, int s)
+{
+    if (s == 0)
+    {
+        return 0;
+    }
+    if (val < (1 << (s - 1)))
+    {
+        return val - (1 << s) + 1;
+    }
+    return val;
 }
 
-static void idct2d(long long b[64]) {
-    long long tmp[64];
-    for (int rr = 0; rr < 8; rr++)
-        for (int n = 0; n < 8; n++) {
-            long long s = 0;
-            for (int k = 0; k < 8; k++) s += b[rr * 8 + k] * g_idctT[k * 8 + n];
-            tmp[rr * 8 + n] = s;
+/* DC difference: signed diff. End-of-stream is signalled by r->eof (set by
+ * the reader on every failure path) — no sentinel value, so a legitimate
+ * -32768 DC difference (s=16) cannot be misread. */
+static int jpeg_decode_dc(JpegReader *r, const JpegHuff *tbl)
+{
+    int s = jpeg_decode_symbol(r, tbl);
+    if (s < 0)
+    {
+        return 0;
+    }
+    if (s == 0)
+    {
+        return 0;
+    }
+    int v = jpeg_rd_bits(r, s);
+    if (v < 0)
+    {
+        return 0;
+    }
+    return jpeg_extend(v, s);
+}
+
+/* Two-pass separable fixed-point IDCT (verbatim algorithm). */
+/* 64-bit accumulators throughout: the Lua reference computes in doubles and
+ * intermediate sums (dequantized coefficients x 4096-scale basis, two passes)
+ * overflow int32 — the exact bug the battery caught. Final spatial values
+ * final spatial samples (pixel 255 -> (255-128)*4*4096*4096 ~ 8.5e9) do NOT
+ * fit int32 either — the Lua reference holds them in doubles. So the output
+ * is int64 as well and the caller divides + rounds in 64-bit. */
+static void jpeg_idct2d(int64_t *block, int64_t *tmp)
+{
+    for (int r = 0; r < 8; r++)
+    {
+        int off = r * 8;
+        for (int n = 0; n < 8; n++)
+        {
+            int64_t s = 0;
+            for (int k = 0; k < 8; k++)
+            {
+                s += (int64_t)block[off + k] * JPEG_IDCT_T[k * 8 + n];
+            }
+            tmp[off + n] = s;
         }
+    }
     for (int c = 0; c < 8; c++)
-        for (int n = 0; n < 8; n++) {
-            long long s = 0;
-            for (int k = 0; k < 8; k++) s += tmp[k * 8 + c] * g_idctT[k * 8 + n];
-            b[n * 8 + c] = s;
+    {
+        for (int n = 0; n < 8; n++)
+        {
+            int64_t s = 0;
+            for (int k = 0; k < 8; k++)
+            {
+                s += tmp[k * 8 + c] * JPEG_IDCT_T[k * 8 + n];
+            }
+            block[n * 8 + c] = s;
         }
-}
-
-typedef struct { int id, h, v, qt; } JComp;
-
-typedef struct {
-    int width, height, precision, ncomp;
-    JComp* comps;
-} JFrame;
-
-typedef struct {
-    int ns;
-    int ci[256];      /* frame component indices (1-based), fallback = scan pos */
-    int dcSel[256], acSel[256];
-    int ss, se, ah, al;
-} JScan;
-
-/* Progressive state: persists across scans within one decode call.
- * Keys are 1-based component indices (0 unused), so all arrays span [256]. */
-typedef struct {
-    long long dcPred[256];   /* keyed by frame comp index */
-    long long* blockDC[256];
-    int cap[256];
-    long long blkIdx[256];
-} JPState;
-
-static void jpstate_reset(JFrame* f, JPState* st) {
-    int sMaxH = 1, sMaxV = 1;
-    for (int i = 0; i < f->ncomp; i++) {
-        if (f->comps[i].h > sMaxH) sMaxH = f->comps[i].h;
-        if (f->comps[i].v > sMaxV) sMaxV = f->comps[i].v;
-    }
-    int bw = sMaxH * 8, bh = sMaxV * 8;
-    long long mcuColsF = (f->width + bw - 1) / bw; if (mcuColsF < 1) mcuColsF = 1;
-    long long mcuRowsF = (f->height + bh - 1) / bh; if (mcuRowsF < 1) mcuRowsF = 1;
-    for (int c = 1; c < 256; c++) {
-        st->dcPred[c] = 0;
-        st->blkIdx[c] = 0;
-    }
-    for (int i = 1; i <= f->ncomp && i < 256; i++) {
-        if (st->blockDC[i]) pluto_free(st->blockDC[i]);
-        st->blockDC[i] = NULL;
-        long long cap = mcuColsF * f->comps[i - 1].h * mcuRowsF * f->comps[i - 1].v;
-        if (cap < 1) cap = 1;
-        st->cap[i] = (cap > 0x7FFFFFF0LL) ? 0x7FFFFFF0 : (int)cap;
-        st->blockDC[i] = (long long*)pluto_calloc((size_t)st->cap[i], sizeof(long long));
-        if (st->blockDC[i] == NULL) st->cap[i] = 0;
-    }
-    for (int i = f->ncomp + 1; i < 256; i++) {
-        if (st->blockDC[i]) pluto_free(st->blockDC[i]);
-        st->blockDC[i] = NULL;
-        st->cap[i] = 0;
     }
 }
 
-static void jpstate_free(JPState* st) {
-    for (int i = 0; i < 256; i++) {
-        if (st->blockDC[i]) pluto_free(st->blockDC[i]);
-        st->blockDC[i] = NULL;
-        st->cap[i] = 0;
+static int jpeg_clamp255(int v)
+{
+    if (v < 0)
+    {
+        return 0;
     }
+    if (v > 255)
+    {
+        return 255;
+    }
+    return v;
 }
 
-static long long* jp_block_slot(JPState* st, int c, long long idx) {
-    if (c < 1 || c > 255) return NULL;
-    if (idx < 0 || idx >= st->cap[c]) return NULL;
-    return &st->blockDC[c][idx];
-}
-
-/* Lazy row buffer over the source canvas (rows calloc'd zero-filled where
- * Lua left untouched cells as nil). */
-static uint8_t** rowbuf_new(int h) {
-    return (uint8_t**)pluto_calloc((size_t)(h > 0 ? h : 1), sizeof(uint8_t*));
-}
-
-static void rowbuf_put(uint8_t** rb, int width, int h,
-                       int x, int y, uint8_t g) {
-    /* Lua wrote into a sparse canvas: off-canvas cells were silently
-     * dropped. MCU padding blocks land past height/width, so clip here. */
-    if (x < 0 || y < 0 || x >= width || y >= h || !rb) return;
-    if (!rb[y]) rb[y] = (uint8_t*)pluto_calloc((size_t)width, 1);
-    if (rb[y]) rb[y][x] = g;
-}
-
-static void rowbuf_fill_block(uint8_t** rb, int width, int h,
-                              int px, int py, uint8_t g) {
-    for (int ri = 0; ri < 8; ri++)
-        for (int cx = 0; cx < 8; cx++)
-            rowbuf_put(rb, width, h, px + cx, py + ri, g);
-}
-
-static void rowbuf_free(uint8_t** rb, int h) {
-    if (!rb) return;
-    for (int y = 0; y < h; y++) pluto_free(rb[y]);
-    pluto_free(rb);
-}
-
-/*-----------------------------------------------------------------------------
- * Baseline scan decoding
- *---------------------------------------------------------------------------*/
-
-static int decode_baseline(const uint8_t* data, size_t len, size_t pos,
-                           const JFrame* f, const JScan* sc,
-                           JHuff* const* dcTables, JHuff* const* acTables,
-                           int* const* qt,
-                           int restartInterval, int maxW, int maxH,
-                           ScaleAccum** outAcc, size_t* outPos);
-
-/*-----------------------------------------------------------------------------
- * Progressive DC scans
- *---------------------------------------------------------------------------*/
-
-static int decode_progressive_dc(const uint8_t* data, size_t len, size_t pos,
-                                 const JFrame* f, const JScan* sc,
-                                 JHuff* const* dcTables,
-                                 int restartInterval, JPState* st,
-                                 size_t* outPos);
-
-static ScaleAccum* render_progressive_dc(const JFrame* f, JPState* st,
-                                         int maxW, int maxH, int* const* qt);
-
-static int decode_ac(JReader* rd, const JHuff* tbl, long long block[64],
-                     const int* qt) {
-    tasks_yield_check();
-    int k = 1;
-    while (k <= 63) {
-        int s = decode_symbol(rd, tbl);
-        if (s == JPEG_NIL) return 0;
-        int rr = s >> 4, cs = s & 15;
-        if (cs == 0) {
-            if (rr == 15) { k += 16; continue; }  /* ZRL */
-            return 1;                             /* EOB */
+/* ── AC coefficients (natural order, dequantized) ─────────────────────────── */
+/* Returns 1 ok, 0 end-of-scan (marker/EOB-exhausted) — the Lua boolean. */
+static int jpeg_decode_ac(JpegReader *r, const JpegHuff *tbl, int64_t *block, const uint16_t *qt)
+{
+    int k = 1; /* zigzag position, 1..63 (Lua k) */
+    while (k <= 63)
+    {
+        int s = jpeg_decode_symbol(r, tbl);
+        if (s < 0)
+        {
+            return 0;
         }
-        k += rr;
-        if (k > 63) return 1;                     /* overrun quirk: no bits consumed */
-        int v = jr_read_bits(rd, cs);
-        if (v == JPEG_NIL) return 0;
-        block[kZigzag[k]] = (long long)jpg_extend(v, cs) * qt[k];
-        k += 1;
+        int run = s >> 4;
+        int cs = s & 15;
+        if (cs == 0)
+        {
+            if (run == 15)
+            {
+                k += 16; /* ZRL */
+            }
+            else
+            {
+                return 1; /* EOB */
+            }
+        }
+        else
+        {
+            k += run;
+            if (k > 63)
+            {
+                return 1;
+            }
+            int v = jpeg_rd_bits(r, cs);
+            if (v < 0)
+            {
+                return 0;
+            }
+            block[JPEG_ZIGZAG[k]] = (int64_t)jpeg_extend(v, cs) * qt[k + 1];
+            k += 1;
+        }
     }
     return 1;
 }
 
-static int decode_dc_sym(JReader* rd, const JHuff* tbl, int* ok) {
-    int s = decode_symbol(rd, tbl);
-    *ok = 1;
-    if (s == JPEG_NIL) { *ok = 0; return 0; }
-    if (s == 0) return 0;
-    int v = jr_read_bits(rd, s);
-    if (v == JPEG_NIL) { *ok = 0; return 0; }
-    return jpg_extend(v, s);
+/* ── Frame/scan segment structs ───────────────────────────────────────────── */
+typedef struct
+{
+    int id;
+    int h, v;   /* sampling factors */
+    int qt;     /* quant table id */
+} JpegComp;
+
+typedef struct
+{
+    int width, height, precision;
+    JpegComp comps[4];
+    int ncomp;
+} JpegFrame;
+
+typedef struct
+{
+    int comps[5];   /* frame component indices (Lua 1-based: [1..4]) */
+    int dcTbl[4];
+    int acTbl[4];
+    int ns;
+    int ss, se, ah, al;
+} JpegScan;
+
+/* Progressive DC state. blockDC[c] is HEAP, sized to the component's exact
+ * block count on first touch (Lua tables grow unbounded; a fixed static cap
+ * would silently truncate large photos). Keyed by 1-based frame component
+ * index c → slot 0 unused. */
+typedef struct
+{
+    int64_t dcPred[5];
+    int64_t *blockDC[5];
+    int blockDCcap[5];
+    int blkIdx[5];
+} JpegProgState;
+
+/* Ensure blockDC[c] holds >= n int64 DC coefficients (zero-filled on first
+ * alloc). DC values live in Lua doubles — must stay 64-bit in C. */
+static int jpeg_prog_ensure(JpegProgState *st, int c, int n)
+{
+    if (c < 1 || c > 4)
+    {
+        return 0;
+    }
+    if (st->blockDC[c] && st->blockDCcap[c] >= n)
+    {
+        return 1;
+    }
+    int newCap = st->blockDCcap[c] ? st->blockDCcap[c] : 256;
+    while (newCap < n)
+    {
+        newCap *= 2;
+    }
+    int64_t *p = (int64_t *)PLUTO_MALLOC(sizeof(int64_t) * (size_t)newCap);
+    if (!p)
+    {
+        return 0;
+    }
+    memset(p, 0, sizeof(int64_t) * (size_t)newCap);
+    if (st->blockDC[c])
+    {
+        memcpy(p, st->blockDC[c], sizeof(int64_t) * (size_t)st->blockDCcap[c]);
+        PLUTO_FREE(st->blockDC[c]);
+    }
+    st->blockDC[c] = p;
+    st->blockDCcap[c] = newCap;
+    return 1;
 }
 
-static int decode_baseline(const uint8_t* data, size_t len, size_t pos,
-                           const JFrame* f, const JScan* sc,
-                           JHuff* const* dcTables, JHuff* const* acTables,
-                           int* const* qt,
-                           int restartInterval, int maxW, int maxH,
-                           ScaleAccum** outAcc, size_t* outPos) {
-    *outAcc = NULL;
-    int ns = sc->ns;
+static void jpeg_prog_free(JpegProgState *st)
+{
+    for (int c = 1; c <= 4; c++)
+    {
+        if (st->blockDC[c])
+        {
+            PLUTO_FREE(st->blockDC[c]);
+            st->blockDC[c] = NULL;
+        }
+        st->blockDCcap[c] = 0;
+    }
+}
 
+/* Quantization tables (Lua parity): t[id][i+1] = i-th byte of the DQT payload
+ * (i = 0-based zigzag position). [1] = DC, [zz+1] = quant for 0-based zz.
+ * 65 slots so index 64 exists (Lua tables have no upper bound issue). */
+typedef struct
+{
+    uint16_t t[4][65];
+} JpegQt;
+
+/* ── Baseline scan decode (streaming, block rows → downscaler) ───────────── */
+typedef struct
+{
+    ScaleAccum *acc;
+    int ended;
+    size_t pos;
+} JpegBaseResult;
+
+static void jpeg_baseline_store_row_rowbuf(uint8_t **rowBuf, int maxRows, int y, int px,
+                                           const int *vals8, int flat)
+{
+    /* rowBuf[y] lazily allocated (Lua rowBuf[py+ri] lazy tables), 0-based y. */
+    if (y < 0 || y >= maxRows)
+    {
+        return;
+    }
+    uint8_t *rb = rowBuf[y];
+    if (!rb)
+    {
+        rb = (uint8_t *)PLUTO_MALLOC(4096); /* one row: up to 4096 px wide */
+        if (!rb)
+        {
+            return;
+        }
+        memset(rb, 0, 4096);
+        rowBuf[y] = rb;
+    }
+    if (flat >= 0)
+    {
+        uint8_t g = (uint8_t)flat;
+        memset(rb + px, g, 8);
+    }
+    else
+    {
+        for (int cx = 0; cx < 8; cx++)
+        {
+            rb[px + cx] = (uint8_t)vals8[cx];
+        }
+    }
+}
+
+static JpegBaseResult jpeg_decode_baseline(const uint8_t *data, size_t len, size_t entropyPos,
+                                           const JpegFrame *frame, const JpegScan *scan,
+                                           const JpegHuff *dcTables, const JpegHuff *acTables,
+                                           const JpegQt *qt, int restartInterval,
+                                           int maxW, int maxH)
+{
+    JpegBaseResult res = { NULL, 0, entropyPos };
+    int width = frame->width, height = frame->height;
+    int ns = scan->ns;
+
+    /* Sampling factors for this scan. scan->comps is Lua-1-based ([1..ns],
+     * slot 0 unused) — iterating it 0-based read garbage (frame->comps[-1])
+     * and collapsed every interleaved image to one MCU. */
     int sMaxH = 1, sMaxV = 1;
-    for (int ci = 1; ci <= ns; ci++) {
-        const JComp* fc = &f->comps[sc->ci[ci] - 1];
+    for (int i = 1; i <= ns; i++)
+    {
+        const JpegComp *fc = &frame->comps[scan->comps[i] - 1];
         if (fc->h > sMaxH) sMaxH = fc->h;
         if (fc->v > sMaxV) sMaxV = fc->v;
     }
-    if (ns == 1) { sMaxH = 1; sMaxV = 1; }
+    if (ns == 1) { sMaxH = 1; sMaxV = 1; } /* non-interleaved */
 
-    int bw = sMaxH * 8, bh = sMaxV * 8;
-    int mcuCols = (f->width + bw - 1) / bw; if (mcuCols < 1) mcuCols = 1;
-    int mcuRows = (f->height + bh - 1) / bh; if (mcuRows < 1) mcuRows = 1;
+    int mcuCols = (width + sMaxH * 8 - 1) / (sMaxH * 8);
+    int mcuRows = (height + sMaxV * 8 - 1) / (sMaxV * 8);
+    if (mcuCols < 1) mcuCols = 1;
+    if (mcuRows < 1) mcuRows = 1;
 
-    ScaleAccum* acc = scale_accum_new(f->width, f->height, maxW, maxH);
-    if (!acc) { *outPos = pos; return 0; }
-    uint8_t** rowBuf = rowbuf_new(f->height);
+    JpegReader rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.str = data;
+    rd.len = len;
+    rd.pos = entropyPos;
 
-    int boxW = 1, boxH = 1, twIgn = 0, thIgn = 0;
-    scale_box_sizes(f->width, f->height, maxW, maxH, &boxW, &boxH, &twIgn, &thIgn);
-    int dcOnly = (boxW >= 4) || (boxH >= 4) ||
-                 ((long long)f->width * (long long)f->height > 200000LL);
+#ifdef P25_DEBUG_DUMP
+    fprintf(stderr, "JPEGDBG GEOM w=%d h=%d ns=%d sMaxH=%d sMaxV=%d mcuCols=%d mcuRows=%d dcOnly=%d\n",
+            width, height, ns, sMaxH, sMaxV, mcuCols, mcuRows,
+            (int)((long)width * height > 200000));
+#endif
 
-    JReader rd = { data, len, pos, 0, 0 };
-    int dcPred[256] = {0};   /* keyed by scan component position 1..ns */
-    long long block[64];
-    long long mcuIndex = 0;
+    res.acc = scale_accum_new(width, height, maxW, maxH);
+    if (!res.acc)
+    {
+        return res;
+    }
+
+    /* rowBuf: one pointer per source row (Lua lazy tables) */
+    int maxRows = height;
+    uint8_t **rowBuf = (uint8_t **)PLUTO_MALLOC(sizeof(uint8_t *) * (size_t)maxRows);
+    if (!rowBuf)
+    {
+        scale_accum_free(res.acc);
+        res.acc = NULL;
+        return res;
+    }
+    memset(rowBuf, 0, sizeof(uint8_t *) * (size_t)maxRows);
+
+    int64_t block[64];
+    int64_t tmp[64];
+    int64_t dcPred[4];
+    for (int i = 0; i < 4; i++) dcPred[i] = 0;
+
+    int boxW = 1, boxH = 1, tw = 1, th = 1;
+    scale_box_sizes(width, height, maxW, maxH, &boxW, &boxH, &tw, &th);
+    int dcOnly = (boxW >= 4) || (boxH >= 4) || ((long)width * height > 200000);
+
+    int mcuIndex = 0;
     int ended = 0;
-    int zeroQt[64] = {0};
 
-    for (int mcuY = 0; mcuY < mcuRows; mcuY++) {
-        tasks_yield_check();
-        for (int mcuX = 0; mcuX < mcuCols; mcuX++) {
-            if (!ended && restartInterval > 0 && mcuIndex > 0 &&
-                (mcuIndex % restartInterval) == 0) {
-                if (!jr_expect_restart(&rd, (int)(mcuIndex % 8))) {
+    for (int mcuY = 0; mcuY < mcuRows && !ended; mcuY++)
+    {
+        for (int mcuX = 0; mcuX < mcuCols; mcuX++)
+        {
+            if (restartInterval > 0 && mcuIndex > 0 && (mcuIndex % restartInterval) == 0)
+            {
+                if (!jpeg_expect_restart(&rd, mcuIndex))
+                {
                     ended = 1;
-                } else {
-                    for (int i = 0; i <= ns; i++) dcPred[i] = 0;
+                    break;
                 }
+                for (int i = 0; i < 4; i++) dcPred[i] = 0;
             }
-            for (int ci = 1; ci <= ns && !ended; ci++) {
-                const JComp* fc = &f->comps[sc->ci[ci] - 1];
-                const JHuff* dcTbl = dcTables[sc->dcSel[ci]];
-                const JHuff* acTbl = acTables[sc->acSel[ci]];
-                const int* qtz = qt[fc->qt];
-                if (!qtz) qtz = zeroQt;   /* missing table: zeros (Lua would error) */
 
-                for (int bj = 0; bj < fc->v && !ended; bj++) {
-                    for (int bi = 0; bi < fc->h && !ended; bi++) {
-                        int ok;
-                        int diff = decode_dc_sym(&rd, dcTbl, &ok);
-                        if (!ok) { ended = 1; break; }
-                        dcPred[ci] += diff;
-                        int dc = dcPred[ci];
-                        int px = mcuX * bw + bi * 8;
-                        int py = mcuY * bh + bj * 8;
+            for (int ci = 1; ci <= ns && !ended; ci++)
+            {
+                /* scan->comps is Lua-1-based ([1..ns], slot 0 unused);
+                 * dcTbl/acTbl are stored 0-based. */
+                const JpegComp *fc = &frame->comps[scan->comps[ci] - 1];
+                const JpegHuff *dcTbl = &dcTables[scan->dcTbl[ci - 1] & 0x03];
+                const JpegHuff *acTbl = &acTables[scan->acTbl[ci - 1] & 0x03];
+                const uint16_t *qtz = qt->t[fc->qt & 0x03];
+                for (int bj = 0; bj < fc->v && !ended; bj++)
+                {
+                    for (int bi = 0; bi < fc->h && !ended; bi++)
+                    {
+                        int diff = jpeg_decode_dc(&rd, dcTbl);
+                        if (rd.eof)
+                        {
+#ifdef P25_DEBUG_DUMP
+                            fprintf(stderr, "JPEGDBG END dc-eof mcuX=%d ci=%d bi=%d bj=%d pos=%zu\n", mcuX, ci, bi, bj, rd.pos);
+#endif
+                            ended = 1;
+                            break;
+                        }
+                        dcPred[ci - 1] += diff;
+                        int dc = dcPred[ci - 1];
+                        int px = mcuX * sMaxH * 8 + bi * 8;
+                        int py = mcuY * sMaxV * 8 + bj * 8;
 
-                        if (ci == 1) {
-                            if (dcOnly) {
-                                decode_ac(&rd, acTbl, block, qtz); /* sync only */
-                                int g = clamp255ll(
-                                    (long long)floor((double)dc * (double)qtz[0] / 8.0 + 0.5) + 128);
-                                rowbuf_fill_block(rowBuf, f->width, f->height, px, py, g);
-                            } else {
-                                block[0] = (long long)dc * qtz[0];
-                                for (int i = 1; i < 64; i++) block[i] = 0;
-                                if (!decode_ac(&rd, acTbl, block, qtz)) { ended = 1; break; }
-                                idct2d(block);
-                                for (int vy = 0; vy < 8; vy++) {
-                                    for (int vx = 0; vx < 8; vx++) {
-                                        double dv = (double)block[vy * 8 + vx] /
-                                                    (double)IDCT_SCALE;
-                                        int g = clamp255ll(
-                                            (long long)floor(dv + 0.5) + 128);
-                                        rowbuf_put(rowBuf, f->width, f->height, px + vx, py + vy,
-                                                   (uint8_t)g);
-                                    }
+                        if (ci == 1)
+                        {
+                            /* Luma (Y): fill row buffer */
+                            if (dcOnly)
+                            {
+                                /* consume AC symbols for stream sync, DC only */
+                                memset(block, 0, 64 * sizeof(int64_t));
+                                if (!jpeg_decode_ac(&rd, acTbl, block, qtz))
+                                {
+#ifdef P25_DEBUG_DUMP
+                                    fprintf(stderr, "JPEGDBG END dconly-ac mcuX=%d ci=%d bi=%d bj=%d pos=%zu eof=%d\n", mcuX, ci, bi, bj, rd.pos, rd.eof);
+#endif
+                                    ended = 1;
+                                    break;
+                                }
+                                int g = jpeg_clamp255((int)floor((double)dc * qtz[1] / 8.0 + 0.5) + 128);
+                                for (int ri = 0; ri < 8; ri++)
+                                {
+                                    jpeg_baseline_store_row_rowbuf(rowBuf, maxRows, py + ri, px, NULL, g);
                                 }
                             }
-                        } else {
-                            /* Chroma: consumed for sync only, results discarded */
-                            block[0] = 0;
-                            decode_ac(&rd, acTbl, block, qtz);
+                            else
+                            {
+                                block[0] = dc * (int64_t)qtz[1];
+                                for (int i = 1; i < 64; i++) block[i] = 0;
+                                if (!jpeg_decode_ac(&rd, acTbl, block, qtz))
+                                {
+#ifdef P25_DEBUG_DUMP
+                                    fprintf(stderr, "JPEGDBG END full-ac mcuX=%d ci=%d bi=%d bj=%d pos=%zu eof=%d\n", mcuX, ci, bi, bj, rd.pos, rd.eof);
+#endif
+                                    ended = 1;
+                                    break;
+                                }
+#ifdef P25_DEBUG_DUMP
+                                fprintf(stderr, "JPEGDBG block mcuX=%d bi=%d bj=%d ci=%d:", mcuX, bi, bj, ci);
+                                for (int zz = 0; zz < 64; zz++) fprintf(stderr, " %lld", (long long)block[zz]);
+                                fprintf(stderr, "\n");
+#endif
+                                jpeg_idct2d(block, tmp);
+                                for (int ri = 0; ri < 8; ri++)
+                                {
+                                    int vals8[8];
+                                    for (int cx = 0; cx < 8; cx++)
+                                    {
+                                        vals8[cx] = jpeg_clamp255(
+                                            (int)floor((double)block[ri * 8 + cx] / JPEG_IDCT_SCALE + 0.5) + 128);
+                                    }
+                                    jpeg_baseline_store_row_rowbuf(rowBuf, maxRows, py + ri, px, vals8, -1);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            /* Chroma: consume bits for sync, discard */
+                            memset(block, 0, 64 * sizeof(int64_t));
+                            if (!jpeg_decode_ac(&rd, acTbl, block, qtz))
+                            {
+#ifdef P25_DEBUG_DUMP
+                                fprintf(stderr, "JPEGDBG END chroma-ac mcuX=%d ci=%d bi=%d bj=%d pos=%zu eof=%d\n", mcuX, ci, bi, bj, rd.pos, rd.eof);
+#endif
+                                ended = 1;
+                                break;
+                            }
                         }
                     }
                 }
             }
+
             mcuIndex++;
         }
-        /* Feed this MCU band even when the scan ended mid-row. */
-        int base = mcuY * bh;
-        for (int ri = 0; ri < bh; ri++) {
+
+        /* Feed completed block rows to the downscaler (also when ended, so
+         * the final MCU row's Y rows are not lost). */
+        int base = mcuY * sMaxV * 8;
+        for (int ri = 0; ri < sMaxV * 8; ri++)
+        {
             int y = base + ri;
-            if (y < f->height) scale_accum_add_row(acc, rowBuf[y]);
+            if (y < height)
+            {
+                scale_accum_add_row(res.acc, rowBuf[y]); /* NULL row = no-op */
+            }
         }
-        if (ended) break;
     }
 
-    rowbuf_free(rowBuf, f->height);
-    *outPos = rd.pos;
-    *outAcc = acc;
-    return ended;
+    for (int y = 0; y < maxRows; y++)
+    {
+        if (rowBuf[y])
+        {
+            PLUTO_FREE(rowBuf[y]);
+        }
+    }
+    PLUTO_FREE(rowBuf);
+
+    res.ended = ended;
+    res.pos = rd.pos;
+    return res;
 }
 
-static int decode_progressive_dc(const uint8_t* data, size_t len, size_t pos,
-                                 const JFrame* f, const JScan* sc,
-                                 JHuff* const* dcTables,
-                                 int restartInterval, JPState* st,
-                                 size_t* outPos) {
-    int ns = sc->ns;
+/* ── Progressive: decode DC scans only (memory-safe, block averages) ─────── */
+/* Returns 1 on success, 0 on truncation. */
+static int jpeg_decode_prog_dc(const uint8_t *data, size_t len, size_t entropyPos,
+                               const JpegFrame *frame, const JpegScan *scan,
+                               const JpegHuff *dcTables, const JpegQt *qt,
+                               int restartInterval, JpegProgState *state)
+{
+    (void)qt;
+    int width = frame->width, height = frame->height;
+    int ns = scan->ns;
 
+    /* Frame-level sampling factors define every component's block grid. */
     int maxHf = 1, maxVf = 1;
-    for (int i = 0; i < f->ncomp; i++) {
-        if (f->comps[i].h > maxHf) maxHf = f->comps[i].h;
-        if (f->comps[i].v > maxVf) maxVf = f->comps[i].v;
+    for (int i = 0; i < frame->ncomp; i++)
+    {
+        if (frame->comps[i].h > maxHf) maxHf = frame->comps[i].h;
+        if (frame->comps[i].v > maxVf) maxVf = frame->comps[i].v;
     }
-    int bw = maxHf * 8, bh = maxVf * 8;
-    int mcuColsF = (f->width + bw - 1) / bw; if (mcuColsF < 1) mcuColsF = 1;
-    int mcuRowsF = (f->height + bh - 1) / bh; if (mcuRowsF < 1) mcuRowsF = 1;
+    int mcuColsF = (width + maxHf * 8 - 1) / (maxHf * 8);
+    int mcuRowsF = (height + maxVf * 8 - 1) / (maxVf * 8);
+    if (mcuColsF < 1) mcuColsF = 1;
+    if (mcuRowsF < 1) mcuRowsF = 1;
 
+    /* Non-interleaved scan: each block is its own MCU. */
     int mcuCols, mcuRows;
-    if (ns == 1) {
-        const JComp* fc = &f->comps[sc->ci[1] - 1];
+    if (ns == 1)
+    {
+        const JpegComp *fc = &frame->comps[scan->comps[0] - 1];
         mcuCols = mcuColsF * fc->h;
         mcuRows = mcuRowsF * fc->v;
-    } else {
+    }
+    else
+    {
         mcuCols = mcuColsF;
         mcuRows = mcuRowsF;
     }
 
-    JReader rd = { data, len, pos, 0, 0 };
-    int refinement = (sc->ah != 0);
-    long long mcuIndex = 0;
+    JpegReader rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.str = data;
+    rd.len = len;
+    rd.pos = entropyPos;
+
+    int refinement = (scan->ah != 0);
+    int mcuIndex = 0;
     int ended = 0;
 
-    for (int mcuY = 0; mcuY < mcuRows && !ended; mcuY++) {
-        tasks_yield_check();
-        for (int mcuX = 0; mcuX < mcuCols && !ended; mcuX++) {
-            if (restartInterval > 0 && mcuIndex > 0 &&
-                (mcuIndex % restartInterval) == 0) {
-                if (!jr_expect_restart(&rd, (int)(mcuIndex % 8))) {
+    for (int mcuY = 0; mcuY < mcuRows && !ended; mcuY++)
+    {
+        for (int mcuX = 0; mcuX < mcuCols && !ended; mcuX++)
+        {
+            if (restartInterval > 0 && mcuIndex > 0 && (mcuIndex % restartInterval) == 0)
+            {
+                if (!jpeg_expect_restart(&rd, mcuIndex))
+                {
                     ended = 1;
                     break;
                 }
                 for (int i = 1; i <= ns; i++)
-                    st->dcPred[sc->ci[i]] = 0;
+                {
+                    state->dcPred[scan->comps[i]] = 0;
+                }
             }
 
-            for (int cix = 1; cix <= ns && !ended; cix++) {
-                int c = sc->ci[cix];
-                const JHuff* dcTbl = dcTables[sc->dcSel[cix]];
-                int blocks = (ns == 1) ? 1
-                    : f->comps[c - 1].h * f->comps[c - 1].v;
-                for (int bi = 0; bi < blocks && !ended; bi++) {
-                    tasks_yield_check();
-                    long long idx = st->blkIdx[c];
-                    st->blkIdx[c] = idx + 1;
-                    long long* slot = jp_block_slot(st, c, idx);
-                    if (refinement) {
-                        int bit = jr_read_bits(&rd, 1);
-                        if (bit == JPEG_NIL) { ended = 1; break; }
-                        long long dcv = slot ? *slot : 0;
-                        if (slot) {
-                            if (bit != 0) *slot = dcv + (1LL << sc->al);
-                            else          *slot = dcv - (1LL << sc->al);
+            for (int ci = 1; ci <= ns && !ended; ci++)
+            {
+                int c = scan->comps[ci];
+                const JpegComp *fc = &frame->comps[c - 1];
+                const JpegHuff *dcTbl = &dcTables[scan->dcTbl[ci - 1] & 0x03];
+
+                int blocks = (ns == 1) ? 1 : fc->h * fc->v;
+                for (int bi = 0; bi < blocks; bi++)
+                {
+                    int idx = state->blkIdx[c];
+                    state->blkIdx[c] = idx + 1;
+                    if (!jpeg_prog_ensure(state, c, idx + 1))
+                    {
+                        ended = 1;
+                        break;
+                    }
+                    if (refinement)
+                    {
+                        int bit = jpeg_rd_bits(&rd, 1);
+                        if (bit < 0)
+                        {
+                            ended = 1;
+                            break;
                         }
-                    } else {
-                        int ok;
-                        int diff = decode_dc_sym(&rd, dcTbl, &ok);
-                        if (!ok) { ended = 1; break; }
-                        st->dcPred[c] += diff;
-                        if (slot) *slot = st->dcPred[c] << sc->al;
+                        int dc = state->blockDC[c][idx];
+                        if (bit != 0)
+                        {
+                            state->blockDC[c][idx] = dc + (1 << scan->al);
+                        }
+                        else
+                        {
+                            state->blockDC[c][idx] = dc - (1 << scan->al);
+                        }
+                    }
+                    else
+                    {
+                        int diff = jpeg_decode_dc(&rd, dcTbl);
+                        if (rd.eof)
+                        {
+                            ended = 1;
+                            break;
+                        }
+                        state->dcPred[c] += diff;
+                        state->blockDC[c][idx] = state->dcPred[c] << scan->al;
                     }
                 }
             }
@@ -515,353 +798,517 @@ static int decode_progressive_dc(const uint8_t* data, size_t len, size_t pos,
         }
     }
 
-    *outPos = rd.pos;
-    return !ended;
+    int ok = !ended;
+    return ok;
 }
 
-static ScaleAccum* render_progressive_dc(const JFrame* f, JPState* st,
-                                         int maxW, int maxH, int* const* qt) {
-    int yc = 1;   /* luma assumed first component */
+/* Turn stored DC coefficients into a downscaled grayscale grid.
+ * MCU-row scratch: blocks within one MCU row write different py rows, so
+ * fill an (sMaxV*8) x rowW scratch per MCU row, then feed each source row
+ * (y < height) to the streaming accumulator — exactly the reference's
+ * rowBuf[py+ri] lazy-table pattern, minus the per-pixel Lua tables. */
+static ScaleAccum *jpeg_render_prog_dc(const JpegFrame *frame, const JpegProgState *state,
+                                       int maxW, int maxH, const JpegQt *qt)
+{
+    int width = frame->width, height = frame->height;
+    int yc = 1; /* luma is component index 1 */
 
     int sMaxH = 1, sMaxV = 1;
-    for (int i = 0; i < f->ncomp; i++) {
-        if (f->comps[i].h > sMaxH) sMaxH = f->comps[i].h;
-        if (f->comps[i].v > sMaxV) sMaxV = f->comps[i].v;
+    for (int i = 0; i < frame->ncomp; i++)
+    {
+        if (frame->comps[i].h > sMaxH) sMaxH = frame->comps[i].h;
+        if (frame->comps[i].v > sMaxV) sMaxV = frame->comps[i].v;
     }
-    int bw = sMaxH * 8, bh = sMaxV * 8;
-    int mcuCols = (f->width + bw - 1) / bw; if (mcuCols < 1) mcuCols = 1;
-    int mcuRows = (f->height + bh - 1) / bh; if (mcuRows < 1) mcuRows = 1;
+    int mcuCols = (width + sMaxH * 8 - 1) / (sMaxH * 8);
+    int mcuRows = (height + sMaxV * 8 - 1) / (sMaxV * 8);
+    if (mcuCols < 1) mcuCols = 1;
+    if (mcuRows < 1) mcuRows = 1;
 
-    ScaleAccum* acc = scale_accum_new(f->width, f->height, maxW, maxH);
-    if (!acc) return NULL;
-    uint8_t** rowBuf = rowbuf_new(f->height);
+    ScaleAccum *acc = scale_accum_new(width, height, maxW, maxH);
+    if (!acc)
+    {
+        return NULL;
+    }
 
-    const JComp* yfc = &f->comps[yc - 1];
-    const int* qtz = qt[yfc->qt];
-    long long qdc = qtz ? qtz[0] : 1;
-    long long idx = 0;
+    int rowW = mcuCols * sMaxH * 8;
+    if (rowW < width) rowW = width;
+    int scratchH = sMaxV * 8;
+    uint8_t *scratch = (uint8_t *)PLUTO_MALLOC((size_t)rowW * (size_t)scratchH);
+    if (!scratch)
+    {
+        scale_accum_free(acc);
+        return NULL;
+    }
 
-    for (int mcuY = 0; mcuY < mcuRows; mcuY++) {
-        tasks_yield_check();
-        for (int mcuX = 0; mcuX < mcuCols; mcuX++) {
-            for (int bj = 0; bj < yfc->v; bj++) {
-                for (int bi = 0; bi < yfc->h; bi++) {
-                    tasks_yield_check();
-                    long long dc = 0;
-                    long long* slot = jp_block_slot(st, yc, idx);
-                    if (slot) dc = *slot;
+    const int64_t *blockDC = state->blockDC[yc];
+    int blockDCcap = state->blockDCcap[yc];
+    int yfc_h = frame->comps[yc - 1].h;
+    int yfc_v = frame->comps[yc - 1].v;
+    const uint16_t *qtz = qt->t[frame->comps[yc - 1].qt & 0x03];
+    int qdc = qtz ? qtz[1] : 1;
+    int idx = 0;
+
+    for (int mcuY = 0; mcuY < mcuRows; mcuY++)
+    {
+        memset(scratch, 0, (size_t)rowW * (size_t)scratchH);
+        for (int mcuX = 0; mcuX < mcuCols; mcuX++)
+        {
+            for (int bj = 0; bj < yfc_v; bj++)
+            {
+                for (int bi = 0; bi < yfc_h; bi++)
+                {
+                    int64_t dc = (blockDC && idx < blockDCcap) ? blockDC[idx] : 0;
                     idx++;
                     int px = mcuX * sMaxH * 8 + bi * 8;
                     int py = mcuY * sMaxV * 8 + bj * 8;
-                    int g = clamp255ll(
-                        (long long)floor((double)dc * (double)qdc / 8.0 + 0.5) + 128);
-                    rowbuf_fill_block(rowBuf, f->width, f->height, px, py, (uint8_t)g);
+                    int g = jpeg_clamp255((int)floor((double)dc * qdc / 8.0 + 0.5) + 128);
+                    /* Lua fills rowBuf[py+ri][px+cx+1] = g for ri = 0..7 —
+                     * every block paints ALL 8 rows of its 8x8 cell with the
+                     * flat DC value (py beyond height still consumed idx for
+                     * parity but never reaches the downscaler). */
+                    for (int ri = 0; ri < 8; ri++)
+                    {
+                        int y = py + ri;
+                        if (y >= height)
+                        {
+                            break; /* rows beyond height never reach the scaler */
+                        }
+                        int srow = y - mcuY * sMaxV * 8;
+                        if (srow >= 0 && srow < scratchH)
+                        {
+                            uint8_t *dst = scratch + (size_t)srow * rowW + px;
+                            int lim = px + 8 < rowW ? 8 : rowW - px;
+                            for (int cx = 0; cx < lim; cx++)
+                            {
+                                dst[cx] = (uint8_t)g;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        /* Feed completed block rows to the downscaler. */
         int base = mcuY * sMaxV * 8;
-        for (int ri = 0; ri < sMaxV * 8; ri++) {
+        for (int ri = 0; ri < scratchH; ri++)
+        {
             int y = base + ri;
-            if (y < f->height) scale_accum_add_row(acc, rowBuf[y]);
+            if (y < height)
+            {
+                scale_accum_add_row(acc, scratch + (size_t)ri * rowW);
+            }
         }
     }
 
-    rowbuf_free(rowBuf, f->height);
+    PLUTO_FREE(scratch);
     return acc;
 }
 
-/*-----------------------------------------------------------------------------
- * Main decoder
- *---------------------------------------------------------------------------*/
+/* ── Main decoder ─────────────────────────────────────────────────────────── */
 
-static void frame_free(JFrame* f) {
-    if (!f) return;
-    pluto_free(f->comps);
-    pluto_free(f);
+/* Read a 16-bit big-endian length at data[pos]; 0 on underflow. */
+static int jpeg_read_u16(const uint8_t *data, size_t len, size_t pos)
+{
+    if (pos + 1 >= len)
+    {
+        return 0;
+    }
+    return (data[pos] << 8) | data[pos + 1];
 }
 
-int jpeg_decode_gray(const uint8_t* data, size_t len,
-                     int maxW, int maxH,
-                     uint8_t*** outRows, int* outW, int* outH) {
-    ensure_tables();
-    *outRows = NULL; *outW = 0; *outH = 0;
-    if (!data || len < 4) return -1;
-    if (data[0] != 0xFF || data[1] != 0xD8) return -1;
+uint8_t **jpeg_decode_gray(const uint8_t *data, size_t len,
+                           int maxW, int maxH,
+                           int *outCount, int *outWidth)
+{
+    *outCount = 0;
+    *outWidth = 0;
+    if (!data || len < 4)
+    {
+        return NULL;
+    }
+    if (data[0] != 0xFF || data[1] != 0xD8)
+    {
+        return NULL; /* not a JPEG (SOI check, Lua parity) */
+    }
     if (maxW <= 0) maxW = 360;
     if (maxH <= 0) maxH = 200;
 
-    size_t pos0 = 2;                 /* Lua pos = 3 */
-    JFrame* frame = NULL;
-    int* qt[16] = {0};
-    JHuff* dcTables[16] = {0};
-    JHuff* acTables[16] = {0};
+    jpeg_idct_init();
+
+    size_t pos = 2; /* Lua pos = 3 (1-based) == index 2 (0-based) */
+    JpegFrame frame;
+    memset(&frame, 0, sizeof(frame));
+    int haveFrame = 0;
+    JpegQt qt;
+    memset(&qt, 0, sizeof(qt));
+    JpegHuff dcTables[4];
+    JpegHuff acTables[4];
+    memset(dcTables, 0, sizeof(dcTables));
+    memset(acTables, 0, sizeof(acTables));
+    int haveDc[4] = {0, 0, 0, 0};
+    int haveAc[4] = {0, 0, 0, 0};
     int restartInterval = 0;
     int progressive = 0;
-    JPState* st = (JPState*)pluto_calloc(1, sizeof(JPState));
-    if (st == NULL) goto cleanup;
-    ScaleAccum* acc = NULL;
-    int rc = -1;
-    uint8_t** grid = NULL;
+    JpegProgState state;
+    memset(&state, 0, sizeof(state));
 
-    while (pos0 + 1 < len) {         /* Lua: pos <= #data - 1 */
-        if (data[pos0] != 0xFF) break;
-        int m = data[pos0 + 1];
-        pos0 += 2;
+    ScaleAccum *acc = NULL;
 
-        if (m == 0xD9) break;        /* EOI */
+    while (pos + 1 < len)
+    {
+        if (data[pos] != 0xFF)
+        {
+            break;
+        }
+        int m = data[pos + 1];
+        pos += 2;
 
-        else if (m == 0xDB) {        /* DQT */
-            size_t p = pos0;
-            size_t segEnd = p + j_u16(data, len, p);
-            p += 2;
-            while (p < segEnd) {
-                int pq = j_byte(data, len, p);
+        if (m == 0xD9)
+        {
+            break; /* EOI */
+        }
+        else if (m == 0xDB) /* DQT */
+        {
+            int segLen = jpeg_read_u16(data, len, pos);
+            if (segLen < 2)
+            {
+                break;
+            }
+            size_t segEnd = pos + (size_t)segLen;
+            size_t p = pos + 2;
+            while (p < segEnd && p < len)
+            {
+                int pq = data[p];
                 p++;
-                if (pq == JPEG_NIL) break;
                 int id = pq & 0x0F;
-                int* t = (int*)pluto_calloc(64, sizeof(int));
-                if (!t) goto cleanup;
-                pluto_free(qt[id]);
-                qt[id] = t;
-                for (int i = 0; i < 64; i++) {
-                    if ((pq >> 4) == 0) {
-                        int b = j_byte(data, len, p);
-                        t[i] = (b == JPEG_NIL) ? 1 : b;
+                if (id > 3)
+                {
+                    p = segEnd;
+                    break;
+                }
+                for (int i = 0; i < 64; i++)
+                {
+                    if ((pq >> 4) == 0)
+                    {
+                        qt.t[id][i + 1] = (p < len) ? data[p] : 1;
                         p++;
-                    } else {
-                        t[i] = (int)j_u16(data, len, p);
+                    }
+                    else
+                    {
+                        qt.t[id][i + 1] = (uint16_t)jpeg_read_u16(data, len, p);
                         p += 2;
                     }
                 }
             }
-            pos0 = segEnd;
+            pos = segEnd;
         }
-
-        else if (m == 0xC4) {        /* DHT */
-            size_t p = pos0;
-            size_t segEnd = p + j_u16(data, len, p);
-            p += 2;
-            while (p < segEnd) {
-                int tc = j_byte(data, len, p);
+        else if (m == 0xC4) /* DHT */
+        {
+            int segLen = jpeg_read_u16(data, len, pos);
+            if (segLen < 2)
+            {
+                break;
+            }
+            size_t segEnd = pos + (size_t)segLen;
+            size_t p = pos + 2;
+            while (p < segEnd && p < len)
+            {
+                int tc = data[p];
                 p++;
-                if (tc == JPEG_NIL) break;
-                int counts[17] = {0};
+                uint8_t counts[16];
                 int total = 0;
-                for (int i = 1; i <= 16; i++) {
-                    int c = j_byte(data, len, p);
+                for (int i = 0; i < 16; i++)
+                {
+                    counts[i] = (p < len) ? data[p] : 0;
                     p++;
-                    counts[i] = (c == JPEG_NIL) ? 0 : c;
                     total += counts[i];
                 }
-                if (total > 256) total = 256;
                 uint8_t values[256];
-                int rawTotal = 0;
-                for (int i = 1; i <= 16; i++) rawTotal += counts[i];
-                for (int i = 0; i < rawTotal; i++) {
-                    int b = j_byte(data, len, p);
-                    p++;
-                    if (i < 256) values[i] = (uint8_t)((b == JPEG_NIL) ? 0 : b);
+                if (total > 256)
+                {
+                    total = 256;
                 }
-                JHuff* t = build_huff(counts, values, total);
-                if (!t) goto cleanup;
+                for (int i = 0; i < total; i++)
+                {
+                    values[i] = (p < len) ? data[p] : 0;
+                    p++;
+                }
                 int cls = (tc >> 4) & 1;
                 int id = tc & 0x0F;
-                if (cls == 0) {
-                    pluto_free(dcTables[id]);
-                    dcTables[id] = t;
-                } else {
-                    pluto_free(acTables[id]);
-                    acTables[id] = t;
+                if (id <= 3)
+                {
+                    if (cls == 0)
+                    {
+                        jpeg_build_huff(&dcTables[id], counts, values, total);
+                        haveDc[id] = 1;
+                    }
+                    else
+                    {
+                        jpeg_build_huff(&acTables[id], counts, values, total);
+                        haveAc[id] = 1;
+                    }
                 }
             }
-            pos0 = segEnd;
+            pos = segEnd;
         }
-
-        else if (m == 0xC0 || m == 0xC2) {   /* SOF0 / SOF2 */
-            size_t p = pos0 + 2;             /* skip length */
-            int precision = j_byte(data, len, p); if (precision == JPEG_NIL) precision = 8;
-            int height = (int)j_u16(data, len, p + 1);
-            int width  = (int)j_u16(data, len, p + 3);
-            int ncomp  = j_byte(data, len, p + 5); if (ncomp == JPEG_NIL) ncomp = 0;
-            if (ncomp < 0 || ncomp > 255 || width <= 0 || height <= 0 ||
-                p + 6 + (size_t)ncomp * 3 > len) goto cleanup;
-            JComp* comps = (JComp*)pluto_calloc((size_t)ncomp, sizeof(JComp));
-            if (!comps) goto cleanup;
+        else if (m == 0xC0 || m == 0xC2) /* SOF0 / SOF2 */
+        {
+            int segLen = jpeg_read_u16(data, len, pos);
+            size_t p = pos + 2; /* skip length (Lua p = pos+2) */
+            frame.precision = (p < len) ? data[p] : 8;
+            frame.height = jpeg_read_u16(data, len, p + 1);
+            frame.width = jpeg_read_u16(data, len, p + 3);
+            frame.ncomp = (p + 5 < len) ? data[p + 5] : 0;
+            if (frame.ncomp > 4) frame.ncomp = 4;
             p += 6;
-            for (int i = 0; i < ncomp; i++) {
-                comps[i].id = j_byte(data, len, p);
-                int samp = j_byte(data, len, p + 1);
-                if (samp == JPEG_NIL) samp = 0x11;
-                comps[i].h = samp >> 4;
-                comps[i].v = samp & 0x0F;
-                int qtid = j_byte(data, len, p + 2);
-                comps[i].qt = (qtid == JPEG_NIL) ? 0 : (qtid & 0x0F);
+            for (int i = 0; i < frame.ncomp; i++)
+            {
+                frame.comps[i].id = (p < len) ? data[p] : 0;
+                int samp = (p + 1 < len) ? data[p + 1] : 0x11;
+                frame.comps[i].qt = (p + 2 < len) ? data[p + 2] : 0;
+                frame.comps[i].h = samp >> 4;
+                frame.comps[i].v = samp & 0x0F;
                 p += 3;
             }
-            frame_free(frame);
-            frame = (JFrame*)pluto_malloc(sizeof(JFrame));
-            if (!frame) { pluto_free(comps); goto cleanup; }
-            frame->width = width;
-            frame->height = height;
-            frame->precision = precision;
-            frame->ncomp = ncomp;
-            frame->comps = comps;
+            haveFrame = 1;
             progressive = (m == 0xC2);
-            jpstate_reset(frame, st);
-            pos0 += j_u16(data, len, pos0);
+            for (int i = 0; i < 5; i++)
+            {
+                state.blkIdx[i] = 0;
+            }
+            pos = pos + (size_t)segLen;
         }
-
-        else if (m == 0xDD) {        /* DRI */
-            restartInterval = (int)j_u16(data, len, pos0 + 2);
-            pos0 += j_u16(data, len, pos0);
+        else if (m == 0xDD) /* DRI */
+        {
+            restartInterval = jpeg_read_u16(data, len, pos + 2);
+            int segLen = jpeg_read_u16(data, len, pos);
+            pos = pos + (size_t)segLen;
         }
-
-        else if (m == 0xDA) {        /* SOS */
-            if (!frame) break;
-            size_t lp = pos0;        /* length field start */
-            int segLen = (int)j_u16(data, len, lp);
-            int ns = j_byte(data, len, lp + 2); if (ns == JPEG_NIL) ns = 0;
-            if (ns < 1 || ns > 255) { if (segLen > 0) pos0 += segLen; else break; continue; }
-            JScan sc;
-            memset(&sc, 0, sizeof(sc));
-            sc.ns = ns;
-            size_t p = lp + 3;
-            for (int i = 1; i <= ns; i++) {
-                int cid = j_byte(data, len, p);
-                int tbls = j_byte(data, len, p + 1);
-                if (tbls == JPEG_NIL) tbls = 0;
+        else if (m == 0xDA) /* SOS */
+        {
+            if (!haveFrame)
+            {
+                break;
+            }
+            int segLen = jpeg_read_u16(data, len, pos);
+            JpegScan scan;
+            memset(&scan, 0, sizeof(scan));
+            scan.ns = (pos + 2 < len) ? data[pos + 2] : 0;
+            if (scan.ns > 4) scan.ns = 4;
+            size_t p = pos + 3;
+            for (int i = 1; i <= scan.ns; i++)
+            {
+                int cid = (p < len) ? data[p] : 0;
+                int tbls = (p + 1 < len) ? data[p + 1] : 0;
                 int ci = 0;
-                for (int jj = 1; jj <= frame->ncomp; jj++) {
-                    if (frame->comps[jj - 1].id == cid) { ci = jj; break; }
+                for (int j = 1; j <= frame.ncomp; j++)
+                {
+                    if (frame.comps[j - 1].id == cid)
+                    {
+                        ci = j;
+                        break;
+                    }
                 }
-                if (ci == 0) ci = i;
-                sc.ci[i] = ci;
-                sc.dcSel[i] = tbls >> 4;
-                sc.acSel[i] = tbls & 0x0F;
+                if (ci == 0)
+                {
+                    ci = i; /* Lua `ci = ci or i` */
+                }
+                scan.comps[i] = ci;
+                scan.dcTbl[i - 1] = tbls >> 4;
+                scan.acTbl[i - 1] = tbls & 0x0F;
                 p += 2;
             }
-            int ss = j_byte(data, len, p); if (ss == JPEG_NIL) ss = 0;
-            int se = j_byte(data, len, p + 1); if (se == JPEG_NIL) se = 63;
-            int ahal = j_byte(data, len, p + 2); if (ahal == JPEG_NIL) ahal = 0;
-            sc.ss = ss;
-            sc.se = se;
-            sc.ah = ahal >> 4;
-            sc.al = ahal & 0x0F;
+            scan.ss = (p < len) ? data[p] : 0;
+            scan.se = (p + 1 < len) ? data[p + 1] : 63;
+            int ahal = (p + 2 < len) ? data[p + 2] : 0;
+            scan.ah = ahal >> 4;
+            scan.al = ahal & 0x0F;
 
-            size_t entropyPos = lp + (size_t)segLen;
+            size_t entropyPos = pos + (size_t)segLen;
 
-            if (progressive) {
-                if (sc.ss == 0 && sc.se == 0) {
-                    size_t nextPos = entropyPos;
-                    int ok = decode_progressive_dc(data, len, entropyPos, frame, &sc,
-                                                   dcTables, restartInterval, st,
-                                                   &nextPos);
-                    pos0 = nextPos;
-                    if (!ok) break;
-                } else {
-                    /* First AC scan reached: DCs are final enough -- render */
+            if (progressive)
+            {
+                if (scan.ss == 0 && scan.se == 0)
+                {
+                    int ok = jpeg_decode_prog_dc(data, len, entropyPos, &frame, &scan,
+                                                 dcTables, &qt, restartInterval, &state);
+                    /* Lua: pos = nextPos even on truncation, then breaks. */
+                    (void)ok;
+                    if (!ok)
+                    {
+                        break; /* truncated */
+                    }
+                    /* Continue after the scan: skip past its entropy data is
+                     * not possible without parsing (markers are inside the
+                     * entropy stream); the Lua reference simply continues the
+                     * marker loop from reader position — we do the same by
+                     * scanning forward for the next FF xx marker. */
+                    size_t q = entropyPos;
+                    while (q + 1 < len)
+                    {
+                        if (data[q] == 0xFF && data[q + 1] != 0x00 &&
+                            !(data[q + 1] >= 0xD0 && data[q + 1] <= 0xD7))
+                        {
+                            break;
+                        }
+                        q++;
+                    }
+                    pos = q;
+                }
+                else
+                {
+                    /* AC scan: we have all DCs — render and stop. */
                     if (acc == NULL)
-                        acc = render_progressive_dc(frame, st, maxW, maxH, qt);
+                    {
+                        acc = jpeg_render_prog_dc(&frame, &state, maxW, maxH, &qt);
+                    }
                     break;
                 }
-            } else {
-                ScaleAccum* res = NULL;
-                size_t nextPos = entropyPos;
-                int ended = decode_baseline(data, len, entropyPos, frame, &sc,
-                                            dcTables, acTables, (int* const*)qt,
-                                            restartInterval, maxW, maxH,
-                                            &res, &nextPos);
-                acc = res;
-                pos0 = nextPos;
-                if (ended) break;
+            }
+            else
+            {
+                JpegBaseResult res = jpeg_decode_baseline(data, len, entropyPos, &frame, &scan,
+                                                          dcTables, acTables, &qt,
+                                                          restartInterval, maxW, maxH);
+                acc = res.acc;
+                res.acc = NULL; /* ownership moved */
+                pos = res.pos;
+                if (res.ended)
+                {
+                    break;
+                }
             }
         }
-
-        else {
-            /* Other segment: skip by length */
-            unsigned slen = j_u16(data, len, pos0);
-            if (slen == 0) break;   /* hang guard (Lua would spin here) */
-            pos0 += slen;
-        }
-    }
-
-    if (acc == NULL && frame)
-        acc = render_progressive_dc(frame, st, maxW, maxH, qt);
-
-    if (acc != NULL && acc->count > 0) {
-        int tw = 0, th = 0;
-        int count = scale_accum_finish(acc, &tw, &th);
-        if (count > 0 && tw > 0) {
-            grid = (uint8_t**)rowbuf_new(count);
-            int okAlloc = 1;
-            for (int y = 0; y < count && okAlloc; y++) {
-                grid[y] = (uint8_t*)pluto_malloc((size_t)tw);
-                if (!grid[y]) { okAlloc = 0; break; }
-                for (int x = 0; x < tw; x++)
-                    grid[y][x] = clamp255ll(acc->out[y][x]);
+        else
+        {
+            /* Other segment: skip by length. */
+            int segLen = jpeg_read_u16(data, len, pos);
+            if (segLen < 2)
+            {
+                break;
             }
-            if (okAlloc) {
-                *outRows = grid;
-                *outW = tw;
-                *outH = count;
-                grid = NULL;
-                rc = 0;
-            }
+            pos = pos + (size_t)segLen;
         }
     }
 
-cleanup:
-    if (grid) rowbuf_free(grid, *outH);
-    if (acc) scale_accum_free(acc);
-    if (st != NULL) {
-        jpstate_free(st);
-        pluto_free(st);
+    if (acc == NULL && haveFrame)
+    {
+        /* Progressive with no AC scans reached yet: render DCs. */
+        acc = jpeg_render_prog_dc(&frame, &state, maxW, maxH, &qt);
     }
-    frame_free(frame);
-    for (int i = 0; i < 16; i++) {
-        pluto_free(qt[i]);
-        pluto_free(dcTables[i]);
-        pluto_free(acTables[i]);
-    }
-    return rc;
-}
 
-void jpeg_free_rows(uint8_t** rows, int h) {
-    if (!rows) return;
-    for (int y = 0; y < h; y++) pluto_free(rows[y]);
-    pluto_free(rows);
-}
+    jpeg_prog_free(&state);
 
-#if defined(PLUTO_JPEG_PD)
-#include "pd_api.h"
-
-typedef struct {
-    uint8_t** rows;
-    int w, h;
-} JpegPixCtx;
-
-static int jpeg_pix(void* ud, int x, int y) {
-    JpegPixCtx* c = (JpegPixCtx*)ud;
-    if (y >= c->h || c->rows[y] == NULL) return 255;
-    return x < c->w ? c->rows[y][x] : 255;
-}
-
-struct LCDBitmap* jpeg_decode(struct PlaydateAPI* pd, const uint8_t* data,
-                              size_t len, int maxW, int maxH) {
-    uint8_t** rows = NULL;
-    int tw = 0, th = 0;
-    if (jpeg_decode_gray(data, len, maxW, maxH, &rows, &tw, &th) != 0)
+    if (!acc)
+    {
         return NULL;
-    JpegPixCtx ctx = { rows, tw, th };
-    struct LCDBitmap* img =
-        dither_to_image(pd, jpeg_pix, &ctx, tw, th);
-    jpeg_free_rows(rows, th);
+    }
+
+    int rows = 0, rowW = 0;
+    uint8_t **grid = scale_accum_finish(acc, &rows, &rowW);
+    if (!grid || rows == 0) /* Lua: acc.count == 0 → nil */
+    {
+        scale_accum_free(acc);
+        return NULL;
+    }
+
+    /* Lua hands Dither.toImage (targetW, targetH) from Scale.boxSizes and
+     * reads rows[y] (missing -> 255) — so a trailing PARTIAL accumulator row
+     * (emitted by finish() when srcH % boxH != 0) exists in rows[] but is
+     * never shown: toImage iterates only y < targetH. Clip to targetH here
+     * for exact parity (tc3: 64 rows in, boxH=6 -> 10 full + 1 partial ->
+     * grid is 16x10, not 16x11). */
+    {
+        int twc, thc;
+        scale_box_sizes(frame.width, frame.height, maxW, maxH, NULL, NULL, &twc, &thc);
+        if (rows > thc)
+        {
+            rows = thc;
+        }
+    }
+
+    /* Detach the grid from the accumulator so it survives scale_accum_free:
+     * finish() returns acc-owned pointers; move them to a caller-owned array
+     * with a NUL sentinel so jpeg_gray_free can walk it without a count. */
+    uint8_t **out = (uint8_t **)PLUTO_MALLOC(sizeof(uint8_t *) * (size_t)(rows + 1));
+    if (!out)
+    {
+        scale_accum_free(acc);
+        return NULL;
+    }
+    for (int i = 0; i < rows; i++)
+    {
+        out[i] = grid[i];
+        grid[i] = NULL; /* the accumulator frees only non-NULL rows */
+    }
+    out[rows] = NULL;
+    scale_accum_free(acc);
+
+    *outCount = rows;
+    *outWidth = rowW;
+    return out;
+}
+
+void jpeg_gray_free(uint8_t **rows)
+{
+    if (!rows)
+    {
+        return;
+    }
+    for (int i = 0; rows[i]; i++)
+    {
+        PLUTO_FREE(rows[i]);
+    }
+    PLUTO_FREE(rows);
+}
+
+/* Output-pixel closure state (Lua: rows[y] and r[x+1] or 255). */
+typedef struct
+{
+    uint8_t **rows;
+    int outCount;
+    int outWidth;
+} JpegDitherCtx;
+
+static uint8_t jpeg_dither_pixel(void *ud, int x, int y)
+{
+    JpegDitherCtx *c = (JpegDitherCtx *)ud;
+    if (y < 0 || y >= c->outCount)
+    {
+        return 255;
+    }
+    const uint8_t *r = c->rows[y];
+    if (!r || x < 0 || x >= c->outWidth)
+    {
+        return 255;
+    }
+    return r[x];
+}
+
+LCDBitmap *jpeg_decode(const uint8_t *data, size_t len, int maxW, int maxH)
+{
+    int rows = 0, rowW = 0;
+    uint8_t **grid = jpeg_decode_gray(data, len, maxW, maxH, &rows, &rowW);
+    if (!grid || rows == 0 || rowW <= 0)
+    {
+        if (grid)
+        {
+            jpeg_gray_free(grid);
+        }
+        return NULL;
+    }
+
+    /* int targetH needed for the dither; scale_box_sizes recomputes it. */
+    int boxW, boxH, targetW, targetH;
+    /* Recover source dims: scale.c stores them in the accumulator, but the
+     * public seam recomputes the box — same math (floor(src/box), min 1). */
+    /* targetW == rowW; targetH == rows. */
+    (void)boxW; (void)boxH;
+    targetW = rowW;
+    targetH = rows;
+
+    JpegDitherCtx dc = { grid, rows, rowW };
+    LCDBitmap *img = dither_to_bitmap(targetW, targetH, jpeg_dither_pixel, &dc);
+    jpeg_gray_free(grid);
     return img;
 }
-#else
-struct LCDBitmap* jpeg_decode(struct PlaydateAPI* pd, const uint8_t* data,
-                              size_t len, int maxW, int maxH) {
-    (void)pd; (void)data; (void)len; (void)maxW; (void)maxH;
-    return NULL;
-}
-#endif

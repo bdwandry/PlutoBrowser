@@ -1,37 +1,26 @@
-#ifndef PLUTO_UI_ERROR_PAGE_H
-#define PLUTO_UI_ERROR_PAGE_H
+/*
+ * PlutoBrowser — error_page.h
+ * Error page display (port of Source/ui/error_page.lua).
+ */
+#ifndef PLUTO_ERROR_PAGE_H
+#define PLUTO_ERROR_PAGE_H
 
-#include <stddef.h>
+/* ErrorPage.show(errorMsg, failedUrl): resets selection to the first button. */
+void error_page_show(const char *errorMsg, const char *failedUrl);
 
-#include "pd_api.h"
+/* ErrorPage.handleInput(): feed the button edge masks from
+ * pd->system->getButtonState(current, pushed, released). Returns
+ * "retry"/"search"/"home" action (malloc'd via SDK; free with pluto_free)
+ * or NULL when no button was pressed. */
+char *error_page_handle_input(unsigned int current, unsigned int pushed,
+                              unsigned int released);
 
-// C port of CometBrowser Source/ui/error_page.lua (ErrorPage).
-//
-// show() stores msg/url and resets selection to 1. handle_input mirrors
-// Lua's buttonJustPressed branches: left|up -> -1 (clamp 1), right|down
-// -> +1 (clamp 3), A -> retry / search / home by index.
+/* ErrorPage.draw(). */
+void error_page_draw(void);
 
-typedef enum {
-    EP_BTN_LEFT,
-    EP_BTN_UP,
-    EP_BTN_RIGHT,
-    EP_BTN_DOWN,
-    EP_BTN_A
-} EpButton;
+/* Test/state accessors. */
+int error_page_selected_index(void);
+const char *error_page_message(void);
+const char *error_page_failed_url(void);
 
-typedef enum {
-    EP_ACT_NONE = 0,
-    EP_ACT_RETRY,
-    EP_ACT_SEARCH,
-    EP_ACT_HOME
-} EpAction;
-
-void     ep_init_pd(PlaydateAPI* pd);
-void     ep_show(const char* errorMsg, const char* failedUrl);
-EpAction ep_handle_input(EpButton btn);
-int      ep_selected_index(void);
-const char* ep_error_msg(void);
-const char* ep_failed_url(void);
-void     ep_draw(void);
-
-#endif
+#endif /* PLUTO_ERROR_PAGE_H */

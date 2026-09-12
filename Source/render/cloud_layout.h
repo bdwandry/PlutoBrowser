@@ -1,99 +1,87 @@
-#ifndef PLUTO_RENDER_CLOUD_LAYOUT_H
-#define PLUTO_RENDER_CLOUD_LAYOUT_H
-
-#include <stddef.h>
-
-struct PlaydateAPI;
-struct JsonValue;
-
-/* C port of Source/render/cloud_layout.lua (CloudLayout).
+/*
+ * PlutoBrowser — cloud_layout.h
+ * Port of Source/render/cloud_layout.lua (reference, 152 lines).
  *
- * Parses the JSON payload served on the MODE_OPERA_DS "cloud" path and
- * renders it: text blocks, images (via ImageDecoder), form input boxes,
- * submit buttons, link rects (via LinkManager) and a scrollbar.
+ * Lua → C function map:
+ *   CloudLayout.parse(jsonString, baseUrl) → cloud_parse() + cloud_free_doc()
+ *   CloudLayout.build(doc)                 → cloud_build()
+ *   CloudLayout.draw(scrollY)              → cloud_draw()
+ *   (module state renderItems)             → internal item array + accessors
+ *   (module state totalHeight)             → cloud_total_height()
+ *   (module state selectedInputItem)       → cloud_selected_input_item()
  *
- * Faithful parity notes:
- *  - parse(jsonString, baseUrl): baseUrl is accepted but UNUSED in the
- *    Lua source; kept in the C signature for parity.
- *  - Malformed JSON parses to { title="Parse Error", elements={},
- *    totalHeight=240 }; missing fields fall back to "Cloud Page", {},
- *    240 respectively.
- *  - build() skips elements with y < 0 and offsets by
- *    CONTENT_Y + el.y. Empty/absent element lists reset totalHeight to
- *    CONTENT_HEIGHT.
- *  - Text font selection: font=="large" -> heading1, "bold" -> bodyBold,
- *    "mono" -> mono, otherwise body; each falls back to the system font
- *    when its slot is unset (Lua: `Style.fontX or gfx.getFont()`).
- *  - input/submit items also register a LinkManager entry so they are
- *    selectable; those links carry isFormInput/inputBlock instead of an
- *    href (see lm_add_form_input).
- *  - draw(scrollY) paints its own white content background, clips to the
- *    content area, draws the selected-link outline itself (black, line
- *    width 3, roundRect r3 inflated by 2px -- distinct from
- *    LinkManager.drawSelectedHighlight) and finishes with a scrollbar.
+ * Preserved reference semantics (verified against the verbatim Lua):
+ *   - parse: any json.decode failure → { title="Parse Error",
+ *     elements={}, totalHeight=240 }; missing fields fall back to
+ *     title="Cloud Page", elements={}, totalHeight=240.
+ *   - build: NULL/empty doc → items cleared, totalHeight = CONTENT_HEIGHT;
+ *     elements with y < 0 are skipped; text/image/link/input/submit handled;
+ *     unknown element types are silently ignored (Lua if/elseif chain).
+ *     LinkManager.clear() runs first. NOTE (reference quirk): link elements
+ *     go through LinkManager.addLink which records href only — the Lua
+ *     addLink drops the isFormInput/inputBlock fields the caller intended,
+ *     so C does exactly the same via lm_add_link().
+ *   - draw: white content background, clip rect, per-item culling
+ *     (drawY + h >= CONTENT_Y && drawY <= SCREEN_HEIGHT), text uses
+ *     drawTextInRect w+10/h+10 kWrapWord/kAlignTextLeft (Lua default wrap =
+ *     word, alignment = left), input value-or-placeholder text inset by 4,
+ *     submit = black round-rect + centered FillWhite bold label, selected
+ *     link gets a 3px round-rect ring inset -2/+4, then the scrollbar.
+ *     C quirk parity: an input with empty value AND nil placeholder draws
+ *     empty (Lua drawTextInRect(nil) would error; never occurs in practice —
+ *     C draws "" which is the benign superset).
  */
+#ifndef PLUTO_CLOUD_LAYOUT_H
+#define PLUTO_CLOUD_LAYOUT_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "pd_api.h"
 
-typedef enum {
-    CL_TEXT = 0,
-    CL_IMAGE,
-    CL_INPUT,
-    CL_SUBMIT
-} ClItemType;
+/* One element of a parsed cloud document (Lua doc.elements[i] projection). */
+typedef struct CloudElement
+{
+    char *type;         /* "text" | "image" | "link" | "input" | "submit" | other */
+    int x, y, w, h;     /* Lua `el.y >= 0` gate uses y; non-numbers → parse error */
+    char *text;         /* text elements */
+    char *font;         /* "large" | "bold" | "mono" | anything else = body */
+    char *src;          /* image elements */
+    char *href;         /* link elements */
+    char *inputType;    /* input/submit */
+    char *name;
+    char *value;
+    char *placeholder;
+    char *formAction;
+    char *label;
+} CloudElement;
 
-typedef struct ClItem ClItem;
+typedef struct CloudDoc
+{
+    char *title;
+    CloudElement *elements;
+    int elementCount;
+    int totalHeight;
+} CloudDoc;
 
-struct ClItem {
-    ClItemType type;
-    int x, y, w, h;
-    /* CL_TEXT */
-    char* text;              /* owned */
-    void* font;              /* LCDFont* resolved at build time */
-    /* CL_IMAGE */
-    char* src;               /* owned */
-    char* alt;               /* owned (Lua default "Image") */
-    /* CL_INPUT / CL_SUBMIT */
-    char* inputType;         /* owned */
-    char* name;              /* owned */
-    char* value;             /* owned */
-    char* placeholder;       /* owned */
-    char* formAction;        /* owned */
-    char* label;             /* owned */
-};
+/* CloudLayout.parse: decode a cloud-layout JSON document. Returns NULL on
+ * any JSON syntax error — the caller then uses cloud_parse_error_doc()
+ * (the Lua "Parse Error" literal doc). baseUrl is accepted for signature
+ * parity with the reference; the Lua parse() ignores it. */
+CloudDoc *cloud_parse(const char *jsonString, const char *baseUrl);
 
-typedef struct ClDoc ClDoc;
+/* The Lua literal `{ title = "Parse Error", elements = {}, totalHeight = 240 }`
+ * as a heap doc (caller frees with cloud_free_doc). */
+CloudDoc *cloud_parse_error_doc(void);
 
-void cl_init(struct PlaydateAPI* pd);
+void cloud_free_doc(CloudDoc *doc);
 
-/* Lua CloudLayout.parse(jsonString, baseUrl): parses jsonString into a
- * document. Never returns NULL except on host OOM. */
-ClDoc* cl_parse(const char* jsonStr, size_t len, const char* baseUrl);
-void   cl_doc_free(ClDoc* doc);
+/* CloudLayout.build: consume the doc into render items + link rects. */
+void cloud_build(const CloudDoc *doc);
 
-/* Test/introspection accessors mirroring the returned doc table. */
-const char* cl_doc_title(const ClDoc* doc);      /* never NULL */
-const struct JsonValue* cl_doc_elements(const ClDoc* doc); /* array|NULL */
-double cl_doc_total_height(const ClDoc* doc);
+/* CloudLayout.draw. */
+void cloud_draw(int scrollY);
 
-/* Lua CloudLayout.build(doc): clears render items + LinkManager and
- * flattens doc->elements into drawable items. NULL doc is allowed. */
-void   cl_build(const ClDoc* doc);
+/* Module state accessors (tests / main.c integration). */
+int cloud_total_height(void);
+int cloud_item_count(void);
+void cloud_clear(void); /* items + totalHeight reset (Lua rebuild from scratch) */
 
-/* Lua CloudLayout.draw(scrollY). Host builds: no-op. */
-void   cl_draw(int scrollY);
-
-double cl_total_height(void);
-int    cl_item_count(void);
-const ClItem* cl_item_at(int i);          /* NULL when out of range */
-const ClItem* cl_selected_input(void);    /* nil in current Lua source */
-
-void cl_free_items(void);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif // PLUTO_RENDER_CLOUD_LAYOUT_H
+#endif /* PLUTO_CLOUD_LAYOUT_H */

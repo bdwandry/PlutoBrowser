@@ -1,134 +1,153 @@
-// strbuf.c — growable byte buffer implementation.
-
-#include "strbuf.h"
-
+/*
+ * PlutoBrowser — strbuf.c
+ * Growable byte buffer (Phase 1). See strbuf.h for the contract.
+ */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "mem.h"
+#include "pd_api.h"
+#include "util/strbuf.h"
 
-void sb_init(StrBuf* sb)
+/* Accessor implemented in main.c; lets this module use the SDK allocator. */
+extern PlaydateAPI *pluto_pd(void);
+
+/* Use the SDK allocator so memory is accounted by the Playdate runtime. */
+#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
+#define PLUTO_REALLOC(p, n) pluto_pd()->system->realloc((p), (n))
+#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+
+int strbuf_init(StrBuf *sb)
 {
-    sb->data = NULL;
+    sb->data = (char *)PLUTO_MALLOC(64);
+    if (!sb->data)
+    {
+        sb->len = 0;
+        sb->cap = 0;
+        return -1;
+    }
+    sb->data[0] = '\0';
+    sb->len = 0;
+    sb->cap = 64;
+    return 0;
+}
+
+void strbuf_free(StrBuf *sb)
+{
+    if (sb->data)
+    {
+        PLUTO_FREE(sb->data);
+        sb->data = NULL;
+    }
     sb->len = 0;
     sb->cap = 0;
 }
 
-void sb_free(StrBuf* sb)
+void strbuf_reset(StrBuf *sb)
 {
-    if (sb->data != NULL) {
-        pluto_free(sb->data);
-    }
-    sb->data = NULL;
     sb->len = 0;
-    sb->cap = 0;
+    if (sb->data)
+    {
+        sb->data[0] = '\0';
+    }
 }
 
-void sb_clear(StrBuf* sb)
+int strbuf_reserve(StrBuf *sb, size_t extra)
 {
-    sb->len = 0; // keep capacity for reuse
-    if (sb->data != NULL) sb->data[0] = '\0';
-}
-
-int sb_reserve(StrBuf* sb, size_t extra)
-{
-    size_t need, newCap;
-    char* nd;
-
-    if (extra == 0) {
-        return (sb->data != NULL || sb->cap == 0) ? 1 : 1;
+    size_t needed = sb->len + extra + 1; /* +1 for NUL */
+    if (needed <= sb->cap)
+    {
+        return 0;
     }
-    if (sb->cap - sb->len >= extra) {
-        return 1;
-    }
-    need = sb->len + extra;
-    newCap = (sb->cap == 0) ? 64 : sb->cap;
-    while (newCap < need) {
+    size_t newCap = sb->cap ? sb->cap : 64;
+    while (newCap < needed)
+    {
         newCap *= 2;
     }
-    nd = (char*)pluto_realloc(sb->data, newCap);
-    if (nd == NULL) {
-        return 0;
+    char *nd = (char *)PLUTO_REALLOC(sb->data, newCap);
+    if (!nd)
+    {
+        return -1;
     }
     sb->data = nd;
     sb->cap = newCap;
-    return 1;
+    return 0;
 }
 
-int sb_append(StrBuf* sb, const void* bytes, size_t n)
+int strbuf_append_n(StrBuf *sb, const char *str, size_t n)
 {
-    if (n == 0) {
-        return 1;
-    }
-    if (!sb_reserve(sb, n + 1)) {
+    if (n == 0)
+    {
         return 0;
     }
-    memcpy(sb->data + sb->len, bytes, n);
+    if (strbuf_reserve(sb, n) != 0)
+    {
+        return -1;
+    }
+    memcpy(sb->data + sb->len, str, n);
     sb->len += n;
     sb->data[sb->len] = '\0';
-    return 1;
+    return 0;
 }
 
-int sb_append_str(StrBuf* sb, const char* cstr)
+int strbuf_append(StrBuf *sb, const char *str)
 {
-    if (cstr == NULL) {
-        return 1;
-    }
-    return sb_append(sb, cstr, strlen(cstr));
-}
-
-int sb_append_char(StrBuf* sb, char c)
-{
-    return sb_append(sb, &c, 1);
-}
-
-int sb_append_buf(StrBuf* sb, const StrBuf* other)
-{
-    if (other == NULL || other == sb) {
-        return other == NULL ? 1 : 0;
-    }
-    return sb_append(sb, other->data, other->len);
-}
-
-int sb_printf(StrBuf* sb, const char* fmt, ...)
-{
-    char stack[256];
-    va_list ap;
-    int n;
-
-    va_start(ap, fmt);
-    n = vsnprintf(stack, sizeof(stack), fmt, ap);
-    va_end(ap);
-    if (n < 0) {
+    if (!str)
+    {
         return 0;
     }
-    if ((size_t)n < sizeof(stack)) {
-        return sb_append(sb, stack, (size_t)n);
-    }
-    {
-        char* heap = (char*)pluto_malloc((size_t)n + 1);
-        int ok;
-        if (heap == NULL) {
-            return 0;
-        }
-        va_start(ap, fmt);
-        vsnprintf(heap, (size_t)n + 1, fmt, ap);
-        va_end(ap);
-        ok = sb_append(sb, heap, (size_t)n);
-        pluto_free(heap);
-        return ok;
-    }
+    return strbuf_append_n(sb, str, strlen(str));
 }
 
-char* sb_detach(StrBuf* sb)
+int strbuf_append_char(StrBuf *sb, char c)
 {
-    char* out;
-    if (!sb_reserve(sb, 1)) {
-        return NULL;
+    return strbuf_append_n(sb, &c, 1);
+}
+
+int strbuf_appendf(StrBuf *sb, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    va_list argsCopy;
+    va_copy(argsCopy, args);
+    int need = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    if (need < 0)
+    {
+        va_end(argsCopy);
+        return -1;
     }
+    if (strbuf_reserve(sb, (size_t)need) != 0)
+    {
+        va_end(argsCopy);
+        return -1;
+    }
+    vsnprintf(sb->data + sb->len, (size_t)need + 1, fmt, argsCopy);
+    va_end(argsCopy);
+    sb->len += (size_t)need;
+    return 0;
+}
+
+int strbuf_append_rep(StrBuf *sb, char c, size_t count)
+{
+    if (count == 0)
+    {
+        return 0;
+    }
+    if (strbuf_reserve(sb, count) != 0)
+    {
+        return -1;
+    }
+    memset(sb->data + sb->len, c, count);
+    sb->len += count;
     sb->data[sb->len] = '\0';
-    out = sb->data;
+    return 0;
+}
+
+char *strbuf_detach(StrBuf *sb)
+{
+    char *out = sb->data;
     sb->data = NULL;
     sb->len = 0;
     sb->cap = 0;

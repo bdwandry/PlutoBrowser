@@ -1,570 +1,711 @@
-// url.c — URL parser, normalizer, resolver (see header for parity notes).
-
-#include "url.h"
-
+/*
+ * PlutoBrowser — url.c
+ * Port of Source/core/url.lua. Every function mirrors the Lua reference's
+ * observable behavior, including its quirks:
+ *   - encode maps newline → \r\n first, then percent-encodes non [A-Za-z0-9 -_.~ ]
+ *     bytes, then maps ' ' → '+'.
+ *   - decode maps '+' → ' ' first, then %XX.
+ *   - isSearchQuery: protocol/about/file prefixes are URLs; whitespace means
+ *     search; localhost/IP are URLs; a dot with non-leading/non-trailing dot
+ *     (i.e. contains a domain-ish token) is a URL; otherwise search.
+ *   - parse defaults missing scheme to https; port defaults 443/80; about:
+ *     pages get host = sub, path = "/" .. sub.
+ *   - resolve handles absolute, protocol-relative, #-only, ?-only, /-rooted and
+ *     path-relative (with '.'/'..' segment normalization) forms.
+ */
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "../util/dynarray.h"
-#include "../util/luanum.h"
-#include "../util/luapattern.h"
-#include "logger.h"
+#include "core/url.h"
+#include "util/strutil.h"
 
-// Literal-with-length for patterns (all literals are NUL-free here).
-#define PLIT(lit) (lit), (sizeof(lit) - 1)
+extern void pluto_free(void *p);
+extern void *pluto_realloc(void *p, size_t n);
 
-static int is_hex(int c)
+/* url.c-returned buffers (encode/decode/resolve/unwrap) are freed by callers
+ * with pluto_free() (main.c, document.c, readability.c, http_client.c). All
+ * allocations here MUST therefore use the same SDK allocator — newlib malloc
+ * lives in a different heap on device, and cross-allocator frees corrupt the
+ * heap (observed as garbage bytes injected into submitted form URLs). */
+#define URL_MALLOC(n) pluto_realloc(NULL, (n))
+
+/* ── internal helpers ─────────────────────────────────────────────────────── */
+
+static void url_free(char *p)
 {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-           (c >= 'A' && c <= 'F');
+    pluto_free(p);
 }
 
-static char ascii_lower(char c)
+static int is_unreserved(unsigned char c)
 {
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-}
-
-// Byte-exact (locale-free) replacements for ctype.h — Lua pattern classes
-// operate on raw bytes, so host locale must never influence behavior.
-static int ascii_isalnum(int c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-           (c >= 'A' && c <= 'Z');
-}
-
-static int ascii_isspace(int c)
-{
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
-           c == '\v';
-}
-
-// Boolean pattern helpers.
-static int pat_match(const char* s, size_t slen, const char* pat, size_t plen)
-{
-    LPCap caps[LP_MAXCAPTURES];
-    int nc;
-    return lp_match(s, slen, pat, plen, 0, caps, &nc) > 0;
-}
-
-static int pat_find(const char* s, size_t slen, const char* pat, size_t plen)
-{
-    size_t a, b;
-    return lp_find(s, slen, pat, plen, 0, &a, &b) == 1;
-}
-
-// Bounded copy; logs when truncation actually occurs.
-static void copy_bounded(char* dst, size_t dstSz, const char* src, size_t len,
-                         const char* what)
-{
-    if (len >= dstSz) {
-        PLUTO_ERROR("url: truncating %s (%u -> %u)", what, (unsigned)len,
-                    (unsigned)(dstSz - 1));
-        len = dstSz - 1;
+    /* Lua pattern [^%w %-%_%.%~]: word chars, space, '-', '_', '.', '~' are kept */
+    if (isalnum(c))
+    {
+        return 1;
     }
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-}
-
-static void copy_z(char* dst, size_t dstSz, const char* src, const char* what)
-{
-    copy_bounded(dst, dstSz, src, strlen(src), what);
-}
-
-// Trim a mutable buffer in place; returns new length.
-static size_t trim_in_place(char* buf, size_t len)
-{
-    size_t s = 0, e = len;
-    while (s < e && ascii_isspace((unsigned char)buf[s])) s++;
-    while (e > s && ascii_isspace((unsigned char)buf[e - 1])) e--;
-    if (s > 0 && e > s) {
-        memmove(buf, buf + s, e - s);
-    }
-    buf[e - s] = '\0';
-    return e - s;
-}
-
-// Lua-style strict numeric conversion lives in util/luanum.
-
-void url_encode(const char* str, StrBuf* out)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    if (str == NULL || out == NULL) {
-        return;
-    }
-    for (; *str != '\0'; str++) {
-        unsigned char c = (unsigned char)*str;
-        if (c == '\n') {
-            // Lua pre-pass replaces "\n" with "\r\n"; both bytes then encode.
-            sb_append_str(out, "%0D%0A");
-        } else if (c == ' ') {
-            // Lua post-pass replaces remaining spaces with '+'.
-            sb_append_char(out, '+');
-        } else if (ascii_isalnum(c) || c == '-' || c == '_' || c == '.' ||
-                   c == '~') {
-            sb_append_char(out, (char)c);
-        } else {
-            sb_append_char(out, '%');
-            sb_append_char(out, hex[c >> 4]);
-            sb_append_char(out, hex[c & 0x0F]);
-        }
-    }
-}
-
-void url_decode(const char* str, StrBuf* out)
-{
-    if (str == NULL || out == NULL) {
-        return;
-    }
-    for (; *str != '\0'; str++) {
-        if (*str == '+') {
-            sb_append_char(out, ' ');
-            continue;
-        }
-        if (*str == '%' && is_hex((unsigned char)str[1]) &&
-            is_hex((unsigned char)str[2])) {
-            int hi = str[1], lo = str[2];
-            int v;
-            v = (hi <= '9') ? hi - '0' : ((ascii_lower((char)hi) - 'a') + 10);
-            v <<= 4;
-            v |= (lo <= '9') ? lo - '0'
-                             : ((ascii_lower((char)lo) - 'a') + 10);
-            sb_append_char(out, (char)v);
-            str += 2;
-            continue;
-        }
-        sb_append_char(out, *str);
-    }
-}
-
-int url_is_search_query(const char* input)
-{
-    char buf[PLUTO_URL_INPUT_MAX];
-    size_t len, tl;
-
-    if (input == NULL || input[0] == '\0') {
+    switch (c)
+    {
+    case ' ':
+    case '-':
+    case '_':
+    case '.':
+    case '~':
+        return 1;
+    default:
         return 0;
     }
-    len = strlen(input);
-    if (len >= sizeof(buf)) {
-        len = sizeof(buf) - 1;
-    }
-    memcpy(buf, input, len);
-    buf[len] = '\0';
-    tl = trim_in_place(buf, len);
+}
 
-    // Known protocols mean URL.
-    if (pat_match(buf, tl, PLIT("^https?://")) ||
-        pat_find(buf, tl, PLIT("^about:")) ||
-        pat_find(buf, tl, PLIT("^file://"))) {
+static int scheme_prefix_len(const char *s)
+{
+    /* ^[a-zA-Z][%w+%-%.]*:// — scheme then "://" */
+    size_t i = 0;
+    if (!s || !isalpha((unsigned char)s[0]))
+    {
+        return 0;
+    }
+    i = 1;
+    while (s[i] != '\0' && (isalnum((unsigned char)s[i]) || s[i] == '+' || s[i] == '-' || s[i] == '.'))
+    {
+        i++;
+    }
+    if (strncmp(s + i, "://", 3) == 0)
+    {
+        return (int)(i + 3);
+    }
+    return 0;
+}
+
+static int has_any_space(const char *s)
+{
+    if (!s)
+    {
+        return 0;
+    }
+    for (const char *p = s; *p; p++)
+    {
+        if (strutil_is_space(*p))
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void append_port_if_needed(char *buf, size_t bufSize, const char *scheme, int port)
+{
+    size_t len = strlen(buf);
+    int isSsl = strcmp(scheme, "https") == 0;
+    int showPort = (isSsl && port != 443) || (!isSsl && port != 80 && port != 0);
+    if (showPort)
+    {
+        snprintf(buf + len, bufSize - len, ":%d", port);
+    }
+}
+
+/* ── public API ───────────────────────────────────────────────────────────── */
+
+char *url_encode(const char *str)
+{
+    if (!str)
+    {
+        str = "";
+    }
+    /* First pass: size. CRLF expansion and %XX escapes. */
+    size_t maxLen = 0;
+    for (const char *p = str; *p; p++)
+    {
+        if (*p == '\n')
+        {
+            maxLen += 2;
+        }
+        else if (is_unreserved((unsigned char)*p) || *p == '\r')
+        {
+            maxLen += 1;
+        }
+        else
+        {
+            maxLen += 3;
+        }
+    }
+    char *out = (char *)URL_MALLOC(maxLen + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    char *o = out;
+    for (const char *p = str; *p; p++)
+    {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\n')
+        {
+            *o++ = '\r';
+            *o++ = '\n';
+        }
+        else if (is_unreserved(c))
+        {
+            /* Lua keeps the byte as-is here; space becomes '+' below. */
+            *o++ = (char)c;
+        }
+        else
+        {
+            o += sprintf(o, "%%%02X", c);
+        }
+    }
+    *o = '\0'; /* BUGFIX (BF5b): pass 1 previously left the tail of the
+                * allocation uninitialized. The pass-2 ' '→'+' scan then read
+                * stale heap bytes on device (recycled SDK heap) and copied
+                * them into the result — the 3-garbage-byte corruption seen
+                * in submitted URLs. Simulator zero-fills fresh host pages,
+                * which masked it. Terminate before scanning. */
+    /* Second pass: ' ' → '+' in-place (shrink-only, safe). */
+    char *w = out;
+    for (const char *r = out; *r; r++)
+    {
+        *w++ = (*r == ' ') ? '+' : *r;
+    }
+    *w = '\0';
+    return out;
+}
+
+char *url_decode(const char *str)
+{
+    if (!str)
+    {
+        str = "";
+    }
+    size_t n = strlen(str);
+    char *out = (char *)URL_MALLOC(n + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    char *o = out;
+    for (const char *p = str; *p;)
+    {
+        if (*p == '+')
+        {
+            *o++ = ' ';
+            p++;
+        }
+        else if (*p == '%' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2]))
+        {
+            char hex[3] = { p[1], p[2], 0 };
+            *o++ = (char)strtol(hex, NULL, 16);
+            p += 3;
+        }
+        else
+        {
+            *o++ = *p++;
+        }
+    }
+    *o = '\0';
+    return out;
+}
+
+int url_is_search_query(const char *input)
+{
+    if (!input || !*input)
+    {
+        return 0;
+    }
+    char *trimmed = strutil_trim_dup(input);
+    if (!trimmed)
+    {
+        return 0;
+    }
+    const char *t = trimmed;
+
+    if (strutil_istarts_with(t, "http://") || strutil_istarts_with(t, "https://") ||
+        strutil_istarts_with(t, "about:") || strutil_istarts_with(t, "file://"))
+    {
+        url_free(trimmed);
         return 0;
     }
 
-    // Any whitespace -> search query.
-    if (pat_find(buf, tl, PLIT("%s"))) {
+    if (has_any_space(t))
+    {
+        url_free(trimmed);
         return 1;
     }
 
-    // localhost / bare IP prefix -> URL.
-    if (pat_find(buf, tl, PLIT("^localhost")) ||
-        pat_find(buf, tl, PLIT("^%d+%.%d+%.%d+%.%d+"))) {
+    /* localhost or dotted-quad IP */
+    if (strncmp(t, "localhost", 9) == 0)
+    {
+        url_free(trimmed);
         return 0;
     }
-
-    // A dot that is neither leading nor trailing -> URL.
-    if (pat_find(buf, tl, PLIT("%.")) &&
-        !pat_find(buf, tl, PLIT("^%.")) &&
-        !pat_find(buf, tl, PLIT("%.$"))) {
-        return 0;
+    {
+        int digits = 0, dots = 0, ok = 1;
+        for (const char *p = t; *p; p++)
+        {
+            if (isdigit((unsigned char)*p))
+            {
+                digits++;
+            }
+            else if (*p == '.')
+            {
+                dots++;
+            }
+            else
+            {
+                ok = 0;
+                break;
+            }
+        }
+        if (ok && digits > 0 && dots == 3)
+        {
+            url_free(trimmed);
+            return 0; /* IPv4 */
+        }
     }
 
+    /* Contains a dot that is neither leading nor trailing → URL (Lua's
+     * "[%."]-heuristic with ^%. and %.$ exclusions). */
+    {
+        size_t len = strlen(t);
+        if (len >= 1 && t[0] != '.' && t[len - 1] != '.' && strchr(t, '.') != NULL)
+        {
+            url_free(trimmed);
+            return 0;
+        }
+    }
+
+    url_free(trimmed);
     return 1;
 }
 
-void url_parse(const char* urlString, PlutoUrl* out)
+int url_parse(const char *urlString, UrlParsed *out)
 {
-    char work[PLUTO_URL_INPUT_MAX];
-    char raw[PLUTO_URL_INPUT_MAX];
-    size_t rawLen;
-    size_t idx, spanEnd;
-    LPCap caps[LP_MAXCAPTURES];
-    int ncaps;
-
     memset(out, 0, sizeof(*out));
 
-    // Empty input -> internal about:blank record (Lua parity).
-    if (urlString == NULL || urlString[0] == '\0') {
-        copy_z(out->normalized, sizeof(out->normalized), "about:blank", "norm");
-        copy_z(out->scheme, sizeof(out->scheme), "about", "scheme");
-        copy_z(out->host, sizeof(out->host), "blank", "host");
-        out->port = 0;
-        copy_z(out->path, sizeof(out->path), "/", "path");
-        copy_z(out->query, sizeof(out->query), "", "query");
-        copy_z(out->hash, sizeof(out->hash), "", "hash");
-        copy_z(out->fullPath, sizeof(out->fullPath), "/", "fullPath");
-        out->isSsl = 1;
-        return;
-    }
-
-    // Trimmed raw.
-    rawLen = strlen(urlString);
-    if (rawLen >= sizeof(raw)) {
-        PLUTO_ERROR("url: input over %u bytes truncated",
-                    (unsigned)sizeof(raw) - 1);
-        rawLen = sizeof(raw) - 1;
-    }
-    memcpy(work, urlString, rawLen);
-    work[rawLen] = '\0';
-    rawLen = trim_in_place(work, rawLen);
-    memcpy(raw, work, rawLen + 1);
-    copy_bounded(out->raw, sizeof(out->raw), raw, rawLen, "raw");
-
-    // about: scheme record
-    if (pat_find(raw, rawLen, PLIT("^about:"))) {
-        const char* sub = raw + 6;
-        size_t subLen = rawLen - 6;
-        copy_z(out->scheme, sizeof(out->scheme), "about", "scheme");
-        copy_bounded(out->host, sizeof(out->host), sub, subLen, "host");
-        out->port = 0;
-        out->path[0] = '/';
-        copy_bounded(out->path + 1, sizeof(out->path) - 1, sub, subLen, "path");
-        copy_z(out->query, sizeof(out->query), "", "query");
-        copy_z(out->hash, sizeof(out->hash), "", "hash");
-        copy_z(out->fullPath, sizeof(out->fullPath), out->path, "fullPath");
-        copy_bounded(out->normalized, sizeof(out->normalized), raw, rawLen, "norm");
-        out->isSsl = 1;
-        return;
-    }
-
-    // Scheme split: default https when no scheme present.
+    if (!urlString || !*urlString)
     {
-        char rest[PLUTO_URL_INPUT_MAX];
-        size_t restLen;
+        strcpy(out->raw, "");
+        strcpy(out->normalized, "about:blank");
+        strcpy(out->scheme, "about");
+        strcpy(out->host, "blank");
+        out->port = 0;
+        strcpy(out->path, "/");
+        strcpy(out->query, "");
+        strcpy(out->hash, "");
+        strcpy(out->fullPath, "/");
+        out->isSsl = 1;
+        return 0;
+    }
 
-        if (lp_match(raw, rawLen,
-                     PLIT("^([a-zA-Z][%w+%-%.]*)://(.*)$"), 0,
-                     caps, &ncaps) == 2) {
-            copy_bounded(out->scheme, sizeof(out->scheme),
-                         raw + caps[0].start, caps[0].len, "scheme");
-            restLen = caps[1].len;
-            copy_bounded(rest, sizeof(rest), raw + caps[1].start, restLen, "rest");
-        } else {
-            copy_z(out->scheme, sizeof(out->scheme), "https", "scheme");
-            restLen = rawLen;
-            memcpy(rest, raw, rawLen);
-            rest[restLen] = '\0';
-        }
+    char *raw = strutil_trim_dup(urlString);
+    if (!raw)
+    {
+        return -1;
+    }
+    snprintf(out->raw, sizeof(out->raw), "%s", raw);
+
+    /* about: pages */
+    if (strncmp(raw, "about:", 6) == 0)
+    {
+        const char *sub = raw + 6;
+        snprintf(out->normalized, sizeof(out->normalized), "%s", raw);
+        strcpy(out->scheme, "about");
+        snprintf(out->host, sizeof(out->host), "%s", sub);
+        out->port = 0;
+        snprintf(out->path, sizeof(out->path), "/%s", sub);
+        strcpy(out->query, "");
+        strcpy(out->hash, "");
+        snprintf(out->fullPath, sizeof(out->fullPath), "/%s", sub);
+        out->isSsl = 1;
+        url_free(raw);
+        return 0;
+    }
+
+    static char scheme[12]; /* BSS: initialized explicitly below (stack hoist) */
+    scheme[0] = 'h'; scheme[1] = 't'; scheme[2] = 't'; scheme[3] = 'p'; scheme[4] = 's'; scheme[5] = '\0';
+    const char *rest = raw;
+    int splen = scheme_prefix_len(raw);
+    if (splen > 0)
+    {
+        size_t sl = (size_t)splen - 3;
+        if (sl >= sizeof(scheme))
         {
-            size_t i;
-            for (i = 0; out->scheme[i] != '\0'; i++) {
-                out->scheme[i] = ascii_lower(out->scheme[i]);
-            }
+            sl = sizeof(scheme) - 1;
         }
-        out->isSsl = (strcmp(out->scheme, "https") == 0);
-
-        // Split hash FIRST (first '#').
-        out->hash[0] = '\0';
-        if (lp_find_plain(rest, restLen, "#", 1, 0, &idx, &spanEnd) == 1) {
-            copy_bounded(out->hash, sizeof(out->hash), rest + idx + 1,
-                         restLen - (idx + 1), "hash");
-            restLen = idx;
-            rest[restLen] = '\0';
-        }
-
-        // Then query (first '?').
-        out->query[0] = '\0';
-        if (pat_find(rest, restLen, PLIT("%?"))) {
-            lp_find(rest, restLen, PLIT("%?"), 0, &idx, &spanEnd);
-            copy_bounded(out->query, sizeof(out->query), rest + idx + 1,
-                         restLen - (idx + 1), "query");
-            restLen = idx;
-            rest[restLen] = '\0';
-        }
-
-        // Split host[:port] and path at first '/'.
+        memcpy(scheme, raw, sl);
+        scheme[sl] = '\0';
+        for (char *c = scheme; *c; c++)
         {
-            char hostPart[PLUTO_URL_HOST_MAX];
-            size_t hostPartLen;
-            char pathPart[PLUTO_URL_PATH_MAX];
+            *c = (char)tolower((unsigned char)*c);
+        }
+        rest = raw + splen;
+    }
+    int isSsl = strcmp(scheme, "https") == 0;
+    snprintf(out->scheme, sizeof(out->scheme), "%s", scheme);
+    out->isSsl = isSsl;
 
-            if (lp_find_plain(rest, restLen, "/", 1, 0, &idx, &spanEnd) == 1) {
-                hostPartLen = idx;
-                copy_bounded(hostPart, sizeof(hostPart), rest, hostPartLen,
-                             "hostPart");
-                copy_bounded(pathPart, sizeof(pathPart), rest + idx,
-                             restLen - idx, "path");
-            } else {
-                hostPartLen = restLen;
-                copy_bounded(hostPart, sizeof(hostPart), rest, restLen,
-                             "hostPart");
-                pathPart[0] = '/';
-                pathPart[1] = '\0';
-            }
+    static char hash[128]; /* BSS: zeroed explicitly below (stack hoist) */
+    hash[0] = '\0';
+    const char *hashIdx = strchr(rest, '#');
+    if (hashIdx)
+    {
+        snprintf(hash, sizeof(hash), "%s", hashIdx + 1);
+        size_t keep = (size_t)(hashIdx - rest);
+        /* truncate rest in place: rest points into raw */
+        ((char *)rest)[keep] = '\0'; /* safe: rest is inside raw buffer */
+    }
 
-            // Host + optional custom port.
-            hostPart[hostPartLen] = '\0';
-            copy_bounded(out->host, sizeof(out->host), hostPart,
-                         hostPartLen, "host");
-            out->port = out->isSsl ? 443 : 80;
-            if (memchr(hostPart, ':', hostPartLen) != NULL) {
-                idx = (size_t)((const char*)memchr(hostPart, ':', hostPartLen) -
-                               hostPart);
-                {
-                    char portTxt[64];
-                    double customPort;
-                    size_t plen = hostPartLen - (idx + 1);
-                    if (plen >= sizeof(portTxt)) {
-                        plen = sizeof(portTxt) - 1;
-                    }
-                    memcpy(portTxt, hostPart + idx + 1, plen);
-                    portTxt[plen] = '\0';
-                    hostPart[idx] = '\0';
-                    copy_bounded(out->host, sizeof(out->host), hostPart,
-                                 idx, "host");
-                    if (pluto_str_tonumber_strict(portTxt, &customPort) &&
-                        customPort > 0 &&
-                        customPort == (double)(int)customPort) {
-                        out->port = (int)customPort;
-                    }
-                }
-            }
+    static char query[256]; /* BSS: zeroed explicitly below (stack hoist) */
+    query[0] = '\0';
+    const char *queryIdx = strchr(rest, '?');
+    if (queryIdx)
+    {
+        snprintf(query, sizeof(query), "%s", queryIdx + 1);
+        ((char *)rest)[queryIdx - rest] = '\0';
+    }
+
+    /* host[:port] and path */
+    char hostPart[128] = "";
+    char pathPart[256] = "/";
+    const char *slashIdx = strchr(rest, '/');
+    if (slashIdx)
+    {
+        size_t hl = (size_t)(slashIdx - rest);
+        if (hl >= sizeof(hostPart))
+        {
+            hl = sizeof(hostPart) - 1;
+        }
+        memcpy(hostPart, rest, hl);
+        hostPart[hl] = '\0';
+        snprintf(pathPart, sizeof(pathPart), "%s", slashIdx);
+    }
+    else
+    {
+        snprintf(hostPart, sizeof(hostPart), "%s", rest);
+    }
+    if (pathPart[0] == '\0')
+    {
+        strcpy(pathPart, "/");
+    }
+
+    /* host/port */
+    static char host[128]; /* hoisted: device gameTask stack is tiny */
+    int port = isSsl ? 443 : 80;
+    const char *colonIdx = strchr(hostPart, ':');
+    if (colonIdx)
+    {
+        size_t hl = (size_t)(colonIdx - hostPart);
+        if (hl >= sizeof(host))
+        {
+            hl = sizeof(host) - 1;
+        }
+        memcpy(host, hostPart, hl);
+        host[hl] = '\0';
+        int customPort = atoi(colonIdx + 1);
+        if (customPort > 0)
+        {
+            port = customPort;
+        }
+    }
+    else
+    {
+        snprintf(host, sizeof(host), "%s", hostPart);
+    }
+    for (char *c = host; *c; c++)
+    {
+        *c = (char)tolower((unsigned char)*c);
+    }
+    snprintf(out->host, sizeof(out->host), "%s", host);
+    out->port = port;
+    snprintf(out->path, sizeof(out->path), "%s", pathPart);
+    snprintf(out->query, sizeof(out->query), "%s", query);
+    snprintf(out->hash, sizeof(out->hash), "%s", hash);
+
+    /* fullPath */
+    snprintf(out->fullPath, sizeof(out->fullPath), "%s", pathPart);
+    if (query[0] != '\0')
+    {
+        strncat(out->fullPath, "?", sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+        strncat(out->fullPath, query, sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+    }
+    if (hash[0] != '\0')
+    {
+        strncat(out->fullPath, "#", sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+        strncat(out->fullPath, hash, sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+    }
+
+    /* normalized */
+    {
+        char portBuf[16] = "";
+        int isSsl2 = strcmp(scheme, "https") == 0;
+        if ((isSsl2 && port != 443) || (!isSsl2 && port != 80 && port != 0))
+        {
+            snprintf(portBuf, sizeof(portBuf), ":%d", port);
+        }
+        /* Truncation of pathological URLs is acceptable (Lua capped too). */
+        (void)snprintf(out->normalized, sizeof(out->normalized), "%s://%s%s%.300s",
+                       scheme, host, portBuf, out->fullPath);
+    }
+
+    url_free(raw);
+    return 0;
+}
+
+char *url_unwrap_redirect(const char *urlString)
+{
+    if (!urlString || !*urlString)
+    {
+        return NULL;
+    }
+    if (strstr(urlString, "duckduckgo.com/l/") == NULL)
+    {
+        return NULL;
+    }
+    /* find uddg= param: [?&]uddg=([^&]+) */
+    const char *p = urlString;
+    const char *uddg = NULL;
+    while ((p = strchr(p, 'u')) != NULL)
+    {
+        if (strncmp(p, "uddg=", 5) == 0 &&
+            (p == urlString || p[-1] == '?' || p[-1] == '&'))
+        {
+            uddg = p + 5;
+            break;
+        }
+        p++;
+    }
+    if (!uddg)
+    {
+        return NULL;
+    }
+    size_t len = 0;
+    while (uddg[len] != '\0' && uddg[len] != '&')
+    {
+        len++;
+    }
+    char *enc = (char *)URL_MALLOC(len + 1);
+    if (!enc)
+    {
+        return NULL;
+    }
+    memcpy(enc, uddg, len);
+    enc[len] = '\0';
+    char *dec = url_decode(enc);
+    url_free(enc);
+    return dec;
+}
+
+char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr)
+{
+    if (!relativeUrlStr || !*relativeUrlStr)
+    {
+        return strutil_trim_dup(baseUrlStr ? baseUrlStr : "");
+    }
+
+    char *rel = strutil_trim_dup(relativeUrlStr);
+    if (!rel)
+    {
+        return NULL;
+    }
+
+    /* Absolute scheme, about:, data: or javascript: → as-is */
+    if (scheme_prefix_len(rel) > 0 || strutil_istarts_with(rel, "about:") ||
+        strutil_istarts_with(rel, "data:") || strutil_istarts_with(rel, "javascript:"))
+    {
+        return rel; /* transfer ownership */
+    }
+
+    static UrlParsed base; /* hoisted: device gameTask stack is tiny */
+    url_parse(baseUrlStr ? baseUrlStr : "", &base);
+    if (strcmp(base.scheme, "about") == 0)
+    {
+        return rel;
+    }
+
+    /* Port suffix helper value */
+    char portStr[16] = "";
+    if (base.port != 80 && base.port != 443)
+    {
+        snprintf(portStr, sizeof(portStr), ":%d", base.port);
+    }
+
+    char *out = NULL;
+
+    /* Protocol-relative: //host/path */
+    if (rel[0] == '/' && rel[1] == '/')
+    {
+        size_t need = strlen(base.scheme) + 1 + strlen(rel) + 1;
+        out = (char *)URL_MALLOC(need);
+        if (out)
+        {
+            snprintf(out, need, "%s:%s", base.scheme, rel);
+        }
+        url_free(rel);
+        return out;
+    }
+
+    /* Anchor-only: #section — note the Lua builds this WITHOUT portStr when
+     * port is 80/443 but the expression differs slightly; mirror Lua exactly:
+     * scheme://host[:port-if-not-80/443]path[?query]rel  */
+    if (rel[0] == '#')
+    {
+        char anchorPort[16] = "";
+        /* Lua: (base.port ~= 80 and base.port ~= 443 and (":"..base.port) or "") */
+        if (base.port != 80 && base.port != 443)
+        {
+            snprintf(anchorPort, sizeof(anchorPort), ":%d", base.port);
+        }
+        size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(anchorPort) +
+                      strlen(base.path) + strlen(base.query) + 1 + strlen(rel) + 8;
+        out = (char *)URL_MALLOC(need);
+        if (out)
+        {
+            snprintf(out, need, "%s://%s%s%s%s%s",
+                     base.scheme, base.host, anchorPort, base.path,
+                     base.query[0] ? "?" : "", base.query);
+            strcat(out, rel);
+        }
+        url_free(rel);
+        return out;
+    }
+
+    /* Query-only: ?key=val (Lua omits query here) */
+    if (rel[0] == '?')
+    {
+        size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
+                      strlen(base.path) + strlen(rel) + 1;
+        out = (char *)URL_MALLOC(need);
+        if (out)
+        {
+            snprintf(out, need, "%s://%s%s%s%s",
+                     base.scheme, base.host, portStr, base.path, rel);
+        }
+        url_free(rel);
+        return out;
+    }
+
+    /* Root-relative: /path */
+    if (rel[0] == '/')
+    {
+        size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
+                      strlen(rel) + 1;
+        out = (char *)URL_MALLOC(need);
+        if (out)
+        {
+            snprintf(out, need, "%s://%s%s%s", base.scheme, base.host, portStr, rel);
+        }
+        url_free(rel);
+        return out;
+    }
+
+    /* Path-relative: resolve '.'/'..' segments against the base directory */
+    const char *basePath = base.path;
+    const char *lastSlash = strrchr(basePath, '/');
+    size_t dirLen = lastSlash ? (size_t)(lastSlash - basePath) + 1 : 1;
+
+    /* combined = dir + rel */
+    size_t combLen = dirLen + strlen(rel) + 2;
+    char *combined = (char *)URL_MALLOC(combLen);
+    if (!combined)
+    {
+        url_free(rel);
+        return NULL;
+    }
+    if (lastSlash)
+    {
+        memcpy(combined, basePath, dirLen);
+        combined[dirLen] = '\0';
+    }
+    else
+    {
+        strcpy(combined, "/");
+    }
+    strcat(combined, rel);
+
+    /* Normalize segments */
+    char *resolvedPath = (char *)URL_MALLOC(combLen + 2);
+    if (!resolvedPath)
+    {
+        url_free(combined);
+        url_free(rel);
+        return NULL;
+    }
+    resolvedPath[0] = '\0';
+    {
+        /* token walk */
+        char *segments[256];
+        int nseg = 0;
+        char *tok = strtok(combined, "/");
+        while (tok)
+        {
+            if (strcmp(tok, "..") == 0)
             {
-                size_t i;
-                for (i = 0; out->host[i] != '\0'; i++) {
-                    out->host[i] = ascii_lower(out->host[i]);
+                if (nseg > 0)
+                {
+                    nseg--;
                 }
             }
-
-            if (pathPart[0] == '\0') {
-                out->path[0] = '/';
-                out->path[1] = '\0';
-            } else {
-                copy_z(out->path, sizeof(out->path), pathPart, "path");
-            }
-        }
-    }
-
-    // fullPath + normalized.
-    {
-        StrBuf fp;
-        StrBuf norm;
-        sb_init(&fp);
-        sb_init(&norm);
-        sb_append_str(&fp, out->path);
-        if (out->query[0] != '\0') {
-            sb_append_char(&fp, '?');
-            sb_append_str(&fp, out->query);
-        }
-        if (out->hash[0] != '\0') {
-            sb_append_char(&fp, '#');
-            sb_append_str(&fp, out->hash);
-        }
-        copy_bounded(out->fullPath, sizeof(out->fullPath),
-                     fp.data ? fp.data : "", fp.len, "fullPath");
-
-        sb_printf(&norm, "%s://%s", out->scheme, out->host);
-        if ((out->isSsl && out->port != 443) ||
-            (!out->isSsl && out->port != 80 && out->port != 0)) {
-            sb_printf(&norm, ":%d", out->port);
-        }
-        sb_append(&norm, fp.data ? fp.data : "", fp.len);
-        copy_bounded(out->normalized, sizeof(out->normalized),
-                     norm.data ? norm.data : "", norm.len, "normalized");
-        sb_free(&fp);
-        sb_free(&norm);
-    }
-}
-
-int url_unwrap_redirect(const char* urlString, StrBuf* out)
-{
-    LPCap caps[LP_MAXCAPTURES];
-    int ncaps;
-    size_t uLen;
-    char uddg[PLUTO_URL_INPUT_MAX];
-
-    if (urlString == NULL || urlString[0] == '\0' || out == NULL) {
-        return 0;
-    }
-    uLen = strlen(urlString);
-    if (!pat_find(urlString, uLen, PLIT("duckduckgo%.com/l/"))) {
-        return 0;
-    }
-    if (lp_match(urlString, uLen, PLIT("[?&]uddg=([^&]+)"), 0,
-                 caps, &ncaps) != 1) {
-        return 0;
-    }
-    if (caps[0].len == 0 || caps[0].len >= sizeof(uddg)) {
-        return 0;
-    }
-    memcpy(uddg, urlString + caps[0].start, caps[0].len);
-    uddg[caps[0].len] = '\0';
-    url_decode(uddg, out);
-    return out->len > 0;
-}
-
-// Append "scheme://host[:port]" used by resolve branches. Port shown unless
-// it equals the scheme default (80 http / 443 https) — Lua rule inline.
-static void append_origin(StrBuf* out, const PlutoUrl* base)
-{
-    sb_append_str(out, base->scheme);
-    sb_append_str(out, "://");
-    sb_append_str(out, base->host);
-    if (base->port != 80 && base->port != 443) {
-        sb_printf(out, ":%d", base->port);
-    }
-}
-
-void url_resolve(const char* baseUrlStr, const char* relativeUrlStr,
-                 StrBuf* out)
-{
-    char rel[PLUTO_URL_INPUT_MAX];
-    size_t relLen;
-    PlutoUrl base;
-
-    if (relativeUrlStr == NULL || relativeUrlStr[0] == '\0') {
-        sb_append_str(out, baseUrlStr ? baseUrlStr : "");
-        return;
-    }
-
-    relLen = strlen(relativeUrlStr);
-    if (relLen >= sizeof(rel)) {
-        PLUTO_ERROR("url: relative over %u bytes truncated",
-                    (unsigned)sizeof(rel) - 1);
-        relLen = sizeof(rel) - 1;
-    }
-    memcpy(rel, relativeUrlStr, relLen);
-    rel[relLen] = '\0';
-    relLen = trim_in_place(rel, relLen);
-
-    // Absolute schemes / internal specials pass through verbatim.
-    if (pat_match(rel, relLen, PLIT("^[a-zA-Z][%w+%-%.]*://")) ||
-        pat_find(rel, relLen, PLIT("^about:")) ||
-        pat_find(rel, relLen, PLIT("^data:")) ||
-        pat_match(rel, relLen,
-                  PLIT("^[Jj][Aa][Vv][Aa][Ss][Cc][Rr][Ii][Pp][Tt]:"))) {
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    url_parse(baseUrlStr, &base);
-    if (strcmp(base.scheme, "about") == 0) {
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    // Protocol-relative "//host/path"
-    if (relLen >= 2 && rel[0] == '/' && rel[1] == '/') {
-        sb_append_str(out, base.scheme);
-        sb_append_char(out, ':');
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    // Anchor-only "#section"
-    if (rel[0] == '#') {
-        append_origin(out, &base);
-        sb_append_str(out, base.path);
-        if (base.query[0] != '\0') {
-            sb_append_char(out, '?');
-            sb_append_str(out, base.query);
-        }
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    // Query-only "?key=val"
-    if (rel[0] == '?') {
-        append_origin(out, &base);
-        sb_append_str(out, base.path);
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    // Root-relative "/path"
-    if (rel[0] == '/') {
-        append_origin(out, &base);
-        sb_append(out, rel, relLen);
-        return;
-    }
-
-    // Path-relative with dot-segment normalization.
-    {
-        typedef struct {
-            size_t off;
-            size_t len;
-        } SegSpan;
-        static const char SEG_PAT[] = "[^/]+";
-        char combined[PLUTO_URL_INPUT_MAX * 2];
-        size_t dirLen = 0;
-        size_t i;
-        DynArray segs;
-        LPGMatch it;
-        LPCap caps[LP_MAXCAPTURES];
-        int ncaps;
-        StrBuf resolvedPath;
-
-        // dir = longest prefix of base.path ending in '/' (Lua "^(.*/)");
-        // parse() guarantees path starts with '/', so this always matches.
-        for (i = 0; base.path[i] != '\0'; i++) {
-            if (base.path[i] == '/') {
-                dirLen = i + 1;
-            }
-        }
-        if (dirLen == 0) {
-            dirLen = 1; // degenerate: treat as "/"
-        }
-        if (dirLen + relLen + 1 > sizeof(combined)) {
-            PLUTO_ERROR("url: resolve overflow");
-            sb_append(out, rel, relLen);
-            return;
-        }
-        memcpy(combined, base.path, dirLen);
-        memcpy(combined + dirLen, rel, relLen);
-        combined[dirLen + relLen] = '\0';
-
-        da_init(&segs, sizeof(SegSpan));
-        lp_gmatch_init(&it, combined, dirLen + relLen, SEG_PAT,
-                       sizeof(SEG_PAT) - 1);
-        while (lp_gmatch_next(&it, caps, &ncaps)) {
-            SegSpan sp;
-            sp.off = caps[0].start;
-            sp.len = caps[0].len;
-            if (sp.len == 2 && combined[sp.off] == '.' &&
-                combined[sp.off + 1] == '.') {
-                if (segs.count > 0) {
-                    da_pop(&segs);
+            else if (strcmp(tok, ".") != 0)
+            {
+                if (nseg < 256)
+                {
+                    segments[nseg++] = tok;
                 }
-                // beyond-root ".." silently dropped (Lua parity)
-            } else if (sp.len == 1 && combined[sp.off] == '.') {
-                // "." segments skipped
-            } else {
-                da_push(&segs, &sp);
             }
+            tok = strtok(NULL, "/");
         }
-
-        sb_init(&resolvedPath);
-        sb_append_char(&resolvedPath, '/');
-        for (i = 0; i < segs.count; i++) {
-            SegSpan* sp = (SegSpan*)da_get(&segs, i);
-            if (i > 0) {
-                sb_append_char(&resolvedPath, '/');
-            }
-            sb_append(&resolvedPath, combined + sp->off, sp->len);
+        /* rebuild: "/a/b/c" */
+        size_t w = 0;
+        for (int i = 0; i < nseg; i++)
+        {
+            resolvedPath[w++] = '/';
+            size_t slen = strlen(segments[i]);
+            memcpy(resolvedPath + w, segments[i], slen);
+            w += slen;
         }
-        append_origin(out, &base);
-        sb_append(out, resolvedPath.data ? resolvedPath.data : "/",
-                  resolvedPath.len);
-        sb_free(&resolvedPath);
-        da_free(&segs);
+        if (w == 0)
+        {
+            resolvedPath[w++] = '/';
+        }
+        resolvedPath[w] = '\0';
     }
+
+    size_t need = strlen(base.scheme) + 3 + strlen(base.host) + strlen(portStr) +
+                  strlen(resolvedPath) + 1;
+    out = (char *)URL_MALLOC(need);
+    if (out)
+    {
+        snprintf(out, need, "%s://%s%s%s", base.scheme, base.host, portStr, resolvedPath);
+    }
+
+    url_free(resolvedPath);
+    url_free(combined);
+    url_free(rel);
+    return out;
 }
 
-void url_build_search_url(const char* engineUrl, const char* queryText,
-                          StrBuf* out)
+char *url_build_search_url(const char *searchEngineUrl, const char *queryText)
 {
-    if (out == NULL) {
-        return;
+    char *enc = url_encode(queryText);
+    if (!enc)
+    {
+        return NULL;
     }
-    sb_append_str(out, engineUrl);
-    url_encode(queryText, out);
+    size_t need = strlen(searchEngineUrl) + strlen(enc) + 1;
+    char *out = (char *)URL_MALLOC(need);
+    if (out)
+    {
+        snprintf(out, need, "%s%s", searchEngineUrl, enc);
+    }
+    url_free(enc);
+    return out;
+}
+
+char *url_normalize_dup(const char *urlString)
+{
+    static UrlParsed p; /* hoisted: device gameTask stack is tiny */
+    if (url_parse(urlString, &p) != 0)
+    {
+        return NULL;
+    }
+    return strutil_trim_dup(p.normalized);
 }

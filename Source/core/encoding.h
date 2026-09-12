@@ -1,39 +1,31 @@
-// encoding.h — charset detection & conversion (C port of core/encoding.lua).
-//
-// Phase P06. Precedence mirrors the HTML-spec order used by the source:
-//   1. BOM (UTF-8 strip / UTF-16LE / UTF-16BE decode)
-//   2. Content-Type header charset (unless quoted/unparseable -> nil)
-//   3. <meta charset=...> / <meta http-equiv content=...> within first 1024
-//      bytes — scanned ONLY when header charset is nil OR "utf-8"
-//   4. windows-1252 best-effort for shift_jis/euc-jp/gbk/big5
-//   5. anything undecodable passes through unchanged
-//
-// Ownership: every returned string is a fresh pluto_malloc buffer (NUL-
-// terminated); outLen receives the byte length (Lua strings may hold any
-// bytes). Caller frees.
+/*
+ * PlutoBrowser — encoding.h
+ * Character encoding detection & conversion (port of Source/core/encoding.lua).
+ *
+ * HTML-spec precedence, preserved exactly from the Lua reference:
+ *   1. BOM (UTF-8 / UTF-16LE / UTF-16BE)
+ *   2. Transport charset from the HTTP Content-Type header
+ *   3. <meta charset="..."> in the first 1024 bytes
+ *   4. <meta http-equiv="Content-Type" content="...; charset=...">
+ *   5. Default: windows-1252 (practical web default)
+ *
+ * All returned strings are heap-allocated via the Playdate realloc API;
+ * free them with pluto_free().
+ */
 #ifndef PLUTO_ENCODING_H
 #define PLUTO_ENCODING_H
 
 #include <stddef.h>
 
-struct PlaydateAPI;
+/*
+ * Detect the document encoding and return a heap-allocated UTF-8 normalized
+ * copy of `data` (len bytes). `contentType` may be NULL. For an empty input
+ * the function returns a heap copy of the input. Returns NULL only on
+ * allocation failure.
+ */
+char *encoding_to_utf8(const unsigned char *data, size_t len, const char *contentType);
 
-void encoding_init(struct PlaydateAPI* pd);
+/* Heuristics exposed for testing (mirror the Lua locals). */
+int encoding_is_utf8(const unsigned char *data, size_t len);
 
-// Encoding.toUtf8(data, contentType). contentType may be NULL.
-char* encoding_to_utf8(const char* data, size_t len,
-                       const char* contentType, size_t* outLen);
-
-// normalizeCharset(name): strip non-alphanumerics, lowercase, alias map.
-// Returns malloc'd token or NULL for NULL input.
-char* encoding_normalize_charset(const char* name);
-
-// charsetFromHeader(contentType): lowercased scan for charset=<token>.
-// Quoted values do NOT match (Lua pattern parity). malloc'd or NULL.
-char* encoding_charset_from_header(const char* contentType);
-
-// scanMetaCharset(data, limit): first `limit` bytes (default 1024),
-// two <meta> patterns. malloc'd or NULL.
-char* encoding_scan_meta_charset(const char* data, size_t len);
-
-#endif // PLUTO_ENCODING_H
+#endif /* PLUTO_ENCODING_H */

@@ -1,0 +1,353 @@
+== h1-headings
+title=Web Page|base=https://example.com/|reader=false
+B heading|level=1|spacingTop=0|spacingBottom=0|indent=0 {text|text=Hello}
+B heading|level=2|align=right|spacingTop=0|spacingBottom=0|indent=0 {text|text=Two}
+B heading|level=6|spacingTop=0|spacingBottom=0|indent=0 {text|text=Six}
+B paragraph {text|text=after}
+--links
+--maps
+--end h1-headings
+== p-divs
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=one}
+B paragraph|align=center|spacingTop=0|spacingBottom=0|indent=0 {text|text=two } {text|text=bold|bold=t}
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=s}
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=a}
+--links
+--maps
+--end p-divs
+== blockquote
+title=Web Page|base=https://example.com/|reader=false
+B blockquote|spacingTop=0|spacingBottom=0|indent=12 {text|text=q} {text|text=uote|bold=t}
+--links
+--maps
+--end blockquote
+== center-marquee
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|align=center|spacingTop=0|spacingBottom=0|indent=0 {text|text=c}
+B paragraph|align=center|spacingTop=0|spacingBottom=0|indent=0 {text|text=m}
+--links
+--maps
+--end center-marquee
+== br-hr-wbr
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=a} {br} {text|text=b}
+B hr
+B paragraph {text|text=c} {wbr} {text|text=d}
+--links
+--maps
+--end br-hr-wbr
+== pre-code
+title=Web Page|base=https://example.com/|reader=false
+B code_block|text=  a\n  b   [L:  a] [L:  b  ]
+B code_block|text=raw [L:raw]
+--links
+--maps
+--end pre-code
+== inline-styles
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=B|bold=t} {text|text=I|italic=t} {text|text=U|underline=t} {text|text=C|code=t} {text|text=M|bold=t|mark=t} {text|text=s|small=t} {text|text=bg|big=t} {text|text=sub|small=t|sub=t} {text|text=sup|small=t|sup=t} {text|text=del|strike=t} {text|text="} {text|text=q} {text|text="} {text|text=ab}
+--links
+--maps
+--end inline-styles
+== span-font
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=sw|bold=t|invert=t} {text|text=big|big=t} {text|text=small|small=t} {text|text=2024-01-01} {text|text=42}
+--links
+--maps
+--end span-font
+== links
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=One|underline=t|href=https://example.com/one|anchorIndex=1} {text|text=frag} {text|text=js} {text|text=short|underline=t|href=http://a.b/c|anchorIndex=2} {text|text=bare}
+--links
+L1|href=https://example.com/one|text=One|target=
+L2|href=http://a.b/c|text=short|target=
+--maps
+--end links
+== lists
+title=Web Page|base=https://example.com/|reader=false
+B list_item|number=1|markerType=1|depth=1 {text|text=a}
+B list_item|number=5|markerType=1|depth=1 {text|text=b}
+B list_item|number=6|markerType=1|depth=1 {text|text=c}
+B list_item|isOrdered=t|number=3|markerType=a|depth=1 {text|text=x}
+B list_item|isOrdered=t|number=4|markerType=a|depth=1 {text|text=y}
+--links
+--maps
+--end lists
+== dl
+title=Web Page|base=https://example.com/|reader=false
+B list_item|depth=1|dt=t {text|text=Term}
+B list_item|depth=1|dd=t {text|text=Def}
+B list_item|depth=1|dt=t {text|text=T2}
+--links
+--maps
+--end dl
+== img-figure
+title=Web Page|base=https://example.com/|reader=false
+B image|src=https://example.com/pic.png|alt=Pic|width=200|height=100|usemap=m
+B image|src=https://example.com/f.png|alt=Cap text|width=50|height=30|usemap=|caption=Cap text
+--links
+--maps
+--end img-figure
+== img-in-link
+title=Web Page|base=https://example.com/|reader=false
+B image|src=https://example.com/t.png|alt=Thumb|width=40|height=30|usemap=|href=https://example.com/gallery
+--links
+L1|href=https://example.com/gallery|text=https://example.com/gallery|target=
+--maps
+--end img-in-link
+== image-data-src
+title=Web Page|base=https://example.com/|reader=false
+B image|src=https://example.com/lazy.png|alt=Image|width=90|height=45|usemap=
+B image|src=https://example.com/a.png|alt=Image|width=10|height=10|usemap=
+--links
+--maps
+--end image-data-src
+== map-area
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=(Empty Web Page)|italic=t}
+--links
+--maps
+M|m
+  area1|shape=rect|coords=0,0,50,50|href=https://example.com/go|alt=Go
+  area2|shape=circle|coords=10,10,5|href=|alt=
+--end map-area
+== table
+title=Web Page|base=https://example.com/|reader=false
+B table|align=center|caption=Cap|border=t
+--links
+--maps
+--end table
+== tbody-th
+title=Web Page|base=https://example.com/|reader=false
+B table|caption=
+--links
+--maps
+--end tbody-th
+== forms
+title=Web Page|base=https://example.com/|reader=false
+B hidden_field|value=1|name=h|formAction=https://example.com/submit|formMethod=post
+B checkbox_field|label=|value=v|checked=t|name=c|formAction=https://example.com/submit|formMethod=post
+B checkbox_field|label=|value=|radio=t|checked=t|name=r|formAction=https://example.com/submit|formMethod=post
+B input_field|value=|name=q|placeholder=Search|inputType=text|formAction=https://example.com/submit|formMethod=post
+B input_submit|label=Go|value=Go|name=q|formAction=https://example.com/submit|formMethod=post
+B input_submit|label=Click|formAction=https://example.com/submit|formMethod=post
+--links
+--maps
+--end forms
+== textarea
+title=Web Page|base=https://example.com/|reader=false
+B input_field|value=default text|name=ta|placeholder=|fieldWidth=30|fieldRows=4|inputType=textarea|formAction=https://example.com/|formMethod=get
+--links
+--maps
+--end textarea
+== select
+title=Web Page|base=https://example.com/|reader=false
+B select_field|name=s|formAction=https://example.com/|formMethod=get|selectedIndex=2 opt1:text=One,value=One, opt2:text=Two,value=2,selected=t, opt3:text=Three,value=Three,disabled=t,
+--links
+--maps
+--end select
+== fieldset-details
+title=Web Page|base=https://example.com/|reader=false
+B box_open|label=L
+B input_field|inert=t|value=|name=x|placeholder=|inputType=text|disabled=t|readonly=t|formAction=|formMethod=get
+B input_field|inert=t|value=|name=y|placeholder=|inputType=text|disabled=t|readonly=t|formAction=|formMethod=get
+B box_close
+B box_open|label=> Sum|toggleKey=d1|toggleOpen=t
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=body}
+B box_close|toggleKey=d1|toggleOpen=t
+B box_open|label=
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=dlg}
+B box_close
+--links
+--maps
+--end fieldset-details
+== media
+title=Web Page|base=https://example.com/|reader=false
+B placeholder|width=300|height=100|label=[video: v.mp4]|tag=video
+B placeholder|width=160|height=60|href=https://frame.example/|label=[iframe: frame.example]|tag=iframe
+B placeholder|width=160|height=60|label=[audio]|tag=audio
+B meter|label=|value=2|max=5|min=0|low=0|high=5|optimum=0
+B meter|label=|value=3|max=10|min=0|low=0|high=10|optimum=0
+--links
+--maps
+--end media
+== math
+title=Web Page|base=https://example.com/|reader=false
+B math|text=x=1 / 2y^2sqrt(9)
+--links
+--maps
+--end math
+== svg
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=(Empty Web Page)|italic=t}
+--links
+--maps
+--end svg
+== script-title
+title=Ignored In Flow|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=visible}
+--links
+--maps
+--end script-title
+== noscript
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=ns}
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=after}
+--links
+--maps
+--end noscript
+== hidden-inert
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=inert |inert=t}
+B input_submit|inert=t|label=X|value=X|name=q|formAction=|formMethod=get
+--links
+--maps
+--end hidden-inert
+== nested-overflow
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=deep}
+--links
+--maps
+--end nested-overflow
+== empty-page
+title=Blank Page|base=https://example.com/|reader=false
+--links
+--maps
+--end empty-page
+== empty-tree
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=(Empty Web Page)|italic=t}
+--links
+--maps
+--end empty-tree
+== in-table-link
+title=Web Page|base=https://example.com/|reader=false
+B table|caption=
+--links
+L1|href=https://example.com/c|text=cell link|target=
+--maps
+--end in-table-link
+== figure-caption-only
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|align=center {text|text=Only caption|italic=t}
+--links
+--maps
+--end figure-caption-only
+== br-in-pre
+title=Web Page|base=https://example.com/|reader=false
+B code_block|text=line1\nline2 [L:line1] [L:line2]
+--links
+--maps
+--end br-in-pre
+== details-open-override
+title=Web Page|base=https://example.com/|reader=false
+B box_open|label=> S1|toggleKey=d1
+B box_close|toggleKey=d1
+B box_open|label=> S2|toggleKey=d2|toggleOpen=t
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=p2}
+B box_close|toggleKey=d2|toggleOpen=t
+--links
+--maps
+--end details-open-override
+== dl-nested
+title=Web Page|base=https://example.com/|reader=false
+B list_item|depth=1|dt=t {text|text=outer}
+B list_item|depth=2|dt=t {text|text=inner}
+B list_item|depth=2|dd=t {text|text=id}
+--links
+--maps
+--end dl-nested
+== wbr-br-inline
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=foo} {wbr} {text|text=bar} {br} {text|text=baz}
+--links
+--maps
+--end wbr-br-inline
+== pre-multiline
+title=Web Page|base=https://example.com/|reader=false
+B code_block|text=l1\nl2\nl3 [L:l1] [L:l2] [L:l3]
+--links
+--maps
+--end pre-multiline
+== img-no-src
+title=Web Page|base=https://example.com/|reader=false
+B image|src=https://example.com/1x.png|alt=Ss|width=160|height=80|usemap=
+--links
+--maps
+--end img-no-src
+== media-title
+title=Web Page|base=https://example.com/|reader=false
+B placeholder|width=160|height=60|label=My Video|tag=video
+B placeholder|width=160|height=60|label=Frame|tag=iframe
+B placeholder|width=160|height=60|label=[embed]|tag=embed
+--links
+--maps
+--end media-title
+== placeholder-href
+title=Web Page|base=https://example.com/|reader=false
+B placeholder|width=200|height=100|href=https://frame.example/x|label=[iframe: x]|tag=iframe
+B placeholder|width=160|height=60|href=https://example.com/portal|label=[portal: portal]|tag=portal
+--links
+L1|href=https://example.com/watch|text=https://example.com/watch|target=
+--maps
+--end placeholder-href
+== placeholder-no-src
+title=Web Page|base=https://example.com/|reader=false
+B placeholder|width=160|height=60|label=[video]|tag=video
+B placeholder|width=160|height=60|label=[audio]|tag=audio
+B placeholder|width=160|height=60|label=[canvas]|tag=canvas
+B placeholder|width=160|height=60|label=[object]|tag=object
+--links
+--maps
+--end placeholder-no-src
+== fencedframe
+title=Web Page|base=https://example.com/|reader=false
+B placeholder|width=100|height=50|label=[fencedframe]
+--links
+--maps
+--end fencedframe
+== invalid-attrs
+title=Web Page|base=https://example.com/|reader=false
+B heading|level=1|spacingTop=0|spacingBottom=0|indent=0 {text|text=H}
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=J}
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=X}
+--links
+--maps
+--end invalid-attrs
+== invert
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0|invert=t {text|text=inv}
+--links
+--maps
+--end invert
+== list-item-value
+title=Web Page|base=https://example.com/|reader=false
+B list_item|isOrdered=t|number=7|markerType=1|depth=1 {text|text=a}
+B list_item|isOrdered=t|number=6|markerType=1|depth=1 {text|text=b}
+--links
+--maps
+--end list-item-value
+== li-no-list
+ERROR: .../bwandrych/Desktop/CometBrowser/Source/html/document.lua:798: attempt to perform arithmetic on a nil value (field 'start')
+--end li-no-list
+== hr-in-div
+title=Web Page|base=https://example.com/|reader=false
+B paragraph|spacingTop=0|spacingBottom=0|indent=0 {text|text=a}
+B hr
+B paragraph {text|text=b}
+--links
+--maps
+--end hr-in-div
+== span-nested
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text=both|bold=t|italic=t}
+--links
+--maps
+--end span-nested
+== q-quotes
+title=Web Page|base=https://example.com/|reader=false
+B paragraph {text|text="} {text|text=double} {text|text="}
+--links
+--maps
+--end q-quotes

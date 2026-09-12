@@ -1,0 +1,12 @@
+rootbits 8
+lengths 1 0 0 0
+rootbits 8
+lengths 0 0 0 0
+rootbits 8
+lengths 1 1 1
+rootbits 8
+lengths 15 15 15 15 15 15 15 15 15 15 15 15 15 15 15 1
+rootbits 7
+lengths 1 2 3 3 3 3 0 0 0 0 0 0 0 0 0 0 0 0 0
+rootbits 8
+lengths 2 1 2

@@ -1,58 +1,66 @@
-#ifndef PLUTO_UI_ADDRESS_BAR_H
-#define PLUTO_UI_ADDRESS_BAR_H
+/*
+ * PlutoBrowser — address_bar.h
+ * Address Bar & Web Search Controller (port of Source/ui/address_bar.lua).
+ *
+ * Lua reference behavior:
+ *  - open(currentUrl, onSubmit): marks the bar open, pre-fills input with the
+ *    current URL unless it starts with "about:", keyboard NOT shown yet.
+ *  - launchKeyboard(): shows the keyboard (guarded against B held), installs
+ *    willHide/textChanged callbacks; on submit trims whitespace, routes search
+ *    queries through the configured search engine, else normalizes as a URL,
+ *    sets skipInputFrames=2, fires the submit callback.
+ *  - cancel(): hides keyboard if shown, clears callbacks.
+ *  - drawOverlay(): compact box (10,6,380x48) when keyboard hidden, tall box
+ *    (4,4,192x232) alongside the keyboard, label + mono text with wrapping.
+ *
+ * C port notes:
+ *  - onSubmit is a function pointer + userdata carried per-open.
+ *  - skipInputFrames lives in main.c; the submit path exposes
+ *    address_bar_consume_skip_frames() so main can arm its own counter
+ *    (Lua's global skipInputFrames = 2).
+ *  - The keyboard port's update-callback takeover is honored: while the
+ *    keyboard is visible, our updateFrame runs from inside keyboardUpdate.
+ */
+#ifndef PLUTO_ADDRESS_BAR_H
+#define PLUTO_ADDRESS_BAR_H
 
-#include <stddef.h>
+#include <stdint.h>
 
-#include "pd_api.h"
+typedef void (*AddressBarSubmitFn)(const char *finalUrl, void *userdata);
 
-// The vendored C keyboard port (vendor/keyboard, Unlicense) references this
-// typedef from an older SDK; it must match pd->system->setUpdateCallback's
-// function shape (our main update returns int).
-typedef int PDCallbackFunction(void* userdata);
+void address_bar_init(void);
 
-#include "keyboard.h"
+/* Lua: AddressBar.open(currentUrl, onSubmit). */
+void address_bar_open(const char *currentUrl, AddressBarSubmitFn onSubmit,
+                      void *userdata);
 
-// C port of CometBrowser Source/ui/address_bar.lua (AddressBar).
-//
-// Lifecycle parity:
-//   ab_open            <- AddressBar.open(currentUrl, onSubmit)
-//   ab_launch_keyboard <- AddressBar.launchKeyboard (gated on B held)
-//   kb_will_hide       <- playdate.keyboard.keyboardWillHideCallback
-//   ab_cancel          <- AddressBar.cancel
-//
-// Pure helpers (unit-tested): trim + final-URL decision (search query vs
-// URL.parse normalized), open-prefill rule (^about: excluded) and the
-// launchKeyboard gate.
+/* Lua: AddressBar.launchKeyboard(). No-op unless open and not shown;
+ * refuses while B is held (Lua parity). */
+void address_bar_launch_keyboard(void);
 
-typedef void (*AbSubmitFn)(const char* finalUrl, void* userdata);
+/* Lua: AddressBar.cancel(). */
+void address_bar_cancel(void);
 
-// mainUpdate/updateUd are handed to the keyboard so it can re-install the
-// system update loop when its takeover ends (vendored-lib requirement).
-void ab_init(PlaydateAPI* pd, int (*mainUpdate)(void*), void* updateUd);
+/* Lua: AddressBar.drawOverlay(). Call after page/chrome drawing. */
+void address_bar_draw_overlay(void);
 
-void ab_open(const char* currentUrl, AbSubmitFn onSubmit, void* userdata);
-void ab_launch_keyboard(void);
-void ab_cancel(void);
+int address_bar_is_open(void);
+int address_bar_keyboard_shown(void);
 
-int         ab_is_open(void);
-int         ab_keyboard_shown(void);
-const char* ab_input_text(void);
-void        ab_draw_overlay(void);
+/* Current input text (live-synced from the keyboard while shown). */
+const char *address_bar_input_text(void);
 
-// skipInputFrames global: willHide sets 2; pop once per frame.
-int  ab_pop_input_skip(void);
-int  ab_input_skip_remaining(void);
+/* Test hook: routes text through the real submit path (trim → search-vs-URL
+ * routing → callback) without the raw keyboard, which P13 verified. */
+void address_bar_test_submit(const char *text);
 
-// ── pure helpers ──────────────────────────────────────────────────────────
+/* Lua copies keyboard text into inputText on every textChanged callback.
+ * The C keyboard exposes getText(); the harness/main loop calls this each
+ * frame while the keyboard is shown (Lua did it via callback). */
+void address_bar_sync_text(void);
 
-// Lua string.gsub(text, "^%s*(.-)%s*$", "%1"): trims both ends in place.
-void ab_trim(char* text);
+/* Lua sets the global skipInputFrames = 2 when the keyboard will hide;
+ * returns how many frames main should skip (and clears it). */
+int address_bar_consume_skip_frames(void);
 
-// Lua submit decision. Returns 0 for empty input (cancel path). Otherwise
-// writes the search-engine URL or URL.parse().normalized into out.
-int ab_build_final_url(const char* text, char* out, size_t cap);
-
-// Lua launchKeyboard gates: isOpen && !keyboardShown && !B held.
-int ab_should_launch_keyboard(int isOpen, int keyboardShown, int bHeld);
-
-#endif
+#endif /* PLUTO_ADDRESS_BAR_H */

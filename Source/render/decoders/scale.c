@@ -1,127 +1,188 @@
-// scale.c — C port of Source/render/decoders/scale.lua (Scale).
-//
-// Shared box-filter downscaler for the image decoders: single source row +
-// tiny output grid in memory, integer box sizes, no fractional math.
-
+/*
+ * PlutoBrowser — scale.c
+ * Port of Source/render/decoders/scale.lua (reference, 85 lines).
+ * Shared integer box-filter downscaler for the image decoders.
+ * See scale.h for the Lua→C map and preserved semantics.
+ */
+#include <stdlib.h>
+#include <string.h>
 #include "render/decoders/scale.h"
 
-#include <math.h>
-#include <string.h>
+struct ScaleAccum
+{
+    int srcW, srcH;
+    int boxW, boxH, targetW, targetH;
 
-#include "util/mem.h"
+    int *accum;    /* targetW column sums for the current output row */
+    int filled;    /* source rows accumulated for the current output row */
+
+    uint8_t **out; /* emitted rows (targetW bytes each) */
+    int outCap;
+    int oy;        /* rows emitted */
+    int divisor;   /* boxW * boxH */
+};
 
 void scale_box_sizes(int srcW, int srcH, int maxW, int maxH,
-                     int* boxW, int* boxH, int* targetW, int* targetH) {
-    if (maxW < 1) maxW = 1;
-    if (maxH < 1) maxH = 1;
-    int bw = (srcW + maxW - 1) / maxW;   /* ceil(srcW/maxW) */
-    int bh = (srcH + maxH - 1) / maxH;
+                     int *boxW, int *boxH, int *targetW, int *targetH)
+{
+    /* Lua: boxW = max(1, ceil(srcW / max(1, maxW))) */
+    int mw = maxW > 1 ? maxW : 1;
+    int mh = maxH > 1 ? maxH : 1;
+    int bw = (srcW + mw - 1) / mw; /* ceil */
+    int bh = (srcH + mh - 1) / mh;
     if (bw < 1) bw = 1;
     if (bh < 1) bh = 1;
-    *boxW = bw;
-    *boxH = bh;
+    /* Lua: targetW = max(1, floor(srcW / boxW)) */
     int tw = srcW / bw;
     int th = srcH / bh;
-    *targetW = tw < 1 ? 1 : tw;
-    *targetH = th < 1 ? 1 : th;
+    if (tw < 1) tw = 1;
+    if (th < 1) th = 1;
+    if (boxW) *boxW = bw;
+    if (boxH) *boxH = bh;
+    if (targetW) *targetW = tw;
+    if (targetH) *targetH = th;
 }
 
-ScaleAccum* scale_accum_new(int srcW, int srcH, int maxW, int maxH) {
-    ScaleAccum* acc = (ScaleAccum*)pluto_malloc(sizeof(ScaleAccum));
-    if (acc == NULL) return NULL;
-    memset(acc, 0, sizeof(*acc));
-
-    scale_box_sizes(srcW, srcH, maxW, maxH,
-                    &acc->boxW, &acc->boxH,
-                    &acc->targetW, &acc->targetH);
-    acc->srcW = srcW;
-
-    acc->accum =
-        (long long*)pluto_malloc(sizeof(long long) * acc->targetW);
-    if (acc->accum == NULL) {
-        pluto_free(acc);
+ScaleAccum *scale_accum_new(int srcW, int srcH, int maxW, int maxH)
+{
+    ScaleAccum *a = (ScaleAccum *)calloc(1, sizeof(ScaleAccum));
+    if (!a)
+    {
         return NULL;
     }
-    memset(acc->accum, 0, sizeof(long long) * acc->targetW);
-    return acc;
+    a->srcW = srcW;
+    a->srcH = srcH;
+    scale_box_sizes(srcW, srcH, maxW, maxH,
+                    &a->boxW, &a->boxH, &a->targetW, &a->targetH);
+    a->divisor = a->boxW * a->boxH;
+    a->accum = (int *)calloc((size_t)a->targetW, sizeof(int));
+    if (!a->accum)
+    {
+        free(a);
+        return NULL;
+    }
+    return a;
 }
 
-void scale_accum_add_row(ScaleAccum* acc, const unsigned char* row) {
-    if (acc == NULL || row == NULL) return;
-    const int srcW = acc->srcW;
-    long long* accum = acc->accum;
+void scale_accum_add_row(ScaleAccum *acc, const uint8_t *row)
+{
+    if (!acc || !row)
+    {
+        return; /* Lua: if not row then return end */
+    }
 
-    if (acc->boxW == 1) {
-        /* Fast path: 1:1 horizontal */
+    if (acc->boxW == 1)
+    {
+        /* Fast path: 1:1 horizontal, just accumulate. */
         for (int i = 0; i < acc->targetW; i++)
-            accum[i] += row[i];
-    } else {
-        int x = 0;
-        for (int oc = 0; oc < acc->targetW; oc++) {
-            int xEnd = x + acc->boxW;          /* exclusive */
-            if (xEnd > srcW) xEnd = srcW;
-            long long s = 0;
-            for (int k = x; k < xEnd; k++) s += row[k];
-            accum[oc] += s;
+        {
+            acc->accum[i] += row[i];
+        }
+    }
+    else
+    {
+        int x = 0; /* Lua x is 1-based over row[k]; C is 0-based */
+        for (int oc = 0; oc < acc->targetW; oc++)
+        {
+            int xEnd = acc->srcW < x + acc->boxW ? acc->srcW : x + acc->boxW;
+            int s = 0;
+            for (int k = x; k < xEnd; k++)
+            {
+                s += row[k];
+            }
+            acc->accum[oc] += s;
             x += acc->boxW;
         }
     }
 
     acc->filled++;
-    if (acc->filled >= acc->boxH) {
-        long divisor = (long)acc->boxW * acc->boxH;
-        int* r = (int*)pluto_malloc(sizeof(int) * acc->targetW);
-        if (r == NULL) return;   /* drop row on OOM (Lua would throw) */
-        for (int i = 0; i < acc->targetW; i++)
-            r[i] = (int)floor((double)accum[i] / divisor + 0.5);
-        if (acc->oy == acc->capOut) {
-            int nc = acc->capOut ? acc->capOut * 2 : 8;
-            int** no = (int**)pluto_realloc(acc->out,
-                                            sizeof(int*) * nc);
-            if (no == NULL) { pluto_free(r); return; }
-            acc->out = no;
-            acc->capOut = nc;
-        }
-        acc->out[acc->oy++] = r;
-        acc->count++;
-        memset(accum, 0, sizeof(long long) * acc->targetW);
-        acc->filled = 0;
-    }
-}
-
-int scale_accum_finish(ScaleAccum* acc, int* outTw, int* outTh) {
-    if (acc == NULL) return 0;
-    if (acc->filled > 0) {
-        /* Trailing partial block (src height not divisible by boxH) */
-        long d = (long)acc->boxW * acc->filled;
-        int* r = (int*)pluto_malloc(sizeof(int) * acc->targetW);
-        if (r != NULL) {
+    if (acc->filled >= acc->boxH)
+    {
+        /* Emit one output row (Lua: floor(sum/divisor + 0.5) — half-up). */
+        uint8_t *r = (uint8_t *)malloc((size_t)acc->targetW);
+        if (r)
+        {
             for (int i = 0; i < acc->targetW; i++)
-                r[i] = (int)floor((double)acc->accum[i] / d + 0.5);
-            if (acc->oy == acc->capOut) {
-                int nc = acc->capOut ? acc->capOut * 2 : 8;
-                int** no = (int**)pluto_realloc(acc->out,
-                                                sizeof(int*) * nc);
-                if (no != NULL) { acc->out = no; acc->capOut = nc; }
+            {
+                r[i] = (uint8_t)((acc->accum[i] / acc->divisor) + ((acc->accum[i] % acc->divisor) * 2 >= acc->divisor ? 1 : 0));
             }
-            if (acc->oy < acc->capOut) {
+            if (acc->oy == acc->outCap)
+            {
+                int newCap = acc->outCap > 0 ? acc->outCap * 2 : 64;
+                uint8_t **grown = (uint8_t **)realloc(acc->out, (size_t)newCap * sizeof(uint8_t *));
+                if (!grown)
+                {
+                    free(r);
+                    return;
+                }
+                acc->out = grown;
+                acc->outCap = newCap;
+            }
+            acc->out[acc->oy++] = r;
+        }
+        memset(acc->accum, 0, (size_t)acc->targetW * sizeof(int));
+        acc->filled = 0;
+    }
+}
+
+uint8_t **scale_accum_finish(ScaleAccum *acc, int *outCount, int *outWidth)
+{
+    if (!acc)
+    {
+        if (outCount) *outCount = 0;
+        if (outWidth) *outWidth = 0;
+        return NULL;
+    }
+
+    if (acc->filled > 0)
+    {
+        /* Trailing partial block: divisor = boxW * filled (Lua parity). */
+        int d = acc->boxW * acc->filled;
+        uint8_t *r = (uint8_t *)malloc((size_t)acc->targetW);
+        if (r)
+        {
+            for (int i = 0; i < acc->targetW; i++)
+            {
+                r[i] = (uint8_t)((acc->accum[i] / d) + ((acc->accum[i] % d) * 2 >= d ? 1 : 0));
+            }
+            if (acc->oy == acc->outCap)
+            {
+                int newCap = acc->outCap > 0 ? acc->outCap * 2 : 64;
+                uint8_t **grown = (uint8_t **)realloc(acc->out, (size_t)newCap * sizeof(uint8_t *));
+                if (grown)
+                {
+                    acc->out = grown;
+                    acc->outCap = newCap;
+                }
+            }
+            if (acc->oy < acc->outCap)
+            {
                 acc->out[acc->oy++] = r;
-                acc->count++;
-            } else {
-                pluto_free(r);
+            }
+            else
+            {
+                free(r);
             }
         }
         acc->filled = 0;
     }
-    if (outTw != NULL) *outTw = acc->targetW;
-    if (outTh != NULL) *outTh = acc->targetH;
-    return acc->count;
+
+    if (outCount) *outCount = acc->oy;
+    if (outWidth) *outWidth = acc->targetW;
+    return acc->out;
 }
 
-void scale_accum_free(ScaleAccum* acc) {
-    if (acc == NULL) return;
-    for (int i = 0; i < acc->oy; i++) pluto_free(acc->out[i]);
-    pluto_free(acc->out);
-    pluto_free(acc->accum);
-    pluto_free(acc);
+void scale_accum_free(ScaleAccum *acc)
+{
+    if (!acc)
+    {
+        return;
+    }
+    for (int i = 0; i < acc->oy; i++)
+    {
+        free(acc->out[i]);
+    }
+    free(acc->out);
+    free(acc->accum);
+    free(acc);
 }

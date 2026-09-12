@@ -1,0 +1,30 @@
+tc1a|style=[margin=10px,padding=5px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc1b|style=[margin=10px 20px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc1c|style=[margin=10px 20px 30px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc1d|style=[margin=10px 20px 30px 40px,padding=1px 2px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc1e|style=[margin-top=33%]|align=nil|dnone=false|inv=false|box=t16 b0 l0 r0
+tc1f|style=[color=red,margin-left=7px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc1g|style=[]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc2a|style=[]|align=center|dnone=false|inv=false|box=t0 b0 l0 r0
+tc2b|style=[text-align=right]|align=right|dnone=false|inv=false|box=t0 b0 l0 r0
+tc2c|style=[text-align=justify]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc2d|style=[]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc3a|style=[]|align=nil|dnone=true|inv=false|box=t0 b0 l0 r0
+tc3b|style=[]|align=nil|dnone=true|inv=false|box=t0 b0 l0 r0
+tc3c|style=[display=none]|align=nil|dnone=true|inv=false|box=t0 b0 l0 r0
+tc3d|style=[visibility=hidden]|align=nil|dnone=true|inv=false|box=t0 b0 l0 r0
+tc3e|style=[color=white,display=none]|align=nil|dnone=true|inv=true|box=t0 b0 l0 r0
+tc3f|style=[display=block]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc3g|style=[]|align=left|dnone=false|inv=false|box=t0 b0 l0 r0
+tc4a|style=[color=white]|align=nil|dnone=false|inv=true|box=t0 b0 l0 r0
+tc4b|style=[color=#fff]|align=nil|dnone=false|inv=true|box=t0 b0 l0 r0
+tc4c|style=[color=#ffff80]|align=nil|dnone=false|inv=true|box=t0 b0 l0 r0
+tc4d|style=[background=black]|align=nil|dnone=false|inv=true|box=t0 b0 l0 r0
+tc4e|style=[background-color=#000000]|align=nil|dnone=false|inv=true|box=t0 b0 l0 r0
+tc4f|style=[color=#000]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc4g|style=[background=#fff]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc4h|style=[color=#ff00ff]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc5a|style=[padding=8px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc5b|style=[margin=4%,padding=8px 16px]|align=nil|dnone=false|inv=false|box=t2 b2 l2 r2
+tc5c|style=[margin-bottom=7.9px,margin-top=-3px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0
+tc5d|style=[margin=2px 4px 6px 8px,padding-left=10px]|align=nil|dnone=false|inv=false|box=t0 b0 l0 r0

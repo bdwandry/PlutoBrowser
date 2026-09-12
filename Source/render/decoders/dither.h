@@ -1,24 +1,41 @@
-#ifndef PLUTO_RENDER_DECODERS_DITHER_H
-#define PLUTO_RENDER_DECODERS_DITHER_H
+/*
+ * PlutoBrowser — dither.h
+ * Port of Source/render/decoders/dither.lua (reference, 60 lines).
+ *
+ * Lua → C function map:
+ *   Dither.rgbToGray(r,g,b)          → dither_rgb_to_gray()
+ *   Dither.toImage(getPixelGray,w,h) → dither_to_bitmap()
+ *
+ * Preserved semantics:
+ *   - 4x4 Bayer matrix thresholds {0,128,32,160 / 192,64,224,96 /
+ *     48,176,16,144 / 240,112,208,80}; isBlack = gray < threshold.
+ *   - Luminance (r*306 + g*601 + b*117) >> 10.
+ *   - Input is clamped to 380x240 (Lua width/height clamps).
+ *   - toImage(NULL fn) → NULL (Lua would call nil → error; the port
+ *     documents the guard because C has no exception to reproduce).
+ */
+#ifndef PLUTO_DITHER_H
+#define PLUTO_DITHER_H
 
 #include <stdint.h>
+#include "pd_api.h"
 
-struct PlaydateAPI;
-typedef int (*DitherGrayFn)(void* userdata, int x, int y);
-
-/* (r*306 + g*601 + b*117) >> 10 -- standard luminance scaled by 1024 */
+/* (r*306 + g*601 + b*117) >> 10 — standard luminance scaled by 1024. */
 int dither_rgb_to_gray(int r, int g, int b);
 
-/* Bayer threshold lookup: is this gray value black at (x,y)? */
-int dither_is_black(int gray, int x, int y);
+/* Paint a 2D grayscale grid into a new 1-bit Playdate image using 4x4
+ * Bayer dithering. getPixelGray(x, y) returns 0..255. Clamps to 380x240.
+ * Returns an LCDBitmap (caller owns via pd->graphics->freeBitmap) or NULL. */
+LCDBitmap *dither_to_bitmap(int width, int height,
+                            uint8_t (*getPixelGray)(void *userdata, int x, int y),
+                            void *userdata);
 
-/* Paint a grayscale grid (via getPixelGray(userdata,x,y), 0..255) into a new
- * 1-bit image using horizontal run-length batching. Host builds (no Playdate
- * API) return NULL. Mirrors Dither.toImage: rejects/clamps sizes, 380x240 cap,
- * white background, strict `gray < threshold` comparison. */
-struct LCDBitmap;
-struct LCDBitmap* dither_to_image(struct PlaydateAPI* pd,
-                                  DitherGrayFn get_pixel_gray,
-                                  void* userdata, int width, int height);
+/* Dither directly into a caller-provided 1-bit buffer (1 = white, 0 =
+ * black, MSB-first, stride = (width+7)/8). Same matrix/clamps as
+ * dither_to_bitmap; used by decoders that rasterize into their own
+ * buffers and by tests. Returns 0 on invalid args. */
+int dither_to_bits(int width, int height,
+                   uint8_t (*getPixelGray)(void *userdata, int x, int y),
+                   void *userdata, uint8_t *outBits, int outStride);
 
-#endif
+#endif /* PLUTO_DITHER_H */
