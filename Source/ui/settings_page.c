@@ -36,7 +36,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 6
+#define OPTION_COUNT 7
 
 /* ── Scrolling list geometry ──────────────────────────────────────────────
  * The panel is fixed-size; the row list scrolls under it as the browser
@@ -64,6 +64,7 @@ static struct
     int invertCrank;              /* 0/1 */
     char imageMode[16];           /* persisted name */
     int showFps;                  /* 0/1 — FPS overlay */
+    int displayFps;               /* display refresh target: 30 or 50 fps */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -191,6 +192,11 @@ void settings_page_open(int prevState)
     snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
              im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_VIEWPORT]);
     g_staged.showFps = storage_setting_int("showFps");
+    g_staged.displayFps = storage_setting_int("displayFps");
+    if (g_staged.displayFps != 50)
+    {
+        g_staged.displayFps = 30; /* only 30 or 50 are valid (Playdate max = 50) */
+    }
 }
 
 void settings_page_close(void)
@@ -205,6 +211,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("invertCrank", g_staged.invertCrank);
     storage_set_setting_str("imageMode", g_staged.imageMode);
     storage_set_setting_int("showFps", g_staged.showFps);
+    storage_set_setting_int("displayFps", g_staged.displayFps);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -258,8 +265,10 @@ const char *settings_page_staged_value(int optionIndex)
         return image_mode_label((ImageMode)(n >= 0 ? n : IMAGE_MODE_ALL));
     }
     case 5:
-        return g_staged.showFps ? "On" : "Off";
+        return g_staged.displayFps == 50 ? "50" : "30";
     case 6:
+        return g_staged.showFps ? "On" : "Off";
+    case 7:
         return "";
     default:
         return "";
@@ -320,9 +329,12 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             break;
         }
         case 5:
-            g_staged.showFps = !g_staged.showFps;
+            g_staged.displayFps = (g_staged.displayFps == 50) ? 30 : 50;
             break;
         case 6:
+            g_staged.showFps = !g_staged.showFps;
+            break;
+        case 7:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -365,9 +377,12 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             break;
         }
         case 5:
-            g_staged.showFps = !g_staged.showFps;
+            g_staged.displayFps = (g_staged.displayFps == 50) ? 30 : 50;
             break;
         case 6:
+            g_staged.showFps = !g_staged.showFps;
+            break;
+        case 7:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -379,7 +394,7 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
     }
     else if (pushed & BTN_A)
     {
-        if (g_selectedIndex == 6)
+        if (g_selectedIndex == 7)
         {
             /* Clear Cookies action: execute immediately */
             if (g_clearCookiesCb)
@@ -456,7 +471,7 @@ void settings_page_draw(void)
 
         static const char *const labels[OPTION_COUNT] = {
             "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-            "Show FPS", "Clear Cookies"};
+            "Display FPS", "Show FPS", "Clear Cookies"};
         int itemY = innerY + SETTINGS_TITLE_H;      /* list top (after title) */
         int itemH = SETTINGS_ITEM_H;
         int itemGap = SETTINGS_ROW_PITCH - SETTINGS_ITEM_H;
@@ -493,7 +508,7 @@ void settings_page_draw(void)
                 continue; /* fully outside the visible window */
             }
             int isSel = (i == g_selectedIndex);
-            int isAction = (i == 6);
+            int isAction = (i == 7);
 
             if (isSel)
             {

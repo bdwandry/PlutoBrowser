@@ -132,6 +132,7 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 - **Character Encoding Detection**: Scans `<meta charset>`, `<meta http-equiv="Content-Type">`, BOM markers, and chardet heuristics.
 
 ### User Interface
+- **Display FPS**: Settings option with **30** (default) or **50** fps (the Playdate's hardware maximum). 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
 - **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, battery level, reader/HTML mode toggle.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
