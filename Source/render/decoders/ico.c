@@ -4,6 +4,7 @@
  * ICO container + classic embedded-DIB decoder → dithered 1-bit bitmap.
  * See ico.h for the Lua→C map and the PNG-entry deviation note.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include "render/decoders/ico.h"
@@ -236,6 +237,7 @@ static LCDBitmap *ico_decode_dib(const uint8_t *data, size_t len, int maxW, int 
 
 LCDBitmap *ico_decode(const uint8_t *data, size_t len, int maxW, int maxH)
 {
+    logger_stack_touch();
     if (!data || len < 22)
     {
         return NULL;

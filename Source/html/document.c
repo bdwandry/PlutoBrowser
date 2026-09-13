@@ -33,6 +33,7 @@
  * Attributes arrive as raw (key, value) pairs — exactly like tok.attrs in
  * Lua — and every helper parses attrs["style"] internally via parseStyle.
  */
+#include "core/logger.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -4592,6 +4593,7 @@ static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out)
 {
+    logger_stack_touch();
     memset(out, 0, sizeof(*out));
 
     if (!htmlString || htmlString[0] == '\0')

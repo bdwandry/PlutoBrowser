@@ -451,6 +451,7 @@ static uint8_t tif_pixel_gray(void *ud, int outX, int outY)
 
 LCDBitmap *tif_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 16) return NULL;
     int bo;
     if (data[0] == 'I' && data[1] == 'I' && data[2] == 42 && data[3] == 0)

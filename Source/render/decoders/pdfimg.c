@@ -1094,6 +1094,7 @@ static LCDBitmap *pdfvec_render(const uint8_t *data, size_t len)
 
 LCDBitmap *pdfimg_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 64) return NULL;
     if (memcmp(data, "%PDF-", 5) != 0) return NULL;
 

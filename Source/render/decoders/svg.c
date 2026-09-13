@@ -6,6 +6,7 @@
  * Stack discipline (P22 rule): tag/attr workspaces are static; the only
  * sizable locals are the expandUses StrBuf (heap) and small scalars.
  */
+#include "core/logger.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -543,6 +544,12 @@ static int strbuf_append_strz(StrBuf *sb, const char *s)
     return strbuf_append(sb, s);
 }
 
+/* <use>-expansion attr scratch, hoisted to BSS — two 2.1KB SvgAttrs on the
+ * stack made svg_expand_uses the second-largest game-task frame (6.2KB).
+ * svg_get_attrs clears its output on entry; single-threaded: safe to share. */
+static SvgAttrs g_useAttrs;
+static SvgAttrs g_refAttrs;
+
 static int svg_expand_uses(const char *src, size_t len, StrBuf *out)
 {
     size_t lastPos = 0;
@@ -580,10 +587,10 @@ static int svg_expand_uses(const char *src, size_t len, StrBuf *out)
         size_t aStart = s + 4, aEnd = ei; /* sub is 1-based inclusive; aEnd = e-1 0-based exclusive */
         if (aEnd > aStart)
         {
-            SvgAttrs ua;
-            svg_get_attrs(src + aStart, aEnd - aStart, &ua);
-            const char *href = attrs_get(&ua, "href");
-            const char *xhref = attrs_get(&ua, "xlink:href");
+            SvgAttrs *ua = &g_useAttrs;
+            svg_get_attrs(src + aStart, aEnd - aStart, ua);
+            const char *href = attrs_get(ua, "href");
+            const char *xhref = attrs_get(ua, "xlink:href");
             const char *h = href ? href : xhref;
             if (h && h[0] == '#')
             {
@@ -613,9 +620,9 @@ static int svg_expand_uses(const char *src, size_t len, StrBuf *out)
                     {
                         memcpy(g_tagAttrsRaw, lt + 1, inLen);
                         g_tagAttrsRaw[inLen] = 0;
-                        SvgAttrs ea;
-                        svg_get_attrs(g_tagAttrsRaw, inLen, &ea);
-                        const char *eid = attrs_get(&ea, "id");
+                        SvgAttrs *ea = &g_refAttrs;
+                        svg_get_attrs(g_tagAttrsRaw, inLen, ea);
+                        const char *eid = attrs_get(ea, "id");
                         if (eid && strcmp(eid, id) == 0)
                         {
                             /* ref = "<" .. elTag .. elStr .. ">" where the
@@ -650,6 +657,7 @@ static int svg_expand_uses(const char *src, size_t len, StrBuf *out)
 
 LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
 {
+    logger_stack_touch();
     if (!xml || !strstr(xml, "<svg"))
     {
         return NULL;

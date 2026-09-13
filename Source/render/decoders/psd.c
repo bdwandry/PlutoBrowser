@@ -73,6 +73,7 @@ static uint8_t psd_pixel_gray(void *ud, int outX, int outY)
 
 LCDBitmap *psd_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 26) return NULL;
     if (memcmp(data, "8BPS", 4) != 0) return NULL;
     int ver = (data[4] << 8) | data[5];

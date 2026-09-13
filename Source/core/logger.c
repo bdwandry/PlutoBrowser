@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "core/logger.h"
 
@@ -24,6 +25,39 @@
 
 static PlaydateAPI *g_pd = NULL;
 static int g_seq = 0;
+
+/* ── Stack high-water tracking ─────────────────────────────────────────
+ * The device game task has a 61.8KB stack; errorlog showed an overflow
+ * (storage_load → entities chain, 2026-09-12). logger_stack_touch() reads
+ * the current SP and records the lowest value seen; the heartbeat logs
+ * the peak. On simulator the SP is meaningless for this purpose, so the
+ * simulator build keeps a fixed 0 peak. */
+#if defined(TARGET_SIMULATOR) || !defined(__arm__)
+void logger_stack_touch(void) {}
+unsigned logger_stack_peak(void) { return 0; }
+#else
+static uintptr_t g_stackTop = 0;
+static uintptr_t g_stackFloor = UINTPTR_MAX;
+void logger_stack_touch(void)
+{
+    uintptr_t sp;
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    if (!g_stackTop || sp > g_stackTop)
+    {
+        g_stackTop = sp; /* shallowest SP seen ≈ stack top */
+    }
+    if (sp < g_stackFloor)
+    {
+        g_stackFloor = sp;
+    }
+}
+unsigned logger_stack_peak(void)
+{
+    return (g_stackTop && g_stackFloor != UINTPTR_MAX && g_stackTop > g_stackFloor)
+               ? (unsigned)(g_stackTop - g_stackFloor)
+               : 0;
+}
+#endif
 
 static void nowString(char *out, size_t outLen)
 {

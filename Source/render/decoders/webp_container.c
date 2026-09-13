@@ -8,6 +8,7 @@
  * Also defines the public entry points (webp_decode / webp_decode_raw /
  * webp_decode_animation) used by image_decoder and tests.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include "pd_api.h"
@@ -570,6 +571,7 @@ static LCDBitmap *webp_argb_to_bitmap(const uint32_t *pix, int w, int h,
 
 LCDBitmap *webp_decode(const uint8_t *data, size_t len, int maxW, int maxH)
 {
+    logger_stack_touch();
     if (maxW <= 0) maxW = 360;
     if (maxH <= 0) maxH = 200;
     const char *cid = NULL;

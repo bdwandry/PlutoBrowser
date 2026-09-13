@@ -23,6 +23,7 @@
  * layout_clear(). Free the document AFTER layout_clear(), or re-build (which
  * clears first).
  */
+#include "core/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,6 +126,14 @@ int layout_build_failed(void) { return g_buildError; }
 
 /* scrollY flows into draw_table_box for page-space link rects */
 static int g_scrollYForLinks = 0;
+/* Large scratch buffers hoisted to BSS (stack audit): the table-cell and
+ * code-box paths nested three 1KB arrays on the game-task stack.
+ * Single-threaded: safe to share. */
+static char g_layoutLineBuf[1024];
+static char g_layoutCellA[1024];
+static char g_layoutCellB[1024];
+static char g_layoutTabExp[1024];
+
 static void draw_table_box(LayoutItem *item, int drawY);
 
 /* test-hook outputs (see layout_test_run_emit) */
@@ -801,6 +810,7 @@ static void add_rect_aux(const char *href, const char *text, int x, int y,
 
 void layout_build(DocParseResult *doc)
 {
+    logger_stack_touch();
     layout_clear();
     lm_clear();
     g_buildError = 0;
@@ -1002,7 +1012,7 @@ void layout_build(DocParseResult *doc)
                 heapLines = (char **)malloc(cap * sizeof(char *));
                 int hc = 0;
                 const char *p = rawText;
-                char buf[1024];
+                char *buf = g_layoutLineBuf; /* BSS-hoisted (stack audit) */
                 size_t bo2 = 0;
                 for (;;)
                 {
@@ -1036,7 +1046,7 @@ void layout_build(DocParseResult *doc)
                         p++;
                         continue;
                     }
-                    if (bo2 + 1 < sizeof(buf))
+                    if (bo2 + 1 < 1024)
                     {
                         buf[bo2++] = *p;
                     }
@@ -1255,10 +1265,15 @@ void layout_build(DocParseResult *doc)
                 }
                 if (!luaIsNumber)
                 {
-                    if (strchr(wstr, '%'))
+                    /* HTML4 percent width ("85%"): the Lua reference raised
+                     * an error here, but real browsers render it — and
+                     * news.ycombinator.com relies on it (width="85%").
+                     * strtod already parsed the numeric prefix (85), so
+                     * scale it to the content width and clamp. */
+                    if (strchr(wstr, '%') && wv > 0)
                     {
-                        g_buildError = 1; /* reference raises here */
-                        return;
+                        int pw = (int)(maxWidth * wv / 100.0 + 0.5);
+                        tblW = pw < 8 ? 8 : (pw > maxWidth ? maxWidth : pw);
                     }
                     /* non-numeric without %: tblW stays maxWidth */
                 }
@@ -1971,7 +1986,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                 {
                     cw = colW * span;
                 }
-                char txt[1024];
+                char *txt = g_layoutCellA; /* BSS-hoisted (stack audit) */
                 size_t to = 0;
                 txt[0] = '\0';
                 for (int ii = 0; ii < cell->inlineCount; ii++)
@@ -1980,7 +1995,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                     if (inl && inl->text)
                     {
                         size_t tl = strlen(inl->text);
-                        if (to + tl < sizeof(txt) - 1)
+                        if (to + tl < 1024 - 1)
                         {
                             strcat(txt + to, inl->text);
                             to += tl;
@@ -1989,14 +2004,14 @@ static void draw_table_box(LayoutItem *item, int drawY)
                 }
                 /* gsub("%s+", " ") + trim: collapse then trim in place */
                 {
-                    char out[1024];
+                    char *out = g_layoutCellB; /* BSS-hoisted (stack audit) */
                     size_t o = 0;
                     int inWs = 0;
                     for (const char *p = txt; *p; p++)
                     {
                         if (is_space_char(*p))
                         {
-                            if (!inWs && o < sizeof(out) - 1)
+                            if (!inWs && o < 1024 - 1)
                             {
                                 out[o++] = ' ';
                             }
@@ -2004,7 +2019,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                         }
                         else
                         {
-                            if (o < sizeof(out) - 1)
+                            if (o < 1024 - 1)
                             {
                                 out[o++] = *p;
                             }
@@ -2102,6 +2117,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
 
 void layout_draw(int scrollY)
 {
+    logger_stack_touch();
     if (!g_pd)
     {
         return;
@@ -2204,8 +2220,8 @@ void layout_draw(int scrollY)
                 {
                     if (lineY + 14 <= drawY + item->h)
                     {
-                        char expanded[1024];
-                        layout_expand_tab_columns(item->lines[li], expanded, sizeof(expanded));
+                        char *expanded = g_layoutTabExp; /* BSS-hoisted (stack audit) */
+                        layout_expand_tab_columns(item->lines[li], expanded, 1024);
                         g_pd->graphics->drawText(expanded, strlen(expanded), kUTF8Encoding,
                                                  item->x + 8, lineY);
                     }

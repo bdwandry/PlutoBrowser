@@ -25,4 +25,10 @@ void logger_log(const char *fmt, ...);
 #define logger_error(...) logger_error_at(__FILE__, __LINE__, __VA_ARGS__)
 void logger_error_at(const char *file, int line, const char *fmt, ...);
 
+/* Stack high-water tracking: call logger_stack_touch() at the entry of
+ * deep call chains (decoders, parse, storage). logger_stack_peak() returns
+ * the deepest observed game-task stack usage in bytes (0 on simulator). */
+void logger_stack_touch(void);
+unsigned logger_stack_peak(void);
+
 #endif /* PLUTO_LOGGER_H */

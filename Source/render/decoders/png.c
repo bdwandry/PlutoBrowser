@@ -73,6 +73,7 @@ static uint8_t png_out_pixel(void *ud, int x, int y)
 
 LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH)
 {
+    logger_stack_touch();
     if (!data || len < 24)
     {
         logger_log("PNG decode: short input %zu", len);
