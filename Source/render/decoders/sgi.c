@@ -69,6 +69,7 @@ static size_t sgi_expand_row(const uint8_t *src, size_t srcLen, uint8_t *out,
 
 LCDBitmap *sgi_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 512) return NULL;
     uint32_t magic = ((uint32_t)data[0] << 8) | data[1];
     if (magic != 0x01DA) return NULL;

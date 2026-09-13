@@ -9,6 +9,7 @@
  * identical lifetime model to document.c's walker output, so document_free
  * releases everything.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -855,6 +856,7 @@ int readability_distill(const TokenizeResult *tr, const char *rawTitle,
                         const char *baseUrl, DocParseResult *out)
 {
     RdState st;
+    logger_stack_touch();
     memset(&st, 0, sizeof(st));
     st.out = out;
     strbuf_init(&st.linkText);

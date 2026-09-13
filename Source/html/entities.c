@@ -7,6 +7,7 @@
  * reproduces the same observable output, including the multi-pass cascade
  * behavior for double-encoded entities.
  */
+#include "core/logger.h"
 #include "entities.h"
 
 #include <ctype.h>
@@ -625,6 +626,7 @@ static int translit_clean_pass(StrBuf *out, const char *text)
 
 char *entities_decode(const char *text)
 {
+    logger_stack_touch();
     if (!text || !text[0])
     {
         char *empty = (char *)PLUTO_MALLOC(1);

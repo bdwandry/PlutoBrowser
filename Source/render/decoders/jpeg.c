@@ -920,6 +920,7 @@ uint8_t **jpeg_decode_gray(const uint8_t *data, size_t len,
                            int maxW, int maxH,
                            int *outCount, int *outWidth)
 {
+    logger_stack_touch();
     *outCount = 0;
     *outWidth = 0;
     if (!data || len < 4)
@@ -936,20 +937,23 @@ uint8_t **jpeg_decode_gray(const uint8_t *data, size_t len,
     jpeg_idct_init();
 
     size_t pos = 2; /* Lua pos = 3 (1-based) == index 2 (0-based) */
-    JpegFrame frame;
+    /* Decode state hoisted to BSS (block-scope statics): the aggregate
+     * frame was 5.8KB of game-task stack. Single-threaded cooperative
+     * tasks; every field is reset below via memset before use. */
+    static JpegFrame frame;
     memset(&frame, 0, sizeof(frame));
     int haveFrame = 0;
-    JpegQt qt;
+    static JpegQt qt;
     memset(&qt, 0, sizeof(qt));
-    JpegHuff dcTables[4];
-    JpegHuff acTables[4];
+    static JpegHuff dcTables[4];
+    static JpegHuff acTables[4];
     memset(dcTables, 0, sizeof(dcTables));
     memset(acTables, 0, sizeof(acTables));
     int haveDc[4] = {0, 0, 0, 0};
     int haveAc[4] = {0, 0, 0, 0};
     int restartInterval = 0;
     int progressive = 0;
-    JpegProgState state;
+    static JpegProgState state;
     memset(&state, 0, sizeof(state));
 
     ScaleAccum *acc = NULL;
