@@ -98,6 +98,43 @@ static const NamedEntity NAMED_ENTITIES[] = {
     { "euro", "EUR" },
     { "check", "[v]" },
     { "cross", "[x]" },
+    /* ── WHATWG named-entity expansion (entities.html): common typography,
+     * punctuation, currency, arrows, math and Greek that appear on real
+     * pages. ASCII-safe approximations, matching the reference's approach. */
+    /* typography / punctuation */
+    { "dagger", "[x]" }, { "Dagger", "[x][x]" },
+    { "lsquor", "," }, { "sbquo", "," }, { "bdquo", "\"" }, { "lsaquo", "<" },
+    { "rsaquo", ">" }, { "OElig", "OE" }, { "oelig", "oe" },
+    { "Scaron", "S" }, { "scaron", "s" }, { "Yuml", "Y" },
+    { "circ", "^" }, { "tilde", "~" },
+    /* currency */
+    { "szlig", "ss" }, { "fnof", "f" },
+    /* Latin Extended additions */
+    { "Ntilde", "N" }, { "ntilde", "n" }, { "Ccedil", "C" }, { "ccedil", "c" },
+    { "Oslash", "O" }, { "oslash", "o" }, { "AElig", "AE" }, { "aelig", "ae" },
+    { "Iexcl", "!" },
+    /* Greek (most common on real pages) */
+    { "Alpha", "A" }, { "Beta", "B" }, { "Gamma", "G" }, { "gamma", "y" },
+    { "delta", "d" }, { "Epsilon", "E" }, { "epsilon", "e" },
+    { "Zeta", "Z" }, { "zeta", "z" }, { "Eta", "E" }, { "eta", "n" },
+    { "Theta", "TH" }, { "theta", "th" }, { "Iota", "I" }, { "iota", "i" },
+    { "Kappa", "K" }, { "kappa", "k" }, { "Lambda", "L" }, { "lambda", "l" },
+    { "Mu", "M" }, { "mu", "u" }, { "Nu", "N" }, { "nu", "v" },
+    { "Xi", "X" }, { "xi", "x" }, { "Omicron", "O" }, { "omicron", "o" },
+    { "Pi", "Pi" }, { "rho", "p" }, { "Sigma", "S" }, { "sigma", "s" },
+    { "Tau", "T" }, { "tau", "t" }, { "Upsilon", "Y" }, { "upsilon", "u" },
+    { "Phi", "PH" }, { "phi", "ph" }, { "Chi", "X" }, { "chi", "x" },
+    { "Psi", "PS" }, { "psi", "ps" }, { "Omega", "OM" }, { "omega", "w" },
+    /* arrows */
+    { "harr", "<->" }, { "crarr", "<-'" }, { "Larr", "<-" }, { "Rarr", "=>" },
+    { "dArr", "=>" }, { "uArr", "^" }, { "lArr", "<=" }, { "hArr", "<=>" },
+    { "rang", ">" }, { "loz", "<>" }, { "spades", "[S]" },
+    { "clubs", "[C]" }, { "hearts", "[H]" }, { "diams", "[D]" },
+    /* math extras */
+    { "there4", ":." }, { "nsup", ">!" }, { "nsub", "!<" },
+    { "sube", "<=" }, { "supe", ">=" }, { "oplus", "(+)" }, { "otimes", "(x)" },
+    { "cup", "U" }, { "empty", "{}" }, { "nabla", "grad" },
+    { "prop", "oc" }, { "vee", "v" }, { "wedge", "^" },
 };
 #define NAMED_ENTITY_COUNT (sizeof(NAMED_ENTITIES) / sizeof(NAMED_ENTITIES[0]))
 
