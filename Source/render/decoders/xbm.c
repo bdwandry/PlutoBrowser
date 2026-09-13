@@ -79,6 +79,7 @@ static int xbm_find_define(const char *s, const char *suffix, size_t len,
 
 LCDBitmap *xbm_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 32) return NULL;
     const char *s = (const char *)data;
 

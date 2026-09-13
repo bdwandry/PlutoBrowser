@@ -959,17 +959,22 @@ static void activate_form_block(const LayoutItem *item)
 }
 
 /* ── submitForm (port) ──────────────────────────────────────────────────── */
+/* Form-submit scratch hoisted to BSS: action[512] + seen[32][64] made
+ * submit_form a 3.3KB game-task frame. Single-threaded: safe to share. */
+static char g_formAction[512];
+static char g_formSeen[32][64];
+
 static void submit_form(const char *formAction, const LayoutItem *inputBlock)
 {
-    char action[512];
+    char *action = g_formAction;
     if (!formAction || !formAction[0])
     {
-        snprintf(action, sizeof(action), "%s",
+        snprintf(action, 512, "%s",
                  currentUrlObj ? currentUrlObj->normalized : "");
     }
     else
     {
-        snprintf(action, sizeof(action), "%s", formAction);
+        snprintf(action, 512, "%s", formAction);
     }
     if (strcmp(action, "#") == 0)
     {
@@ -981,7 +986,7 @@ static void submit_form(const char *formAction, const LayoutItem *inputBlock)
     int pairCount = 0;
 
     /* First-seen name dedupe (Lua `seen` table). */
-    char seen[32][64];
+    char (*seen)[64] = g_formSeen;
     int seenCount = 0;
 
     for (int i = 0; i < layout_get_item_count(); i++)
@@ -1222,6 +1227,9 @@ static int updateFrame(void *userdata)
 {
     (void)userdata;
     frameCount++;
+
+    /* Stack high-water sample (frame-level floor; deep callees touch too). */
+    logger_stack_touch();
 
     /* Clear the full framebuffer every frame (was dropped accidentally during
      * the BTEST scaffolding removal — without it, home-page scrolling smears
@@ -2052,7 +2060,8 @@ static int updateFrame(void *userdata)
     /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
     if (frameCount % 300 == 0)
     {
-        logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d", frameCount, g_fpsValue, g_showFps);
+        logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d stackPeak=%uB/61800B",
+                   frameCount, g_fpsValue, g_showFps, logger_stack_peak());
     }
 
 
@@ -2117,6 +2126,7 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         pd = api;
         playdate = api; /* keyboard port global (same pointer) */
         logger_init(pd);
+        logger_stack_touch(); /* baseline: SP near the game-task stack top */
 
         logger_log("=== PlutoBrowser boot ===");
         logger_log("eventHandler: kEventInit, osversion=%u", pd->system->getSystemInfo()->osversion);

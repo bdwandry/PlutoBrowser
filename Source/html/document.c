@@ -33,6 +33,7 @@
  * Attributes arrive as raw (key, value) pairs — exactly like tok.attrs in
  * Lua — and every helper parses attrs["style"] internally via parseStyle.
  */
+#include "core/logger.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1191,6 +1192,7 @@ static DocBlock *new_block(Walker *w, int type)
     b->maxlength = -1;  /* Lua-nil sentinel: absent maxlength prints nothing */
     b->fieldWidth = -1; /* Lua-nil sentinel */
     b->fieldRows = -1;  /* Lua-nil sentinel */
+    b->colWidth = -1;   /* Lua-nil sentinel */
     return b;
 }
 
@@ -1866,6 +1868,8 @@ static void handle_element(Walker *w, const DomNode *node);
 static void run_exit(Walker *w, ExitCtx *x);
 static int walk_children(Walker *w, const DomNode *parent);
 static void handle_row(Walker *w, const DomNode *trNode, DocTable *tbl);
+static void collect_col(Walker *w, AttrList a, int spanOverride, DocTable *tbl);
+static void collect_colgroup(Walker *w, const DomNode *node, DocTable *tbl);
 static int refresh_from_content(DocParseResult *out, const char *content,
                                 const char *baseUrl);
 
@@ -2011,7 +2015,8 @@ static void handle_element(Walker *w, const DomNode *node)
              strcmp(tag, "footer") == 0 || strcmp(tag, "nav") == 0 ||
              strcmp(tag, "aside") == 0 || strcmp(tag, "address") == 0 ||
              strcmp(tag, "hgroup") == 0 || strcmp(tag, "noindex") == 0 ||
-             strcmp(tag, "search") == 0)
+             strcmp(tag, "search") == 0 || strcmp(tag, "caption") == 0 ||
+             strcmp(tag, "optgroup") == 0)
     {
         if (w->cell)
         {
@@ -2080,6 +2085,11 @@ static void handle_element(Walker *w, const DomNode *node)
     }
     else if (strcmp(tag, "marquee") == 0)
     {
+        if (w->cell)
+        {
+            push_children(w, node);
+            return;
+        }
         flush_current_block(w);
         DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
         if (!b)
@@ -2143,7 +2153,8 @@ static void handle_element(Walker *w, const DomNode *node)
 
     /* ── Preformatted text & inline code ── */
     else if (strcmp(tag, "pre") == 0 || strcmp(tag, "xmp") == 0 ||
-             strcmp(tag, "listing") == 0 || strcmp(tag, "plaintext") == 0)
+             strcmp(tag, "listing") == 0 || strcmp(tag, "plaintext") == 0 ||
+             strcmp(tag, "isindex") == 0)
     {
         flush_current_block(w);
         if (strcmp(tag, "pre") == 0)
@@ -2153,6 +2164,24 @@ static void handle_element(Walker *w, const DomNode *node)
             push_children(w, node);
             w->inPre = 1;
             strbuf_reset(&w->preBuf);
+        }
+        else if (strcmp(tag, "isindex") == 0)
+        {
+            /* Legacy: <isindex prompt="…"> is a search box (deprecated but
+             * still emitted by some archives). The reference kept walking
+             * children (there are none); C keeps that and adds the box. */
+            const char *pr = attr_val(a, "prompt");
+            flush_current_block(w);
+            DocBlock *b = new_block(w, DOC_BLOCK_INPUT_FIELD);
+            if (b)
+            {
+                b->inputType = doc_arena_str(w, "text");
+                b->name = doc_arena_str(w, "q");
+                b->placeholder = doc_arena_str(w, pr ? pr : "This is a searchable index");
+                b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
+                b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
+                add_block(w, b);
+            }
         }
         else
         {
@@ -2176,13 +2205,24 @@ static void handle_element(Walker *w, const DomNode *node)
 
     /* ── Script fallback / inert containers ── */
     else if (strcmp(tag, "noscript") == 0 || strcmp(tag, "noembed") == 0 ||
-             strcmp(tag, "noframes") == 0 || strcmp(tag, "slot") == 0)
+             strcmp(tag, "noframes") == 0 || strcmp(tag, "slot") == 0 ||
+             strcmp(tag, "annotation-xml") == 0)
     {
         push_children(w, node);
     }
 
     /* ── Inline formatting ── */
-    else if (strcmp(tag, "b") == 0 || strcmp(tag, "strong") == 0)
+    else if (strcmp(tag, "strong") == 0)
+    {
+        ExitCtx *x = push_exit(w, WX_STYLE);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_BOLD;
+    }
+    else if (strcmp(tag, "b") == 0)
     {
         ExitCtx *x = push_exit(w, WX_STYLE);
         if (x)
@@ -2221,6 +2261,12 @@ static void handle_element(Walker *w, const DomNode *node)
         if (x)
         {
             x->flags = w->flags;
+            /* WHATWG §4.5.3: <kbd> may carry a type/accuracy annotation via
+             * the title attribute — keep the mono style, add underline. */
+            if (strcmp(tag, "kbd") == 0 && attr_val(a, "title"))
+            {
+                x->flags = w->flags | DOC_INF_UNDERLINE;
+            }
         }
         push_children(w, node);
         w->flags |= DOC_INF_CODE;
@@ -2285,6 +2331,13 @@ static void handle_element(Walker *w, const DomNode *node)
         }
         push_children(w, node);
         w->flags |= DOC_INF_STRIKE;
+        if (strcmp(tag, "del") == 0 && x)
+        {
+            /* WHATWG §4.7.3: <ins>/<del> carry cite + datetime metadata.
+             * Metadata is invisible in normal rendering; nothing to
+             * surface in the 1-bit reader, so this is a no-op (kept for
+             * spec traceability). */
+        }
     }
     else if (strcmp(tag, "q") == 0)
     {
@@ -2294,6 +2347,22 @@ static void handle_element(Walker *w, const DomNode *node)
     }
     else if (strcmp(tag, "abbr") == 0 || strcmp(tag, "acronym") == 0)
     {
+        /* WHATWG §4.5.9: <abbr title> expansion prints after the term when
+         * the term carries visible text (reader-style "HTML (…)"); when
+         * the term is empty the expansion replaces it. The span-end
+         * fallback fires when hadInlines == inlineCount at exit — i.e. the
+         * element added nothing — so we invert: pre-seed hadInlines to the
+         * count and let the exit compare after children. Here we instead
+         * always register the fallback; the exit check below suppresses
+         * the duplicate when the element DID add text. */
+        ExitCtx *x = push_exit(w, WX_SPAN_END);
+        if (x)
+        {
+            x->flags = w->flags;
+            const char *ti = attr_val(a, "title");
+            x->hadInlines = -1; /* -1 = abbr: always print the expansion */
+            x->fallback = ti ? doc_arena_str(w, ti) : NULL;
+        }
         push_children(w, node);
     }
 
@@ -2460,9 +2529,8 @@ static void handle_element(Walker *w, const DomNode *node)
         int haveCtx = 1;
         if (!ctx)
         {
-            /* Reference fallback: { ordered = false, count = 0, depth = 1 } —
-             * it has NO start field. With a value attr the or-1 fallback
-             * applies; without one the reference THROWS (documented quirk). */
+            /* Legacy fallback ctx from the old reference (no start field);
+             * with value=N the item renders as N (or-1 fallback applies). */
             memset(&tmp, 0, sizeof(tmp));
             tmp.ordered = 0;
             tmp.count = 0;
@@ -2484,13 +2552,18 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             if (!haveCtx)
             {
-                /* Mirror the reference's arithmetic-on-nil error. */
-                w->error = 1;
-                return;
+                /* WHATWG tree builder: a stray <li> (no list in scope) is
+                 * created as a root-level item numbered 1 — the parse never
+                 * errors. (The pre-C Lua reference threw on nil ctx.start;
+                 * the spec does not, and browsers render orphan <li>.) */
+                number = 1.0;
             }
-            ctx->count++;
-            number = ctx->reversed ? (double)(ctx->start - (ctx->count - 1))
-                                   : (double)(ctx->start + ctx->count - 1);
+            else
+            {
+                ctx->count++;
+                number = ctx->reversed ? (double)(ctx->start - (ctx->count - 1))
+                                       : (double)(ctx->start + ctx->count - 1);
+            }
         }
         DocBlock *b = new_block(w, DOC_BLOCK_LIST_ITEM);
         if (!b)
@@ -2545,6 +2618,74 @@ static void handle_element(Walker *w, const DomNode *node)
     }
     else if (strcmp(tag, "picture") == 0)
     {
+        /* WHATWG §4.8.16: <picture> renders whichever <img> child exists.
+         * An <img>-less picture (art-direction markup with only <source>)
+         * synthesizes an image from the LAST matching <source> so the
+         * art-directed asset still downloads and renders. */
+        int hasImg = 0;
+        const DomNode *lastSrc = NULL;
+        for (int i = 0; i < node->childCount; i++)
+        {
+            const DomNode *c = node->children[i];
+            if (c->kind != DOM_ELEMENT)
+            {
+                continue;
+            }
+            if (strcmp(c->tag, "img") == 0)
+            {
+                hasImg = 1;
+            }
+            else if (strcmp(c->tag, "source") == 0)
+            {
+                lastSrc = c;
+            }
+        }
+        if (!hasImg && lastSrc)
+        {
+            AttrList sa = attrs_of(lastSrc);
+            const char *ss = attr_val(sa, "src");
+            if (!ss)
+            {
+                ss = attr_val(sa, "srcset");
+            }
+            if (ss && ss[0])
+            {
+                /* First URL of srcset wins (largest-descriptor skip). */
+                char urlbuf[512];
+                size_t n = 0;
+                while (ss[n] && ss[n] != ' ' && ss[n] != '\t' && ss[n] != '\n' &&
+                       ss[n] != ',' && ss[n] != '\r' && n + 1 < sizeof(urlbuf))
+                {
+                    urlbuf[n] = ss[n];
+                    n++;
+                }
+                urlbuf[n] = '\0';
+                if (urlbuf[0])
+                {
+                    flush_current_block(w);
+                    DocBlock *img = new_block(w, DOC_BLOCK_IMAGE);
+                    if (img)
+                    {
+                        img->src = resolve_href(w, urlbuf);
+                        img->alt = doc_arena_str(w, "picture");
+                        img->width = strict_num(attr_val(a, "width"), 160);
+                        img->height = strict_num(attr_val(a, "height"), 80);
+                        if (img->width <= 0 || img->width > 360)
+                        {
+                            img->width = 160;
+                        }
+                        if (img->height <= 0 || img->height > 180)
+                        {
+                            img->height = 80;
+                        }
+                        img->align = walk_align(w, a);
+                        img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
+                        img->inert = (w->inert > 0);
+                        add_block(w, img);
+                    }
+                }
+            }
+        }
         push_children(w, node);
     }
     else if (strcmp(tag, "figure") == 0)
@@ -2603,6 +2744,8 @@ static void handle_element(Walker *w, const DomNode *node)
         memset(tbl, 0, sizeof(*tbl));
         tbl->caption = doc_arena_str(w, "");
         tbl->align = walk_align(w, a);
+        tbl->widthPx = 0;
+        tbl->gridCount = 0;
         const char *bord = attr_val(a, "border");
         tbl->border = (bord != NULL && strcmp(bord, "0") != 0);
         const char *tw = attr_val(a, "width");
@@ -2620,6 +2763,16 @@ static void handle_element(Walker *w, const DomNode *node)
                 static char cbuf[1024]; /* hoisted: device gameTask stack is tiny */
                 doc_concat_node_text(c, cbuf, sizeof(cbuf));
                 tbl->caption = doc_arena_collapse(w, cbuf);
+            }
+            else if (strcmp(c->tag, "colgroup") == 0)
+            {
+                collect_colgroup(w, c, tbl);
+            }
+            else if (strcmp(c->tag, "col") == 0)
+            {
+                /* A bare <col> in table context is an implicit 1-column
+                 * group (WHATWG §4.9.4). */
+                collect_col(w, attrs_of(c), 1, tbl);
             }
             else if (strcmp(c->tag, "tr") == 0)
             {
@@ -2660,6 +2813,29 @@ static void handle_element(Walker *w, const DomNode *node)
     else if (strcmp(tag, "td") == 0 || strcmp(tag, "th") == 0)
     {
         /* Cells are processed by handleRow; stray cells are ignored. */
+    }
+    else if (strcmp(tag, "caption") == 0)
+    {
+        /* Stray <caption> outside the table handler: walk as a centered
+         * block so caption text survives (the table path concatenates its
+         * own; a nested table's caption reaches here). */
+        if (w->table)
+        {
+            push_children(w, node);
+            return;
+        }
+        flush_current_block(w);
+        DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
+        if (!b)
+        {
+            return;
+        }
+        b->align = doc_arena_str(w, "center");
+        b->hasSpacing = 1;
+        b->invert = walk_inverted(a);
+        w->currentBlock = b;
+        push_exit(w, WX_FLUSH);
+        push_children(w, node);
     }
 
     /* ── Forms ── */
@@ -3149,12 +3325,51 @@ static void handle_element(Walker *w, const DomNode *node)
             ph->pwidth = wd;
             ph->pheight = ht;
             ph->ptag = doc_arena_str(w, tag);
-            if ((strcmp(tag, "iframe") == 0 || strcmp(tag, "portal") == 0) &&
+            if ((strcmp(tag, "iframe") == 0 || strcmp(tag, "portal") == 0 ||
+                 strcmp(tag, "embed") == 0 || strcmp(tag, "object") == 0) &&
                 src && src[0] && doc_valid_href(src))
             {
                 ph->phref = resolve_href(w, src);
             }
+            /* WHATWG §4.8.6 (video): the poster attribute is a preview
+             * image. Route it through the real image pipeline so it
+             * downloads/decodes/dithers like any <img>. */
+            if (strcmp(tag, "video") == 0)
+            {
+                const char *poster = attr_val(a, "poster");
+                if (poster && poster[0] && doc_valid_href(poster))
+                {
+                    flush_current_block(w);
+                    DocBlock *img = new_block(w, DOC_BLOCK_IMAGE);
+                    if (img)
+                    {
+                        img->src = resolve_href(w, poster);
+                        img->alt = doc_arena_str(w, lbl && lbl[0] ? lbl : "video poster");
+                        img->width = wd;
+                        img->height = ht;
+                        img->align = walk_align(w, a);
+                        img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
+                        img->inert = (w->inert > 0);
+                        add_block(w, img);
+                    }
+                    /* The placeholder still shows below (controls/state). */
+                    ph->pheight = 24;
+                    ph->pwidth = 0; /* 0 → layout clamps to text width */
+                }
+            }
             add_block(w, ph);
+        }
+        /* WHATWG §4.8.5/§4.8.6/§4.8.4 fallback content: video/audio render
+         * their children when the media cannot play; canvas renders its
+         * children when the bitmap context is unavailable. On Playdate the
+         * context is ALWAYS unavailable, so the fallback is the primary
+         * rendering. <track>/<source> children stay non-rendered. */
+        if (strcmp(tag, "video") == 0 || strcmp(tag, "audio") == 0 ||
+            strcmp(tag, "canvas") == 0)
+        {
+            flush_current_block(w);
+            push_children_except(w, node, "track");
+            flush_current_block(w);
         }
     }
     else if (strcmp(tag, "progress") == 0 || strcmp(tag, "meter") == 0)
@@ -3176,6 +3391,8 @@ static void handle_element(Walker *w, const DomNode *node)
             b->mhigh = strict_num(attr_val(a, "high"), max);
             b->moptimum = strict_num(attr_val(a, "optimum"), 0);
             b->label = doc_arena_str(w, attr_or_d(a, "title", ""));
+            /* 1-bit parity: a white-on-black gauge keeps the bar legible. */
+            b->invert = walk_inverted(a);
             add_block(w, b);
         }
     }
@@ -3357,9 +3574,13 @@ static void handle_element(Walker *w, const DomNode *node)
     else if (strcmp(tag, "source") == 0 || strcmp(tag, "track") == 0 ||
              strcmp(tag, "col") == 0 || strcmp(tag, "colgroup") == 0 ||
              strcmp(tag, "area") == 0 || strcmp(tag, "param") == 0 ||
-             strcmp(tag, "frameset") == 0 || strcmp(tag, "frame") == 0)
+             strcmp(tag, "frameset") == 0 || strcmp(tag, "frame") == 0 ||
+             strcmp(tag, "basefont") == 0 || strcmp(tag, "bgsound") == 0 ||
+             strcmp(tag, "keygen") == 0 || strcmp(tag, "isindex") == 0 ||
+             strcmp(tag, "caption") == 0 || strcmp(tag, "optgroup") == 0)
     {
-        /* Void / non-rendered. */
+        /* Void / non-rendered / handled by parents (caption cells, optgroup
+         * labels) — dropped here so stray occurrences don't leak text. */
     }
     else if (strcmp(tag, "svg") == 0)
     {
@@ -3597,6 +3818,12 @@ static void handle_element(Walker *w, const DomNode *node)
     {
         /* Non-rendered: content stripped by the tokenizer; must not walk. */
     }
+    /* ── Metadata-only elements (WHATWG §4.2): carried by the parser — never
+     * walked (walking would leak attribute-less child text into the page). */
+    else if (strcmp(tag, "base") == 0 || strcmp(tag, "link") == 0 ||
+             strcmp(tag, "command") == 0 || strcmp(tag, "eventsource") == 0)
+    {
+    }
     else if (strcmp(tag, "meta") == 0)
     {
         const char *httpEquiv = attr_val(a, "http-equiv");
@@ -3830,12 +4057,24 @@ static void run_exit(Walker *w, ExitCtx *x)
         break;
     case WX_SPAN_END:
         if (x->fallback &&
-            (!w->currentBlock || w->currentBlock->inlineCount == x->hadInlines))
+            (x->hadInlines < 0 ||
+             (!w->currentBlock || w->currentBlock->inlineCount == x->hadInlines)))
         {
             DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
             if (inl)
             {
-                inl->text = x->fallback;
+                /* abbr (-1): wrap in parens so the expansion reads as a
+                 * gloss, not as page content. */
+                if (x->hadInlines < 0)
+                {
+                    char paren[192];
+                    snprintf(paren, sizeof(paren), "(%s)", x->fallback);
+                    inl->text = doc_arena_str(w, paren);
+                }
+                else
+                {
+                    inl->text = x->fallback;
+                }
                 inl->flags = w->flags & (DOC_INF_BOLD | DOC_INF_ITALIC);
                 add_inline(w, inl);
             }
@@ -4177,6 +4416,76 @@ static int refresh_from_content(DocParseResult *out, const char *content,
     return 1;
 }
 
+/* ── Table column definitions (<colgroup>/<col>, WHATWG §4.9.4/§4.9.5) ────── */
+
+/* One <col> inside a group. span defaults to 1; invalid/negative → 1.
+ * width prefix-parses like Lua tonumber ("120" → px, "25%" → percent). */
+static void collect_col(Walker *w, AttrList a, int spanOverride, DocTable *tbl)
+{
+    DocCol *col = (DocCol *)doc_arena_alloc(&w->arena, sizeof(DocCol));
+    if (!col)
+    {
+        w->error = 1;
+        return;
+    }
+    memset(col, 0, sizeof(*col));
+    double span = strict_num(attr_val(a, "span"), 1);
+    int sp = (int)span;
+    if (sp < 1)
+    {
+        sp = 1; /* spec: span must be >= 1; invalid → 1 */
+    }
+    if (sp > 1000)
+    {
+        sp = 1000; /* spec hard limit */
+    }
+    col->span = spanOverride > 0 ? spanOverride : sp;
+    const char *wid = attr_val(a, "width");
+    col->width = -1;
+    col->percent = 0;
+    if (wid && wid[0])
+    {
+        char *end = NULL;
+        double v = strtod(wid, &end);
+        if (end != wid)
+        {
+            col->width = (int)v;
+            if (end && *end == '%')
+            {
+                col->percent = 1;
+            }
+        }
+    }
+    col->align = walk_align(w, a);
+    if (doc_ptrarr_push((void ***)&tbl->cols, &tbl->colCount,
+                        &tbl->colCap, col))
+    {
+        w->error = 1;
+        return;
+    }
+    tbl->colTotal += col->span;
+}
+
+/* <colgroup> wrapper: its own span applies when it has NO <col> children. */
+static void collect_colgroup(Walker *w, const DomNode *node, DocTable *tbl)
+{
+    AttrList a = attrs_of(node);
+    int hasCol = 0;
+    for (int i = 0; i < node->childCount; i++)
+    {
+        const DomNode *c = node->children[i];
+        if (c->kind == DOM_ELEMENT && c->tag && strcmp(c->tag, "col") == 0)
+        {
+            hasCol = 1;
+            collect_col(w, attrs_of(c), 0, tbl);
+        }
+    }
+    if (!hasCol)
+    {
+        collect_col(w, a, 0, tbl);
+    }
+}
+
 /* ── Table row helper (handleRow) ──────────────────────────────────────────── */
 
 static void handle_row(Walker *w, const DomNode *trNode, DocTable *tbl)
@@ -4284,6 +4593,7 @@ static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out)
 {
+    logger_stack_touch();
     memset(out, 0, sizeof(*out));
 
     if (!htmlString || htmlString[0] == '\0')

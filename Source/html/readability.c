@@ -9,6 +9,7 @@
  * identical lifetime model to document.c's walker output, so document_free
  * releases everything.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -855,6 +856,7 @@ int readability_distill(const TokenizeResult *tr, const char *rawTitle,
                         const char *baseUrl, DocParseResult *out)
 {
     RdState st;
+    logger_stack_touch();
     memset(&st, 0, sizeof(st));
     st.out = out;
     strbuf_init(&st.linkText);
@@ -1003,7 +1005,14 @@ int readability_distill(const TokenizeResult *tr, const char *rawTitle,
             }
         }
         else if (strcmp(tag, "p") == 0 || strcmp(tag, "div") == 0 ||
-                 strcmp(tag, "section") == 0)
+                 strcmp(tag, "section") == 0 || strcmp(tag, "article") == 0 ||
+                 strcmp(tag, "main") == 0 || strcmp(tag, "header") == 0 ||
+                 strcmp(tag, "footer") == 0 || strcmp(tag, "aside") == 0 ||
+                 strcmp(tag, "nav") == 0 || strcmp(tag, "figure") == 0 ||
+                 strcmp(tag, "figcaption") == 0 || strcmp(tag, "blockquote") == 0 ||
+                 strcmp(tag, "hgroup") == 0 || strcmp(tag, "address") == 0 ||
+                 strcmp(tag, "fieldset") == 0 || strcmp(tag, "details") == 0 ||
+                 strcmp(tag, "dialog") == 0 || strcmp(tag, "summary") == 0)
         {
             rd_commit_block(&st);
         }

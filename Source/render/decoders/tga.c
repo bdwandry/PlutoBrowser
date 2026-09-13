@@ -115,6 +115,7 @@ static uint8_t tga_pixel_gray(void *ud, int outX, int outY)
 
 LCDBitmap *tga_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 18) return NULL;
     int idLen = data[0];
     int cmapType = data[1];
