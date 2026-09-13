@@ -1003,7 +1003,14 @@ int readability_distill(const TokenizeResult *tr, const char *rawTitle,
             }
         }
         else if (strcmp(tag, "p") == 0 || strcmp(tag, "div") == 0 ||
-                 strcmp(tag, "section") == 0)
+                 strcmp(tag, "section") == 0 || strcmp(tag, "article") == 0 ||
+                 strcmp(tag, "main") == 0 || strcmp(tag, "header") == 0 ||
+                 strcmp(tag, "footer") == 0 || strcmp(tag, "aside") == 0 ||
+                 strcmp(tag, "nav") == 0 || strcmp(tag, "figure") == 0 ||
+                 strcmp(tag, "figcaption") == 0 || strcmp(tag, "blockquote") == 0 ||
+                 strcmp(tag, "hgroup") == 0 || strcmp(tag, "address") == 0 ||
+                 strcmp(tag, "fieldset") == 0 || strcmp(tag, "details") == 0 ||
+                 strcmp(tag, "dialog") == 0 || strcmp(tag, "summary") == 0)
         {
             rd_commit_block(&st);
         }

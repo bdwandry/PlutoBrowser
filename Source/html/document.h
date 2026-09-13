@@ -119,6 +119,15 @@ typedef struct
     int cellCap;
 } DocRow;
 
+/* Column definition from <colgroup>/<col> (WHATWG §4.9.4/§4.9.5). */
+typedef struct
+{
+    int span;      /* >= 1 (attr span, clamped) */
+    int width;     /* -1 = unspecified; else pixel width (attr width prefix) */
+    int percent;   /* width attr ended with '%' → percent of table */
+    const char *align; /* "center"/"right"/"left" or NULL */
+} DocCol;
+
 typedef struct
 {
     DocRow **rows; /* heap array */
@@ -128,6 +137,15 @@ typedef struct
     const char *align; /* or NULL */
     int border; /* border attr present and != "0" */
     char *width; /* arena string or NULL */
+    DocCol **cols; /* heap array of column defs (NULL when no <colgroup>) */
+    int colCount;
+    int colCap;
+    int colTotal;  /* sum of span over colCount */
+    /* Layout scratch (owned by the layout engine, zeroed at parse time): */
+    int widthPx;   /* resolved table width in layout pixels */
+    int *colX;     /* column left offsets (one per grid column) */
+    int *colW;     /* column widths (one per grid column) */
+    int gridCount; /* number of grid columns (max colTotal, rowCount) */
 } DocTable;
 
 /* ── Select options (port of select options + datalist entries) ──────────── */
@@ -219,6 +237,8 @@ typedef struct
     /* box_open / box_close */
     char *toggleKey; /* arena "d<N>" or NULL */
     int toggleOpen;
+    /* form widget column hint (select field sizing) */
+    int colWidth; /* <select size>/colgroup hint; -1 = absent */
     /* placeholder */
     char *ptag, *plabel, *phref; /* arena strings */
     double pwidth, pheight;
