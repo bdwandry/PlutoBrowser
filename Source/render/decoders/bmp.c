@@ -4,6 +4,7 @@
  * Pure on-device BMP decoder → Bayer-dithered 1-bit bitmap.
  * See bmp.h for the Lua→C map and preserved semantics.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include "render/decoders/bmp.h"
@@ -139,6 +140,7 @@ static void bmp_load_palette(BmpCtx *c, size_t palOffset)
 
 LCDBitmap *bmp_decode(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 54)
     {
         return NULL;

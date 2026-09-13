@@ -4,6 +4,7 @@
  * Pure DEFLATE decompressor (one-shot + streaming) for PNG.
  * See inflate.h for the Lua→C map and documented deviations.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include "render/decoders/inflate.h"
@@ -217,24 +218,32 @@ static const uint8_t clOrder[19] = {
 /* ── Dynamic Huffman header (shared logic of Lua decompress + beginBlock) ──
  * strict=1 (streaming): cl-symbol EOF → return 0 (caller sets eof).
  * strict=0 (one-shot): cl-symbol EOF → stop filling (Lua `break`), continue. */
+/* Dynamic-block scratch (512 code lengths), hoisted to BSS — see
+ * inf_read_dynamic. */
+static uint8_t g_infAllLens[512];
+
 static int inf_read_dynamic(BitStream *bs, HuffTable *lit, HuffTable *dist, int strict)
 {
     uint32_t hlit = bs_read_bits_or0(bs, 5) + 257;
     uint32_t hdist = bs_read_bits_or0(bs, 5) + 1;
     uint32_t hclen = bs_read_bits_or0(bs, 4) + 4;
 
-    uint8_t codeLens[19] = {0};
+    /* Scratch hoisted to BSS: this frame + inflate_decompress's own
+     * 7.0KB reached ~11.4KB of the game-task stack in one chain.
+     * Single-threaded cooperative tasks: safe to share. */
+    static uint8_t codeLens[19];
+    static HuffTable clTable;
+    memset(codeLens, 0, sizeof(codeLens));
     for (uint32_t i = 0; i < hclen && i < 19; i++)
     {
         codeLens[clOrder[i]] = (uint8_t)bs_read_bits_or0(bs, 3);
     }
-    HuffTable clTable;
     inf_build_table(codeLens, 19, &clTable);
 
     /* hlit+hdist ≤ 320; a trailing run can overshoot (Lua allows it) —
      * 512 covers the worst case so overflow entries are ignored, as in
      * Lua where only 1..hlit / hlit+1..hlit+hdist are consumed. */
-    uint8_t allLens[512];
+    uint8_t *allLens = g_infAllLens;
     int allCount = 0;
     while (allCount < (int)(hlit + hdist))
     {
@@ -323,8 +332,15 @@ static void out_push(OutBuf *b, uint8_t v)
     b->d[b->n++] = v;
 }
 
+/* Dynamic-block HuffTables for the one-shot path, hoisted to BSS (each is
+ * 288 entries ≈ 4.6KB; two on the stack = 9.2KB of game-task stack).
+ * Single-threaded cooperative tasks: safe to share. */
+static HuffTable g_dynLit;
+static HuffTable g_dynDist;
+
 uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen)
 {
+    logger_stack_touch();
     if (outLen)
     {
         *outLen = 0;
@@ -394,7 +410,8 @@ uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen)
         {
             const HuffTable *litT;
             const HuffTable *distT;
-            HuffTable dynLit, dynDist;
+            HuffTable *dynLit = &g_dynLit;
+            HuffTable *dynDist = &g_dynDist;
             if (btype == 1)
             {
                 inf_fixed_tables();
@@ -403,13 +420,13 @@ uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen)
             }
             else
             {
-                if (!inf_read_dynamic(&bs, &dynLit, &dynDist, 0))
+                if (!inf_read_dynamic(&bs, dynLit, dynDist, 0))
                 {
                     /* strict=0 never returns 0; defensive only */
                     break;
                 }
-                litT = &dynLit;
-                distT = &dynDist;
+                litT = dynLit;
+                distT = dynDist;
             }
 
             for (;;)
@@ -663,6 +680,7 @@ static void st_pump(InflateStream *s, size_t n)
 
 InflateStream *inflate_stream_new(const uint8_t *data, size_t len)
 {
+    logger_stack_touch();
     if (!data || len < 2)
     {
         return NULL;

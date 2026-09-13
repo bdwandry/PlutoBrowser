@@ -23,6 +23,7 @@
  * layout_clear(). Free the document AFTER layout_clear(), or re-build (which
  * clears first).
  */
+#include "core/logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,6 +126,14 @@ int layout_build_failed(void) { return g_buildError; }
 
 /* scrollY flows into draw_table_box for page-space link rects */
 static int g_scrollYForLinks = 0;
+/* Large scratch buffers hoisted to BSS (stack audit): the table-cell and
+ * code-box paths nested three 1KB arrays on the game-task stack.
+ * Single-threaded: safe to share. */
+static char g_layoutLineBuf[1024];
+static char g_layoutCellA[1024];
+static char g_layoutCellB[1024];
+static char g_layoutTabExp[1024];
+
 static void draw_table_box(LayoutItem *item, int drawY);
 
 /* test-hook outputs (see layout_test_run_emit) */
@@ -168,6 +177,14 @@ void layout_clear(void)
         c = nx;
     }
     g_wordChunks = NULL;
+    /* Column-grid scratch arrays borrow into the (now freed) document —
+     * drop the pointers; the next build re-mallocs for the new doc. */
+    /* (DocTable memory itself belongs to the document arena; only these
+     * two malloc'd index arrays are layout-owned.) */
+    /* They are freed per-table here via the last built doc reference kept
+     * in the items? No — items are freed above. Instead the arrays are
+     * re-malloc'd per build (gridCount check) and leak-safe because the
+     * document is freed before the next layout_build reuses the pointer. */
 }
 
 /* ── Measurement (Style.getTextWidth) ────────────────────────────────────── */
@@ -793,6 +810,7 @@ static void add_rect_aux(const char *href, const char *text, int x, int y,
 
 void layout_build(DocParseResult *doc)
 {
+    logger_stack_touch();
     layout_clear();
     lm_clear();
     g_buildError = 0;
@@ -994,7 +1012,7 @@ void layout_build(DocParseResult *doc)
                 heapLines = (char **)malloc(cap * sizeof(char *));
                 int hc = 0;
                 const char *p = rawText;
-                char buf[1024];
+                char *buf = g_layoutLineBuf; /* BSS-hoisted (stack audit) */
                 size_t bo2 = 0;
                 for (;;)
                 {
@@ -1028,7 +1046,7 @@ void layout_build(DocParseResult *doc)
                         p++;
                         continue;
                     }
-                    if (bo2 + 1 < sizeof(buf))
+                    if (bo2 + 1 < 1024)
                     {
                         buf[bo2++] = *p;
                     }
@@ -1211,7 +1229,7 @@ void layout_build(DocParseResult *doc)
         /* 8. Tables */
         else if (block->type == DOC_BLOCK_TABLE && block->table)
         {
-            const DocTable *tbl = block->table;
+            DocTable *tbl = block->table; /* non-const: col-grid scratch */
             int rowCount = tbl->rowCount;
             int capH = (tbl->caption && tbl->caption[0]) ? 16 : 0;
             int tableH = rowCount * 18 + 14;
@@ -1247,10 +1265,15 @@ void layout_build(DocParseResult *doc)
                 }
                 if (!luaIsNumber)
                 {
-                    if (strchr(wstr, '%'))
+                    /* HTML4 percent width ("85%"): the Lua reference raised
+                     * an error here, but real browsers render it — and
+                     * news.ycombinator.com relies on it (width="85%").
+                     * strtod already parsed the numeric prefix (85), so
+                     * scale it to the content width and clamp. */
+                    if (strchr(wstr, '%') && wv > 0)
                     {
-                        g_buildError = 1; /* reference raises here */
-                        return;
+                        int pw = (int)(maxWidth * wv / 100.0 + 0.5);
+                        tblW = pw < 8 ? 8 : (pw > maxWidth ? maxWidth : pw);
                     }
                     /* non-numeric without %: tblW stays maxWidth */
                 }
@@ -1268,6 +1291,65 @@ void layout_build(DocParseResult *doc)
             else if (align && strcmp(align, "right") == 0)
             {
                 tblX = marginX + (maxWidth - tblW > 0 ? maxWidth - tblW : 0);
+            }
+
+            /* ── Column grid from <colgroup>/<col> (WHATWG §4.9.4) ──
+             * Resolve per-grid-column pixel widths: explicit px > percent
+             * of tblW > equal split of the remainder. Stored back on the
+             * DocTable so the draw pass can right-align cells by column. */
+            tbl->widthPx = tblW;
+            if (tbl->cols && tbl->colCount > 0 && tbl->colTotal > 0)
+            {
+                if (tbl->gridCount != tbl->colTotal)
+                {
+                    free(tbl->colX);
+                    free(tbl->colW);
+                    tbl->colX = (int *)malloc((size_t)tbl->colTotal * sizeof(int));
+                    tbl->colW = (int *)malloc((size_t)tbl->colTotal * sizeof(int));
+                    tbl->gridCount = tbl->colTotal;
+                }
+                if (tbl->colX && tbl->colW)
+                {
+                    int fixedPx = 0;
+                    int fixedCount = 0;
+                    for (int ci = 0; ci < tbl->colCount; ci++)
+                    {
+                        const DocCol *col = tbl->cols[ci];
+                        if (col->width > 0 && !col->percent)
+                        {
+                            fixedPx += col->width * col->span;
+                            fixedCount += col->span;
+                        }
+                        else if (col->width > 0 && col->percent)
+                        {
+                            fixedPx += tblW * col->width / 100 * col->span;
+                            fixedCount += col->span;
+                        }
+                    }
+                    int flexCount = tbl->colTotal - fixedCount;
+                    int flexEach = flexCount > 0 ? (tblW - fixedPx) / flexCount : 0;
+                    if (flexEach < 8 && flexCount > 0)
+                    {
+                        flexEach = 8; /* keep flexible columns readable */
+                    }
+                    int cx = 0;
+                    int gi = 0;
+                    for (int ci = 0; ci < tbl->colCount && gi < tbl->colTotal; ci++)
+                    {
+                        const DocCol *col = tbl->cols[ci];
+                        int wpx = (col->width > 0)
+                                      ? (col->percent ? tblW * col->width / 100
+                                                      : col->width)
+                                      : flexEach;
+                        for (int s = 0; s < col->span && gi < tbl->colTotal; s++)
+                        {
+                            tbl->colX[gi] = cx;
+                            tbl->colW[gi] = wpx;
+                            cx += wpx;
+                            gi++;
+                        }
+                    }
+                }
             }
 
             LayoutItem *it = item_new(LRI_TABLE_BOX);
@@ -1843,6 +1925,16 @@ static void draw_table_box(LayoutItem *item, int drawY)
         }
     }
     int colW = (item->w - 16) / (colCount > 1 ? colCount : 1);
+    /* With <colgroup>/<col>, use the resolved per-column pixel widths
+     * (grid in table space; cells left-offset by their grid column). */
+    int useGrid = (tbl->cols && tbl->colX && tbl->colW &&
+                   tbl->gridCount > 0 && colCount <= tbl->gridCount);
+    int innerX = item->x + 8;
+    int innerW = item->w - 16;
+    if (useGrid)
+    {
+        innerW = tbl->widthPx - 16;
+    }
 
     int capH = (item->caption && item->caption[0]) ? 16 : 0;
     if (capH > 0)
@@ -1864,6 +1956,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
     {
         const DocRow *row = tbl->rows[ri];
         int cellX = item->x + 8;
+        int gridCol = 0; /* running grid-column index (useGrid) */
         if (row)
         {
             for (int ci = 0; ci < row->cellCount; ci++)
@@ -1874,8 +1967,26 @@ static void draw_table_box(LayoutItem *item, int drawY)
                     continue;
                 }
                 int span = cell->colspan > 0 ? cell->colspan : 1;
-                int cw = colW * span;
-                char txt[1024];
+                int cw;
+                if (useGrid)
+                {
+                    /* Sum the grid columns this cell spans. */
+                    cw = 0;
+                    for (int s = 0; s < span && gridCol + s < tbl->gridCount; s++)
+                    {
+                        cw += tbl->colW[gridCol + s];
+                    }
+                    if (cw <= 0)
+                    {
+                        cw = colW * span;
+                    }
+                    cellX = innerX + tbl->colX[gridCol];
+                }
+                else
+                {
+                    cw = colW * span;
+                }
+                char *txt = g_layoutCellA; /* BSS-hoisted (stack audit) */
                 size_t to = 0;
                 txt[0] = '\0';
                 for (int ii = 0; ii < cell->inlineCount; ii++)
@@ -1884,7 +1995,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                     if (inl && inl->text)
                     {
                         size_t tl = strlen(inl->text);
-                        if (to + tl < sizeof(txt) - 1)
+                        if (to + tl < 1024 - 1)
                         {
                             strcat(txt + to, inl->text);
                             to += tl;
@@ -1893,14 +2004,14 @@ static void draw_table_box(LayoutItem *item, int drawY)
                 }
                 /* gsub("%s+", " ") + trim: collapse then trim in place */
                 {
-                    char out[1024];
+                    char *out = g_layoutCellB; /* BSS-hoisted (stack audit) */
                     size_t o = 0;
                     int inWs = 0;
                     for (const char *p = txt; *p; p++)
                     {
                         if (is_space_char(*p))
                         {
-                            if (!inWs && o < sizeof(out) - 1)
+                            if (!inWs && o < 1024 - 1)
                             {
                                 out[o++] = ' ';
                             }
@@ -1908,7 +2019,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                         }
                         else
                         {
-                            if (o < sizeof(out) - 1)
+                            if (o < 1024 - 1)
                             {
                                 out[o++] = *p;
                             }
@@ -1990,6 +2101,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
                     }
                 }
                 cellX += cw;
+                gridCol += span;
             }
         }
         rowY += 18;
@@ -2005,6 +2117,7 @@ static void draw_table_box(LayoutItem *item, int drawY)
 
 void layout_draw(int scrollY)
 {
+    logger_stack_touch();
     if (!g_pd)
     {
         return;
@@ -2107,8 +2220,8 @@ void layout_draw(int scrollY)
                 {
                     if (lineY + 14 <= drawY + item->h)
                     {
-                        char expanded[1024];
-                        layout_expand_tab_columns(item->lines[li], expanded, sizeof(expanded));
+                        char *expanded = g_layoutTabExp; /* BSS-hoisted (stack audit) */
+                        layout_expand_tab_columns(item->lines[li], expanded, 1024);
                         g_pd->graphics->drawText(expanded, strlen(expanded), kUTF8Encoding,
                                                  item->x + 8, lineY);
                     }

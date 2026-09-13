@@ -133,6 +133,19 @@ void storage_set_setting_str(const char *key, const char *value)
 
 /* ── escaping: \ → \\ , | → \p , tab → \t , CR/LF → \n \r , other <0x20 → \xHH ── */
 
+/* Line-scratch hoisted to BSS: storage_load nests ~2.5KB of these locals
+ * under the game task, and with the entities-decode chain beneath
+ * unescape_to it overflowed the 61.8KB task stack on device (errorlog
+ * "stack overflow in task gameTask", 2026-09-12). Same pattern as
+ * cookie_jar.c. Single-threaded cooperative tasks: safe to share. */
+static char g_stRaw[900];
+static char g_stKey[64];
+static char g_stVal[512];
+static char g_stName[128];
+static char g_stValue[400];
+static char g_stDomain[256];
+static char g_stPath[256];
+
 static void escape_to(const char *in, char *out, size_t cap)
 {
     size_t o = 0;
@@ -322,6 +335,7 @@ static char g_saveLine[1200];
 
 void storage_load(void)
 {
+    logger_stack_touch();
     /* NOTE: kFileRead reads the game BUNDLE; data files written via kFileWrite
      * live in the /Data/<bundleid> sandbox and must be read with
      * kFileReadData (this is what datastore read/write used in Lua). */
@@ -383,16 +397,16 @@ void storage_load(void)
 
         if (strcmp(section, "settings") == 0 && line[0] == 'S' && line[1] == '|')
         {
-            char raw[600];
-            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *raw = g_stRaw;
+            snprintf(raw, 600, "%s", line + 2);
             char *eq = strchr(raw, '=');
             if (eq)
             {
                 *eq = '\0';
-                char key[64];
-                char val[512];
-                unescape_to(raw, key, sizeof(key));
-                unescape_to(eq + 1, val, sizeof(val));
+                char *key = g_stKey;
+                char *val = g_stVal;
+                unescape_to(raw, key, 64);
+                unescape_to(eq + 1, val, 512);
                 Setting *s = find_setting(key);
                 if (s)
                 {
@@ -418,8 +432,8 @@ void storage_load(void)
         {
             /* B|title|url|desc — split on unescaped pipes (escapes already
              * encode pipes, so a plain strtok-style split is safe) */
-            char raw[900];
-            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *raw = g_stRaw;
+            snprintf(raw, sizeof(g_stRaw), "%s", line + 2);
             char *p1 = strchr(raw, '|');
             char *p2 = p1 ? strchr(p1 + 1, '|') : NULL;
             char *p3 = p2 ? strchr(p2 + 1, '|') : NULL;
@@ -450,8 +464,8 @@ void storage_load(void)
         }
         else if (strcmp(section, "history") == 0 && line[0] == 'H' && line[1] == '|')
         {
-            char raw[900];
-            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *raw = g_stRaw;
+            snprintf(raw, sizeof(g_stRaw), "%s", line + 2);
             /* H|time|title|url */
             char *p1 = strchr(raw, '|');
             char *p2 = p1 ? strchr(p1 + 1, '|') : NULL;
@@ -484,8 +498,8 @@ void storage_load(void)
         else if (strcmp(section, "cookies") == 0 && line[0] == 'C' && line[1] == '|')
         {
             /* C|name|value|domain|hostOnly|path|secure|httpOnly|samesite|expires */
-            char raw[900];
-            snprintf(raw, sizeof(raw), "%s", line + 2);
+            char *raw = g_stRaw;
+            snprintf(raw, sizeof(g_stRaw), "%s", line + 2);
             char *tok[10];
             int nt = 0;
             tok[nt++] = raw;
@@ -501,15 +515,15 @@ void storage_load(void)
             {
                 Cookie c;
                 memset(&c, 0, sizeof(c));
-                char name[128];
-                char value[400];
-                char domain[256];
-                char path[256];
+                char *name = g_stName;
+                char *value = g_stValue;
+                char *domain = g_stDomain;
+                char *path = g_stPath;
                 char samesite[8];
-                unescape_to(tok[0], name, sizeof(name));
-                unescape_to(tok[1], value, sizeof(value));
-                unescape_to(tok[2], domain, sizeof(domain));
-                unescape_to(tok[4], path, sizeof(path));
+                unescape_to(tok[0], name, 128);
+                unescape_to(tok[1], value, 400);
+                unescape_to(tok[2], domain, 256);
+                unescape_to(tok[4], path, 256);
                 unescape_to(tok[8], samesite, sizeof(samesite));
                 c.name = name;
                 c.value = value;

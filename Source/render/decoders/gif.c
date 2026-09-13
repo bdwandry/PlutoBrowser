@@ -5,6 +5,7 @@
  * downscaler (bounded memory), interlace rows buffered and replayed.
  * See gif.h for the Lua→C map and preserved semantics.
  */
+#include "core/logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include "render/decoders/gif.h"
@@ -165,6 +166,7 @@ static uint8_t gif_out_pixel(void *ud, int x, int y)
 
 LCDBitmap *gif_decode(const uint8_t *data, size_t len, int maxW, int maxH)
 {
+    logger_stack_touch();
     if (!data || len < 14)
     {
         return NULL;

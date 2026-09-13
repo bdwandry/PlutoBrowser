@@ -90,6 +90,8 @@ static char *arena_dup(Arena *a, const char *s, size_t n)
 /* ── Tag rule tables (Lua parity) ───────────────────────────────────────── */
 static int is_void(const char *tag)
 {
+    /* WHATWG §13.1.2 void-elements. (basefont/bgsound/keygen/frame are
+     * legacy-void in the spec — see also is_legacy_void below.) */
     static const char *const VOID[] = {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
         "link", "meta", "param", "source", "track", "wbr"
@@ -110,14 +112,38 @@ static int is_skip_subtree(const char *tag)
            strcmp(tag, "selectedcontent") == 0;
 }
 
+/* Legacy void elements (WHATWG §13.1.2, non-conforming-but-void list):
+ * they never take children, so a stray close tag must not pop ancestors.
+ * (basefont/bgsound/keygen were missing before — a page containing
+ * '</basefont>' would have truncated the whole tree at that point.) */
+static int is_legacy_void(const char *tag)
+{
+    static const char *const LEGACY_VOID[] = {
+        "basefont", "bgsound", "frame", "keygen"
+    };
+    for (size_t i = 0; i < sizeof(LEGACY_VOID) / sizeof(LEGACY_VOID[0]); i++)
+    {
+        if (strcmp(tag, LEGACY_VOID[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int is_block(const char *tag)
 {
+    /* Block-level boxes for the implied-<p>-close rule (WHATWG §13.2.6.4:
+    * a <p> element's end tag is implied by many start tags). Extended with
+    * caption/optgroup/address/xmp/listing/plaintext/marquee/colgroup/fenced
+    * frame/h1group beyond the reference set. */
     static const char *const BLOCK[] = {
-        "address", "article", "aside", "blockquote", "center", "dd",
-        "details", "dialog", "dir", "div", "dl", "dt", "fieldset",
+        "address", "article", "aside", "blockquote", "caption", "center",
+        "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset",
         "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hgroup", "hr", "li", "main", "menu", "nav",
-        "ol", "p", "pre", "section", "table", "ul"
+        "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main",
+        "marquee", "menu", "nav", "ol", "optgroup", "p", "plaintext",
+        "pre", "section", "table", "ul", "xmp"
     };
     for (size_t i = 0; i < sizeof(BLOCK) / sizeof(BLOCK[0]); i++)
     {
@@ -386,6 +412,61 @@ static int prepare_option(Stack *s)
     return 0;
 }
 
+/* <optgroup>: an open optgroup is closed by another optgroup or by
+ * </select> (WHATWG §13.2.6.5: end tags implied by optgroup start tags).
+ * An optgroup outside a <select> is dropped (parity with prepare_option). */
+static int prepare_optgroup(Stack *s)
+{
+    for (int i = s->count - 1; i >= 1; i--)
+    {
+        const char *t = s->items[i]->tag;
+        if (strcmp(t, "optgroup") == 0)
+        {
+            s->count = i;
+            break;
+        }
+        if (strcmp(t, "select") == 0)
+        {
+            break;
+        }
+    }
+    for (int i = s->count - 1; i >= 1; i--)
+    {
+        if (strcmp(s->items[i]->tag, "select") == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* <caption>: closes an open caption; dropped outside a <table>
+ * (WHATWG table foster rules, simplified to the reference's flavor). */
+static int prepare_caption(Stack *s)
+{
+    for (int i = s->count - 1; i >= 1; i--)
+    {
+        const char *t = s->items[i]->tag;
+        if (strcmp(t, "caption") == 0)
+        {
+            s->count = i;
+            break;
+        }
+        if (is_table_ctx(t))
+        {
+            break;
+        }
+    }
+    for (int i = s->count - 1; i >= 1; i--)
+    {
+        if (strcmp(s->items[i]->tag, "table") == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ── Attribute copy (tokens → DOM; arena-owned strings) ─────────────────── */
 static int copy_attrs(DomNode *el, const Token *tok, Arena *arena)
 {
@@ -516,20 +597,31 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
             const char *tag = tok->name ? tok->name : "";
             if (tok->isClosing)
             {
-                if (!is_void(tag) && !is_skip_subtree(tag))
+                if (!is_void(tag) && !is_legacy_void(tag) && !is_skip_subtree(tag))
                 {
                     pop_to_tag(&stack, tag);
                 }
             }
             else
             {
+                /* WHATWG §13.2.6.4.7: an <image> start tag in body is a
+                 * parse error; change the tag name to "img" and
+                 * reprocess — the image renders as an image. Must run
+                 * before the void check so it takes img's code path. */
+                if (strcmp(tag, "image") == 0)
+                {
+                    tag = "img";
+                }
                 if (is_skip_subtree(tag))
                 {
                     skipDepth = 1;
                     skipTag = tag;
                 }
-                else if (is_void(tag))
+                else if (is_void(tag) || is_legacy_void(tag))
                 {
+                    /* Legacy voids (basefont/bgsound/frame/keygen) append
+                     * like voids and are never pushed — children after them
+                     * stay in the parent's flow (WHATWG §13.1.2). */
                     DomNode *el = node_new();
                     if (!el)
                     {
@@ -572,6 +664,14 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
                     else if (strcmp(tag, "option") == 0)
                     {
                         doPush = prepare_option(&stack);
+                    }
+                    else if (strcmp(tag, "optgroup") == 0)
+                    {
+                        doPush = prepare_optgroup(&stack);
+                    }
+                    else if (strcmp(tag, "caption") == 0)
+                    {
+                        doPush = prepare_caption(&stack);
                     }
                     else if (strcmp(tag, "a") == 0)
                     {
