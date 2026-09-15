@@ -93,10 +93,11 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 - **Default Speed Dial**: 10 pre-loaded bookmarks on the home page (Wikipedia, DuckDuckGo Lite, FrogFind, Wiby and more).
 
 ### Rendering
+- **JavaScript Engine (muJS 1.3.10)**: Real ES5 execution wired into the DOM pipeline, toggled via **Settings > Enable Javascript**. Pages can read and mutate the live DOM (`getElementById`, `textContent`, `setAttribute`, `createElement`/`appendChild`/`removeChild`, element `click` listeners with `preventDefault`), use `document.write` during load, and drive live re-renders. Includes hard device-safety limits: instruction run-limit per event, DOM-call budget per page, per-script size cap, and bounded `document.write` capture (runaway scripts are contained, never lock the browser). Not a modern engine: no timers, network (`fetch`/XHR), storage, or ES6+ syntax. Test the engine at `about:javascript`.
 - **Dual Browsing Modes**:
   - **Reader Mode**: Distills articles for clean, distraction-free reading.
   - **HTML Mode**: Full visual layout with virtual mouse cursor, interactive forms, and clickable elements.
-- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`.
+- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`, and inline `<script>` (executed in HTML mode when JavaScript is enabled; skipped entirely when disabled).
 - **Form Support**: Text inputs, checkboxes, radio buttons, dropdowns, submit buttons, hidden fields, and `<button>` elements. Forms are submitted per the HTML spec (hidden inputs included, submit button name/value always appended).
 - **Inline Styles**: Bold, italic, underline, strikethrough, code, small, sub/superscript, text alignment.
 - **`<base href>` Support**: Resolves relative URLs correctly when a base element is present.
@@ -133,6 +134,7 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 
 ### User Interface
 - **Display FPS**: Settings option with **30** (default) or **50** fps (the Playdate's hardware maximum). 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
+- **Enable Javascript**: Settings toggle (On by default, persisted). When Off, no page scripts are parsed or executed and no JS engine is created; when On, inline `<script>` blocks run in muJS during page load (HTML mode) and live element click listeners can intercept links.
 - **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, battery level, reader/HTML mode toggle.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
@@ -144,6 +146,7 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 ### Internal Pages
 - `about:home` — Speed Dial start page
 - `about:acidtest` — HTML & image rendering test suite
+- `about:javascript` — JavaScript engine & DOM-integration test suite (PASS/PART/MISS per capability; full demo of supported muJS + DOM features)
 - `about:blank` — Blank page
 
 ---
@@ -216,7 +219,8 @@ PlutoBrowser/
     │   ├── document.c          # Block hierarchy builder, form parsing, meta refresh detection
     │   ├── entities.c          # HTML entity decoder (&amp; &#123; etc.)
     │   ├── readability.c       # Article distillation for reader mode
-    │   └── jsenv.c             # Sandboxed JavaScript environment hooks (muJS-based)
+    │   ├── jsbridge.c          # muJS engine bridge: document/window/console bindings, DOM objects, click dispatch, document.write adoption
+    │   └── jsbridge.h          # Bridge API + device resource limits (run limit, call budget, script caps)
     │
     ├── render/                 # Layout & visual rendering
     │   ├── style.c             # Typography, font metrics, Roobert font family
@@ -264,7 +268,7 @@ PlutoBrowser/
     │   ├── strutil.c           # String helpers
     │   └── pdtimer.c           # Timer API bindings
     │
-    ├── js/                     # Vendored muJS — a lightweight ES5 JavaScript engine
+    ├── js/                     # Vendored muJS 1.3.10 (official ArtifexSoftware release) — lightweight ES5 JavaScript engine
     │
     ├── fonts/                  # Roobert font family (Playdate .fnt format)
     │   ├── Roobert-20-Medium.fnt

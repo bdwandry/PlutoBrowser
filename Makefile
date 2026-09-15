@@ -16,7 +16,7 @@ endif
 ######
 # IMPORTANT: You must add your source folders to VPATH for make to find them
 ######
-VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard
+VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js
 
 # List C source files here (grows as phases land)
 SRC = \
@@ -66,14 +66,40 @@ SRC = \
 	Source/html/dom.c \
 	Source/html/document.c \
 	Source/html/readability.c \
+	Source/html/jsbridge.c \
 	Source/keyboard/keyboard.c \
 	Source/core/tasks.c \
 	Source/util/strbuf.c \
 	Source/util/strutil.c \
-	Source/util/pdtimer.c
+	Source/util/pdtimer.c \
+	Source/js/jsarray.c \
+	Source/js/jsboolean.c \
+	Source/js/jsbuiltin.c \
+	Source/js/jscompile.c \
+	Source/js/jsdate.c \
+	Source/js/jsdtoa.c \
+	Source/js/jserror.c \
+	Source/js/jsfunction.c \
+	Source/js/jsgc.c \
+	Source/js/jsintern.c \
+	Source/js/jslex.c \
+	Source/js/jsmath.c \
+	Source/js/jsnumber.c \
+	Source/js/jsobject.c \
+	Source/js/json.c \
+	Source/js/jsparse.c \
+	Source/js/jsproperty.c \
+	Source/js/jsregexp.c \
+	Source/js/jsrepr.c \
+	Source/js/jsrun.c \
+	Source/js/jsstate.c \
+	Source/js/jsstring.c \
+	Source/js/jsvalue.c \
+	Source/js/regexp.c \
+	Source/js/utf.c
 
 # List all user directories here
-UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard
+UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js
 
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
@@ -87,6 +113,12 @@ ULIBS =
 override PDCFLAGS += -k -s
 
 include $(SDK)/C_API/buildsupport/common.mk
+
+# Optional extra flags for the simulator dylib (e.g. make SIMDEFS=-DPLUTO_JS_AUTOTEST)
+# Must come after the include: common.mk assigns DYLIB_FLAGS with =.
+ifdef SIMDEFS
+DYLIB_FLAGS += $(SIMDEFS)
+endif
 
 # Per-function stack-usage reports (build/*.su) — device game-task stack is
 # small; P18's watchdog crash was an aggregate eventHandler frame overflow.

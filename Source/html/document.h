@@ -254,6 +254,7 @@ typedef struct
     char *href; /* arena */
     char *text; /* arena */
     char *target; /* arena or NULL */
+    void *srcNode; /* source <a> DOM node (jsbridge click events); may be NULL */
 } DocLink;
 
 /* ── Parse options (port of Document.parse's opts table) ─────────────────── */
@@ -268,6 +269,18 @@ typedef struct
     DocSvgDecoderFn svgDecoder; /* NULL → inline svg decode fails (no block) */
 } DocParseOpts;
 
+/* scriptPolicy: how document_parse handles inline <script> bodies.
+ *   DOC_SCRIPT_OFF       skip scripts entirely (JavaScript setting Off)
+ *   DOC_SCRIPT_RUN       execute before the walker; document.write re-parsed
+ *   DOC_SCRIPT_RUN_KEEP  same, and the JS engine stays attached to the result
+ *                        for click events (js_doc_close before document_free) */
+typedef enum
+{
+    DOC_SCRIPT_OFF = 0,
+    DOC_SCRIPT_RUN = 1,
+    DOC_SCRIPT_RUN_KEEP = 2
+} DocScriptPolicy;
+
 /* ── Document result ─────────────────────────────────────────────────────── */
 typedef struct
 {
@@ -277,6 +290,13 @@ typedef struct
     int isReaderMode;
     int mode; /* MODE_READER / MODE_RAW_HTML */
     DocMetaRefresh metaRefresh;
+    /* ── JavaScript integration (jsbridge) ── */
+    void *_dom; /* live DomResult while the bridge is attached (freed by
+                 * js_doc_close, NOT by document_free) */
+    struct JsBridge *_jsbridge; /* opaque; valid while scripts may still run */
+    int jsRan;                  /* inline scripts executed for this page */
+    int jsErrors;               /* scripts that failed to compile/run */
+    char jsLastError[128];      /* first error ("" when none) */
     /* Walker output */
     DocBlock **blocks; /* heap array */
     int blockCount;
@@ -299,6 +319,9 @@ typedef struct
     char *readingTimeStr; /* arena string (readability arena) */
     void *_arena; /* walker string/object arena (document.c internal) */
 } DocParseResult;
+
+/* Inline <script> execution (attach/flush/close + click dispatch) lives in
+ * html/jsbridge.h, driven by document_parse_ex and the browser. */
 
 /* ── Parsing helpers (exact ports; see document.c for quirk notes) ──────── */
 
@@ -341,6 +364,19 @@ char *doc_serialize_svg_node(const DomNode *n);
  * Returns 0 ok (check out->parseError), -1 alloc failure. */
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out);
+
+/* Full-control variant: scriptPolicy selects inline <script> handling
+ * (DOC_SCRIPT_OFF keeps the historical skip-scripts path); outBridge (may be
+ * NULL) receives the JS bridge when one was attached (DOC_SCRIPT_RUN_KEEP). */
+int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
+                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
+                      struct JsBridge **outBridge, DocParseResult *out);
+
+/* Re-run ONLY the element walker over the (possibly JS-mutated) live DOM
+ * kept by doc->_dom: blocks/links are rebuilt without re-parsing HTML or
+ * re-running scripts. Layout must be cleared first (it borrows strings).
+ * Returns 0 ok, -1 alloc failure. */
+int document_rewalk(DocParseResult *doc);
 
 void document_free(DocParseResult *doc);
 

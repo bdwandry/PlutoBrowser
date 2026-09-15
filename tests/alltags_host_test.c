@@ -39,6 +39,7 @@ PlaydateAPI *pluto_pd(void)
 }
 void pluto_free(void *p) { free(p); }
 void *pluto_realloc(void *p, size_t n) { return realloc(p, n); }
+void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
 #include "html/document.h"
 #include "core/constants.h"
