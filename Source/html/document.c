@@ -42,8 +42,10 @@
 #include "pd_api.h"
 #include "html/document.h"
 #include "html/tokenizer.h"
+#include "html/dom.h"
 #include "html/readability.h"
 #include "html/entities.h"
+#include "html/jsbridge.h"
 #include "core/constants.h"
 #include "core/url.h"
 #include "util/strbuf.h"
@@ -886,6 +888,7 @@ typedef struct ExitCtx
     int anchorIndex;
     char *title; /* a: attrs["title"] */
     char *target; /* a: attrs["target"] */
+    void *srcNode; /* a: source DomNode (jsbridge click events) */
     int hadInlines; /* span: inline count at entry */
     char *fallback; /* span: time datetime / data value */
     void *listCtx; /* saved ListCtx* */
@@ -2468,6 +2471,7 @@ static void handle_element(Walker *w, const DomNode *node)
             const char *tg = attr_val(a, "target");
             x->title = ti ? doc_arena_str(w, ti) : NULL;
             x->target = tg ? doc_arena_str(w, tg) : NULL;
+            x->srcNode = (void *)node;
         }
         push_children(w, node);
         const char *rawHref = attr_val(a, "href");
@@ -3869,6 +3873,7 @@ static void run_exit(Walker *w, ExitCtx *x)
                 lk->href = w->currentHref;
                 lk->text = doc_arena_str(w, (text && text[0]) ? text : w->currentHref);
                 lk->target = x->target;
+                lk->srcNode = x->srcNode;
                 if (doc_ptrarr_push((void ***)&w->doc->links, &w->doc->linkCount,
                                     &w->doc->linkCap, lk))
                 {
@@ -4593,8 +4598,20 @@ static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out)
 {
+    return document_parse_ex(htmlString, baseUrl, mode, opts, DOC_SCRIPT_OFF,
+                             NULL, out);
+}
+
+int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
+                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
+                      struct JsBridge **outBridge, DocParseResult *out)
+{
     logger_stack_touch();
     memset(out, 0, sizeof(*out));
+    if (outBridge)
+    {
+        *outBridge = NULL;
+    }
 
     if (!htmlString || htmlString[0] == '\0')
     {
@@ -4715,6 +4732,76 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
         return -1;
     }
 
+    /* 4b. Inline <script> execution (jsbridge / muJS). DOC_SCRIPT_OFF is the
+     * historical path: scripts stay skipped by the tokenizer and no engine is
+     * created. RUN/RUN_KEEP execute scripts AFTER dom_build so handlers can
+     * bind to the live tree, then re-parse any document.write output (which
+     * the tokenizer consumed as raw script bytes) and append the resulting
+     * tokens to this stream before the walker runs. The heap DomResult copy
+     * outlives the walk when a bridge is attached (click events need the
+     * live tree); it is freed by document_free, never here. */
+    out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+    if (out->rawHtml)
+    {
+        strcpy(out->rawHtml, htmlString);
+    }
+    if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
+    {
+        /* Promote the stack DomResult to the heap so it can outlive this
+         * function (the bridge and click dispatch need the live tree). */
+        DomResult *heapDom = (DomResult *)PLUTO_MALLOC(sizeof(DomResult));
+        if (heapDom)
+        {
+            *heapDom = dom;
+            out->_dom = heapDom;
+            int rc = js_doc_attach(&out->_jsbridge, out, scriptPolicy);
+            if (rc == 0 && out->_jsbridge)
+            {
+                if (outBridge)
+                {
+                    *outBridge = out->_jsbridge;
+                }
+            }
+            else
+            {
+                /* Engine failed to start: fall back to the no-JS path rather
+                 * than failing the whole page. */
+                if (out->_jsbridge)
+                {
+                    PLUTO_FREE(out->_jsbridge);
+                    out->_jsbridge = NULL;
+                }
+                out->_dom = NULL;
+                PLUTO_FREE(heapDom);
+                out->jsErrors = 1;
+                snprintf(out->jsLastError, sizeof(out->jsLastError),
+                         "engine init failed");
+            }
+        }
+        else
+        {
+            out->jsErrors = 1;
+            snprintf(out->jsLastError, sizeof(out->jsLastError),
+                     "engine init failed");
+        }
+    }
+    int domKeptByBridge = (out->_dom != NULL);
+
+    /* document.write output produced during script execution: parse it and
+     * adopt the resulting subtree under the live DOM root so the walker
+     * below renders it (parser parity with the reference's appendScriptHtml).
+     * DOC_SCRIPT_RUN is done after the flush — the engine (and its DOM
+     * binding budget) is freed; DOC_SCRIPT_RUN_KEEP stays attached so the
+     * browser can dispatch click events while the page is open. */
+    if (out->_jsbridge)
+    {
+        js_doc_flush_output(out->_jsbridge);
+        if (scriptPolicy == DOC_SCRIPT_RUN)
+        {
+            js_doc_close(out->_jsbridge);
+        }
+    }
+
     Walker w;
     memset(&w, 0, sizeof(w));
     w.doc = out;
@@ -4757,16 +4844,16 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
     {
         PLUTO_FREE(w.frames);
     }
-    dom_free_result(&dom);
+    /* The heap DomResult is owned by out->_dom (freed via document_free);
+     * only the plain parse path frees the stack copy here. */
+    if (!domKeptByBridge)
+    {
+        dom_free_result(&dom);
+    }
     tokenizer_free_result(&tr);
 
     out->mode = mode;
     out->isReaderMode = 0;
-    out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
-    if (out->rawHtml)
-    {
-        strcpy(out->rawHtml, htmlString);
-    }
 
     if (werr || !out->rawHtml)
     {
@@ -4774,10 +4861,6 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
          * caller gets no doc. Mirror with parseError + an emptied result. */
         doc_free_walk_output(out);
         out->parseError = 1;
-        if (out->rawHtml)
-        {
-            /* keep the copy for the error path */
-        }
         /* arena still holds objects; free it now */
         doc_arena_free_all(&w.arena);
         return 0;
@@ -4797,6 +4880,91 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
     return 0;
 }
 
+/* Re-run ONLY the element walker over a (possibly JS-mutated) live DOM.
+ * Used by the browser after a script mutates the DOM and calls
+ * preventDefault(): blocks/links are rebuilt from the current tree without
+ * re-parsing HTML or re-running scripts (script state is preserved).
+ * Returns 0 ok, -1 alloc failure (doc is left with no walk output). */
+int document_rewalk(DocParseResult *doc)
+{
+    if (!doc || !doc->_dom)
+    {
+        return -1;
+    }
+    DomResult *dom = (DomResult *)doc->_dom;
+
+    /* Drop the previous walk output + its arena. Layout must not hold
+     * borrowed strings across this call (browser clears it first). */
+    doc_free_walk_output(doc);
+    if (doc->_arena)
+    {
+        doc_arena_free_all((DocArena *)doc->_arena);
+        PLUTO_FREE(doc->_arena);
+        doc->_arena = NULL;
+    }
+    doc->parseError = 0;
+    doc->blockCount = doc->blockCap = 0;
+    doc->blocks = NULL;
+
+    Walker w;
+    memset(&w, 0, sizeof(w));
+    w.doc = doc;
+    w.opts = NULL;
+    w.formAction = NULL;
+    w.formMethod = doc_arena_str_lower(&w, "get");
+    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
+                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
+    int werr = sbFail;
+    if (!werr && walk_children(&w, dom->root) != 0)
+    {
+        werr = 1;
+    }
+    if (!werr)
+    {
+        walker_finish(&w);
+        werr = w.error;
+    }
+
+    strbuf_free(&w.linkText);
+    strbuf_free(&w.preBuf);
+    strbuf_free(&w.textareaBuf);
+    strbuf_free(&w.mathBuf);
+    for (int i = 0; i < w.heapBufCount; i++)
+    {
+        if (w.heapBufs[i])
+        {
+            strbuf_free(w.heapBufs[i]);
+            PLUTO_FREE(w.heapBufs[i]);
+        }
+    }
+    if (w.heapBufs)
+    {
+        PLUTO_FREE(w.heapBufs);
+    }
+    if (w.frames)
+    {
+        PLUTO_FREE(w.frames);
+    }
+
+    if (werr)
+    {
+        doc_arena_free_all(&w.arena);
+        doc->parseError = 1;
+        return 0;
+    }
+
+    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+    if (!keep)
+    {
+        doc_arena_free_all(&w.arena);
+        return -1;
+    }
+    *keep = w.arena;
+    w.arena.head = NULL;
+    doc->_arena = keep;
+    return 0;
+}
+
 void document_free(DocParseResult *doc)
 {
     if (!doc)
@@ -4808,6 +4976,14 @@ void document_free(DocParseResult *doc)
     {
         PLUTO_FREE(doc->rawHtml);
         doc->rawHtml = NULL;
+    }
+    if (doc->_dom)
+    {
+        /* js_doc_close detaches before document_free in the browser path;
+         * this is the safety net for direct callers. */
+        dom_free_result((DomResult *)doc->_dom);
+        PLUTO_FREE(doc->_dom);
+        doc->_dom = NULL;
     }
     if (doc->_arena)
     {

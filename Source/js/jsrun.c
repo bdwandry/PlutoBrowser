@@ -1567,10 +1567,8 @@ static int jsR_isindex(js_State *J, int idx, int *k)
 {
 	js_Value *v = stackidx(J, idx);
 	if (v->t.type == JS_TNUMBER) {
-		if (v->u.number >= 0 && v->u.number <= INT_MAX) {
-			*k = v->u.number;
-			return *k == v->u.number;
-		}
+		*k = v->u.number;
+		return *k == v->u.number && *k >= 0;
 	}
 	return 0;
 }

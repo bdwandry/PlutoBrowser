@@ -49,6 +49,7 @@
 #include "html/tokenizer.h"
 #include "html/dom.h"
 #include "html/document.h"
+#include "html/jsbridge.h"
 #include "html/readability.h"
 #include "keyboard/keyboard.h"
 #include "core/constants.h"
@@ -398,8 +399,92 @@ typedef struct RenderTask
     int isToggle;      /* details-toggle re-render: restore scroll, no history */
     int prevScroll;
     int prevTarget;
-    DocParseResult *doc; /* set by the parse step, consumed by done */
+    DocParseResult *doc;   /* set by the parse step, consumed by done */
+    DocParseResult *rewalkDoc; /* re-walk this LIVE doc (JS mutation path) */
 } RenderTask;
+
+/* JS bridge of the LIVE page (kept across the parse→layout→done sequence
+ * for click-event dispatch). The bridge is owned by the DocParseResult:
+ * every teardown path closes it BEFORE document_free frees the doc (and
+ * the live DOM the engine points into). */
+static JsBridge *g_pageJs = NULL;
+
+/* Close the old page's bridge + doc, then adopt the new one. Callers must
+ * already hold the new doc in rt->doc. */
+static void page_swap_doc(RenderTask *rt)
+{
+    if (rt->rewalkDoc)
+    {
+        /* JS-mutation re-walk: the doc was updated in place — keep it (and
+         * its live engine) alive; nothing to swap. */
+        currentDoc = rt->rewalkDoc;
+        rt->rewalkDoc = NULL;
+        g_pageJs = currentDoc->_jsbridge;
+        return;
+    }
+    if (currentDoc)
+    {
+        if (currentDoc->_jsbridge)
+        {
+            js_doc_close(currentDoc->_jsbridge);
+        }
+        document_free(currentDoc);
+        free(currentDoc);
+    }
+    currentDoc = rt->doc;
+    rt->doc = NULL;
+    /* RUN_KEEP pages keep their engine for click events; RUN/OFF pages
+     * have no bridge here. */
+    g_pageJs = currentDoc->_jsbridge;
+    if (g_pageJs)
+    {
+        logger_log("[js] live page: listeners=%d ran=%d errs=%d",
+                   jsbridge_listener_count(g_pageJs), currentDoc->jsRan,
+                   currentDoc->jsErrors);
+    }
+}
+
+/* Live re-render after a JS DOM mutation (preventDefault path): re-walk the
+ * mutated live DOM into fresh blocks/links and rebuild the layout — scripts
+ * do NOT re-run (no reload), so page script state is preserved. */
+static void page_rewalk_now(void);
+
+/* Dispatch a click on the source DOM node of link #linkIndex (1-based).
+ * Returns 1 when a page handler ran (re-render if it called preventDefault,
+ * navigate otherwise), 0 when no JS took the event. */
+static int page_handle_js_click(int linkIndex)
+{
+    if (!g_pageJs || !currentDoc || linkIndex <= 0 ||
+        linkIndex > currentDoc->linkCount)
+    {
+        return 0;
+    }
+    void *anchorNode = currentDoc->links[linkIndex - 1]->srcNode;
+    if (!anchorNode)
+    {
+        return 0;
+    }
+    int rc = jsbridge_dispatch_link_click(g_pageJs, anchorNode);
+    if (rc == JSB_CLICK_NONE)
+    {
+        return 0;
+    }
+    if (rc == JSB_CLICK_SUPPRESSED)
+    {
+        /* The handler mutated the DOM: rebuild blocks/links from the live
+         * tree (scripts keep running — no reload) and redraw. */
+        page_rewalk_now();
+        return 1;
+    }
+    /* Handler ran without preventDefault: perform the default action. */
+    const LMLink *lk = lm_link_at(linkIndex);
+    if (lk && lk->href)
+    {
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", lk->href);
+    }
+    return 1;
+}
 
 /* Static error buffer: tasks fire onError(data) with the task's data pointer
  * (see tasks.c), so the real message travels through this side channel. */
@@ -408,6 +493,21 @@ static char g_renderErrMsg[192];
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
+
+    /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
+    if (rt->rewalkDoc)
+    {
+        int wrc = document_rewalk(rt->rewalkDoc);
+        if (wrc != 0)
+        {
+            snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
+                     "Render Error: rewalk out of memory");
+            return -1;
+        }
+        tasks_report_progress(0.6f);
+        return 1; /* more work: layout next tick */
+    }
+
     if (!rt->doc)
     {
         rt->doc = (DocParseResult *)malloc(sizeof(DocParseResult));
@@ -430,13 +530,32 @@ static int render_step(TaskCtx *ctx)
         }
         opts.svgDecoder = app_svg_decoder;
 
-        int rc = document_parse(rt->body, rt->url, currentBrowseMode,
-                                rt->isToggle ? &opts : NULL, rt->doc);
+        /* JavaScript execution policy: On → run scripts and keep the engine
+         * (click dispatch), HTML mode only — reader mode distills the page
+         * before scripts would be meaningful. Off → DOC_SCRIPT_OFF (the
+         * historical skip-scripts path; no engine is ever created). */
+        DocScriptPolicy jsPolicy = DOC_SCRIPT_OFF;
+        if (storage_setting_int("jsEnabled") &&
+            currentBrowseMode == MODE_RAW_HTML)
+        {
+            jsPolicy = DOC_SCRIPT_RUN_KEEP;
+        }
+
+        int rc = document_parse_ex(rt->body, rt->url, currentBrowseMode,
+                                   rt->isToggle ? &opts : NULL, jsPolicy, NULL,
+                                   rt->doc);
         if (rc != 0 || rt->doc->parseError)
         {
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
                      "Parse Error: parse failed");
             return -1;
+        }
+        if (rt->doc->jsRan || rt->doc->jsErrors)
+        {
+            logger_log("[js] page: ran=%d errs=%d%s%s", rt->doc->jsRan,
+                       rt->doc->jsErrors,
+                       rt->doc->jsLastError[0] ? " last=" : "",
+                       rt->doc->jsLastError[0] ? rt->doc->jsLastError : "");
         }
         tasks_report_progress(0.6f);
         return 1; /* more work: layout next tick */
@@ -463,15 +582,10 @@ static void render_done(void *result, void *userdata)
         return;
     }
     isRendering = 0;
+    int wasRewalk = (rt->rewalkDoc != NULL); /* read before page_swap_doc */
 
     /* Free the previous doc AFTER the new build (layout borrows strings). */
-    if (currentDoc)
-    {
-        document_free(currentDoc);
-        free(currentDoc);
-    }
-    currentDoc = rt->doc;
-    rt->doc = NULL;
+    page_swap_doc(rt);
 
     snprintf(pageTitle, sizeof(pageTitle), "%s",
              currentDoc->title[0] ? currentDoc->title
@@ -519,8 +633,9 @@ static void render_done(void *result, void *userdata)
         }
     }
 
-    /* Auto-redirect for <meta http-equiv="refresh">. */
-    if (currentDoc && currentDoc->metaRefresh.present && currentDoc->metaRefresh.delay >= 0)
+    /* Auto-redirect for <meta http-equiv="refresh"> (fresh loads only — a
+     * JS-mutation re-walk must not re-arm an already-scheduled redirect). */
+    if (!wasRewalk && currentDoc && currentDoc->metaRefresh.present && currentDoc->metaRefresh.delay >= 0)
     {
         const char *redirectUrl = currentDoc->metaRefresh.url[0]
                                       ? currentDoc->metaRefresh.url
@@ -567,6 +682,10 @@ static void render_error(const char *message, void *userdata)
         }
         if (rt->doc)
         {
+            if (rt->doc->_jsbridge)
+            {
+                js_doc_close(rt->doc->_jsbridge); /* engine dies with the doc */
+            }
             document_free(rt->doc);
             free(rt->doc);
         }
@@ -762,6 +881,33 @@ static void http_on_error(const char *message)
     currentState = STATE_ERROR;
     snprintf(pageTitle, sizeof(pageTitle), "Connection Error");
     update_system_menu();
+}
+
+/* ── Live re-walk after JS DOM mutation (preventDefault path) ───────────── */
+static void page_rewalk_now(void)
+{
+    if (!currentDoc || isRendering)
+    {
+        return;
+    }
+    int prevScroll = scrollY;
+    int prevTarget = targetScrollY;
+    isRendering = 1;
+    snprintf(pageTitle, sizeof(pageTitle), "Rendering...");
+    currentState = STATE_LOADING;
+
+    RenderTask *rt = (RenderTask *)calloc(1, sizeof(RenderTask));
+    if (!rt)
+    {
+        isRendering = 0;
+        return;
+    }
+    rt->rewalkDoc = currentDoc; /* re-walk the LIVE tree, do not reload */
+    rt->addToHistory = 0;
+    rt->isToggle = 1; /* restore scroll position */
+    rt->prevScroll = prevScroll;
+    rt->prevTarget = prevTarget;
+    tasks_run(render_step, rt, render_done, render_error, rt);
 }
 
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
@@ -1557,6 +1703,10 @@ static int updateFrame(void *userdata)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
                         }
+                        else if (page_handle_js_click(activeLink->index))
+                        {
+                            /* A JS click handler ran (see HTML-mode branch). */
+                        }
                         else if (activeLink->href &&
                                  !(primary && primary->inert))
                         {
@@ -1714,6 +1864,11 @@ static int updateFrame(void *userdata)
                                  primary->inputItem)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
+                        }
+                        else if (page_handle_js_click(hitLink->index))
+                        {
+                            /* A JS click handler ran: it may have mutated the
+                             * DOM (preventDefault) or requested navigation. */
                         }
                         else if (hitLink->href && !(primary && primary->inert))
                         {
@@ -2159,6 +2314,17 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         update_system_menu();
         home_page_reset();
         currentState = STATE_HOME;
+
+#if defined(TARGET_SIMULATOR) && defined(PLUTO_JS_AUTOTEST)
+        /* TEMPORARY (sim-only, PLUTO_JS_AUTOTEST builds): navigate straight
+         * to the JS test suite so the integration run is reproducible.
+         * PLUTO_JS_AUTOTEST_OFF additionally forces the JS setting Off. */
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");
+    #ifdef PLUTO_JS_AUTOTEST_OFF
+        storage_set_setting_int("jsEnabled", 0);
+    #endif
+#endif
 
         /* Keyboard instance. The port's contract:
          * setPlaydateUpdateCallback MUST be called before show() — while the

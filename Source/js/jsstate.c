@@ -1,9 +1,5 @@
 #include "jsi.h"
 
-/* PlutoBrowser port patch: MUJS_NO_FILE_IO excludes js_loadfile/
- * js_ploadfile/js_dofile so newlib stdio is not linked on device
- * (no _read/_write syscalls there). See Source/html/jsenv.h. */
-
 #include <assert.h>
 #include <errno.h>
 
@@ -49,7 +45,6 @@ int js_ploadstring(js_State *J, const char *filename, const char *source)
 	return 0;
 }
 
-#ifndef MUJS_NO_FILE_IO
 int js_ploadfile(js_State *J, const char *filename)
 {
 	if (js_ptry(J))
@@ -60,7 +55,6 @@ int js_ploadfile(js_State *J, const char *filename)
 	js_endtry(J);
 	return 0;
 }
-#endif
 
 const char *js_trystring(js_State *J, int idx, const char *error)
 {
@@ -238,7 +232,6 @@ int js_dostring(js_State *J, const char *source)
 	return 0;
 }
 
-#ifndef MUJS_NO_FILE_IO
 int js_dofile(js_State *J, const char *filename)
 {
 	if (js_ptry(J)) {
@@ -258,7 +251,6 @@ int js_dofile(js_State *J, const char *filename)
 	js_endtry(J);
 	return 0;
 }
-#endif
 
 js_Panic js_atpanic(js_State *J, js_Panic panic)
 {
