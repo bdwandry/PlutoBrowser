@@ -77,4 +77,19 @@ int http_is_loading(void);
 /* Pump the state machine — call once per frame from the update loop. */
 void http_update(void);
 
+/* ── Internal about: page directory ─────────────────────────────────────────
+ * Read-only name/title view of http_client's INTERNAL_PAGES table (same
+ * order; html bodies stay internal). Single source of truth for UI that
+ * lists the built-in pages — the home page's Test Cases section renders one
+ * card per entry and navigates to entry.name. */
+typedef struct
+{
+    const char *name;  /* navigable URL, e.g. "about:javascript" */
+    const char *title; /* card label, e.g. "JavaScript Test Suite" */
+} HttpTestPage;
+
+/* Fill *entries with the internal-page directory; returns the entry count
+ * (currently 5: home, blank, acidtest, javascript, jsext). */
+int http_test_pages(const HttpTestPage **entries);
+
 #endif /* PLUTO_HTTP_CLIENT_H */

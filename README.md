@@ -54,9 +54,9 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 | :--- | :--- |
 | **D-Pad Up / Down** | Move between grid rows. |
 | **D-Pad Left / Right** | Move between grid columns. |
-| **A** | Open the selected bookmark. |
+| **A** | Open the selected bookmark (or Test Case). |
 | **B** | Open the Address Bar & search. |
-| **Crank** | Select bookmarks one by one (Settings button included) — the page scrolls along; past the last card it free-scrolls to the bottom. |
+| **Crank** | Select cards one by one (Settings button included) — the page scrolls along; past the last card it free-scrolls to the bottom. |
 
 ### Loading Screen
 
@@ -148,6 +148,9 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 - `about:acidtest` — HTML & image rendering test suite
 - `about:javascript` — JavaScript engine & DOM-integration test suite (PASS/PART/MISS per capability; full demo of supported muJS + DOM features)
 - `about:blank` — Blank page
+- `about:jsext` — External `<script src>` (Full mode) test suite
+
+All internal pages are also listed **on the Home page** under a **Test Cases** section beneath Speed Dial: every built-in `about:` site gets a clickable card (identical card grid and crank/D-pad navigation as bookmarks; A opens the page).
 
 ---
 
