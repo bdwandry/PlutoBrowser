@@ -502,6 +502,98 @@ static int page_handle_js_click(int linkIndex)
  * (see tasks.c), so the real message travels through this side channel. */
 static char g_renderErrMsg[192];
 
+#if defined(PLUTO_HOME_TEST_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic probe for the
+ * home-page Test Cases section. Drives the REAL STATE_HOME input path
+ * (home_page_handle_input with synthesized button masks) down the reading
+ * order to the first test card, presses A, and asserts the navigation
+ * opened that card's about: page. PASS/FAIL lands in pluto.log via
+ * [hometest-autotest] lines. */
+#define HT_BTN_A (1u << 5)
+static int g_homeTestPhase = 0; /* 0=drive home, 1=await page, 2=done */
+static unsigned g_homeTestFrames = 0;
+static int g_homeTestPresses = 0;
+static void home_test_autotest_tick(void)
+{
+    if (g_homeTestPhase == 2 || isRendering)
+    {
+        return;
+    }
+    ++g_homeTestFrames;
+    if (g_homeTestFrames < 60)
+    {
+        return; /* let boot + first home render settle ~1s */
+    }
+    if (g_homeTestPhase == 0)
+    {
+        if (currentState != STATE_HOME)
+        {
+            return;
+        }
+        /* Target the 3rd test card (about:acidtest, index bmCount+3):
+         * card 1 is about:home, which special-cases back to STATE_HOME (not
+         * a page render), so it cannot verify the navigation path. Steer
+         * with the CRANK (one reading-order step per call, clamps at the
+         * last selectable item — no skipped indices, always terminates). */
+        int target = 1 + storage_bookmark_count() + 2;
+        if (home_page_selected_index() != target && g_homeTestPresses < 40)
+        {
+            home_page_handle_crank(HOME_CRANK_STEP_PX);
+            g_homeTestPresses++;
+            return;
+        }
+        if (home_page_selected_index() != target)
+        {
+            logger_log("[hometest-autotest] FAIL: never reached test card 3 "
+                       "(sel=%d target=%d)",
+                       home_page_selected_index(), target);
+            g_homeTestPhase = 2;
+            return;
+        }
+        logger_log("[hometest-autotest] on test card 3 after %d crank "
+                   "step(s), pressing A",
+                   g_homeTestPresses);
+        char *u = home_page_handle_input(HT_BTN_A, NULL);
+        if (u)
+        {
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", u);
+            pluto_free(u);
+            logger_log("[hometest-autotest] A opened a URL, awaiting page");
+        }
+        else
+        {
+            logger_log("[hometest-autotest] FAIL: A on first test card "
+                       "returned no URL");
+            g_homeTestPhase = 2;
+        }
+        g_homeTestPhase = u ? 1 : 2;
+        return;
+    }
+    /* Phase 1: verify the navigation landed on the 3rd test page. */
+    if (currentState == STATE_PAGE && currentDoc)
+    {
+        const HttpTestPage *pages = NULL;
+        http_test_pages(&pages);
+        const char *want = (pages && pages[2].name) ? pages[2].name
+                                                    : "about:acidtest";
+        if (currentDoc->baseUrl && strcmp(currentDoc->baseUrl, want) == 0)
+        {
+            logger_log("[hometest-autotest] PASS: Test Cases card opened %s "
+                       "(%u frames)",
+                       want, g_homeTestFrames);
+        }
+        else
+        {
+            logger_log("[hometest-autotest] FAIL: landed on %s, wanted %s",
+                       currentDoc->baseUrl ? currentDoc->baseUrl : "(null)",
+                       want);
+        }
+        g_homeTestPhase = 2;
+    }
+}
+#endif
+
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic repro for the
  * about:javascript "Event Details → Click me" hang. After the suite page
@@ -1610,6 +1702,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
     js_click_autotest_tick();
+#endif
+
+#if defined(PLUTO_HOME_TEST_AUTOTEST)
+    home_test_autotest_tick();
 #endif
 
     /* ── crank velocity physics (Lua parity) ── */

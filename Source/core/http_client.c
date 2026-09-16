@@ -420,6 +420,26 @@ static const InternalPage INTERNAL_PAGES[] = {
     { "about:jsext", "Full JS Test Suite", JSEXTTEST_HTML },
 };
 
+/* Read-only directory view (http_client.h): name + title per internal page,
+ * same order as INTERNAL_PAGES — the home page's Test Cases section lists
+ * exactly these entries (all 5 programmed about: sites). */
+static const HttpTestPage TEST_PAGES[] = {
+    { "about:home", "PlutoBrowser Home" },
+    { "about:blank", "Blank Page" },
+    { "about:acidtest", "HTML Acid Test" },
+    { "about:javascript", "JavaScript Test Suite" },
+    { "about:jsext", "Full JS Test Suite" },
+};
+
+int http_test_pages(const HttpTestPage **entries)
+{
+    if (entries)
+    {
+        *entries = TEST_PAGES;
+    }
+    return (int)(sizeof(TEST_PAGES) / sizeof(TEST_PAGES[0]));
+}
+
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
 /* Lua closeTcp: only close once the open has resolved; a still-connecting

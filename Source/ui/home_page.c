@@ -35,6 +35,7 @@
 #include "ui/home_page.h"
 #include "core/constants.h"
 #include "core/storage.h"
+#include "core/http_client.h"
 #include "core/logger.h"
 #include "render/style.h"
 #include "pd_api.h"
@@ -49,6 +50,11 @@ extern void pluto_free(void *p);
 #define BTN_DOWN (1 << 3)
 #define BTN_A (1 << 5)
 
+/* Selection reading order on the home page (indices into one list):
+ *   0                → Settings button
+ *   1..bookmarkCount → Speed Dial / bookmark cards (grid, 2 columns)
+ *   +1..+testCount   → Test Cases cards (2 columns, after the grid)
+ *   +testCount+1     → footer info block (NOT selectable — skipped) */
 static int g_selectedIndex = 0;
 static float g_scrollY = 0;
 static float g_targetScrollY = 0;
@@ -68,12 +74,15 @@ static float g_targetScrollY = 0;
 static float g_crankFrac = 0.0f; /* sub-step remainder, crank degrees */
 static int g_crankTarget = -1;   /* selection anchor; -1 = no gesture */
 
-/* marquee state per card (Lua keyed "t<i>"/"d<i>"; we track per index) */
+/* marquee state per card (Lua keyed "t<i>"/"d<i>"; we track per index).
+ * Slots: bookmarks use i*2-2 / i*2-1 (i = 1..count → 0..127 for the 64-bookmark
+ * cap); Test Cases cards use 128 + i*2 / +1. */
+#define MARQUEE_SLOTS 148
 typedef struct
 {
     unsigned int startMs;
 } MarqueeState;
-static MarqueeState g_marquee[64]; /* 2 per card up to 32 cards */
+static MarqueeState g_marquee[MARQUEE_SLOTS];
 
 static unsigned int now_ms(void)
 {
@@ -105,16 +114,38 @@ static int bookmark_count(void)
     return storage_bookmark_count();
 }
 
+/* Test Cases section: the built-in about: pages, straight from http_client's
+ * directory (currently 5). count == 0 when the section is absent (host-test
+ * fakes without the accessor, or a future build that drops the directory). */
+static int test_count(void)
+{
+    const HttpTestPage *pages = NULL;
+    return http_test_pages(&pages);
+}
+
+/* Total selectable items: Settings (0), bookmarks (1..bm), then the test
+ * cards. The footer is intentionally NOT selectable. */
+static int selectable_count(void)
+{
+    return 1 + bookmark_count() + test_count();
+}
+
 /* ── BF14: crank-driven selection + bounded scroll ─────────────────────── */
 
 /* Absolute (unscrolled) Y of the first pixel BELOW all home content.
  * draw() builds the same chain: startY = CONTENT_Y+4 → settings row
- * (+100+22) → section header (+14) → grid (+24) → rows*(46+8) → footer
- * header (+12) → footer list (+76+4) → bottom margin (8). Keep in sync. */
+ * (+100+22) → section header (+14) → grid (+24) → rows*(46+8) → [test
+ * section (+12 grid-bottom pad, +24 header→cards — same rhythm as the
+ * Speed Dial header) → test rows*(46+8)] → footer header (+12) → footer
+ * list (+76+4) → bottom margin (8). Keep in sync. The Test Cases section is
+ * appended only when the directory is non-empty. */
 static int home_content_bottom(int count)
 {
     int rows = (count + 1) / 2; /* grid rows used by cards */
-    return CONTENT_Y + 4 + 172 + rows * (46 + 8) + 80 + 8;
+    int tests = test_count();
+    int testRows = tests > 0 ? (tests + 1) / 2 : 0;
+    return CONTENT_Y + 4 + 172 + rows * (46 + 8) +
+           (tests > 0 ? 12 + 24 + testRows * (46 + 8) : 0) + 80 + 8;
 }
 
 /* Crank → selection (BF14). One bookmark step per HOME_CRANK_STEP_PX
@@ -158,14 +189,19 @@ void home_page_handle_crank(float crankChange)
 
     if (g_crankTarget > count)
     {
-        g_crankTarget = count;
-        if (count > 0 && g_selectedIndex == count)
+        int last = selectable_count() - 1;
+        if (g_crankTarget > last)
         {
-            /* Already on the final card: keep scrolling into the footer at
-             * the grid-row pitch; update_scroll clamps to content bottom. */
-            g_targetScrollY += (float)steps * (46 + 8);
-            logger_log("home: crank freescroll tgt=%d", (int)g_targetScrollY);
-            return;
+            g_crankTarget = last;
+            if (g_selectedIndex == last)
+            {
+                /* Already on the final selectable item: keep scrolling into
+                 * the footer at the grid-row pitch; update_scroll clamps to
+                 * the content bottom. */
+                g_targetScrollY += (float)steps * (46 + 8);
+                logger_log("home: crank freescroll tgt=%d", (int)g_targetScrollY);
+                return;
+            }
         }
     }
     if (g_crankTarget < 0)
@@ -201,7 +237,7 @@ void home_page_update_scroll(void)
     {
         g_targetScrollY = 0;
     }
-    else if (count > 0)
+    else if (g_selectedIndex <= count)
     {
         int row = (g_selectedIndex - 1) / 2;
         /* BF14: CONTENT_Y+4+160 matches cardsStartY = startY+160 exactly
@@ -218,6 +254,33 @@ void home_page_update_scroll(void)
         {
             float t = (float)(selectedAbsY - CONTENT_Y - 10);
             g_targetScrollY = t > 0 ? t : 0;
+        }
+    }
+    else
+    {
+        /* Test Cases cards: same 46px card, 54px row pitch. Absolute top
+         * = grid bottom (+12, draw's bottomY pad) + 24 header→cards gap
+         * (BF19 fix: was a bare +54 that both used the stale pre-BF19 gap
+         * AND dropped the +12 pad — the auto-scroll target landed 12px
+         * short, clipping the highlighted card's bottom off-screen). */
+        int tests = test_count();
+        int ti = g_selectedIndex - 1 - count; /* 0-based test index */
+        if (tests > 0 && ti >= 0 && ti < tests)
+        {
+            int rows = (count + 1) / 2;
+            int row = ti / 2;
+            int selectedAbsY = CONTENT_Y + 4 + 160 + rows * (46 + 8) + 12 +
+                               24 + row * (46 + 8);
+            int displayY = (int)(selectedAbsY - g_targetScrollY);
+            if (displayY > SCREEN_HEIGHT - 46)
+            {
+                g_targetScrollY = (float)(selectedAbsY - SCREEN_HEIGHT + 46);
+            }
+            else if (displayY < CONTENT_Y + 10)
+            {
+                float t = (float)(selectedAbsY - CONTENT_Y - 10);
+                g_targetScrollY = t > 0 ? t : 0;
+            }
         }
     }
 
@@ -270,7 +333,7 @@ static void draw_marquee(const char *text, int x, int y, int maxW,
     }
 
     int range = tw - maxW;
-    if (slot < 0 || slot >= 64)
+    if (slot < 0 || slot >= MARQUEE_SLOTS)
     {
         slot = 0;
     }
@@ -314,6 +377,8 @@ static void draw_marquee(const char *text, int x, int y, int maxW,
 char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void))
 {
     int count = bookmark_count();
+    int tests = test_count();
+    int last = selectable_count() - 1; /* last selectable index */
     int isOnSettingsBtn = (g_selectedIndex == 0);
 
     if (pushed != 0)
@@ -329,7 +394,7 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
     {
         if (isOnSettingsBtn)
         {
-            if (count > 0)
+            if (count > 0 || tests > 0)
             {
                 g_selectedIndex = 1;
             }
@@ -342,16 +407,36 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
         {
             g_selectedIndex += 1;
         }
+        else if (g_selectedIndex == count && tests > 0)
+        {
+            /* Last bookmark (odd trailing row cell): DOWN steps into the
+             * Test Cases section. The footer is NOT selectable. */
+            g_selectedIndex = count + 1;
+        }
+        else if (g_selectedIndex + 2 <= last)
+        {
+            /* Inside the Test Cases: +2 = one 2-column row down. */
+            g_selectedIndex += 2;
+        }
     }
     else if (pushed & BTN_UP)
     {
         if (!isOnSettingsBtn)
         {
-            if (g_selectedIndex <= 2)
+            if (g_selectedIndex == count + 1 && count > 0 && count % 2 == 1)
             {
+                /* First test card sits directly under a lone last-row
+                 * bookmark (odd grid): UP returns to IT (a −2 would land on
+                 * the visually-empty cell one row higher). */
+                g_selectedIndex -= 1;
+            }
+            else if (g_selectedIndex <= 2)
+            {
+                /* Top row(s) of the bookmark grid (or the first test row
+                 * when there are no bookmarks): UP goes to Settings. */
                 g_selectedIndex = 0;
             }
-            else if (g_selectedIndex - 2 >= 1)
+            else
             {
                 g_selectedIndex -= 2;
             }
@@ -363,12 +448,30 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
         {
             g_selectedIndex++;
         }
+        else if (!isOnSettingsBtn && g_selectedIndex > count &&
+                 (g_selectedIndex - count - 1) % 2 == 0 && g_selectedIndex + 1 <= last)
+        {
+            /* Test Cases: RIGHT moves within the row (left column only). */
+            g_selectedIndex++;
+        }
     }
     else if (pushed & BTN_LEFT)
     {
         if (!isOnSettingsBtn && g_selectedIndex % 2 == 0 && g_selectedIndex > 1)
         {
             g_selectedIndex--;
+        }
+        else if (!isOnSettingsBtn && g_selectedIndex > count + 1 &&
+                 (g_selectedIndex - count - 1) % 2 == 1)
+        {
+            /* Test Cases: LEFT moves within the row (right column only). */
+            g_selectedIndex--;
+        }
+        else if (!isOnSettingsBtn && g_selectedIndex == count + 1 && count > 0)
+        {
+            /* First test card (left column): LEFT steps back into the
+             * bookmark grid (nearest right-column card above). */
+            g_selectedIndex = (count % 2 == 1) ? count - 1 : count;
         }
     }
 
@@ -379,6 +482,25 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
             if (settingsCallback)
             {
                 settingsCallback();
+            }
+            return NULL;
+        }
+        if (g_selectedIndex > count)
+        {
+            /* Test Cases card: open the built-in about: page (the URL is a
+             * static string — duplicate it exactly like the bookmark path). */
+            const HttpTestPage *pages = NULL;
+            int ti = g_selectedIndex - 1 - count;
+            if (tests > 0 && ti >= 0 && ti < tests && http_test_pages(&pages) > 0 &&
+                pages[ti].name)
+            {
+                size_t n = strlen(pages[ti].name) + 1;
+                char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+                if (out)
+                {
+                    memcpy(out, pages[ti].name, n);
+                }
+                return out;
             }
             return NULL;
         }
@@ -567,28 +689,107 @@ void home_page_draw(float crankChange)
     }
 
     int bottomY = cardsStartY + (count + 1) / 2 * (cardH + gapY) + 12;
+
+    /* Test Cases section: every built-in about: page (from http_client's
+     * directory — currently all 5) as a clickable card, same 2-column card
+     * grid as Speed Dial. Selection indices continue after the last
+     * bookmark (count + 1 .. count + tests) and A opens the page. */
+    int tests = test_count();
+    int testCardsStartY = bottomY;
+    int testRows = 0;
+    if (tests > 0)
+    {
+        const HttpTestPage *pages = NULL;
+        http_test_pages(&pages);
+        pd->graphics->setFont(fontBold);
+        const char *testSection = "TEST CASES";
+        pd->graphics->drawText(testSection, strlen(testSection), kUTF8Encoding,
+                               20, bottomY);
+        /* BF19b: no separator line under TEST CASES — with the old 54px gap
+         * it floated in dead space and read as a stray rule (user request
+         * "get rid of this"). The Speed Dial header keeps its underline. */
+
+        /* 24 = same header→cards gap as Speed Dial (was 54 — 30px of dead
+         * space between the TEST CASES heading and the first row). */
+        testCardsStartY = bottomY + 24;
+        testRows = (tests + 1) / 2;
+        for (int i = 0; i < tests; i++)
+        {
+            if (!pages || !pages[i].name)
+            {
+                continue;
+            }
+            int col = i % 2;
+            int row = i / 2;
+            int cardX = 20 + col * (cardW + gapX);
+            int cardY = testCardsStartY + row * (cardH + gapY);
+
+            if (cardY > SCREEN_HEIGHT || cardY + cardH < CONTENT_Y)
+            {
+                continue;
+            }
+
+            int isSelected = (count + 1 + i == g_selectedIndex);
+
+            if (isSelected)
+            {
+                pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5,
+                                            kColorBlack);
+                pd->graphics->drawRoundRect(cardX + 1, cardY + 1, cardW - 2,
+                                            cardH - 2, 4, 1, kColorWhite);
+                pd->graphics->setDrawMode(kDrawModeFillWhite);
+            }
+            else
+            {
+                pd->graphics->fillRoundRect(cardX, cardY, cardW, cardH, 5,
+                                            kColorWhite);
+                pd->graphics->drawRoundRect(cardX, cardY, cardW, cardH, 5, 1,
+                                            kColorBlack);
+                pd->graphics->setDrawMode(kDrawModeCopy);
+            }
+
+            int textAreaW = cardW - 16;
+
+            pd->graphics->setFont(fontBold);
+            draw_marquee(pages[i].name, cardX + 8, cardY + 6, textAreaW,
+                         fontBold, PLUTO_FONT_BODY_BOLD, 128 + i * 2);
+
+            pd->graphics->setFont(fontSmall);
+            const char *d = pages[i].title ? pages[i].title : pages[i].name;
+            draw_marquee(d, cardX + 8, cardY + 24, textAreaW, fontSmall,
+                         PLUTO_FONT_SMALL, 128 + i * 2 + 1);
+
+            pd->graphics->setDrawMode(kDrawModeCopy);
+        }
+    }
+
+    /* Footer sits 12px below the last card row (legacy bottomY position when
+     * the Test Cases section is absent). */
+    int footerY = (tests > 0)
+                      ? testCardsStartY + testRows * (cardH + gapY) + 12
+                      : bottomY;
     pd->graphics->setFont(fontSmall);
     /* BF11: one long line was cut off at the right edge — hints now listed
      * under an underlined "Buttons to Press:" header, each bulleted. */
     pd->graphics->setFont(fontSmall);
     const char *footerHdr = "Buttons to Press:";
     pd->graphics->drawText(footerHdr, strlen(footerHdr), kUTF8Encoding, 24,
-                           bottomY);
+                           footerY);
     int hdrW = style_get_text_width(PLUTO_FONT_SMALL, footerHdr);
     int hdrH = pd->graphics->getFontHeight(fontSmall);
-    pd->graphics->drawLine(24, bottomY + hdrH + 2, 24 + hdrW,
-                           bottomY + hdrH + 2, 1, kColorBlack);
+    pd->graphics->drawLine(24, footerY + hdrH + 2, 24 + hdrW,
+                           footerY + hdrH + 2, 1, kColorBlack);
     const char *footerA = "(A) Open";
     const char *footerB = "(B) Search/URL";
     const char *footerC = "Menu: Settings";
     pd->graphics->drawText(footerA, strlen(footerA), kUTF8Encoding, 34,
-                           bottomY + 32);
+                           footerY + 32);
     pd->graphics->drawText(footerB, strlen(footerB), kUTF8Encoding, 34,
-                           bottomY + 52);
+                           footerY + 52);
     pd->graphics->drawText(footerC, strlen(footerC), kUTF8Encoding, 34,
-                           bottomY + 72);
+                           footerY + 72);
     /* square bullets aligned with each line's vertical center */
-    pd->graphics->fillRect(24, bottomY + 36, 4, 4, kColorBlack);
-    pd->graphics->fillRect(24, bottomY + 56, 4, 4, kColorBlack);
-    pd->graphics->fillRect(24, bottomY + 76, 4, 4, kColorBlack);
+    pd->graphics->fillRect(24, footerY + 36, 4, 4, kColorBlack);
+    pd->graphics->fillRect(24, footerY + 56, 4, 4, kColorBlack);
+    pd->graphics->fillRect(24, footerY + 76, 4, 4, kColorBlack);
 }
