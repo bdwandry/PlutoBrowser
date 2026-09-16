@@ -278,7 +278,8 @@ typedef enum
 {
     DOC_SCRIPT_OFF = 0,
     DOC_SCRIPT_RUN = 1,
-    DOC_SCRIPT_RUN_KEEP = 2
+    DOC_SCRIPT_RUN_KEEP = 2,
+    DOC_SCRIPT_FULL = 3 /* inline + fetched external <script src> files */
 } DocScriptPolicy;
 
 /* ── Document result ─────────────────────────────────────────────────────── */
@@ -294,9 +295,13 @@ typedef struct
     void *_dom; /* live DomResult while the bridge is attached (freed by
                  * js_doc_close, NOT by document_free) */
     struct JsBridge *_jsbridge; /* opaque; valid while scripts may still run */
-    int jsRan;                  /* inline scripts executed for this page */
+    int jsRan;                  /* scripts executed for this page (all kinds) */
     int jsErrors;               /* scripts that failed to compile/run */
     char jsLastError[128];      /* first error ("" when none) */
+    /* ── External <script src> files (DOC_SCRIPT_FULL) ── */
+    struct JsExtScript_ *extScripts; /* heap array; body owned here */
+    int extScriptCount;              /* unique src= URLs stored */
+    void *_extArena;                 /* jsext scratch arena (document.c frees) */
     /* Walker output */
     DocBlock **blocks; /* heap array */
     int blockCount;

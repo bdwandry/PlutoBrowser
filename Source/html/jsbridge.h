@@ -25,16 +25,46 @@
 #include "html/document.h"
 
 /* ── Resource limits (Playdate-sized) ────────────────────────────────────── */
-#define JSBRIDGE_MAX_SCRIPTS 48          /* inline <script> blocks per page */
+#define JSBRIDGE_MAX_SCRIPTS 48          /* <script> elements per page (all kinds) */
 #define JSBRIDGE_MAX_SCRIPT_BYTES (64 * 1024) /* per-script source cap */
 #define JSBRIDGE_MAX_OUTPUT (64 * 1024)  /* total document.write capture */
 #define JSBRIDGE_RUNLIMIT 2000000        /* muJS statement/back-edge counter */
-#define JSBRIDGE_MAXALLOC (256 * 1024)   /* single-allocation cap */
+/* Single-allocation cap inside the engine. muJS grows its compile and
+ * runtime structures with individual mallocs; the device heap has ~3MB
+ * free, so budget generously — a failed huge allocation must surface as a
+ * compile error, never a device crash. */
+#define JSBRIDGE_MAXALLOC (1024 * 1024)  /* single-allocation cap */
 #define JSBRIDGE_CALL_BUDGET 512         /* DOM mutations per page */
 #define JSBRIDGE_LISTENERS_MAX 32        /* click listeners per page */
 #define JSBRIDGE_MAX_PROPS 32            /* has-props scan per DOM object */
 #define JSBRIDGE_MAX_FILES 32            /* document.files[] size */
 #define JSBRIDGE_WRITE_CHUNK 2048        /* per-write() growth step cap */
+
+/* ── External <script src> support (Full mode) ───────────────────────────── */
+#define JSBRIDGE_MAX_EXT_SCRIPTS 24            /* unique external files per page */
+#define JSBRIDGE_EXT_URL_MAX 512               /* per-URL storage */
+#define JSBRIDGE_EXT_PAGE_BUDGET (160 * 1024)  /* total external JS bytes/page */
+
+/* One fetched external script file. body is the raw source (SDK-allocated,
+ * owned by the DocParseResult); NULL = not fetched / refused / failed.
+ * (Tagged so document.h can hold pointers to it without a cycle.) */
+typedef struct JsExtScript_
+{
+    char url[JSBRIDGE_EXT_URL_MAX]; /* ABSOLUTE url (resolved by html/jsext) */
+    char *body;
+    size_t len;
+} JsExtScript;
+
+/* One <script> element in document order: an inline body, or a reference to
+ * an extScripts[] entry. Slots are produced by jsbridge_scan_scripts and
+ * executed in array order — the browser-faithful interleaving. */
+typedef struct
+{
+    int isExt;               /* 0 = inline body below; 1 = extScripts[extIndex] */
+    const char *inlineStart; /* inline body start (points into the page html) */
+    size_t inlineLen;
+    int extIndex;            /* -1 = external but unresolvable/over-cap */
+} JsScriptSlot;
 
 typedef struct JsBridge JsBridge;
 
@@ -46,10 +76,24 @@ typedef enum
     JSB_CLICK_SUPPRESSED = 2  /* preventDefault() → re-render, don't navigate */
 } JsBridgeClickResult;
 
+/* ── Script scanning ───────────────────────────────────────────────────────
+ * Scan raw HTML for <script> elements in document order into `slots`.
+ * Signature lives here so both Inline and Full modes share one parser.
+ * extRaw (optional) additionally receives the RAW src= strings of external
+ * references (deduplicated; html/jsext resolves them against the page URL);
+ * external elements then occupy slots at their page positions. When
+ * extRaw is NULL, src= elements are skipped entirely (legacy Inline-mode
+ * scan, bit-identical to the pre-Full behavior). Returns the TOTAL slot
+ * count (uncapped); only the first slotMax entries are stored. */
+int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
+                          char (*extRaw)[JSBRIDGE_EXT_URL_MAX], int extMax,
+                          int *extCountOut);
+
 /* Run all inline <script> bodies of `doc` per policy (see document.h).
  * policy DOC_SCRIPT_RUN frees the engine before returning; RUN_KEEP leaves
- * it attached for jsbridge_dispatch_click. Returns 0 ok (check
- * doc->jsErrors / doc->jsLastError), -1 engine init failure. */
+ * it attached for jsbridge_dispatch_click; FULL also executes fetched
+ * externals (doc->extScripts bodies) at their page positions. Returns 0 ok
+ * (check doc->jsErrors / doc->jsLastError), -1 engine init failure. */
 int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy);
 
 /* Parse the captured document.write output and adopt the nodes under the

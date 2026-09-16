@@ -67,6 +67,7 @@ SRC = \
 	Source/html/document.c \
 	Source/html/readability.c \
 	Source/html/jsbridge.c \
+	Source/html/jsext.c \
 	Source/keyboard/keyboard.c \
 	Source/core/tasks.c \
 	Source/util/strbuf.c \
@@ -118,6 +119,12 @@ include $(SDK)/C_API/buildsupport/common.mk
 # Must come after the include: common.mk assigns DYLIB_FLAGS with =.
 ifdef SIMDEFS
 DYLIB_FLAGS += $(SIMDEFS)
+endif
+
+# Optional extra flags for the device binary (mirrors SIMDEFS), e.g.
+# make device DEVICEDEFS="-DPLUTO_JSEXT_AUTOTEST" for a self-testing deploy.
+ifdef DEVICEDEFS
+CPFLAGS += $(DEVICEDEFS)
 endif
 
 # Per-function stack-usage reports (build/*.su) — device game-task stack is

@@ -86,7 +86,12 @@ int webp_parse_container(const uint8_t *data, size_t len,
             }
             haveVp8 = 1;
         }
-        pos += 8 + size + (size & 1);
+        /* 64-bit advance: a corrupt 4GB chunk size must not wrap 32-bit
+         * size_t and spin the loop. */
+        uint64_t adv = 8ull + size + (size & 1);
+        if (adv >= (uint64_t)(len - pos))
+            break;
+        pos += (size_t)adv;
     }
     if (!haveVp8) return 0;
     if (payload) *payload = vp8Payload;
@@ -124,7 +129,10 @@ int webp_parse_animation(const uint8_t *data, size_t len, WebPAnim *out)
             uint8_t flags = (p < len) ? data[p] : 0;
             canvasW = (int)read_le24(data, p + 4) + 1;
             canvasH = (int)read_le24(data, p + 7) + 1;
-            if (canvasW < 1 || canvasH < 1 || canvasW * canvasH > WEBP_MAX_PIXELS)
+            if (canvasW < 1 || canvasH < 1 ||
+                /* 64-bit product: each dim can be ~16.7M from a corrupt
+                 * VP8X; a 32-bit product can wrap positive and pass. */
+                (int64_t)canvasW * (int64_t)canvasH > (int64_t)WEBP_MAX_PIXELS)
             {
                 PLUTO_FREE(frames);
                 return 0;
@@ -157,7 +165,8 @@ int webp_parse_animation(const uint8_t *data, size_t len, WebPAnim *out)
             }
             const uint8_t *pl = data + pos + 8;
             size_t plLen = (pos + 8 + (size_t)size <= len) ? size : (len - (pos + 8));
-            if (plLen < 16)
+            /* 17: the fixed ANMF header reads pl[0..16] (offsets 1..16). */
+            if (plLen < 17)
             {
                 PLUTO_FREE(frames);
                 return 0;
@@ -177,24 +186,33 @@ int webp_parse_animation(const uint8_t *data, size_t len, WebPAnim *out)
             {
                 const uint8_t *ic = pl + ipos;
                 uint32_t isize = rd32(pl, ipos + 4);
+                /* Clamp declared chunk sizes to the bytes actually present:
+                 * a truncated/corrupt file can declare multi-GB payloads;
+                 * decoding would read far past the buffer. */
+                size_t room = (ipos + 8 + (size_t)isize <= plLen)
+                                  ? (size_t)isize
+                                  : (plLen - (ipos + 8));
                 if (memcmp(ic, "ALPH", 4) == 0)
                 {
                     f.alpha = pl + ipos + 8;
-                    f.alphaLen = isize;
+                    f.alphaLen = room;
                 }
                 else if (memcmp(ic, "VP8L", 4) == 0)
                 {
                     f.cid = "VP8L";
                     f.payload = pl + ipos + 8;
-                    f.payloadLen = isize;
+                    f.payloadLen = room;
                 }
                 else if (memcmp(ic, "VP8 ", 4) == 0)
                 {
                     f.cid = "VP8 ";
                     f.payload = pl + ipos + 8;
-                    f.payloadLen = isize;
+                    f.payloadLen = room;
                 }
-                ipos += 8 + isize + (isize & 1);
+                uint64_t iadv = 8ull + isize + (isize & 1);
+                if (iadv >= (uint64_t)(plLen - ipos))
+                    break;
+                ipos += (size_t)iadv;
             }
             if (!f.cid || !f.payload)
             {
@@ -224,12 +242,27 @@ int webp_parse_animation(const uint8_t *data, size_t len, WebPAnim *out)
             }
             frames[numFrames++] = f;
         }
-        pos += 8 + size + (size & 1);
+        /* 64-bit advance (see webp_parse_container). */
+        uint64_t adv = 8ull + size + (size & 1);
+        if (adv >= (uint64_t)(len - pos))
+            break;
+        pos += (size_t)adv;
     }
     if (!isExtended || numFrames == 0)
     {
         PLUTO_FREE(frames);
         return 0;
+    }
+    /* Re-validate every frame against the FINAL canvas: a second VP8X may
+     * have shrunk the canvas after earlier frames were bounds-checked. */
+    for (int i = 0; i < numFrames; i++)
+    {
+        if (frames[i].x + frames[i].w > canvasW ||
+            frames[i].y + frames[i].h > canvasH)
+        {
+            PLUTO_FREE(frames);
+            return 0;
+        }
     }
     out->canvasW = canvasW;
     out->canvasH = canvasH;
@@ -279,6 +312,18 @@ int webp_decode_animation(const uint8_t *data, size_t len, WebPAnimResult *out)
     memset(&anim, 0, sizeof(anim));
     if (!webp_parse_animation(data, len, &anim)) return 0;
     int canvasW = anim.canvasW, canvasH = anim.canvasH;
+    /* Defense in depth: the decode below writes frames into the canvas
+     * buffer; never trust the parser's internal state for the bounds. */
+    for (int i = 0; i < anim.numFrames; i++)
+    {
+        const WebPAnimFrame *f = &anim.frames[i];
+        if (f->x < 0 || f->y < 0 || f->w < 1 || f->h < 1 ||
+            f->x + f->w > canvasW || f->y + f->h > canvasH)
+        {
+            webp_anim_free(&anim);
+            return 0;
+        }
+    }
     int total = canvasW * canvasH;
     if (total < 1 || total > WEBP_MAX_PIXELS)
     {

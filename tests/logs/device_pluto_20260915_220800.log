@@ -1,0 +1,70 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[01:54:32 #1] === PlutoBrowser boot ===
+[01:54:32 #2] eventHandler: kEventInit, osversion=30101
+[01:54:32 #3] STORAGE: init enter
+[01:54:32 #4] STORAGE: load enter
+[01:54:32 #5] STORAGE: file opened, parsing
+[01:54:32 #6] STORAGE: init exit
+[01:54:32 #7] KB new: entering
+[01:54:32 #8] KB new: allocated
+[01:54:32 #9] KB load: font...
+[01:54:32 #10] KB load: font ok h=36
+[01:54:32 #11] KB load: menu-space ok
+[01:54:32 #12] KB load: menu-ok ok
+[01:54:32 #13] KB load: menu-del ok
+[01:54:32 #14] KB load: menu-cancel ok
+[01:54:32 #15] KB new: font+images loaded
+[01:54:32 #16] DISPLAY: refresh rate set to 50 fps
+[01:54:32 #17] updateFrame: first frame executed
+[01:54:33 #18] home: crank sel=1 count=10
+[01:54:33 #19] home: crank sel=2 count=10
+[01:54:33 #20] home: crank sel=3 count=10
+[01:54:33 #21] home: crank sel=4 count=10
+[01:54:33 #22] home: crank sel=5 count=10
+[01:54:33 #23] home: crank sel=6 count=10
+[01:54:33 #24] home: crank sel=7 count=10
+[01:54:33 #25] home: crank sel=8 count=10
+[01:54:34 #26] home: crank sel=9 count=10
+[01:54:34 #27] home: crank sel=10 count=10
+[01:54:34 #28] home: crank freescroll tgt=264
+[01:54:34 #29] home: crank freescroll tgt=318
+[01:54:34 #30] home: crank freescroll tgt=372
+[01:54:34 #31] home: crank freescroll tgt=372
+[01:54:34 #32] home: crank freescroll tgt=372
+[01:54:34 #33] home: crank freescroll tgt=372
+[01:54:35 #34] home: crank sel=9 count=10
+[01:54:35 #35] home: crank sel=8 count=10
+[01:54:36 #36] home: crank sel=7 count=10
+[01:54:36 #37] home: crank sel=6 count=10
+[01:54:36 #38] home: crank sel=5 count=10
+[01:54:36 #39] home: crank sel=4 count=10
+[01:54:36 #40] home: crank sel=3 count=10
+[01:54:36 #41] home: crank sel=2 count=10
+[01:54:37 #42] home: crank sel=1 count=10
+[01:54:37 #43] home: crank sel=0 count=10
+[01:54:37 #44] home: crank sel=1 count=10
+[01:54:38 #45] home: crank sel=2 count=10
+[01:54:38 #46] updateFrame: heartbeat frame=300 fps=50 overlay=1 stackPeak=632B/61800B
+[01:54:43 #47] navigate_to: https://google.com
+[01:54:43 #48] state -> 1 (frame 524)
+[01:54:44 #49] updateFrame: heartbeat frame=600 fps=50 overlay=1 stackPeak=632B/61800B
+[01:54:50 #50] updateFrame: heartbeat frame=900 fps=50 overlay=1 stackPeak=632B/61800B
+[01:54:55 #51] [js] script 2 failed to compile
+[01:54:55 #52] [js] script 8 failed to compile
+[01:54:56 #53] [js] page: ran=10 errs=4 last=TypeError: cannot convert undefined to object
+[01:54:56 #54] [js] live page: listeners=0 ran=10 errs=4
+[01:54:56 #55] STORAGE: save open
+[01:54:56 #56] STORAGE: save writing (bm=10 hist=7)
+[01:54:56 #57] STORAGE: save close
+[01:54:56 #58] STORAGE: save exit
+[01:54:56 #59] state -> 2 (frame 1043)
+[01:54:59 #60] updateFrame: heartbeat frame=1200 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:55:02 #61] IMGDEC ok https://www.google.com/images/branding/google_wordmark/v1/1x/googlelogo_color_white_background_272x92dp.png kind=1 272x92 (2478 bytes)
+[01:55:05 #62] updateFrame: heartbeat frame=1500 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:55:11 #63] updateFrame: heartbeat frame=1800 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:55:17 #64] updateFrame: heartbeat frame=2100 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:55:20 #65] navigate_to: https://www.google.com/search?ie=ISO-8859-1&hl=en&source=hp&biw=&bih=&q=Bry&iflsig=ABILxe8AAAAAaqoE_a0F2OzoNeTB6GFVI6SBit6Ta1VY&gbv=1&btnG=Google+Search
+[01:55:20 #66] state -> 1 (frame 2231)
+[01:55:23 #67] updateFrame: heartbeat frame=2400 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:55:25 #68] [js] script 3 failed to compile

@@ -50,6 +50,7 @@
 #include "html/dom.h"
 #include "html/document.h"
 #include "html/jsbridge.h"
+#include "html/jsext.h"
 #include "html/readability.h"
 #include "keyboard/keyboard.h"
 #include "core/constants.h"
@@ -401,6 +402,17 @@ typedef struct RenderTask
     int prevTarget;
     DocParseResult *doc;   /* set by the parse step, consumed by done */
     DocParseResult *rewalkDoc; /* re-walk this LIVE doc (JS mutation path) */
+    /* ── DOC_SCRIPT_FULL: external <script src> prefetch chain ──
+     * Stage 1: scan + resolve, begin the fetch session, then yield (return 1)
+     * so the frame can pump http_update(); Stage 2 re-enters through the SAME
+     * !rt->doc gate, pumps the session (return 1 while any file is in
+     * flight), then detaches the results and falls through to the parser.
+     * parseExtedDoc guards the stage boundary: once parsing starts, Stage-2
+     * code must never run again (the task then behaves like a plain parse). */
+    int prefetching;           /* 1 between Stage-1 begin and Stage-2 detach */
+    int parseExtedDoc;         /* 1 once the Stage-1 ext scan has been consumed */
+    int parsed;                /* 1 once document_parse_ex has run (parse step done) */
+    JsExtFetch *fetch;         /* jsext session (owned while prefetching) */
 } RenderTask;
 
 /* JS bridge of the LIVE page (kept across the parse→layout→done sequence
@@ -508,17 +520,44 @@ static int render_step(TaskCtx *ctx)
         return 1; /* more work: layout next tick */
     }
 
-    if (!rt->doc)
+    if (!rt->parsed)
     {
-        rt->doc = (DocParseResult *)malloc(sizeof(DocParseResult));
         if (!rt->doc)
         {
-            snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
-                     "Parse Error: out of memory");
-            return -1;
+            rt->doc = (DocParseResult *)malloc(sizeof(DocParseResult));
+            if (!rt->doc)
+            {
+                snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
+                         "Parse Error: out of memory");
+                return -1;
+            }
+            memset(rt->doc, 0, sizeof(DocParseResult));
+            tasks_report_progress(0.05f);
         }
-        memset(rt->doc, 0, sizeof(DocParseResult));
-        tasks_report_progress(0.05f);
+
+        /* ── Stage 2 (FULL): pump the prefetch session before parsing ────
+         * Each entry pumps/downloads one tick; while any file is in flight
+         * the task yields so the frame loop can call http_update(). When all
+         * files settle, the session detaches its arena + ext table into
+         * rt->doc and the SAME step falls through to the parse below. */
+        if (rt->prefetching && rt->fetch)
+        {
+            if (jsext_prefetch_step(rt->fetch) != 0)
+            {
+                return 1; /* still downloading (http_update pumps per frame) */
+            }
+            rt->prefetching = 0;
+            JsExtArena *arena = NULL;
+            JsExtScript *ext = NULL;
+            int extCount = 0;
+            jsext_fetch_detach(rt->fetch, &arena, &ext, &extCount);
+            rt->fetch = NULL;
+            rt->doc->extScripts = ext;
+            rt->doc->extScriptCount = extCount;
+            rt->doc->_extArena = arena;
+            logger_log("[jsext] prefetch done: %d file(s), %zu bytes",
+                       extCount, jsext_last_bytes());
+        }
 
         /* detailsOpen overrides for toggle re-renders. */
         DocParseOpts opts;
@@ -530,15 +569,69 @@ static int render_step(TaskCtx *ctx)
         }
         opts.svgDecoder = app_svg_decoder;
 
-        /* JavaScript execution policy: On → run scripts and keep the engine
-         * (click dispatch), HTML mode only — reader mode distills the page
-         * before scripts would be meaningful. Off → DOC_SCRIPT_OFF (the
-         * historical skip-scripts path; no engine is ever created). */
+        /* JavaScript execution policy: Off → DOC_SCRIPT_OFF (no engine ever
+         * created); Inline → RUN_KEEP (inline scripts only, files skipped —
+         * the historical On path); Full → the same engine wiring PLUS the
+         * prefetch chain below downloads external <script src> files, which
+         * then execute in document order like inline bodies. HTML mode only
+         * in every case — reader mode distills the page first. */
         DocScriptPolicy jsPolicy = DOC_SCRIPT_OFF;
-        if (storage_setting_int("jsEnabled") &&
-            currentBrowseMode == MODE_RAW_HTML)
+        int jsSetting = storage_setting_int("jsEnabled");
+        if (jsSetting == 1 && currentBrowseMode == MODE_RAW_HTML)
         {
             jsPolicy = DOC_SCRIPT_RUN_KEEP;
+        }
+        else if (jsSetting == 2 && currentBrowseMode == MODE_RAW_HTML)
+        {
+            jsPolicy = DOC_SCRIPT_FULL;
+        }
+
+        /* Full mode (Stage 1): scan the page for external script files and
+         * provide them BEFORE parsing (browser-preload-scanner model — a
+         * desktop browser will not run a file-based script before its bytes
+         * arrive; Stage 2 above pumps the session across task re-entries).
+         *   Network pages: sequential fetches through the single-flight HTTP
+         * client (same machinery as the page body and images).
+         *   about: pages: scripts resolve LOCALLY from jsext's built-in table
+         * (deterministic tests 6–11 with zero network dependence). */
+        if (jsPolicy == DOC_SCRIPT_FULL && rt->body && !rt->parseExtedDoc)
+        {
+            /* Consumed immediately: the fetch path returns before falling
+             * through, and Stage 2 (top of step) must not re-run the scan. */
+            rt->parseExtedDoc = 1;
+            int isAbout = (strncmp(rt->url, "about:", 6) == 0);
+            JsScriptSlot *slots = NULL;
+            JsExtScript *ext = NULL;
+            int slotCount = 0, extCount = 0;
+            JsExtArena *arena = NULL;
+            jsext_collect(rt->body, rt->url, &slots, &slotCount, &ext,
+                          &extCount, &arena);
+            if (extCount > 0)
+            {
+                logger_log("[jsext] %d external script(s) on page", extCount);
+                if (isAbout)
+                {
+                    jsext_local_fill(arena, ext, extCount);
+                    rt->doc->extScripts = ext;
+                    rt->doc->extScriptCount = extCount;
+                    rt->doc->_extArena = arena;
+                }
+                else
+                {
+                    rt->fetch = jsext_prefetch_begin(arena, slots, slotCount,
+                                                     ext, extCount);
+                    if (rt->fetch)
+                    {
+                        rt->prefetching = 1;
+                        return 1; /* downloads pump on re-entry (Stage 2) */
+                    }
+                    jsext_arena_free(arena); /* begin failed */
+                }
+            }
+            else if (arena)
+            {
+                jsext_arena_free(arena); /* no externals: drop scratch */
+            }
         }
 
         int rc = document_parse_ex(rt->body, rt->url, currentBrowseMode,
@@ -557,6 +650,7 @@ static int render_step(TaskCtx *ctx)
                        rt->doc->jsLastError[0] ? " last=" : "",
                        rt->doc->jsLastError[0] ? rt->doc->jsLastError : "");
         }
+        rt->parsed = 1;
         tasks_report_progress(0.6f);
         return 1; /* more work: layout next tick */
     }
@@ -667,6 +761,9 @@ static void render_error(const char *message, void *userdata)
     isRendering = 0;
     if (rt)
     {
+        /* FULL-mode prefetch mid-flight: abort the session (cancels any
+         * in-flight script request + frees the arena) before tearing down. */
+        jsext_abort_active();
         if (rt->isToggle)
         {
             /* Lua: undo the toggle flip on error. */
@@ -747,6 +844,7 @@ static void navigate_to(const char *urlString)
     /* Any still-running parse/render of a previous page must be dropped;
      * its onComplete would otherwise fire later and hijack the new page. */
     tasks_cancel_all();
+    jsext_abort_active(); /* FULL-mode prefetch: kill any in-flight session */
     isRendering = 0;
     /* Drop the previous page's layout (borrows doc strings) before the doc
      * is freed on the next render_done. */
@@ -877,6 +975,7 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 
 static void http_on_error(const char *message)
 {
+    logger_log("[net] http error: %s", message ? message : "(null)");
     error_page_show(message, currentUrlObj ? currentUrlObj->normalized : "");
     currentState = STATE_ERROR;
     snprintf(pageTitle, sizeof(pageTitle), "Connection Error");
@@ -2315,6 +2414,72 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         home_page_reset();
         currentState = STATE_HOME;
 
+#if defined(TARGET_SIMULATOR) && defined(PLUTO_SETTINGS_AUTOTEST)
+        /* TEMPORARY (sim-only, PLUTO_SETTINGS_AUTOTEST builds): boot-time
+         * settings-panel probe — open the panel (stages storage), log the
+         * JavaScript row's label + staged value, cycle the row through the
+         * 3-state range with the same buttons a user presses (Right/Right/
+         * Left/Left returns to the start: Inline→Full→Off→Full→Inline),
+         * then B-cancel (discard — storage untouched) and return home. */
+        settings_page_open((int)currentState);
+        currentState = STATE_SETTINGS;
+        logger_log("[settings-autotest] label='%s' value='%s'",
+                   settings_page_label(7), settings_page_staged_value(7));
+        {
+            const int btnDown = 1 << 3, btnRight = 1 << 1, btnLeft = 1 << 0,
+                      btnB = 1 << 4;
+            char *act = NULL;
+            /* Row 7 is 6 DOWN presses away from the opening selection. */
+            for (int i = 0; i < 6; i++)
+            {
+                act = settings_page_handle_input(btnDown,
+                                                 settings_cleared_cookies);
+                if (act)
+                {
+                    pluto_free(act);
+                }
+            }
+            logger_log("[settings-autotest] row7 selected: label='%s'",
+                       settings_page_label(7));
+            act = settings_page_handle_input(btnRight,
+                                                   settings_cleared_cookies);
+            if (act)
+            {
+                pluto_free(act);
+            }
+            logger_log("[settings-autotest] R -> '%s'",
+                       settings_page_staged_value(7));
+            act = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act)
+            {
+                pluto_free(act);
+            }
+            logger_log("[settings-autotest] RR -> '%s'",
+                       settings_page_staged_value(7));
+            act = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act)
+            {
+                pluto_free(act);
+            }
+            logger_log("[settings-autotest] RRL -> '%s'",
+                       settings_page_staged_value(7));
+            act = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act)
+            {
+                pluto_free(act);
+            }
+            logger_log("[settings-autotest] RRLL -> '%s'",
+                       settings_page_staged_value(7));
+            act = settings_page_handle_input(btnB, settings_cleared_cookies);
+            if (act)
+            {
+                pluto_free(act);
+            }
+        }
+        currentState = STATE_HOME;
+        home_page_reset();
+#endif
+
 #if defined(TARGET_SIMULATOR) && defined(PLUTO_JS_AUTOTEST)
         /* TEMPORARY (sim-only, PLUTO_JS_AUTOTEST builds): navigate straight
          * to the JS test suite so the integration run is reproducible.
@@ -2324,6 +2489,32 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
     #ifdef PLUTO_JS_AUTOTEST_OFF
         storage_set_setting_int("jsEnabled", 0);
     #endif
+#endif /* TARGET_SIMULATOR guard above */
+
+#if defined(PLUTO_JSEXT_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): force the JS
+         * setting to Full (2) and navigate to the external-script suite —
+         * exercises the prefetch/local-fill chain + FULL execution end to
+         * end; assertions land in pluto.log via [jsext] / [js] lines.
+         * PLUTO_JSEXT_AUTOTEST_URL overrides the target (sim-only: a
+         * loopback HTTP server for the real-network run; on device there
+         * is no dev machine to serve it). */
+        storage_set_setting_int("jsEnabled", 2);
+        pendingNavUrlSet = 1;
+#ifdef PLUTO_JSEXT_AUTOTEST_URL
+/* The target URL lives in jsext_autotest_url.h (generated at the project
+ * root before a seam build) — a -D value containing "//" is parsed as a
+ * comment by the preprocessor, and shell/make quoting is too fragile:
+ *   printf '#define PLUTO_JSEXT_AUTOTEST_URL_STR "%s"\n' \
+ *     "http://127.0.0.1:8099/page.html" > jsext_autotest_url.h
+ *   make SIMDEFS="-DPLUTO_JSEXT_AUTOTEST -DPLUTO_JSEXT_AUTOTEST_URL=1"
+ */
+#include "jsext_autotest_url.h"
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 PLUTO_JSEXT_AUTOTEST_URL_STR);
+#else
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:jsext");
+#endif
 #endif
 
         /* Keyboard instance. The port's contract:

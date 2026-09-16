@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 #include "jsbridge.h"
 #include "mujs.h"
@@ -868,6 +869,136 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
     return count;
 }
 
+/* ── compile-safety pre-scan (device stack guard) ──────────────────────────
+ * The vendored muJS compiler is used exactly as shipped (no Source/js edits).
+ * Its parser recurses per nesting level and its regex compiler recurses on
+ * consecutive escapes — on the device's 61.8KB game-task stack a pathological
+ * script can overflow the stack and corrupt the task, crashing far from the
+ * cause. This scan runs in OUR code before the engine sees the script and
+ * rejects inputs whose nesting/regex shape could plausibly exceed the
+ * budget. Heuristic by design: false rejects (deep-but-legal scripts) are
+ * acceptable on this hardware; a stack overflow is not. */
+#define PLUTO_SCAN_MAX_DEPTH 40   /* parser nesting levels (muJS ASTLIMIT 400) */
+#define PLUTO_SCAN_MAX_REGEX_LEN 8192
+#define PLUTO_SCAN_MAX_REGEX_ESC 64  /* consecutive escapes = recursion depth */
+static int pluto_script_compile_safe(const char *src, size_t len)
+{
+    static const char *const kw[] = {
+        "return", "typeof", "instanceof", "in", "of", "new", "delete",
+        "void", "case", "do", "else", "throw", "yield", "await"
+    };
+    int depth = 0, maxDepth = 0;
+    int rxLen = 0, rxEsc = 0;
+    char q = 0; /* active quote: 0, '"', '\'', '/' */
+    int inLine = 0, inBlock = 0;
+    const char *p = src, *end = src + len;
+
+    while (p < end)
+    {
+        char c = *p;
+        if (inLine)
+        {
+            if (c == '\n') inLine = 0;
+        }
+        else if (inBlock)
+        {
+            if (c == '*' && p + 1 < end && p[1] == '/')
+            {
+                inBlock = 0;
+                p++;
+            }
+        }
+        else if (q == '/')
+        {
+            if (c == '\\')
+            {
+                if (p + 1 < end) { p++; rxEsc++; }
+            }
+            else if (c == '\n')
+            {
+                q = 0; /* unterminated: treat as division, keep scanning */
+            }
+            else if (c == '/')
+            {
+                q = 0;
+            }
+        }
+        else if (q == '"' || q == '\'')
+        {
+            if (c == '\\')
+            {
+                if (p + 1 < end) p++;
+            }
+            else if (c == q)
+            {
+                q = 0;
+            }
+        }
+        else if (c == '/' && p + 1 < end && p[1] == '/')
+        {
+            inLine = 1;
+            p++;
+        }
+        else if (c == '/' && p + 1 < end && p[1] == '*')
+        {
+            inBlock = 1;
+            p++;
+        }
+        else if (c == '"' || c == '\'')
+        {
+            q = c;
+        }
+        else if (c == '/')
+        {
+            /* Division-vs-regex heuristic: a '/' after something that can
+             * end an expression is division; after an operator/keyword it
+             * starts a regex literal. */
+            const char *s = p - 1;
+            while (s >= src && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+                s--;
+            if (s >= src && (isalnum((unsigned char)*s) || *s == '_' || *s == '$'))
+            {
+                const char *w = s;
+                while (w >= src && (isalnum((unsigned char)*w) || *w == '_' || *w == '$'))
+                    w--;
+                size_t wl = (size_t)(s - w);
+                int isKw = 0;
+                for (size_t k = 0; k < sizeof(kw) / sizeof(kw[0]); k++)
+                {
+                    if (wl == strlen(kw[k]) && strncmp(w + 1, kw[k], wl) == 0)
+                    {
+                        isKw = 1;
+                        break;
+                    }
+                }
+                if (!isKw)
+                {
+                    p++; /* division */
+                    continue;
+                }
+            }
+            q = '/'; /* regex literal */
+            rxLen = 0;
+            rxEsc = 0;
+        }
+        else if (c == '{' || c == '(' || c == '[')
+        {
+            depth++;
+            if (depth > maxDepth) maxDepth = depth;
+        }
+        else if (c == '}' || c == ')' || c == ']')
+        {
+            if (depth > 0) depth--;
+        }
+        if (q == '/' && ++rxLen > PLUTO_SCAN_MAX_REGEX_LEN)
+            return 0;
+        if (rxEsc > PLUTO_SCAN_MAX_REGEX_ESC)
+            return 0;
+        p++;
+    }
+    return maxDepth <= PLUTO_SCAN_MAX_DEPTH;
+}
+
 /* ── script execution ────────────────────────────────────────────────────── */
 static void run_one_script(JsBridge *b, const char *src, size_t len, int index)
 {
@@ -885,6 +1016,20 @@ static void run_one_script(JsBridge *b, const char *src, size_t len, int index)
         }
         return;
     }
+    /* Compile-safety gate (our code, engine untouched): reject scripts whose
+     * nesting or regex shape could overflow the device task stack inside the
+     * vendored muJS compiler. Skipped like any other failed script. */
+    if (!pluto_script_compile_safe(src, len))
+    {
+        b->errs++;
+        if (!b->lastError[0])
+        {
+            snprintf(b->lastError, sizeof(b->lastError),
+                     "script %d too deeply nested", index);
+        }
+        logger_log("[js] script %d skipped (nesting guard)", index);
+        return;
+    }
     char *buf = (char *)JMalloc(len + 1);
     if (!buf)
     {
@@ -900,6 +1045,10 @@ static void run_one_script(JsBridge *b, const char *src, size_t len, int index)
     if (js_ploadstring(J, "[page]", buf) != 0)
     {
         b->errs++;
+        /* Compile failure (syntax or the per-script allocation budget):
+         * record which slot failed — muJS's error object needs an extra
+         * unwrap, so the log line carries the position, not the message. */
+        logger_log("[js] script %d failed to compile", index);
         js_pop(J, 1); /* error object */
     }
     else
@@ -1032,13 +1181,103 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
 
     const char *starts[JSBRIDGE_MAX_SCRIPTS];
     size_t lens[JSBRIDGE_MAX_SCRIPTS];
-    int n = extract_scripts(doc->rawHtml ? doc->rawHtml : "", starts, lens,
-                            JSBRIDGE_MAX_SCRIPTS);
-    int total = (n > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS : n;
-    for (int i = 0; i < total; i++)
+    int n = 0;
+    int total = 0;
+    if (!(policy == DOC_SCRIPT_FULL && doc->extScripts))
     {
-        run_one_script(b, starts[i], lens[i], i + 1);
-        js_gc(J, 0);
+        /* OFF/RUN/RUN_KEEP: extract inline bodies up front. FULL defers this
+         * (it scans slots instead) and only extracts in its OOM fallback. */
+        n = extract_scripts(doc->rawHtml ? doc->rawHtml : "", starts, lens,
+                            JSBRIDGE_MAX_SCRIPTS);
+        total = (n > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS : n;
+    }
+    if (policy == DOC_SCRIPT_FULL && doc->extScripts)
+    {
+        /* FULL: execute inline bodies and fetched externals in DOCUMENT
+         * ORDER (browser-faithful interleaving). The slot scan parses the
+         * same rawHtml with the same first-seen external ordering the
+         * prefetcher used, so slot.extIndex maps positionally onto
+         * doc->extScripts. Files that never arrived (failed download,
+         * refused, over budget) are skipped with a log line — the page and
+         * later scripts still run (image-failure philosophy). BOTH scratch
+         * arrays are heap-allocated: the 12KB URL table AND the slot table
+         * must not join the render-task stack (P19 stack rule) — a stack
+         * copy here charged +784B on EVERY page load's parse chain and
+         * contributed to a device gameTask stack overflow. */
+        JsScriptSlot *slots = (JsScriptSlot *)JMalloc(
+            sizeof(JsScriptSlot) * (size_t)JSBRIDGE_MAX_SCRIPTS);
+        char (*extRaw)[JSBRIDGE_EXT_URL_MAX] =
+            (char (*)[JSBRIDGE_EXT_URL_MAX])JMalloc(
+                sizeof(char[JSBRIDGE_MAX_EXT_SCRIPTS][JSBRIDGE_EXT_URL_MAX]));
+        if (slots && extRaw)
+        {
+            int extCount = 0;
+            int nslots = jsbridge_scan_scripts(doc->rawHtml, slots,
+                                               JSBRIDGE_MAX_SCRIPTS, extRaw,
+                                               JSBRIDGE_MAX_EXT_SCRIPTS,
+                                               &extCount);
+            int totalS = (nslots > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS
+                                                         : nslots;
+            for (int i = 0; i < totalS; i++)
+            {
+                if (!slots[i].isExt)
+                {
+                    run_one_script(b, slots[i].inlineStart,
+                                   slots[i].inlineLen, i + 1);
+                }
+                else if (slots[i].extIndex >= 0 &&
+                         slots[i].extIndex < doc->extScriptCount)
+                {
+                    JsExtScript *e =
+                        &((JsExtScript *)doc->extScripts)[slots[i].extIndex];
+                    if (e->body && e->len)
+                    {
+                        /* run_one_script copies the source before running,
+                         * so the doc-owned body is never aliased. */
+                        run_one_script(b, e->body, e->len, i + 1);
+                    }
+                    else
+                    {
+                        logger_log("[js] ext skip (not fetched): %s",
+                                   e->url[0] ? e->url : "(unresolved)");
+                    }
+                }
+                else
+                {
+                    logger_log("[js] ext skip (unmapped slot) #%d", i);
+                }
+                js_gc(J, 0);
+            }
+        }
+        else
+        {
+            /* Scan-scratch OOM: degrade to inline-only (still logged). */
+            logger_log("[js] FULL scan OOM: inline-only fallback");
+            n = extract_scripts(doc->rawHtml ? doc->rawHtml : "", starts, lens,
+                                JSBRIDGE_MAX_SCRIPTS);
+            total = (n > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS : n;
+            for (int i = 0; i < total; i++)
+            {
+                run_one_script(b, starts[i], lens[i], i + 1);
+                js_gc(J, 0);
+            }
+        }
+        if (slots)
+        {
+            JFree(slots); /* realloc(p,0) — safe on NULL */
+        }
+        if (extRaw)
+        {
+            JFree(extRaw);
+        }
+    }
+    else
+    {
+        for (int i = 0; i < total; i++)
+        {
+            run_one_script(b, starts[i], lens[i], i + 1);
+            js_gc(J, 0);
+        }
     }
 
     doc->jsRan = b->ran;

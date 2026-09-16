@@ -1,0 +1,77 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[01:14:08 #1] === PlutoBrowser boot ===
+[01:14:08 #2] eventHandler: kEventInit, osversion=30101
+[01:14:08 #3] STORAGE: init enter
+[01:14:08 #4] STORAGE: load enter
+[01:14:08 #5] STORAGE: file opened, parsing
+[01:14:09 #6] STORAGE: init exit
+[01:14:09 #7] KB new: entering
+[01:14:09 #8] KB new: allocated
+[01:14:09 #9] KB load: font...
+[01:14:09 #10] KB load: font ok h=36
+[01:14:09 #11] KB load: menu-space ok
+[01:14:09 #12] KB load: menu-ok ok
+[01:14:09 #13] KB load: menu-del ok
+[01:14:09 #14] KB load: menu-cancel ok
+[01:14:09 #15] KB new: font+images loaded
+[01:14:09 #16] DISPLAY: refresh rate set to 50 fps
+[01:14:09 #17] updateFrame: first frame executed
+[01:14:12 #18] main: B-release opened address bar (keyboard)
+[01:14:15 #19] updateFrame: heartbeat frame=300 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:21 #20] updateFrame: heartbeat frame=600 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:27 #21] updateFrame: heartbeat frame=900 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:33 #22] updateFrame: heartbeat frame=1200 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:39 #23] updateFrame: heartbeat frame=1500 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:45 #24] updateFrame: heartbeat frame=1800 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:51 #25] updateFrame: heartbeat frame=2100 fps=50 overlay=1 stackPeak=808B/61800B
+[01:14:57 #26] updateFrame: heartbeat frame=2400 fps=50 overlay=1 stackPeak=808B/61800B
+[01:15:03 #27] updateFrame: heartbeat frame=2700 fps=50 overlay=1 stackPeak=808B/61800B
+[01:15:06 #28] AddressBar submit: https://html.duckduckgo.com/html/?q=Bryan+Wandrych
+[01:15:06 #29] navigate_to: https://html.duckduckgo.com/html/?q=Bryan+Wandrych
+[01:15:06 #30] state -> 1 (frame 2861)
+[01:15:09 #31] updateFrame: heartbeat frame=3000 fps=50 overlay=1 stackPeak=808B/61800B
+[01:15:13 #32] [js] live page: listeners=0 ran=0 errs=0
+[01:15:13 #33] STORAGE: save open
+[01:15:13 #34] STORAGE: save writing (bm=10 hist=5)
+[01:15:13 #35] STORAGE: save close
+[01:15:13 #36] STORAGE: save exit
+[01:15:13 #37] state -> 2 (frame 3174)
+[01:15:15 #38] updateFrame: heartbeat frame=3300 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:19 #39] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.linkedin.com.ico sync 64x64 (24838 bytes)
+[01:15:21 #40] updateFrame: heartbeat frame=3600 fps=49 overlay=1 stackPeak=2232B/61800B
+[01:15:24 #41] navigate_to: https://duckduckgo.com/l/?uddg=https%3A%2F%2Fbryanwandrych.com%2Fabout&rut=7588b5c5a40cbe2143eb28b49833e951d1716423f6c43493f06b3a83607453a9
+[01:15:24 #42] state -> 1 (frame 3741)
+[01:15:27 #43] updateFrame: heartbeat frame=3900 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:32 #44] [net] http error: Connection failed: -21
+[01:15:32 #45] state -> 3 (frame 4178)
+[01:15:33 #46] updateFrame: heartbeat frame=4200 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:37 #47] navigate_to: https://html.duckduckgo.com/html/?q=Bryan+Wandrych
+[01:15:37 #48] state -> 1 (frame 4413)
+[01:15:39 #49] updateFrame: heartbeat frame=4500 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:40 #50] [js] close: ran=0 errs=0 listeners=0 budgetLeft=512
+[01:15:40 #51] [js] live page: listeners=0 ran=0 errs=0
+[01:15:40 #52] STORAGE: save open
+[01:15:40 #53] STORAGE: save writing (bm=10 hist=5)
+[01:15:40 #54] STORAGE: save close
+[01:15:41 #55] STORAGE: save exit
+[01:15:41 #56] state -> 2 (frame 4562)
+[01:15:45 #57] updateFrame: heartbeat frame=4800 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:47 #58] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.linkedin.com.ico sync 64x64 (24838 bytes)
+[01:15:47 #59] navigate_to: https://duckduckgo.com/l/?uddg=https%3A%2F%2Fbryanwandrych.com%2Fabout&rut=7588b5c5a40cbe2143eb28b49833e951d1716423f6c43493f06b3a83607453a9
+[01:15:47 #60] state -> 1 (frame 4905)
+[01:15:51 #61] updateFrame: heartbeat frame=5100 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:15:57 #62] updateFrame: heartbeat frame=5400 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:01 #63] [net] http error: Connection failed: -21
+[01:16:01 #64] state -> 3 (frame 5568)
+[01:16:04 #65] updateFrame: heartbeat frame=5700 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:10 #66] updateFrame: heartbeat frame=6000 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:16 #67] updateFrame: heartbeat frame=6300 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:21 #68] navigate_to: about:home
+[01:16:21 #69] state -> 0 (frame 6574)
+[01:16:22 #70] updateFrame: heartbeat frame=6600 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:23 #71] navigate_to: https://google.com
+[01:16:23 #72] state -> 1 (frame 6669)
+[01:16:28 #73] updateFrame: heartbeat frame=6900 fps=50 overlay=1 stackPeak=2232B/61800B
+[01:16:33 #74] [js] script 2 failed to compile
+[01:16:33 #75] [js] script 8 failed to compile

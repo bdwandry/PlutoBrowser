@@ -338,6 +338,78 @@ static const char JSTEST_HTML[] =
     "</script>\n"
     "</body></html>";
 
+/* ── about:jsext — Full-mode external <script src> test suite ─────────────
+ * Deterministic tests 6–11 (ordering + shared engine, fail-skip, dedupe,
+ * per-script cap, page budget, document.write wiring). The "external"
+ * files are served locally by html/jsext's built-in table (matched by
+ * file-name tail), so the suite runs identically on simulator and device
+ * with zero network dependence. In Off/Inline modes this page renders
+ * fine with no report rows (nothing external runs) — mode-regression
+ * comes from the settings autotest seam instead. */
+static const char JSEXTTEST_HTML[] =
+    "<!DOCTYPE html><html><head><title>Full JS Test Suite</title></head><body>\n"
+    "<h1>External Script (Full) Suite</h1>\n"
+    "<p id=\"banner\">running…</p>\n"
+    "<div id=\"out\"></div>\n"
+    /* 6: defines window.__extOrder — consumed by the final inline report. */
+    "<script src=\"jsext-order.js\"></script>\n"
+    /* 8: NOT in the local table → download miss → skipped, later scripts run. */
+    "<script src=\"jsext-missing.js\"></script>\n"
+    /* 9 (first of two): bumps window.__extCount; logged/fetched once. */
+    "<script src=\"jsext-dup.js\"></script>\n"
+    "<script>window.__inlineA = (window.__extCount === 1) ? 'A_OK' : 'A_BAD';</script>\n"
+    /* 9 (second occurrence): executes again — window.__extCount reads 2. */
+    "<script src=\"jsext-dup.js\"></script>\n"
+    /* 10: 70KB > 64KB per-script cap → refused BEFORE execution. */
+    "<script src=\"jsext-huge.js\"></script>\n"
+    /* 11a–11h: ~16KB each, cap-legal and engine-runnable; together with the
+     * tiny scripts they consume ~114KB of the 160KB page budget. */
+    "<script src=\"jsext-big.js\"></script>\n"
+    "<script src=\"jsext-big2.js\"></script>\n"
+    "<script src=\"jsext-big3.js\"></script>\n"
+    "<script src=\"jsext-big4.js\"></script>\n"
+    "<script src=\"jsext-big5.js\"></script>\n"
+    "<script src=\"jsext-big6.js\"></script>\n"
+    "<script src=\"jsext-big7.js\"></script>\n"
+    "<script src=\"jsext-big8.js\"></script>\n"
+    /* 11i: 56KB > the remaining ~46KB budget → refused. */
+    "<script src=\"jsext-big9.js\"></script>\n"
+    /* 7: document.write from an EXTERNAL script, wired like an inline one. */
+    "<script src=\"jsext-write.js\"></script>\n"
+    "<script>\n"
+    "var out = document.getElementById('out');\n"
+    "var pass = 0, fail = 0;\n"
+    "function T(name, fn) {\n"
+    "  var r;\n"
+    "  try { r = fn(); } catch (e) { r = 'threw: ' + e; }\n"
+    "  if (r === true) { pass = pass + 1; } else { fail = fail + 1; }\n"
+    "  var p = document.createElement('p');\n"
+    "  p.textContent = '[' + (r === true ? 'PASS' : 'FAIL') + '] ' + name +\n"
+    "    (r === true ? '' : ' :: ' + r);\n"
+    "  out.appendChild(p);\n"
+    "}\n"
+    "try {\n"
+    "  T('external defined global (order+engine)', function(){\n"
+    "    return window.__extOrder === 'EXT_OK'; });\n"
+    "  T('inline-after-external saw ext state', function(){\n"
+    "    return window.__inlineA === 'A_OK'; });\n"
+    "  T('dup: downloaded once, executed twice', function(){\n"
+    "    return window.__extCount === 2; });\n"
+    "  T('over-cap file refused (no execution)', function(){\n"
+    "    return typeof window.__huge === 'undefined'; });\n"
+    "  T('over-budget file refused (no execution)', function(){\n"
+    "    return typeof window.__big3 === 'undefined'; });\n"
+    "  T('big files did not break the engine', function(){\n"
+    "    return typeof window.__extOrder === 'string'; });\n"
+    "  var b = document.getElementById('banner');\n"
+    "  b.textContent = pass + ' passed, ' + fail + ' failed.';\n"
+    "  console.log('[jsext-test] summary: ' + pass + ' passed, ' + fail + ' failed');\n"
+    "} catch (e) {\n"
+    "  document.getElementById('banner').textContent = 'Suite error: ' + e;\n"
+    "}\n"
+    "</script>\n"
+    "</body></html>";
+
 static const InternalPage INTERNAL_PAGES[] = {
     { "about:home", "PlutoBrowser",
       "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
@@ -345,6 +417,7 @@ static const InternalPage INTERNAL_PAGES[] = {
       "<html><body></body></html>" },
     { "about:acidtest", "HTML Acid Test", ACIDTEST_HTML },
     { "about:javascript", "JavaScript Test Suite", JSTEST_HTML },
+    { "about:jsext", "Full JS Test Suite", JSEXTTEST_HTML },
 };
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
