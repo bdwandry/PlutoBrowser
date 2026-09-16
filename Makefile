@@ -105,6 +105,40 @@ UINCDIR = Source Source/core Source/util Source/html Source/render Source/render
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
 
+# ── muJS resource limits (device stack safety) ────────────────────────────────
+# The vendored muJS 1.3.10 ships with limits sized for servers, not for a
+# 61.8KB game-task stack. Every one of these is guarded by #ifndef in
+# Source/js, so they can be tightened WITHOUT touching the vendored engine
+# (user rule: Source/js is immutable). The simulator never reproduces the
+# overflow (8MB host stack), so these are applied to BOTH sim + device via
+# UDEFS — shared build flags are the only way the sim validates the same
+# code the device runs.
+#
+# Device evidence (errorlog 2026-09-16 16:09–16:13, build b2db9147):
+# 4x "stack overflow in task gameTask" while loading google.com with
+# jsEnabled=2 (Full). Worst chains (measured, arm-none-eabi-gcc -O2 .su):
+#   - js_regcompx embeds Reclass cclass[128] (REG_MAXCLASS) ON ITS STACK:
+#     33,536B frame for ANY script containing a regex literal; 16 regex
+#     literals on google.com = 536KB total demand.
+#   - jsparse AST recursion: JS_ASTLIMIT 400 levels x ~1.4KB worst chain
+#     (expression ~600B + statement 596B) ≈ 560KB.
+#   - regex parse recursion: REG_MAXREC 4096 deep x ~112B parseatom chain.
+#   - JS runtime call recursion is bounded ONLY by heap growth (envstack
+#     spills to heap) — an unbounded OOM spiral instead of a clean error.
+# With the compile-safety gate in jsbridge.c this is layered defense:
+# gate first (our code), engine limits second (vendored #ifndef knobs).
+UDEFS += -DJS_ASTLIMIT=48 \
+         -DJS_ENVLIMIT=64 \
+         -DJS_TRYLIMIT=8 \
+         -DREG_MAXREC=48 \
+         -DREG_MAXCLASS=16
+
+# muJS value-stack: 4096 entries x 16B = 64KB > the whole device stack.
+# The engine allocates it from the heap at js_newstate, so only the SIZE
+# needs bounding (deep JS recursion spills envstack here; the recursion
+# itself is stopped by JS_ENVLIMIT above).
+UDEFS += -DJS_STACKSIZE=2048
+
 # List the user directory to look for the libraries here
 ULIBDIR =
 
