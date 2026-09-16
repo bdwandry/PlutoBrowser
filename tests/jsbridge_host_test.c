@@ -297,6 +297,18 @@ int main(void)
         CHECK(find_inline_text(d, "Handler ran 1 time(s)") &&
                   find_inline_text(d, "created-by-JS"),
               "suite: mutations survive the rewalk");
+        /* Browser-path invariants the 60%-stall fix relies on: the rewalk
+         * frees/rebuilds walk output but must keep title/baseUrl and stay
+         * clean when called AGAIN (the browser task could re-enter; a stale
+         * pointer or double-free here is the hang/corruption class). */
+        CHECK(strcmp(d->title, "JavaScript Test Suite") == 0,
+              "suite: title survives the rewalk");
+        CHECK(strcmp(d->baseUrl, "about:javascript") == 0,
+              "suite: baseUrl survives the rewalk");
+        CHECK(document_rewalk(d) == 0,
+              "suite: second consecutive rewalk ok (idempotent)");
+        CHECK(find_inline_text(d, "Handler ran 1 time(s)"),
+              "suite: handler text still present after 2nd rewalk");
         js_doc_close(d->_jsbridge);
         d->_jsbridge = NULL;
         document_free(d);

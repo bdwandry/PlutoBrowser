@@ -502,13 +502,95 @@ static int page_handle_js_click(int linkIndex)
  * (see tasks.c), so the real message travels through this side channel. */
 static char g_renderErrMsg[192];
 
+#if defined(PLUTO_JS_CLICK_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic repro for the
+ * about:javascript "Event Details → Click me" hang. After the suite page
+ * renders, dispatch the click on the page's #clickme anchor through the
+ * same page_handle_js_click path the A-button uses, then verify the
+ * triggered re-render actually completes (state returns to PAGE, not stuck
+ * at 60%). PASS/FAIL lands in pluto.log via [jsclick-autotest] lines. */
+static int g_jsClickTestPhase = 0; /* 0=waiting for page, 1=clicked, 2=done */
+static unsigned g_jsClickTestFrames = 0;
+#ifdef PLUTO_JS_CLICK_AUTOTEST_OFF
+/* Optional: force the JS setting Off for a negative (no-engine) control run. */
+#define PLUTO_JS_CLICK_AUTOTEST_FORCE_OFF 1
+#endif
+static void js_click_autotest_tick(void)
+{
+    if (g_jsClickTestPhase == 2 || isRendering)
+    {
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc)
+    {
+        return;
+    }
+    int onSuite = strncmp(currentDoc->baseUrl, "about:javascript", 16) == 0;
+    if (g_jsClickTestPhase == 0)
+    {
+        if (!onSuite)
+        {
+            return;
+        }
+        if (++g_jsClickTestFrames < 30)
+        {
+            return; /* let the page settle ~0.5s */
+        }
+        int idx = 0;
+        for (int i = 0; i < currentDoc->linkCount; i++)
+        {
+            const char *h = currentDoc->links[i]->href;
+            if (h && strcmp(h, "https://example.com/blocked") == 0)
+            {
+                idx = i + 1;
+                break;
+            }
+        }
+        if (idx <= 0)
+        {
+            logger_log("[jsclick-autotest] FAIL: #clickme link not found");
+            g_jsClickTestPhase = 2;
+            return;
+        }
+        logger_log("[jsclick-autotest] clicking Event demo link %d", idx);
+        int rc = page_handle_js_click(idx);
+        logger_log("[jsclick-autotest] dispatch rc=%d (1=handler ran)", rc);
+        g_jsClickTestPhase = (rc == 1) ? 1 : 2;
+        if (g_jsClickTestPhase == 2)
+        {
+#ifdef PLUTO_JS_CLICK_AUTOTEST_FORCE_OFF
+            logger_log("[jsclick-autotest] OK: no handler ran (JS Off "
+                       "control behaved as expected)");
+#else
+            logger_log("[jsclick-autotest] FAIL: click handler did not run");
+#endif
+        }
+        return;
+    }
+    /* Phase 1: the click-triggered re-render landed back on the page. */
+    ++g_jsClickTestFrames;
+    if (!onSuite)
+    {
+        logger_log("[jsclick-autotest] FAIL: navigated away (unexpected "
+                   "default action)");
+        g_jsClickTestPhase = 2;
+        return;
+    }
+    logger_log("[jsclick-autotest] PASS: re-render completed, %u frames "
+               "since page load",
+               g_jsClickTestFrames);
+    g_jsClickTestPhase = 2;
+}
+#endif
+
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
 
     /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
-    if (rt->rewalkDoc)
+    if (rt->rewalkDoc && !rt->parsed)
     {
+        logger_log("render: rewalk start (live DOM mutation re-render)");
         int wrc = document_rewalk(rt->rewalkDoc);
         if (wrc != 0)
         {
@@ -516,6 +598,15 @@ static int render_step(TaskCtx *ctx)
                      "Render Error: rewalk out of memory");
             return -1;
         }
+        logger_log("render: rewalk done blocks=%d links=%d",
+                   rt->rewalkDoc->blockCount, rt->rewalkDoc->linkCount);
+        /* Mark parsed so this branch runs exactly ONCE: the next task
+         * re-entry must fall through to the layout step below. Without this
+         * gate the task rewalked + yielded FOREVER — the loading screen
+         * stuck at 60% (about:javascript "Click me" bug). rewalkDoc stays
+         * set: page_swap_doc routes on it to keep the doc + live engine
+         * alive, and the layout step below reads it. */
+        rt->parsed = 1;
         tasks_report_progress(0.6f);
         return 1; /* more work: layout next tick */
     }
@@ -655,8 +746,10 @@ static int render_step(TaskCtx *ctx)
         return 1; /* more work: layout next tick */
     }
 
-    /* Layout step. */
-    layout_build(rt->doc);
+    /* Layout step. The JS-mutation re-walk path keeps its (already-parsed)
+     * doc in rewalkDoc — page_swap_doc still routes on rewalkDoc to keep the
+     * doc + live engine alive, so the layout must build from THAT doc. */
+    layout_build(rt->rewalkDoc ? rt->rewalkDoc : rt->doc);
     if (layout_build_failed())
     {
         snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
@@ -1514,6 +1607,10 @@ static int updateFrame(void *userdata)
         pendingNavUrl[0] = '\0';
         navigate_to(dest);
     }
+
+#if defined(PLUTO_JS_CLICK_AUTOTEST)
+    js_click_autotest_tick();
+#endif
 
     /* ── crank velocity physics (Lua parity) ── */
     {
@@ -2489,6 +2586,26 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
     #ifdef PLUTO_JS_AUTOTEST_OFF
         storage_set_setting_int("jsEnabled", 0);
     #endif
+#endif /* TARGET_SIMULATOR guard above */
+
+#if defined(PLUTO_JS_CLICK_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): navigate straight to
+         * the JS test suite so the Event-demo click repro is deterministic.
+         * PLUTO_JS_CLICK_AUTOTEST_OFF additionally forces the JS setting
+         * Off (negative control: no engine, no listener). */
+    #ifdef PLUTO_JS_CLICK_AUTOTEST_FORCE_OFF
+        storage_set_setting_int("jsEnabled", 0);
+    #else
+        if (storage_setting_int("jsEnabled") == 0)
+        {
+            /* The click path needs an engine; only bump a saved Off. */
+            storage_set_setting_int("jsEnabled", 1);
+            logger_log("[jsclick-autotest] jsEnabled was Off, bumped to "
+                       "Inline for this run");
+        }
+    #endif
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");
 #endif /* TARGET_SIMULATOR guard above */
 
 #if defined(PLUTO_JSEXT_AUTOTEST)

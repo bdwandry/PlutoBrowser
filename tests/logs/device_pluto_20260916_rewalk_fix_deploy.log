@@ -1,0 +1,43 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[17:08:48 #1] === PlutoBrowser boot ===
+[17:08:48 #2] eventHandler: kEventInit, osversion=30101
+[17:08:48 #3] STORAGE: init enter
+[17:08:48 #4] STORAGE: load enter
+[17:08:48 #5] STORAGE: file opened, parsing
+[17:08:48 #6] STORAGE: init exit
+[17:08:48 #7] KB new: entering
+[17:08:48 #8] KB new: allocated
+[17:08:48 #9] KB load: font...
+[17:08:48 #10] KB load: font ok h=36
+[17:08:48 #11] KB load: menu-space ok
+[17:08:48 #12] KB load: menu-ok ok
+[17:08:48 #13] KB load: menu-del ok
+[17:08:48 #14] KB load: menu-cancel ok
+[17:08:48 #15] KB new: font+images loaded
+[17:08:48 #16] DISPLAY: refresh rate set to 50 fps
+[17:08:48 #17] updateFrame: first frame executed
+[17:08:54 #18] updateFrame: heartbeat frame=300 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:00 #19] updateFrame: heartbeat frame=600 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:06 #20] updateFrame: heartbeat frame=900 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:12 #21] updateFrame: heartbeat frame=1200 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:18 #22] updateFrame: heartbeat frame=1500 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:24 #23] updateFrame: heartbeat frame=1800 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:30 #24] updateFrame: heartbeat frame=2100 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:36 #25] updateFrame: heartbeat frame=2400 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:42 #26] updateFrame: heartbeat frame=2700 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:48 #27] updateFrame: heartbeat frame=3000 fps=50 overlay=1 stackPeak=632B/61800B
+[17:09:54 #28] updateFrame: heartbeat frame=3300 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:00 #29] updateFrame: heartbeat frame=3600 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:06 #30] updateFrame: heartbeat frame=3900 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:12 #31] updateFrame: heartbeat frame=4200 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:18 #32] updateFrame: heartbeat frame=4500 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:24 #33] updateFrame: heartbeat frame=4800 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:30 #34] updateFrame: heartbeat frame=5100 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:36 #35] updateFrame: heartbeat frame=5400 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:42 #36] updateFrame: heartbeat frame=5700 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:48 #37] updateFrame: heartbeat frame=6000 fps=50 overlay=1 stackPeak=632B/61800B
+[17:10:54 #38] updateFrame: heartbeat frame=6300 fps=50 overlay=1 stackPeak=632B/61800B
+[17:11:00 #39] updateFrame: heartbeat frame=6600 fps=50 overlay=1 stackPeak=632B/61800B
+[17:11:06 #40] updateFrame: heartbeat frame=6900 fps=50 overlay=1 stackPeak=632B/61800B
+[17:11:11 #41] eventHandler: kEventTerminate, frames=7163

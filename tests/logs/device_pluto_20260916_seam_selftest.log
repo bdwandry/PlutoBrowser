@@ -1,0 +1,41 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[17:19:42 #1] === PlutoBrowser boot ===
+[17:19:42 #2] eventHandler: kEventInit, osversion=30101
+[17:19:42 #3] STORAGE: init enter
+[17:19:42 #4] STORAGE: load enter
+[17:19:42 #5] STORAGE: file opened, parsing
+[17:19:42 #6] STORAGE: init exit
+[17:19:42 #7] KB new: entering
+[17:19:42 #8] KB new: allocated
+[17:19:42 #9] KB load: font...
+[17:19:42 #10] KB load: font ok h=36
+[17:19:42 #11] KB load: menu-space ok
+[17:19:42 #12] KB load: menu-ok ok
+[17:19:42 #13] KB load: menu-del ok
+[17:19:42 #14] KB load: menu-cancel ok
+[17:19:42 #15] KB new: font+images loaded
+[17:19:42 #16] DISPLAY: refresh rate set to 50 fps
+[17:19:42 #17] navigate_to: about:javascript
+[17:19:42 #18] state -> 1 (frame 1)
+[17:19:42 #19] updateFrame: first frame executed
+[17:19:42 #20] [js] page: ran=1 errs=0
+[17:19:42 #21] [js] live page: listeners=1 ran=1 errs=0
+[17:19:42 #22] state -> 2 (frame 5)
+[17:19:43 #23] [jsclick-autotest] clicking Event demo link 1
+[17:19:43 #24] [jsclick-autotest] dispatch rc=1 (1=handler ran)
+[17:19:43 #25] state -> 1 (frame 34)
+[17:19:43 #26] render: rewalk start (live DOM mutation re-render)
+[17:19:43 #27] render: rewalk done blocks=57 links=1
+[17:19:43 #28] [jsclick-autotest] PASS: re-render completed, 31 frames since page load
+[17:19:43 #29] state -> 2 (frame 36)
+[17:19:48 #30] updateFrame: heartbeat frame=300 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:19:54 #31] updateFrame: heartbeat frame=600 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:00 #32] updateFrame: heartbeat frame=900 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:06 #33] updateFrame: heartbeat frame=1200 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:12 #34] updateFrame: heartbeat frame=1500 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:18 #35] updateFrame: heartbeat frame=1800 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:24 #36] updateFrame: heartbeat frame=2100 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:30 #37] updateFrame: heartbeat frame=2400 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:36 #38] updateFrame: heartbeat frame=2700 fps=50 overlay=1 stackPeak=2560B/61800B
+[17:20:42 #39] eventHandler: kEventTerminate, frames=2975
