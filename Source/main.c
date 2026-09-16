@@ -283,6 +283,9 @@ static void update_system_menu(void);
 static void settings_on_change(void);
 static void view_menu_callback(void *ud);
 static void meta_refresh_cb(void *ud);
+#if defined(PLUTO_NAV_AUTOTEST)
+static void nav_autotest_tick(void);
+#endif
 
 static void go_home(void)
 {
@@ -672,6 +675,89 @@ static void js_click_autotest_tick(void)
                "since page load",
                g_jsClickTestFrames);
     g_jsClickTestPhase = 2;
+}
+#endif
+
+#if defined(PLUTO_NAV_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic repro for the
+ * google.com navigation crash. Boots to the home page, presses A on the
+ * Google speed-dial card through the REAL home-page input path, then
+ * watches the navigation complete: state 2 (page rendered) with a live doc
+ * is PASS; an error page for google.com FAILs. Verifies the OS is still
+ * alive 10s later (the device errorlog overflow killed the task ~3s after
+ * the nav). PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
+static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
+static unsigned g_navTestFrames = 0;
+static void nav_autotest_tick(void)
+{
+    if (g_navTestPhase == 3 || isRendering)
+    {
+        return;
+    }
+    ++g_navTestFrames;
+    if (g_navTestFrames < 60)
+    {
+        return; /* let boot + first home render settle ~1s */
+    }
+    if (g_navTestPhase == 0)
+    {
+        if (currentState != STATE_HOME)
+        {
+            return;
+        }
+        /* The Google speed-dial card is bookmark #2 (index 2): Storage
+         * order is Bitmap Gallery(1), Google(2), ... Steer with crank. */
+        int target = 2;
+        if (home_page_selected_index() != target)
+        {
+            home_page_handle_crank(HOME_CRANK_STEP_PX);
+            return;
+        }
+        logger_log("[nav-autotest] on Google card, pressing A");
+        char *u = home_page_handle_input(1u << 5, NULL);
+        if (u)
+        {
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", u);
+            pluto_free(u);
+            g_navTestPhase = 1;
+        }
+        else
+        {
+            logger_log("[nav-autotest] FAIL: A on Google card returned no URL");
+            g_navTestPhase = 3;
+        }
+        return;
+    }
+    if (g_navTestPhase == 1)
+    {
+        if (currentState == STATE_PAGE && currentDoc)
+        {
+            logger_log("[nav-autotest] PASS: google.com rendered (title=%.40s, "
+                       "%u frames)", pageTitle, g_navTestFrames);
+            g_navTestPhase = 2;
+            g_navTestFrames = 0;
+        }
+        else if (currentState == STATE_ERROR)
+        {
+            logger_log("[nav-autotest] FAIL: error page for google.com");
+            g_navTestPhase = 3;
+        }
+        else if (g_navTestFrames > 60 * 30)
+        {
+            logger_log("[nav-autotest] FAIL: navigation never completed "
+                       "(state=%d)", (int)currentState);
+            g_navTestPhase = 3;
+        }
+        return;
+    }
+    /* Phase 2: hold 10s of live frames — proves the game task survived the
+     * JS-heavy page (the device overflow killed the task seconds after nav). */
+    if (g_navTestFrames > 60 * 10)
+    {
+        logger_log("[nav-autotest] PASS: task alive 10s after render");
+        g_navTestPhase = 3;
+    }
 }
 #endif
 
@@ -1704,6 +1790,10 @@ static int updateFrame(void *userdata)
     js_click_autotest_tick();
 #endif
 
+#if defined(PLUTO_NAV_AUTOTEST)
+    nav_autotest_tick();
+#endif
+
 #if defined(PLUTO_HOME_TEST_AUTOTEST)
     home_test_autotest_tick();
 #endif
@@ -2728,6 +2818,12 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 #else
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:jsext");
 #endif
+#endif
+
+#if defined(PLUTO_NAV_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): leave the app on the
+         * home page — nav_autotest_tick() steers the Google speed-dial card
+         * and presses A through the real input path (see updateFrame). */
 #endif
 
         /* Keyboard instance. The port's contract:

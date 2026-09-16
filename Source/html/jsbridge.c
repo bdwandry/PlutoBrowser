@@ -881,6 +881,17 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
 #define PLUTO_SCAN_MAX_DEPTH 40   /* parser nesting levels (muJS ASTLIMIT 400) */
 #define PLUTO_SCAN_MAX_REGEX_LEN 8192
 #define PLUTO_SCAN_MAX_REGEX_ESC 64  /* consecutive escapes = recursion depth */
+#define PLUTO_SCAN_MAX_OPENS 2000    /* total {[( opens per script: bounds the
+                                      * total parser WORK (nodes emitted), not
+                                      * just depth — a 40KB flat script with
+                                      * thousands of blocks is parser load
+                                      * even when nesting stays shallow */
+#define PLUTO_SCAN_MAX_REGEXES 12    /* regex literals per script: each regex
+                                      * compiles through js_regcompx (the
+                                      * engine's regexp compiler); bound the
+                                      * count so one script cannot queue a
+                                      * long chain of compiles (google.com:
+                                      * 16 regexes across 10 scripts) */
 static int pluto_script_compile_safe(const char *src, size_t len)
 {
     static const char *const kw[] = {
@@ -889,6 +900,8 @@ static int pluto_script_compile_safe(const char *src, size_t len)
     };
     int depth = 0, maxDepth = 0;
     int rxLen = 0, rxEsc = 0;
+    int opens = 0;      /* total {[( seen — bounds total parser work */
+    int regexCount = 0; /* regex literals seen — bounds js_regcompx calls */
     char q = 0; /* active quote: 0, '"', '\'', '/' */
     int inLine = 0, inBlock = 0;
     const char *p = src, *end = src + len;
@@ -978,13 +991,23 @@ static int pluto_script_compile_safe(const char *src, size_t len)
                 }
             }
             q = '/'; /* regex literal */
+            regexCount++;
+            if (regexCount > PLUTO_SCAN_MAX_REGEXES)
+            {
+                return 0;
+            }
             rxLen = 0;
             rxEsc = 0;
         }
         else if (c == '{' || c == '(' || c == '[')
         {
             depth++;
+            opens++;
             if (depth > maxDepth) maxDepth = depth;
+            if (opens > PLUTO_SCAN_MAX_OPENS)
+            {
+                return 0;
+            }
         }
         else if (c == '}' || c == ')' || c == ']')
         {
