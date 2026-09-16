@@ -97,7 +97,7 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 - **Dual Browsing Modes**:
   - **Reader Mode**: Distills articles for clean, distraction-free reading.
   - **HTML Mode**: Full visual layout with virtual mouse cursor, interactive forms, and clickable elements.
-- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`, and inline `<script>` (executed in HTML mode when JavaScript is enabled; skipped entirely when disabled).
+- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`, and `<script>` blocks (Inline mode runs embedded scripts; Full mode additionally downloads and runs `src=` files in page order; Off skips scripts entirely).
 - **Form Support**: Text inputs, checkboxes, radio buttons, dropdowns, submit buttons, hidden fields, and `<button>` elements. Forms are submitted per the HTML spec (hidden inputs included, submit button name/value always appended).
 - **Inline Styles**: Bold, italic, underline, strikethrough, code, small, sub/superscript, text alignment.
 - **`<base href>` Support**: Resolves relative URLs correctly when a base element is present.
@@ -134,7 +134,7 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 
 ### User Interface
 - **Display FPS**: Settings option with **30** (default) or **50** fps (the Playdate's hardware maximum). 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
-- **Enable Javascript**: Settings toggle (On by default, persisted). When Off, no page scripts are parsed or executed and no JS engine is created; when On, inline `<script>` blocks run in muJS during page load (HTML mode) and live element click listeners can intercept links.
+- **JavaScript Execution**: Settings option with three modes (default **Inline**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run in muJS during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order, with a 64KB per-file cap, a 160KB per-page budget, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
 - **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, battery level, reader/HTML mode toggle.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).

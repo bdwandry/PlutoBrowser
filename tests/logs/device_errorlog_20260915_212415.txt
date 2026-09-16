@@ -1,0 +1,9 @@
+2026/09/15 21:16:33
+/Games/PlutoBrowser.pdx
+stack overflow in task gameTask
+
+2026/09/15 21:16:41
+/Games/PlutoBrowser.pdx
+Run loop stalled for more than 10 seconds pc=0x2402405E lr=0x24007805
+
+

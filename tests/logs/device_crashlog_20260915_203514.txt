@@ -1,0 +1,9 @@
+--- crash at 2026/09/16 00:24:51---
+build:057d750f-3.1.1-release.210171-gitlab-runner
+   r0:26686379    r1:00000001     r2:00000000    r3: 24056c35
+  r12:ffffffff    lr:24056c3d     pc:24056c3c   psr: 61010000
+ cfsr:00000082  hfsr:00000000  mmfar:2668637d  bfar: 2668637d
+rcccsr:00000000
+heap allocated: 2674304
+Lua totalbytes=0 GCdebt=0 GCestimate=0 stacksize=0
+

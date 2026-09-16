@@ -1,0 +1,24 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[20:54:28 #1] === PlutoBrowser boot ===
+[20:54:28 #2] eventHandler: kEventInit, osversion=30101
+[20:54:28 #3] STORAGE: init enter
+[20:54:28 #4] STORAGE: load enter
+[20:54:28 #5] STORAGE: file opened, parsing
+[20:54:28 #6] STORAGE: init exit
+[20:54:28 #7] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[20:54:28 #8] [settings-autotest] label='Javascript Execution' value='Inline'
+[20:54:28 #9] KB new: entering
+[20:54:28 #10] KB new: allocated
+[20:54:28 #11] KB load: font...
+[20:54:28 #12] KB load: font ok h=36
+[20:54:28 #13] KB load: menu-space ok
+[20:54:28 #14] KB load: menu-ok ok
+[20:54:28 #15] KB load: menu-del ok
+[20:54:28 #16] KB load: menu-cancel ok
+[20:54:28 #17] KB new: font+images loaded
+[20:54:28 #18] DISPLAY: refresh rate set to 30 fps
+[20:54:28 #19] updateFrame: first frame executed
+[20:54:38 #20] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B
+[20:54:48 #21] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B
+[20:54:58 #22] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B

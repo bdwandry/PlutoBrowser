@@ -14,7 +14,8 @@
  * tests/htmltags_host_test.c):
  *   cc -o /tmp/jstest tests/jsbridge_host_test.c Source/html/tokenizer.c \
  *     Source/html/dom.c Source/html/document.c Source/html/entities.c \
- *     Source/html/readability.c Source/html/jsbridge.c Source/core/url.c \
+ *     Source/html/readability.c Source/html/jsbridge.c Source/html/jsext.c \
+ *     Source/core/url.c \
  *     Source/core/constants.c Source/core/logger.c Source/util/strbuf.c \
  *     Source/util/strutil.c Source/util/json.c Source/js/*.c \
  *     -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/js \
@@ -46,6 +47,20 @@ PlaydateAPI *pluto_pd(void)
 void pluto_free(void *p) { free(p); }
 void *pluto_realloc(void *p, size_t n) { return realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; } /* readability stub */
+
+/* http_client stubs: html/jsext.c (linked for jsext_arena_free) references
+ * these for its NETWORK prefetch session, which no test here exercises. */
+typedef struct HttpCallbacks HttpCallbacks;
+int http_get(const char *url, const HttpCallbacks *cb)
+{
+    (void)url;
+    (void)cb;
+    return 0;
+}
+void http_cancel(void) {}
+void http_client_init(PlaydateAPI *pd) { (void)pd; }
+void http_update(void) {}
+int http_is_loading(void) { return 0; }
 
 #include "html/document.h"
 #include "html/jsbridge.h"
@@ -341,6 +356,77 @@ int main(void)
                           MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN, NULL, d);
         CHECK(d->jsRan >= 1 && !d->_jsbridge,
               "run: scripts ran, engine closed by parse");
+        document_free(d);
+        free(d);
+    }
+
+    /* ── 5. Compile-safety guard: pathological scripts skipped, not fatal ── */
+    {
+        /* (a) 200 nested blocks — would recurse deeply inside the muJS
+         * compiler on the device task stack; must be skipped cleanly. */
+        static char deepHtml[1600];
+        int n = snprintf(deepHtml, sizeof(deepHtml),
+                         "<html><body><p id=\"m\">alive</p><script>");
+        for (int i = 0; i < 200; i++)
+            deepHtml[n++] = '{';
+        n += snprintf(deepHtml + n, sizeof(deepHtml) - (size_t)n, "var x=1;");
+        for (int i = 0; i < 200; i++)
+            deepHtml[n++] = '}';
+        snprintf(deepHtml + n, sizeof(deepHtml) - (size_t)n,
+                 "</script></body></html>");
+        DocParseResult *d = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(deepHtml, "https://example.com/deep", MODE_RAW_HTML,
+                          NULL, DOC_SCRIPT_RUN, NULL, d);
+        CHECK(d->jsRan == 0 && d->jsErrors == 1,
+              "guard: deeply-nested script skipped, counted as error");
+        CHECK(strstr(d->jsLastError, "too deeply nested") != NULL,
+              "guard: lastError explains the rejection");
+        CHECK(find_inline_text(d, "alive") != NULL,
+              "guard: page still renders around the skipped script");
+        document_free(d);
+        free(d);
+    }
+    {
+        /* (b) regex with 200 consecutive escapes — recursion bomb inside
+         * muJS's regex compiler; must be skipped cleanly. */
+        static char rxHtml[1400];
+        int n = snprintf(rxHtml, sizeof(rxHtml),
+                         "<html><body><p>still-here</p><script>var re=/a");
+        for (int i = 0; i < 200; i++)
+            n += snprintf(rxHtml + n, sizeof(rxHtml) - (size_t)n, "\\x");
+        snprintf(rxHtml + n, sizeof(rxHtml) - (size_t)n,
+                 "/;</script></body></html>");
+        DocParseResult *d = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(rxHtml, "https://example.com/rx", MODE_RAW_HTML,
+                          NULL, DOC_SCRIPT_RUN, NULL, d);
+        CHECK(d->jsRan == 0 && d->jsErrors == 1,
+              "guard: regex-escape-bomb script skipped, counted as error");
+        CHECK(find_inline_text(d, "still-here") != NULL,
+              "guard: page still renders around the regex bomb");
+        document_free(d);
+        free(d);
+    }
+    {
+        /* (c) deep-but-legal nesting (39 levels, under the guard cap) must
+         * still run — proves the guard is not over-aggressive. */
+        static char okHtml[400];
+        int n = snprintf(okHtml, sizeof(okHtml),
+                         "<html><body><p id=\"d\"></p><script>var v=");
+        for (int i = 0; i < 39; i++)
+            okHtml[n++] = '(';
+        okHtml[n++] = '7';
+        for (int i = 0; i < 39; i++)
+            okHtml[n++] = ')';
+        snprintf(okHtml + n, sizeof(okHtml) - (size_t)n,
+                 ";document.getElementById('d').textContent='deep-ok';"
+                 "</script></body></html>");
+        DocParseResult *d = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(okHtml, "https://example.com/ok", MODE_RAW_HTML,
+                          NULL, DOC_SCRIPT_RUN, NULL, d);
+        CHECK(d->jsRan == 1 && d->jsErrors == 0,
+              "guard: 39-deep legal script still runs");
+        CHECK(find_inline_text(d, "deep-ok") != NULL,
+              "guard: 39-deep script produced its DOM effect");
         document_free(d);
         free(d);
     }

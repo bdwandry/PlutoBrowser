@@ -1,0 +1,94 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[00:24:57 #1] === PlutoBrowser boot ===
+[00:24:57 #2] eventHandler: kEventInit, osversion=30101
+[00:24:57 #3] STORAGE: init enter
+[00:24:57 #4] STORAGE: load enter
+[00:24:57 #5] STORAGE: file opened, parsing
+[00:24:57 #6] STORAGE: init exit
+[00:24:57 #7] KB new: entering
+[00:24:57 #8] KB new: allocated
+[00:24:57 #9] KB load: font...
+[00:24:57 #10] KB load: font ok h=36
+[00:24:57 #11] KB load: menu-space ok
+[00:24:57 #12] KB load: menu-ok ok
+[00:24:57 #13] KB load: menu-del ok
+[00:24:57 #14] KB load: menu-cancel ok
+[00:24:57 #15] KB new: font+images loaded
+[00:24:57 #16] DISPLAY: refresh rate set to 30 fps
+[00:24:57 #17] updateFrame: first frame executed
+[00:24:58 #18] SETTINGS: open label7='Javascript Execution' staged7='Full'
+[00:24:58 #19] main: home Settings opened (state=6)
+[00:24:58 #20] state -> 6 (frame 27)
+[00:25:06 #21] STORAGE: save open
+[00:25:06 #22] STORAGE: save writing (bm=10 hist=3)
+[00:25:06 #23] STORAGE: save close
+[00:25:06 #24] STORAGE: save exit
+[00:25:06 #25] DISPLAY: refresh rate set to 50 fps
+[00:25:06 #26] navigate_to: about:home
+[00:25:06 #27] state -> 0 (frame 258)
+[00:25:06 #28] updateFrame: heartbeat frame=300 fps=51 overlay=1 stackPeak=632B/61800B
+[00:25:08 #29] navigate_to: https://wiesmann.codiferes.net/share/bitmaps/
+[00:25:08 #30] state -> 1 (frame 374)
+[00:25:12 #31] updateFrame: heartbeat frame=600 fps=50 overlay=1 stackPeak=632B/61800B
+[00:25:13 #32] [js] script 1 failed to compile
+[00:25:13 #33] [js] page: ran=1 errs=1
+[00:25:13 #34] [js] live page: listeners=0 ran=1 errs=1
+[00:25:13 #35] STORAGE: save open
+[00:25:13 #36] STORAGE: save writing (bm=10 hist=4)
+[00:25:13 #37] STORAGE: save close
+[00:25:13 #38] STORAGE: save exit
+[00:25:13 #39] state -> 2 (frame 629)
+[00:25:15 #40] IMGDEC ok http://wiesmann.codiferes.net/share/bitmaps/test_pattern.svg sync 266x200 (26157 bytes)
+[00:25:19 #41] updateFrame: heartbeat frame=900 fps=49 overlay=1 stackPeak=2232B/61800B
+[00:25:20 #42] PDF ok (vector) 262x200
+[00:25:20 #43] IMGDEC ok http://wiesmann.codiferes.net/share/bitmaps/test_pattern.pdf sync 262x200 (3011 bytes)
+[00:25:22 #44] IMGDEC ok http://wiesmann.codiferes.net/share/bitmaps/test_pattern.png kind=1 200x150 (22849 bytes)
+[00:25:25 #45] updateFrame: heartbeat frame=1200 fps=47 overlay=1 stackPeak=2232B/61800B
+[00:25:28 #46] TIF ok 200x150
+[00:25:28 #47] IMGDEC ok http://wiesmann.codiferes.net/share/bitmaps/test_pattern.tif sync 200x150 (36114 bytes)
+[00:25:32 #48] updateFrame: heartbeat frame=1500 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:25:32 #49] navigate_to: about:home
+[00:25:32 #50] state -> 0 (frame 1532)
+[00:25:33 #51] home: crank sel=1 count=10
+[00:25:33 #52] home: crank sel=2 count=10
+[00:25:34 #53] home: crank sel=3 count=10
+[00:25:34 #54] home: crank sel=4 count=10
+[00:25:34 #55] home: crank sel=5 count=10
+[00:25:35 #56] IMGDEC ok http://wiesmann.codiferes.net/share/bitmaps/test_pattern.bmp sync 200x150 (90026 bytes)
+[00:25:35 #57] home: crank sel=6 count=10
+[00:25:35 #58] home: crank sel=7 count=10
+[00:25:35 #59] home: crank sel=8 count=10
+[00:25:36 #60] home: crank sel=9 count=10
+[00:25:36 #61] home: crank sel=10 count=10
+[00:25:36 #62] home: crank freescroll tgt=264
+[00:25:36 #63] home: crank freescroll tgt=318
+[00:25:37 #64] home: crank freescroll tgt=372
+[00:25:37 #65] home: crank sel=9 count=10
+[00:25:38 #66] home: crank sel=8 count=10
+[00:25:38 #67] updateFrame: heartbeat frame=1800 fps=49 overlay=1 stackPeak=3496B/61800B
+[00:25:38 #68] home: crank sel=7 count=10
+[00:25:39 #69] home: crank sel=6 count=10
+[00:25:39 #70] home: crank sel=5 count=10
+[00:25:39 #71] home: crank sel=4 count=10
+[00:25:39 #72] home: crank sel=3 count=10
+[00:25:39 #73] home: crank sel=2 count=10
+[00:25:40 #74] home: crank sel=1 count=10
+[00:25:40 #75] home: crank sel=0 count=10
+[00:25:43 #76] home: crank sel=1 count=10
+[00:25:44 #77] updateFrame: heartbeat frame=2100 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:25:44 #78] main: B-release opened address bar (keyboard)
+[00:25:50 #79] updateFrame: heartbeat frame=2400 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:25:56 #80] updateFrame: heartbeat frame=2700 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:02 #81] updateFrame: heartbeat frame=3000 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:08 #82] updateFrame: heartbeat frame=3300 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:14 #83] updateFrame: heartbeat frame=3600 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:20 #84] updateFrame: heartbeat frame=3900 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:26 #85] updateFrame: heartbeat frame=4200 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:32 #86] updateFrame: heartbeat frame=4500 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:38 #87] updateFrame: heartbeat frame=4800 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:44 #88] updateFrame: heartbeat frame=5100 fps=50 overlay=1 stackPeak=3496B/61800B
+[00:26:48 #89] AddressBar submit: https://html.duckduckgo.com/html/?q=Bryan+Wandrych
+[00:26:48 #90] navigate_to: https://html.duckduckgo.com/html/?q=Bryan+Wandrych
+[00:26:48 #91] state -> 1 (frame 5303)
+[00:26:50 #92] updateFrame: heartbeat frame=5400 fps=50 overlay=1 stackPeak=3496B/61800B

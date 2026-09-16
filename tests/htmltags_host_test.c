@@ -41,6 +41,20 @@ void pluto_free(void *p) { free(p); }
 void *pluto_realloc(void *p, size_t n) { return realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
+/* http_client stubs: html/jsext.c (linked for jsext_arena_free) references
+ * these; the network prefetch path is never exercised here. */
+typedef struct HttpCallbacks HttpCallbacks;
+int http_get(const char *url, const HttpCallbacks *cb)
+{
+    (void)url;
+    (void)cb;
+    return 0;
+}
+void http_cancel(void) {}
+void http_client_init(PlaydateAPI *pd) { (void)pd; }
+void http_update(void) {}
+int http_is_loading(void) { return 0; }
+
 #include "html/document.h"
 #include "core/constants.h"
 

@@ -46,6 +46,7 @@
 #include "html/readability.h"
 #include "html/entities.h"
 #include "html/jsbridge.h"
+#include "html/jsext.h"
 #include "core/constants.h"
 #include "core/url.h"
 #include "util/strbuf.h"
@@ -4607,7 +4608,17 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
                       struct JsBridge **outBridge, DocParseResult *out)
 {
     logger_stack_touch();
+    /* Caller-provided Full-mode ext table (html/jsext results, attached by
+     * main.c's render task BEFORE this call) must survive the zeroing below
+     * — js_doc_attach executes doc->extScripts at their page positions, and
+     * document_free owns freeing bodies + arena. */
+    struct JsExtScript_ *savedExt = out->extScripts;
+    int savedExtCount = out->extScriptCount;
+    void *savedExtArena = out->_extArena;
     memset(out, 0, sizeof(*out));
+    out->extScripts = savedExt;
+    out->extScriptCount = savedExtCount;
+    out->_extArena = savedExtArena;
     if (outBridge)
     {
         *outBridge = NULL;
@@ -4739,7 +4750,9 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
      * the tokenizer consumed as raw script bytes) and append the resulting
      * tokens to this stream before the walker runs. The heap DomResult copy
      * outlives the walk when a bridge is attached (click events need the
-     * live tree); it is freed by document_free, never here. */
+     * live tree); it is freed by document_free, never here. FULL behaves like
+     * RUN_KEEP but also executes fetched external <script src> bodies stored
+     * in out->extScripts (prefetched by html/jsext before parsing). */
     out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
     if (out->rawHtml)
     {
@@ -4990,5 +5003,20 @@ void document_free(DocParseResult *doc)
         doc_arena_free_all((DocArena *)doc->_arena);
         PLUTO_FREE(doc->_arena);
         doc->_arena = NULL;
+    }
+    if (doc->extScripts)
+    {
+        /* NOTE: the ext array AND its bodies are arena-allocated by
+         * html/jsext (jsext_collect allocates the array inside the scratch
+         * arena) — everything dies with _extArena below. Freeing either
+         * here would be an interior-pointer free → heap corruption. */
+        doc->extScripts = NULL;
+        doc->extScriptCount = 0;
+    }
+    if (doc->_extArena)
+    {
+        /* jsext_arena_free frees every block AND the arena struct itself. */
+        jsext_arena_free((JsExtArena *)doc->_extArena);
+        doc->_extArena = NULL;
     }
 }

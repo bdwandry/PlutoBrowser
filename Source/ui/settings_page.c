@@ -14,6 +14,7 @@
 #include "ui/settings_page.h"
 #include "core/constants.h"
 #include "core/storage.h"
+#include "core/logger.h"
 #include "render/style.h"
 #include "pd_api.h"
 
@@ -69,6 +70,21 @@ static struct
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
+
+/* Row labels (optionIndex 1..OPTION_COUNT). Single source of truth for both
+ * the renderer and settings_page_label(). */
+static const char *const k_settingsLabels[OPTION_COUNT] = {
+    "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
+    "Display FPS", "Show FPS", "Javascript Execution", "Clear Cookies"};
+
+const char *settings_page_label(int optionIndex)
+{
+    if (optionIndex < 1 || optionIndex > OPTION_COUNT)
+    {
+        return "";
+    }
+    return k_settingsLabels[optionIndex - 1];
+}
 
 void settings_page_set_onchange_callback(void (*fn)(void))
 {
@@ -199,6 +215,16 @@ void settings_page_open(int prevState)
         g_staged.displayFps = 30; /* only 30 or 50 are valid (Playdate max = 50) */
     }
     g_staged.jsEnabled = storage_setting_int("jsEnabled");
+    if (g_staged.jsEnabled < 0 || g_staged.jsEnabled > 2)
+    {
+        g_staged.jsEnabled = 1; /* Off/Inline/Full — out-of-range → Inline */
+    }
+
+    /* Settings-panel audit line: logs the exact on-screen label + staged
+     * value of the JavaScript row so simulator/device pluto.log runs can
+     * verify the row set without human eyes on the panel. */
+    logger_log("SETTINGS: open label7='%s' staged7='%s'",
+               settings_page_label(7), settings_page_staged_value(7));
 }
 
 void settings_page_close(void)
@@ -271,8 +297,10 @@ const char *settings_page_staged_value(int optionIndex)
         return g_staged.displayFps == 50 ? "50" : "30";
     case 6:
         return g_staged.showFps ? "On" : "Off";
-    case 7:
-        return g_staged.jsEnabled ? "On" : "Off";
+    case 7: /* JavaScript execution: Off / Inline / Full (0/1/2) */
+        return g_staged.jsEnabled == 2   ? "Full"
+               : g_staged.jsEnabled == 1 ? "Inline"
+                                         : "Off";
     case 8:
         return "";
     default:
@@ -339,8 +367,8 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 6:
             g_staged.showFps = !g_staged.showFps;
             break;
-        case 7:
-            g_staged.jsEnabled = !g_staged.jsEnabled;
+        case 7: /* Off → Full → Inline → Off (left decrements) */
+            g_staged.jsEnabled = (g_staged.jsEnabled + 2) % 3;
             break;
         case 8:
             if (g_clearCookiesCb)
@@ -390,8 +418,8 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 6:
             g_staged.showFps = !g_staged.showFps;
             break;
-        case 7:
-            g_staged.jsEnabled = !g_staged.jsEnabled;
+        case 7: /* Off → Inline → Full → Off (right increments) */
+            g_staged.jsEnabled = (g_staged.jsEnabled + 1) % 3;
             break;
         case 8:
             if (g_clearCookiesCb)
@@ -480,9 +508,6 @@ void settings_page_draw(void)
         pd->graphics->drawLine(innerX, innerY + 16, innerX + innerW, innerY + 16,
                                1, kColorBlack);
 
-        static const char *const labels[OPTION_COUNT] = {
-            "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-            "Display FPS", "Show FPS", "Enable Javascript", "Clear Cookies"};
         int itemY = innerY + SETTINGS_TITLE_H;      /* list top (after title) */
         int itemH = SETTINGS_ITEM_H;
         int itemGap = SETTINGS_ROW_PITCH - SETTINGS_ITEM_H;
@@ -535,7 +560,8 @@ void settings_page_draw(void)
             }
 
             pd->graphics->setFont(fontBold);
-            pd->graphics->drawText(labels[i - 1], strlen(labels[i - 1]),
+            pd->graphics->drawText(k_settingsLabels[i - 1],
+                                   strlen(k_settingsLabels[i - 1]),
                                    kUTF8Encoding, innerX + 4, iy + 5);
 
             const char *val = settings_page_staged_value(i);

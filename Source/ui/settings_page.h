@@ -33,6 +33,9 @@ int settings_page_previous_state(void);
  * engine name, image-mode label). */
 const char *settings_page_staged_value(int optionIndex);
 
+/* Test support: row label string (optionIndex 1..OPTION_COUNT, "" outside). */
+const char *settings_page_label(int optionIndex);
+
 /* Register the change callback (reference SettingsPage.onChangeCallback):
  * fired by save_and_close after settings are persisted. */
 void settings_page_set_onchange_callback(void (*fn)(void));
