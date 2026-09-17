@@ -1,6 +1,6 @@
 /*
  * PlutoBrowser — jsbridge.h
- * JavaScript engine bridge (muJS 1.3.10, Source/js) wired into the browser's
+ * JavaScript engine bridge (muJS 1.3.10, Source/js/muJS) wired into the browser's
  * DOM pipeline (document_parse_ex + layout/main event dispatch).
  *
  * Design (device-safe):
@@ -112,5 +112,15 @@ int jsbridge_dispatch_link_click(JsBridge *bridge, const void *anchorNode);
 
 /* Diagnostics accessors (logging/telemetry). */
 int jsbridge_listener_count(const JsBridge *bridge);
+
+/* Select the engine for ALL subsequently attached pages: JS_ENGINE_MUJS
+ * (default) or JS_ENGINE_DUKTAPE. Any other value selects muJS. Called by
+ * main when Settings change; pages never mix engines — the chosen engine
+ * runs the page exclusively. (See jsbridge_internal.h for JS_ENGINE_*.) */
+void jsbridge_set_engine(int engine);
+
+/* Current engine selection (JS_ENGINE_MUJS or JS_ENGINE_DUKTAPE) for
+ * logging/telemetry — does not affect any page. */
+int jsbridge_current_engine(void);
 
 #endif /* PLUTO_JSBIDGE_H */

@@ -27,8 +27,13 @@
  *   SDK=$HOME/Developer/PlaydateSDK; cc -o /tmp/jsexttest \
  *     tests/jsext_host_test.c Source/html/*.c \
  *     $(ls Source/core/*.c | grep -vE '/tasks.c|/http_client.c') \
- *     Source/util/*.c Source/js/*.c \
- *     -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/js \
+ *     Source/util/*.c Source/js/muJS/*.c Source/js/duktape/duktape.c \
+ *     Source/js/QuickJS/quickjs.c Source/js/QuickJS/libregexp.c \
+ *     Source/js/QuickJS/libunicode.c Source/js/QuickJS/cutils.c \
+ *     Source/js/QuickJS/dtoa.c Source/html/jsbridge_quickjs.c \
+ *     Source/html/jsbridge_mujs.c Source/html/jsbridge_duktape.c \
+ *     -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/js/muJS \
+ *     -ISource/js/duktape -ISource/js/QuickJS -lm \
  *     -ISource/render -I$SDK/C_API \
  *     -DTARGET_EXTENSION=1 -DPDCS_STRDUP=1 && /tmp/jsexttest
  */

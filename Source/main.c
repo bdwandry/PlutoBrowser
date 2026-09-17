@@ -1717,11 +1717,23 @@ static void apply_display_fps(void)
     logger_log("DISPLAY: refresh rate set to %d fps", fps);
 }
 
+/* Engine selection lives in the router (jsbridge_set_engine); this helper
+ * only names it for logs (0=muJS, 1=Duktape, 2=QuickJS). */
+static const char *engine_name(void)
+{
+    int e = storage_setting_int("jsEngine");
+    return e == 1 ? "Duktape" : (e == 2 ? "QuickJS" : "muJS");
+}
+
 static void settings_on_change(void)
 {
     currentBrowseMode = storage_setting_int("mode");
     g_showFps = storage_setting_int("showFps");
     apply_display_fps();
+    /* Route all subsequent page loads to the selected JS engine (0=muJS,
+     * 1=Duktape). Pages never mix engines: the chosen one runs everything. */
+    jsbridge_set_engine(storage_setting_int("jsEngine"));
+    logger_log("[jsbridge] engine selected: %s", engine_name());
     if (currentBrowseMode != MODE_READER && currentBrowseMode != MODE_RAW_HTML)
     {
         currentBrowseMode = MODE_READER;
@@ -2684,6 +2696,10 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         /* FPS overlay: cache the setting and load the bold font once. */
         g_showFps = storage_setting_int("showFps");
         g_fpsFont = style_font(PLUTO_FONT_BODY_BOLD);
+        /* Route page loads to the persisted JS engine selection (0=muJS,
+         * 1=Duktape). Page loads attach per-engine bridges. */
+        jsbridge_set_engine(storage_setting_int("jsEngine"));
+        logger_log("[jsbridge] boot engine: %s", engine_name());
 
         /* Lua boot: currentBrowseMode = storage_setting_int("mode"). */
         currentBrowseMode = storage_setting_int("mode");
@@ -2697,8 +2713,8 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         home_page_reset();
         currentState = STATE_HOME;
 
-#if defined(TARGET_SIMULATOR) && defined(PLUTO_SETTINGS_AUTOTEST)
-        /* TEMPORARY (sim-only, PLUTO_SETTINGS_AUTOTEST builds): boot-time
+#if defined(PLUTO_SETTINGS_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): boot-time
          * settings-panel probe — open the panel (stages storage), log the
          * JavaScript row's label + staged value, cycle the row through the
          * 3-state range with the same buttons a user presses (Right/Right/
@@ -2759,6 +2775,143 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
                 pluto_free(act);
             }
         }
+
+        /* Row 8 "Javascript Engine": selector probe through the REAL input
+         * path, in BOTH Execution states:
+         *   Inline → cycles muJS ↔ Duktape (Right then Left returns);
+         *   Off    → locked 'Off', L/R no-op, mirrors row 7 live.
+         * Storage's jsEnabled is snapshotted and restored; every staged
+         * change here is B-cancelled (never saved).
+         * NOTE: never navigate DOWN onto row 9 (Clear Cookies) — Right there
+         * fires the real cookie-clear callback. Route via row 7 instead. */
+        {
+            const int btnDown = 1 << 3, btnUp = 1 << 2, btnRight = 1 << 1,
+                      btnLeft = 1 << 0, btnB = 1 << 4;
+            const int savedJs = storage_setting_int("jsEnabled");
+            char *act8 = NULL;
+            /* ── Inline state: row 8 must read 'muJS' and ignore L/R. ── */
+            storage_set_setting_int("jsEnabled", 1);
+            settings_page_open((int)STATE_HOME);
+            for (int i = 0; i < 7; i++) /* row 1 → row 8 (stays off row 9) */
+            {
+                act8 = settings_page_handle_input(btnDown,
+                                                  settings_cleared_cookies);
+                if (act8)
+                {
+                    pluto_free(act8);
+                    act8 = NULL;
+                }
+            }
+            logger_log("[settings-autotest] row8 selected: label='%s' "
+                       "value='%s' (want muJS)",
+                       settings_page_label(8), settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RIGHT: '%s' (want Duktape)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RR: '%s' (want QuickJS)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RRL: '%s' (want Duktape)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RRLL: '%s' (want muJS)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnB, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            /* ── Off state: row 8 must read 'Off', ignore L/R, and mirror
+             * row 7 LIVE when the Execution policy changes under it. ── */
+            storage_set_setting_int("jsEnabled", 0);
+            settings_page_open((int)STATE_HOME);
+            for (int i = 0; i < 7; i++)
+            {
+                act8 = settings_page_handle_input(btnDown,
+                                                  settings_cleared_cookies);
+                if (act8)
+                {
+                    pluto_free(act8);
+                    act8 = NULL;
+                }
+            }
+            logger_log("[settings-autotest] row8 selected: '%s' (want Off)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RIGHT: '%s' (want Off)",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after LEFT: '%s' (want Off)",
+                       settings_page_staged_value(8));
+            /* UP to row 7 and flip Execution Off → Inline (one RIGHT): the
+             * locked row 8 must follow with ZERO input on it. */
+            act8 = settings_page_handle_input(btnUp, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            act8 = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row7 '%s' → row8 mirror '%s' "
+                       "(want Inline/muJS)",
+                       settings_page_staged_value(7),
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row7 '%s' → row8 mirror '%s' "
+                       "(want Off/Off)",
+                       settings_page_staged_value(7),
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnB, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            /* Restore the user's persisted Execution value. */
+            storage_set_setting_int("jsEnabled", savedJs);
+        }
         currentState = STATE_HOME;
         home_page_reset();
 #endif
@@ -2771,6 +2924,21 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");
     #ifdef PLUTO_JS_AUTOTEST_OFF
         storage_set_setting_int("jsEnabled", 0);
+    #endif
+    #ifdef PLUTO_JS_AUTOTEST_DUKTAPE
+        /* Run the suite on the DUKTAPE engine instead of muJS: select it in
+         * storage AND flip the live router before navigation. The [js] lines
+         * and close[Duktape] summary prove which engine binaries ran. */
+        storage_set_setting_int("jsEngine", 1);
+        jsbridge_set_engine(1);
+        logger_log("[js-autotest] engine forced: Duktape");
+    #endif
+    #ifdef PLUTO_JS_AUTOTEST_QUICKJS
+        /* Same, on the QUICKJS engine (storage jsEngine=2, live router=2).
+         * close[QuickJS] in the log proves which binaries executed. */
+        storage_set_setting_int("jsEngine", 2);
+        jsbridge_set_engine(2);
+        logger_log("[js-autotest] engine forced: QuickJS");
     #endif
 #endif /* TARGET_SIMULATOR guard above */
 
@@ -2789,6 +2957,21 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
             logger_log("[jsclick-autotest] jsEnabled was Off, bumped to "
                        "Inline for this run");
         }
+    #endif
+    #ifdef PLUTO_JS_CLICK_AUTOTEST_DUKTAPE
+        /* Run the suite on the DUKTAPE engine instead of muJS: select it in
+         * storage AND flip the live router before navigation. The click
+         * listener/dispatch then exercises the Duktape path on hardware. */
+        storage_set_setting_int("jsEngine", 1);
+        jsbridge_set_engine(1);
+        logger_log("[jsclick-autotest] engine forced: Duktape");
+    #endif
+    #ifdef PLUTO_JS_CLICK_AUTOTEST_QUICKJS
+        /* Same, on the QUICKJS engine (storage jsEngine=2, live router=2):
+         * click listener + dispatch + preventDefault on the QuickJS path. */
+        storage_set_setting_int("jsEngine", 2);
+        jsbridge_set_engine(2);
+        logger_log("[jsclick-autotest] engine forced: QuickJS");
     #endif
         pendingNavUrlSet = 1;
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");

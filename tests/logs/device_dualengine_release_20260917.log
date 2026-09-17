@@ -1,0 +1,27 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[15:30:30 #1] === PlutoBrowser boot ===
+[15:30:30 #2] eventHandler: kEventInit, osversion=30101
+[15:30:30 #3] STORAGE: init enter
+[15:30:30 #4] STORAGE: load enter
+[15:30:30 #5] STORAGE: file opened, parsing
+[15:30:30 #6] STORAGE: init exit
+[15:30:31 #7] [jsbridge] boot engine: muJS
+[15:30:31 #8] KB new: entering
+[15:30:31 #9] KB new: allocated
+[15:30:31 #10] KB load: font...
+[15:30:31 #11] KB load: font ok h=36
+[15:30:31 #12] KB load: menu-space ok
+[15:30:31 #13] KB load: menu-ok ok
+[15:30:31 #14] KB load: menu-del ok
+[15:30:31 #15] KB load: menu-cancel ok
+[15:30:31 #16] KB new: font+images loaded
+[15:30:31 #17] DISPLAY: refresh rate set to 30 fps
+[15:30:31 #18] updateFrame: first frame executed
+[15:30:40 #19] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=632B/61800B
+[15:30:50 #20] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=632B/61800B
+[15:31:00 #21] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=632B/61800B
+[15:31:10 #22] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=632B/61800B
+[15:31:20 #23] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=632B/61800B
+[15:31:30 #24] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=632B/61800B
+[15:31:33 #25] eventHandler: kEventTerminate, frames=1883

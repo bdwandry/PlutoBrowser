@@ -1,0 +1,40 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[13:14:22 #1] === PlutoBrowser boot ===
+[13:14:22 #2] eventHandler: kEventInit, osversion=30101
+[13:14:22 #3] STORAGE: init enter
+[13:14:22 #4] STORAGE: load enter
+[13:14:22 #5] STORAGE: no data file -> defaults
+[13:14:22 #6] STORAGE: defaults done (bm=10)
+[13:14:22 #7] STORAGE: save enter
+[13:14:22 #8] STORAGE: save open
+[13:14:22 #9] STORAGE: save writing (bm=10 hist=0)
+[13:14:22 #10] STORAGE: save close
+[13:14:22 #11] STORAGE: save exit
+[13:14:22 #12] STORAGE: save done
+[13:14:22 #13] STORAGE: init exit
+[13:14:22 #14] KB new: entering
+[13:14:22 #15] KB new: allocated
+[13:14:22 #16] KB load: font...
+[13:14:22 #17] KB load: font ok h=36
+[13:14:22 #18] KB load: menu-space ok
+[13:14:22 #19] KB load: menu-ok ok
+[13:14:22 #20] KB load: menu-del ok
+[13:14:22 #21] KB load: menu-cancel ok
+[13:14:22 #22] KB new: font+images loaded
+[13:14:22 #23] DISPLAY: refresh rate set to 30 fps
+[13:14:22 #24] updateFrame: first frame executed
+[13:14:32 #25] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=632B/61800B
+[13:14:42 #26] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=632B/61800B
+[13:14:52 #27] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:02 #28] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:12 #29] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:22 #30] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:32 #31] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:42 #32] updateFrame: heartbeat frame=2400 fps=30 overlay=0 stackPeak=632B/61800B
+[13:15:43 #33] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[13:15:43 #34] main: home Settings opened (state=6)
+[13:15:43 #35] state -> 6 (frame 2450)
+[13:15:45 #36] navigate_to: about:home
+[13:15:45 #37] state -> 0 (frame 2517)
+[13:15:48 #38] eventHandler: kEventTerminate, frames=2608

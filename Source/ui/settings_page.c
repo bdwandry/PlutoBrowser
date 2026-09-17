@@ -6,6 +6,13 @@
  * staged → storage, fires onChange) unless the row is the Clear Cookies
  * action (executes immediately); B discards. Animation: 300ms ease-out cubic
  * box scale from center, contents clipped, drawn only past t>0.4.
+ *
+ * Row 8 ("Javascript Engine") picks the engine used for ALL script
+ * execution: when Execution (row 7) is Off the row is a locked "Off" mirror
+ * (no engine runs); when Inline/Full it cycles muJS ↔ Duktape and persists
+ * (storage jsEngine: 0=muJS default, 1=Duktape, 2=QuickJS). The selected
+ * engine runs
+ * the page exclusively — no cross-engine execution.
  */
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +44,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 8
+#define OPTION_COUNT 9
 
 /* ── Scrolling list geometry ──────────────────────────────────────────────
  * The panel is fixed-size; the row list scrolls under it as the browser
@@ -66,7 +73,8 @@ static struct
     char imageMode[16];           /* persisted name */
     int showFps;                  /* 0/1 — FPS overlay */
     int displayFps;               /* display refresh target: 30 or 50 fps */
-    int jsEnabled;                /* 0/1 — JavaScript execution (muJS) */
+    int jsEnabled;                /* 0/1/2 — JavaScript execution: Off/Inline/Full */
+    int jsEngine;                 /* 0/1/2 — engine: muJS/Duktape/QuickJS */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -75,7 +83,8 @@ void settings_page_set_onchange_callback(void (*fn)(void));
  * the renderer and settings_page_label(). */
 static const char *const k_settingsLabels[OPTION_COUNT] = {
     "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
-    "Display FPS", "Show FPS", "Javascript Execution", "Clear Cookies"};
+    "Display FPS", "Show FPS", "Javascript Execution", "Javascript Engine",
+    "Clear Cookies"};
 
 const char *settings_page_label(int optionIndex)
 {
@@ -219,12 +228,21 @@ void settings_page_open(int prevState)
     {
         g_staged.jsEnabled = 1; /* Off/Inline/Full — out-of-range → Inline */
     }
+    g_staged.jsEngine = storage_setting_int("jsEngine");
+    if (g_staged.jsEngine != 1 && g_staged.jsEngine != 2)
+    {
+        g_staged.jsEngine = 0; /* only muJS (0) / Duktape (1) / QuickJS (2) */
+    }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
      * value of the JavaScript row so simulator/device pluto.log runs can
      * verify the row set without human eyes on the panel. */
     logger_log("SETTINGS: open label7='%s' staged7='%s'",
                settings_page_label(7), settings_page_staged_value(7));
+    /* Row 8 is derived from row 7 (see file comment) — logged so simulator
+     * and device pluto.log runs can verify the mirror stays in sync. */
+    logger_log("SETTINGS: open label8='%s' staged8='%s'",
+               settings_page_label(8), settings_page_staged_value(8));
 }
 
 void settings_page_close(void)
@@ -241,6 +259,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("showFps", g_staged.showFps);
     storage_set_setting_int("displayFps", g_staged.displayFps);
     storage_set_setting_int("jsEnabled", g_staged.jsEnabled);
+    storage_set_setting_int("jsEngine", g_staged.jsEngine);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -301,7 +320,17 @@ const char *settings_page_staged_value(int optionIndex)
         return g_staged.jsEnabled == 2   ? "Full"
                : g_staged.jsEnabled == 1 ? "Inline"
                                          : "Off";
-    case 8:
+    case 8: /* Javascript Engine: locked "Off" mirror while Execution is
+             * Off; otherwise the selected engine (storage jsEngine:
+             * 0=muJS default, 1=Duktape) that will run ALL page scripts. */
+        if (g_staged.jsEnabled == 0)
+        {
+            return "Off";
+        }
+        return g_staged.jsEngine == 1   ? "Duktape"
+               : g_staged.jsEngine == 2 ? "QuickJS"
+                                        : "muJS";
+    case 9:
         return "";
     default:
         return "";
@@ -370,7 +399,15 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 7: /* Off → Full → Inline → Off (left decrements) */
             g_staged.jsEnabled = (g_staged.jsEnabled + 2) % 3;
             break;
-        case 8:
+        case 8: /* muJS → Duktape → QuickJS — ONLY while Execution is
+                 * active; a locked "Off" when Execution is Off (no engine
+                 * runs at all). */
+            if (g_staged.jsEnabled != 0)
+            {
+                g_staged.jsEngine = (g_staged.jsEngine + 2) % 3;
+            }
+            break;
+        case 9:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -421,7 +458,14 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 7: /* Off → Inline → Full → Off (right increments) */
             g_staged.jsEnabled = (g_staged.jsEnabled + 1) % 3;
             break;
-        case 8:
+        case 8: /* muJS → Duktape → QuickJS → muJS — same cycle both
+                 * directions, gated. */
+            if (g_staged.jsEnabled != 0)
+            {
+                g_staged.jsEngine = (g_staged.jsEngine + 1) % 3;
+            }
+            break;
+        case 9:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -433,7 +477,7 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
     }
     else if (pushed & BTN_A)
     {
-        if (g_selectedIndex == 8)
+        if (g_selectedIndex == 9)
         {
             /* Clear Cookies action: execute immediately */
             if (g_clearCookiesCb)
@@ -544,7 +588,9 @@ void settings_page_draw(void)
                 continue; /* fully outside the visible window */
             }
             int isSel = (i == g_selectedIndex);
-            int isAction = (i == 8);
+            int isAction = (i == 9);
+            /* Engine row shows no < > affordance only while locked (Off). */
+            int isLocked = (i == 8 && g_staged.jsEnabled == 0);
 
             if (isSel)
             {
@@ -573,7 +619,7 @@ void settings_page_draw(void)
                                        innerX + innerW - valW - 4, iy + 7);
             }
 
-            if (isSel && !isAction)
+            if (isSel && !isAction && !isLocked)
             {
                 pd->graphics->setFont(fontSmall);
                 int valW = val ? style_get_text_width(PLUTO_FONT_SMALL, val) : 0;
