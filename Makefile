@@ -16,7 +16,7 @@ endif
 ######
 # IMPORTANT: You must add your source folders to VPATH for make to find them
 ######
-VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js
+VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js/muJS:Source/js/duktape:Source/js/QuickJS
 
 # List C source files here (grows as phases land)
 SRC = \
@@ -67,49 +67,90 @@ SRC = \
 	Source/html/document.c \
 	Source/html/readability.c \
 	Source/html/jsbridge.c \
+	Source/html/jsbridge_mujs.c \
+	Source/html/jsbridge_duktape.c \
+	Source/html/jsbridge_quickjs.c \
 	Source/html/jsext.c \
 	Source/keyboard/keyboard.c \
 	Source/core/tasks.c \
 	Source/util/strbuf.c \
 	Source/util/strutil.c \
 	Source/util/pdtimer.c \
-	Source/js/jsarray.c \
-	Source/js/jsboolean.c \
-	Source/js/jsbuiltin.c \
-	Source/js/jscompile.c \
-	Source/js/jsdate.c \
-	Source/js/jsdtoa.c \
-	Source/js/jserror.c \
-	Source/js/jsfunction.c \
-	Source/js/jsgc.c \
-	Source/js/jsintern.c \
-	Source/js/jslex.c \
-	Source/js/jsmath.c \
-	Source/js/jsnumber.c \
-	Source/js/jsobject.c \
-	Source/js/json.c \
-	Source/js/jsparse.c \
-	Source/js/jsproperty.c \
-	Source/js/jsregexp.c \
-	Source/js/jsrepr.c \
-	Source/js/jsrun.c \
-	Source/js/jsstate.c \
-	Source/js/jsstring.c \
-	Source/js/jsvalue.c \
-	Source/js/regexp.c \
-	Source/js/utf.c
+	Source/js/muJS/jsarray.c \
+	Source/js/muJS/jsboolean.c \
+	Source/js/muJS/jsbuiltin.c \
+	Source/js/muJS/jscompile.c \
+	Source/js/muJS/jsdate.c \
+	Source/js/muJS/jsdtoa.c \
+	Source/js/muJS/jserror.c \
+	Source/js/muJS/jsfunction.c \
+	Source/js/muJS/jsgc.c \
+	Source/js/muJS/jsintern.c \
+	Source/js/muJS/jslex.c \
+	Source/js/muJS/jsmath.c \
+	Source/js/muJS/jsnumber.c \
+	Source/js/muJS/jsobject.c \
+	Source/js/muJS/json.c \
+	Source/js/muJS/jsparse.c \
+	Source/js/muJS/jsproperty.c \
+	Source/js/muJS/jsregexp.c \
+	Source/js/muJS/jsrepr.c \
+	Source/js/muJS/jsrun.c \
+	Source/js/muJS/jsstate.c \
+	Source/js/muJS/jsstring.c \
+	Source/js/muJS/jsvalue.c \
+	Source/js/muJS/regexp.c \
+	Source/js/muJS/utf.c \
+	Source/js/duktape/duktape.c \
+	Source/html/qjs_shim_quickjs.c \
+	Source/html/qjs_shim_libregexp.c \
+	Source/html/qjs_shim_libunicode.c \
+	Source/html/qjs_shim_cutils.c \
+	Source/html/qjs_shim_dtoa.c \
+	Source/html/qjs_pthread_stubs.c
 
 # List all user directories here
-UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js
+UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS
 
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
+
+# QuickJS 2026-06-04 (vendored stock under Source/js/QuickJS — never
+# modified): CONFIG_VERSION is defined by the build, not the engine. The
+# device game-task stack is 61.8KB, so the CONFIG_STACK_CHECK probe bound
+# via JS_SetMaxStackSize (jsbridge_quickjs.c) is what keeps deep JS
+# recursion from blowing the task stack — never raise it above ~32KB.
+#
+# SYMBOL COEXISTENCE: QuickJS's public allocator helpers (js_malloc/js_free/
+# js_realloc/js_strdup via cutils.h) collide with muJS's internal allocator
+# wrappers of the same names. Resolved WITHOUT touching either vendored
+# engine: the Source/html/qjs_shim_*.c adapter TUs #define the rename and
+# then #include the stock engine sources, so ONLY QuickJS's translation
+# units get distinct pluto_qjs_* symbols while muJS keeps its own. Do not
+# compile Source/js/QuickJS/*.c directly — always through the shims.
+UDEFS += -DCONFIG_VERSION="\"2026-06-04\""
+
+# Route QuickJS's pthread mutex/condvar calls (its Atomics intrinsics + a
+# JS_NewClassID guard) to no-op/safe-fail primitives for the single-threaded
+# Playdate (Source/html/qjs_pthread_stubs.c). The rename is applied to the
+# QuickJS shims AND the stubs TU — never to other code. Atomics.wait needs a
+# SharedArrayBuffer (QuickJS exposes no way to create one), so the condvar
+# paths can never be entered in practice; they fail safely if ever reached.
+UDEFS += -Dpthread_mutex_lock=pluto_qjs_pthread_mutex_lock \
+         -Dpthread_mutex_unlock=pluto_qjs_pthread_mutex_unlock \
+         -Dpthread_cond_init=pluto_qjs_pthread_cond_init \
+         -Dpthread_cond_destroy=pluto_qjs_pthread_cond_destroy \
+         -Dpthread_cond_signal=pluto_qjs_pthread_cond_signal \
+         -Dpthread_cond_wait=pluto_qjs_pthread_cond_wait \
+         -Dpthread_cond_timedwait=pluto_qjs_pthread_cond_timedwait \
+         -Dclock_gettime=pluto_qjs_clock_gettime
 
 # ── muJS resource limits (device stack safety) ────────────────────────────────
 # The vendored muJS 1.3.10 ships with limits sized for servers, not for a
 # 61.8KB game-task stack. Every one of these is guarded by #ifndef in
 # Source/js, so they can be tightened WITHOUT touching the vendored engine
-# (user rule: Source/js is immutable). The simulator never reproduces the
+# (user rule: Source/js/muJS, Source/js/duktape AND Source/js/QuickJS are
+# immutable). The simulator never reproduces the
 # overflow (8MB host stack), so these are applied to BOTH sim + device via
 # UDEFS — shared build flags are the only way the sim validates the same
 # code the device runs.
@@ -155,6 +196,18 @@ ifdef SIMDEFS
 DYLIB_FLAGS += $(SIMDEFS)
 endif
 
+# The simulator's monolithic compile rule doesn't consume UDEFS (the device
+# per-object rule does). Mirror ALL of UDEFS to the sim — engine-compat
+# renames AND the muJS limits — so both targets compile the exact same code
+# (the sim validates device behavior only if the flags match).
+DYLIB_FLAGS += $(UDEFS)
+
+# Duktape's stock duk_config.h probes for math functions (fmin/fmax/fmod)
+# that macOS's libSystem does not export as separate symbols — link libm
+# explicitly for the simulator dylib (the device toolchain links newlib's
+# libm by default).
+DYLIB_FLAGS += -lm
+
 # Optional extra flags for the device binary (mirrors SIMDEFS), e.g.
 # make device DEVICEDEFS="-DPLUTO_JSEXT_AUTOTEST" for a self-testing deploy.
 ifdef DEVICEDEFS
@@ -165,3 +218,13 @@ endif
 # small; P18's watchdog crash was an aggregate eventHandler frame overflow.
 # Audit with: sort -t, -k2 -rn build/*.su | head
 CPFLAGS += -fstack-usage
+
+# The SDK compile flags emit a per-file assembly listing (-fverbose-asm
+# plus -Wa,-ahlms=...) which costs 10+ minutes on the ~60K-line QuickJS
+# shim TU (Source/html/qjs_shim_quickjs.c). Override the flags for the
+# QuickJS shim objects ONLY: same -O2/-g levels and limits, minus the
+# listing emission (the .su stack-usage reports are kept — those are what
+# the device stack audits read). Dependency tracking (-MD/-MP/-MF) is
+# re-added per-target so incremental builds stay correct.
+QJS_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage
+build/Source/html/qjs_shim_%.o: CPFLAGS = $(QJS_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d

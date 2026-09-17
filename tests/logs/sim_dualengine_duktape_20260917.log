@@ -1,0 +1,57 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[15:17:08 #1] === PlutoBrowser boot ===
+[15:17:08 #2] eventHandler: kEventInit, osversion=30101
+[15:17:08 #3] STORAGE: init enter
+[15:17:08 #4] STORAGE: load enter
+[15:17:08 #5] STORAGE: no data file -> defaults
+[15:17:08 #6] STORAGE: defaults done (bm=10)
+[15:17:08 #7] STORAGE: save enter
+[15:17:08 #8] STORAGE: save open
+[15:17:08 #9] STORAGE: save writing (bm=10 hist=0)
+[15:17:08 #10] STORAGE: save close
+[15:17:08 #11] STORAGE: save exit
+[15:17:08 #12] STORAGE: save done
+[15:17:08 #13] STORAGE: init exit
+[15:17:08 #14] [jsbridge] boot engine: muJS
+[15:17:08 #15] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[15:17:08 #16] SETTINGS: open label8='Javascript Engine' staged8='muJS'
+[15:17:08 #17] [settings-autotest] label='Javascript Execution' value='Inline'
+[15:17:08 #18] [settings-autotest] row7 selected: label='Javascript Execution'
+[15:17:08 #19] [settings-autotest] R -> 'Full'
+[15:17:08 #20] [settings-autotest] RR -> 'Off'
+[15:17:08 #21] [settings-autotest] RRL -> 'Full'
+[15:17:08 #22] [settings-autotest] RRLL -> 'Inline'
+[15:17:08 #23] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[15:17:08 #24] SETTINGS: open label8='Javascript Engine' staged8='muJS'
+[15:17:08 #25] [settings-autotest] row8 selected: label='Javascript Engine' value='muJS' (want muJS)
+[15:17:08 #26] [settings-autotest] row8 after RIGHT: 'Duktape' (want Duktape)
+[15:17:08 #27] [settings-autotest] row8 after LEFT: 'muJS' (want muJS)
+[15:17:08 #28] SETTINGS: open label7='Javascript Execution' staged7='Off'
+[15:17:08 #29] SETTINGS: open label8='Javascript Engine' staged8='Off'
+[15:17:08 #30] [settings-autotest] row8 selected: 'Off' (want Off)
+[15:17:08 #31] [settings-autotest] row8 after RIGHT: 'Off' (want Off)
+[15:17:08 #32] [settings-autotest] row8 after LEFT: 'Off' (want Off)
+[15:17:08 #33] [settings-autotest] row7 'Inline' → row8 mirror 'muJS' (want Inline/muJS)
+[15:17:08 #34] [settings-autotest] row7 'Off' → row8 mirror 'Off' (want Off/Off)
+[15:17:08 #35] [js-autotest] engine forced: Duktape
+[15:17:08 #36] KB new: entering
+[15:17:08 #37] KB new: allocated
+[15:17:08 #38] KB load: font...
+[15:17:08 #39] KB load: font ok h=36
+[15:17:08 #40] KB load: menu-space ok
+[15:17:08 #41] KB load: menu-ok ok
+[15:17:08 #42] KB load: menu-del ok
+[15:17:08 #43] KB load: menu-cancel ok
+[15:17:08 #44] KB new: font+images loaded
+[15:17:08 #45] DISPLAY: refresh rate set to 30 fps
+[15:17:08 #46] navigate_to: about:javascript
+[15:17:08 #47] state -> 1 (frame 1)
+[15:17:08 #48] updateFrame: first frame executed
+[15:17:08 #49] [js] page: ran=1 errs=0
+[15:17:08 #50] [js] live page: listeners=1 ran=1 errs=0
+[15:17:08 #51] state -> 2 (frame 5)
+[15:17:19 #52] updateFrame: heartbeat frame=300 fps=29 overlay=0 stackPeak=0B/61800B
+[15:17:29 #53] updateFrame: heartbeat frame=600 fps=27 overlay=0 stackPeak=0B/61800B
+[15:17:40 #54] updateFrame: heartbeat frame=900 fps=27 overlay=0 stackPeak=0B/61800B
+[15:17:51 #55] updateFrame: heartbeat frame=1200 fps=28 overlay=0 stackPeak=0B/61800B

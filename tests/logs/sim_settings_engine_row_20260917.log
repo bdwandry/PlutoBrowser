@@ -1,0 +1,39 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[13:42:12 #1] === PlutoBrowser boot ===
+[13:42:12 #2] eventHandler: kEventInit, osversion=30101
+[13:42:12 #3] STORAGE: init enter
+[13:42:12 #4] STORAGE: load enter
+[13:42:12 #5] STORAGE: file opened, parsing
+[13:42:12 #6] STORAGE: init exit
+[13:42:12 #7] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[13:42:12 #8] SETTINGS: open label8='Javascript Engine' staged8='muJS'
+[13:42:12 #9] [settings-autotest] label='Javascript Execution' value='Inline'
+[13:42:12 #10] [settings-autotest] row7 selected: label='Javascript Execution'
+[13:42:12 #11] [settings-autotest] R -> 'Full'
+[13:42:12 #12] [settings-autotest] RR -> 'Off'
+[13:42:12 #13] [settings-autotest] RRL -> 'Full'
+[13:42:12 #14] [settings-autotest] RRLL -> 'Inline'
+[13:42:12 #15] SETTINGS: open label7='Javascript Execution' staged7='Inline'
+[13:42:12 #16] SETTINGS: open label8='Javascript Engine' staged8='muJS'
+[13:42:12 #17] [settings-autotest] row8 selected: label='Javascript Engine' value='muJS' (want muJS)
+[13:42:12 #18] [settings-autotest] row8 after RIGHT: 'muJS' (want muJS)
+[13:42:12 #19] [settings-autotest] row8 after LEFT: 'muJS' (want muJS)
+[13:42:12 #20] SETTINGS: open label7='Javascript Execution' staged7='Off'
+[13:42:12 #21] SETTINGS: open label8='Javascript Engine' staged8='Off'
+[13:42:12 #22] [settings-autotest] row8 selected: 'Off' (want Off)
+[13:42:12 #23] [settings-autotest] row8 after RIGHT: 'Off' (want Off)
+[13:42:12 #24] [settings-autotest] row8 after LEFT: 'Off' (want Off)
+[13:42:12 #25] [settings-autotest] row7 'Inline' → row8 mirror 'muJS' (want Inline/muJS)
+[13:42:12 #26] [settings-autotest] row7 'Off' → row8 mirror 'Off' (want Off/Off)
+[13:42:12 #27] KB new: entering
+[13:42:12 #28] KB new: allocated
+[13:42:12 #29] KB load: font...
+[13:42:12 #30] KB load: font ok h=36
+[13:42:12 #31] KB load: menu-space ok
+[13:42:12 #32] KB load: menu-ok ok
+[13:42:12 #33] KB load: menu-del ok
+[13:42:12 #34] KB load: menu-cancel ok
+[13:42:12 #35] KB new: font+images loaded
+[13:42:12 #36] DISPLAY: refresh rate set to 30 fps
+[13:42:12 #37] updateFrame: first frame executed

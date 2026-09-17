@@ -1,0 +1,24 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[13:09:46 #1] === PlutoBrowser boot ===
+[13:09:46 #2] eventHandler: kEventInit, osversion=30101
+[13:09:46 #3] STORAGE: init enter
+[13:09:46 #4] STORAGE: load enter
+[13:09:46 #5] STORAGE: file opened, parsing
+[13:09:46 #6] STORAGE: init exit
+[13:09:46 #7] KB new: entering
+[13:09:46 #8] KB new: allocated
+[13:09:46 #9] KB load: font...
+[13:09:46 #10] KB load: font ok h=36
+[13:09:46 #11] KB load: menu-space ok
+[13:09:46 #12] KB load: menu-ok ok
+[13:09:46 #13] KB load: menu-del ok
+[13:09:46 #14] KB load: menu-cancel ok
+[13:09:46 #15] KB new: font+images loaded
+[13:09:46 #16] DISPLAY: refresh rate set to 30 fps
+[13:09:46 #17] navigate_to: about:javascript
+[13:09:46 #18] state -> 1 (frame 1)
+[13:09:46 #19] updateFrame: first frame executed
+[13:09:46 #20] [js] page: ran=1 errs=0
+[13:09:46 #21] [js] live page: listeners=1 ran=1 errs=0
+[13:09:46 #22] state -> 2 (frame 5)

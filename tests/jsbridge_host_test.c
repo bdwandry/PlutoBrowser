@@ -17,9 +17,16 @@
  *     Source/html/readability.c Source/html/jsbridge.c Source/html/jsext.c \
  *     Source/core/url.c \
  *     Source/core/constants.c Source/core/logger.c Source/util/strbuf.c \
- *     Source/util/strutil.c Source/util/json.c Source/js/*.c \
- *     -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/js \
- *     -ISource/render -DTARGET_EXTENSION=1 -DPDCS_STRDUP=1 && /tmp/jstest
+ *     Source/util/strutil.c Source/util/json.c Source/js/muJS/*.c \
+ *     Source/js/duktape/duktape.c Source/js/QuickJS/quickjs.c \
+ *     Source/js/QuickJS/libregexp.c Source/js/QuickJS/libunicode.c \
+ *     Source/js/QuickJS/cutils.c Source/js/QuickJS/dtoa.c \
+ *     Source/html/jsbridge_mujs.c Source/html/jsbridge_duktape.c \
+ *     Source/html/jsbridge_duktape.c \
+ *     -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/js/muJS \
+ *     -ISource/js/duktape -ISource/js/QuickJS -ISource/render \
+ *     -lm -DCONFIG_VERSION='"2026-06-04"' -DTARGET_EXTENSION=1 \
+ *     -DPDCS_STRDUP=1 && /tmp/jstest
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,8 +177,11 @@ static const char SUITE_HTML[] =
     "  report(c, name, 'MISS', 'failed'); mark('MISS');"
     "}"
     "try {"
-    "  banner.textContent = 'JavaScript ran. muJS 1.3.10 (ES5 subset).';"
-    "  document.getElementById('engine').textContent = 'muJS 1.3.10';"
+    "  var ua = navigator.userAgent;"
+    "  var isDuk = ua.indexOf('Duktape') >= 0;"
+    "  var isQjs = ua.indexOf('QuickJS') >= 0;"
+    "  banner.textContent = 'JavaScript ran. ' + (isDuk ? 'Duktape 2.7.0 (ES5.1).' : isQjs ? 'QuickJS 2026-06-04 (ES2023).' : 'muJS 1.3.10 (ES5 subset).');"
+    "  document.getElementById('engine').textContent = isDuk ? 'Duktape 2.7.0' : isQjs ? 'QuickJS 2026-06-04' : 'muJS 1.3.10';"
     "  var lang = document.getElementById('langout');"
     "  var dom = document.getElementById('domout');"
     "  T(lang, 'variables + arithmetic', function(){ var a = 6*7; return a === 42; });"
@@ -208,7 +218,7 @@ static const char SUITE_HTML[] =
     "  T(dom, 'parentNode', function(){ var li = document.getElementById('demoList').children[0]; return li.parentNode.tagName === 'UL'; });"
     "  T(dom, 'childElementCount/children', function(){ return document.getElementById('demoList').childElementCount === 3; });"
     "  T(dom, 'location.href (read)', function(){ return typeof location.href === 'string' && location.href.length > 0; });"
-    "  T(dom, 'navigator.userAgent', function(){ return navigator.userAgent.indexOf('muJS') > 0; });"
+    "  T(dom, 'navigator.userAgent', function(){ return navigator.userAgent.indexOf('muJS') > 0 || navigator.userAgent.indexOf('Duktape') > 0 || navigator.userAgent.indexOf('QuickJS') > 0; });"
     "  T(dom, 'document.title', function(){ return document.title === 'JavaScript Test Suite'; });"
     "  P(dom, 'innerHTML (write)', function(){ var d = document.getElementById('domhint'); d.innerHTML = 'html-as-text'; var v = d.textContent === 'html-as-text'; d.textContent = 'ready'; return v; }, 'no markup parsing - text only');"
     "  var link = document.getElementById('clickme');"
@@ -313,6 +323,172 @@ int main(void)
         d->_jsbridge = NULL;
         document_free(d);
         free(d);
+    }
+
+    /* ── 1b. Duktape engine: same suite, same DOM surface, zero muJS ───── */
+    {
+        jsbridge_set_engine(1);
+        DocParseResult *d = calloc(1, sizeof(DocParseResult));
+        int rc = document_parse_ex(SUITE_HTML, "about:javascript",
+                                   MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN_KEEP,
+                                   NULL, d);
+        CHECK(rc == 0, "duktape: document_parse_ex returns 0");
+        CHECK(d->jsRan >= 1, "duktape: the inline script ran");
+        CHECK(d->jsErrors == 0, "duktape: no JS errors");
+        if (d->jsLastError[0])
+        {
+            printf("  (jsLastError: %s)\n", d->jsLastError);
+        }
+        CHECK(find_inline_text(d, "JavaScript ran. Duktape 2.7.0"),
+              "duktape: banner rewritten by the DUKTAPE engine");
+        CHECK(find_inline_text(d, "Duktape 2.7.0") &&
+                  !find_inline_text(d, "muJS 1.3.10"),
+              "duktape: engine field shows Duktape, never muJS (isolation)");
+        CHECK(find_inline_text(d, "created-by-JS"),
+              "duktape: createElement+appendChild produced a rendered <p>");
+        CHECK(find_inline_text(d, "document.write appended this line"),
+              "duktape: document.write content rendered");
+        CHECK(find_inline_text(d, "0 missing") ||
+                  find_inline_text(d, "0 missing."),
+              "duktape: zero MISSING language/DOM checks");
+        if (getenv("JSDEBUG"))
+        {
+            printf("--- duktape suite lines (MISSing checks visible) ---\n");
+            dump_texts(d);
+        }
+        int clicked = 0;
+        if (d->_jsbridge && d->linkCount > 0)
+        {
+            for (int i = 0; i < d->linkCount; i++)
+            {
+                if (d->links[i]->srcNode &&
+                    jsbridge_dispatch_link_click(d->_jsbridge,
+                                                 d->links[i]->srcNode) ==
+                        JSB_CLICK_SUPPRESSED)
+                {
+                    clicked = 1;
+                    break;
+                }
+            }
+        }
+        CHECK(clicked, "duktape: click handler fired + preventDefault");
+        CHECK(document_rewalk(d) == 0 &&
+                  find_inline_text(d, "Handler ran 1 time(s)"),
+              "duktape: mutations survive the rewalk");
+        js_doc_close(d->_jsbridge);
+        d->_jsbridge = NULL;
+        document_free(d);
+        free(d);
+        /* Click-mutation page on Duktape too (listener dispatch + mutation). */
+        DocParseResult *d2 = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(CLICKDOC_HTML, "https://example.com/dukclick",
+                          MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN_KEEP, NULL, d2);
+        int suppressed2 = 0;
+        if (d2->_jsbridge)
+        {
+            for (int i = 0; i < d2->linkCount; i++)
+            {
+                if (d2->links[i]->srcNode &&
+                    jsbridge_dispatch_link_click(d2->_jsbridge,
+                                                 d2->links[i]->srcNode) ==
+                        JSB_CLICK_SUPPRESSED)
+                {
+                    suppressed2 = 1;
+                    break;
+                }
+            }
+        }
+        CHECK(suppressed2, "duktape: clickdoc preventDefault reported");
+        CHECK(document_rewalk(d2) == 0 && find_inline_text(d2, "clicked"),
+              "duktape: clickdoc mutation renders after rewalk");
+        js_doc_close(d2->_jsbridge);
+        d2->_jsbridge = NULL;
+        document_free(d2);
+        free(d2);
+        jsbridge_set_engine(0); /* restore the muJS default for later sections */
+    }
+
+    /* ── 1c. QuickJS engine: same suite, same DOM surface, zero muJS/Duktape ── */
+    {
+        jsbridge_set_engine(2);
+        DocParseResult *d = calloc(1, sizeof(DocParseResult));
+        int rc = document_parse_ex(SUITE_HTML, "about:javascript",
+                                   MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN_KEEP,
+                                   NULL, d);
+        CHECK(rc == 0, "quickjs: document_parse_ex returns 0");
+        CHECK(d->jsRan >= 1, "quickjs: the inline script ran");
+        CHECK(d->jsErrors == 0, "quickjs: no JS errors");
+        if (d->jsLastError[0])
+        {
+            printf("  (jsLastError: %s)\n", d->jsLastError);
+        }
+        CHECK(find_inline_text(d, "JavaScript ran. QuickJS 2026-06-04"),
+              "quickjs: banner rewritten by the QUICKJS engine");
+        CHECK(find_inline_text(d, "QuickJS 2026-06-04") &&
+                  !find_inline_text(d, "muJS 1.3.10"),
+              "quickjs: engine field shows QuickJS, never muJS (isolation)");
+        CHECK(find_inline_text(d, "created-by-JS"),
+              "quickjs: createElement+appendChild produced a rendered <p>");
+        CHECK(find_inline_text(d, "document.write appended this line"),
+              "quickjs: document.write content rendered");
+        CHECK(find_inline_text(d, "0 missing") ||
+                  find_inline_text(d, "0 missing."),
+              "quickjs: zero MISSING language/DOM checks");
+        if (getenv("JSDEBUG"))
+        {
+            printf("--- quickjs suite lines (MISSing checks visible) ---\n");
+            dump_texts(d);
+        }
+        int clicked = 0;
+        if (d->_jsbridge && d->linkCount > 0)
+        {
+            for (int i = 0; i < d->linkCount; i++)
+            {
+                if (d->links[i]->srcNode &&
+                    jsbridge_dispatch_link_click(d->_jsbridge,
+                                                 d->links[i]->srcNode) ==
+                        JSB_CLICK_SUPPRESSED)
+                {
+                    clicked = 1;
+                    break;
+                }
+            }
+        }
+        CHECK(clicked, "quickjs: click handler fired + preventDefault");
+        CHECK(document_rewalk(d) == 0 &&
+                  find_inline_text(d, "Handler ran 1 time(s)"),
+              "quickjs: mutations survive the rewalk");
+        js_doc_close(d->_jsbridge);
+        d->_jsbridge = NULL;
+        document_free(d);
+        free(d);
+        /* Click-mutation page on QuickJS too (listener dispatch + mutation). */
+        DocParseResult *d2 = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(CLICKDOC_HTML, "https://example.com/qjsclick",
+                          MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN_KEEP, NULL, d2);
+        int suppressed2 = 0;
+        if (d2->_jsbridge)
+        {
+            for (int i = 0; i < d2->linkCount; i++)
+            {
+                if (d2->links[i]->srcNode &&
+                    jsbridge_dispatch_link_click(d2->_jsbridge,
+                                                 d2->links[i]->srcNode) ==
+                        JSB_CLICK_SUPPRESSED)
+                {
+                    suppressed2 = 1;
+                    break;
+                }
+            }
+        }
+        CHECK(suppressed2, "quickjs: clickdoc preventDefault reported");
+        CHECK(document_rewalk(d2) == 0 && find_inline_text(d2, "clicked"),
+              "quickjs: clickdoc mutation renders after rewalk");
+        js_doc_close(d2->_jsbridge);
+        d2->_jsbridge = NULL;
+        document_free(d2);
+        free(d2);
+        jsbridge_set_engine(0); /* restore the muJS default for later sections */
     }
 
     /* ── 2. Click-mutation page: suppressed default + rewalk text ──────── */

@@ -7,10 +7,17 @@
  * Build & run:
  *   cc -o /tmp/htmltags tests/htmltags_host_test.c Source/html/tokenizer.c \
  *     Source/html/dom.c Source/html/document.c Source/html/entities.c \
- *     Source/html/readability.c Source/html/jsbridge.c Source/js/*.c \
+ *     Source/html/readability.c Source/html/jsbridge.c \
+ *     Source/html/jsbridge_mujs.c Source/html/jsbridge_duktape.c \
+ *     Source/js/muJS/*.c Source/js/duktape/duktape.c \
+ *     Source/js/QuickJS/quickjs.c Source/js/QuickJS/libregexp.c \
+ *     Source/js/QuickJS/libunicode.c Source/js/QuickJS/cutils.c \
+ *     Source/js/QuickJS/dtoa.c \
  *     Source/core/url.c Source/core/constants.c Source/core/logger.c \
  *     Source/util/strbuf.c Source/util/strutil.c -I. -ISource -ISource/core \
- *     -ISource/util -ISource/html -ISource/js -ISource/render \
+ *     -ISource/util -ISource/html -ISource/js/muJS -ISource/js/duktape \
+ *     -ISource/js/QuickJS \
+ *     -ISource/render -lm \
  *     -I"$PLAYDATE_SDK_PATH/C_API" -DTARGET_EXTENSION=1 -DPDCS_STRDUP=1 \
  *     && /tmp/htmltags
  */

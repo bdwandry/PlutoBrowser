@@ -49,9 +49,10 @@ static Setting g_settings[16] = {
     {"invertCrank", "", 0, 1}, /* false */
     {"showFps", "", 0, 1}, /* false — FPS overlay off by default */
     {"displayFps", "", 30, 1}, /* display refresh target: 30 or 50 fps (Playdate max) */
-    {"jsEnabled", "", 1, 1} /* JavaScript execution (muJS) — On by default */
+    {"jsEnabled", "", 1, 1}, /* JavaScript execution: 0=Off 1=Inline 2=Full */
+    {"jsEngine", "", 0, 1} /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS (only used when jsEnabled != 0) */
 };
-static int g_settingCount = 9;
+static int g_settingCount = 10;
 
 static int g_haveDefaults = 0;
 
@@ -367,6 +368,7 @@ void storage_load(void)
     storage_set_setting_int("invertCrank", 0);
     storage_set_setting_int("displayFps", 30); /* 30 fps default per Playdate SDK */
     storage_set_setting_int("jsEnabled", 1); /* JavaScript execution On by default */
+    storage_set_setting_int("jsEngine", 0); /* muJS engine by default */
 
     char *line = g_loadLine;
     char section[32] = "";
@@ -687,6 +689,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("displayFps", 30); /* 30 fps default per Playdate SDK */
     storage_set_setting_int("jsEnabled", 1); /* JavaScript execution On by default */
+    storage_set_setting_int("jsEngine", 0); /* muJS engine by default */
     storage_load();
     logger_log("STORAGE: init exit");
 }
