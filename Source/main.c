@@ -1718,11 +1718,14 @@ static void apply_display_fps(void)
 }
 
 /* Engine selection lives in the router (jsbridge_set_engine); this helper
- * only names it for logs (0=muJS, 1=Duktape, 2=QuickJS). */
+ * only names it for logs (0=muJS, 1=Duktape, 2=QuickJS, 3=XS). */
 static const char *engine_name(void)
 {
     int e = storage_setting_int("jsEngine");
-    return e == 1 ? "Duktape" : (e == 2 ? "QuickJS" : "muJS");
+    return e == 1   ? "Duktape"
+           : e == 2 ? "QuickJS"
+           : e == 3 ? "XS (Moddable)"
+                    : "muJS";
 }
 
 static void settings_on_change(void)
@@ -2821,6 +2824,23 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
             }
             logger_log("[settings-autotest] row8 after RR: '%s' (want QuickJS)",
                        settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnRight, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RRR: '%s' "
+                       "(want XS (Moddable))",
+                       settings_page_staged_value(8));
+            act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
+            if (act8)
+            {
+                pluto_free(act8);
+                act8 = NULL;
+            }
+            logger_log("[settings-autotest] row8 after RRRL: '%s' (want QuickJS)",
+                       settings_page_staged_value(8));
             act8 = settings_page_handle_input(btnLeft, settings_cleared_cookies);
             if (act8)
             {
@@ -2940,6 +2960,13 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         jsbridge_set_engine(2);
         logger_log("[js-autotest] engine forced: QuickJS");
     #endif
+    #ifdef PLUTO_JS_AUTOTEST_XS
+        /* Same, on the XS (MODDABLE) engine (storage jsEngine=3, live
+         * router=3). close[XS] in the log proves which binaries ran. */
+        storage_set_setting_int("jsEngine", 3);
+        jsbridge_set_engine(3);
+        logger_log("[js-autotest] engine forced: XS (Moddable)");
+    #endif
 #endif /* TARGET_SIMULATOR guard above */
 
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
@@ -2972,6 +2999,13 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         storage_set_setting_int("jsEngine", 2);
         jsbridge_set_engine(2);
         logger_log("[jsclick-autotest] engine forced: QuickJS");
+    #endif
+    #ifdef PLUTO_JS_CLICK_AUTOTEST_XS
+        /* Same, on the XS (MODDABLE) engine (storage jsEngine=3, live
+         * router=3): click listener + dispatch + preventDefault on XS. */
+        storage_set_setting_int("jsEngine", 3);
+        jsbridge_set_engine(3);
+        logger_log("[jsclick-autotest] engine forced: XS (Moddable)");
     #endif
         pendingNavUrlSet = 1;
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");

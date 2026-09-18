@@ -114,12 +114,14 @@ int jsbridge_dispatch_link_click(JsBridge *bridge, const void *anchorNode);
 int jsbridge_listener_count(const JsBridge *bridge);
 
 /* Select the engine for ALL subsequently attached pages: JS_ENGINE_MUJS
- * (default) or JS_ENGINE_DUKTAPE. Any other value selects muJS. Called by
+ * (default), JS_ENGINE_DUKTAPE, JS_ENGINE_QUICKJS or JS_ENGINE_XS. Any
+ * other value selects muJS. Called by
  * main when Settings change; pages never mix engines — the chosen engine
  * runs the page exclusively. (See jsbridge_internal.h for JS_ENGINE_*.) */
 void jsbridge_set_engine(int engine);
 
-/* Current engine selection (JS_ENGINE_MUJS or JS_ENGINE_DUKTAPE) for
+/* Current engine selection (JS_ENGINE_MUJS, JS_ENGINE_DUKTAPE,
+ * JS_ENGINE_QUICKJS or JS_ENGINE_XS) for
  * logging/telemetry — does not affect any page. */
 int jsbridge_current_engine(void);
 

@@ -50,7 +50,7 @@ static Setting g_settings[16] = {
     {"showFps", "", 0, 1}, /* false — FPS overlay off by default */
     {"displayFps", "", 30, 1}, /* display refresh target: 30 or 50 fps (Playdate max) */
     {"jsEnabled", "", 1, 1}, /* JavaScript execution: 0=Off 1=Inline 2=Full */
-    {"jsEngine", "", 0, 1} /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS (only used when jsEnabled != 0) */
+    {"jsEngine", "", 0, 1} /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS 3=XS (only used when jsEnabled != 0) */
 };
 static int g_settingCount = 10;
 
