@@ -16,7 +16,7 @@ endif
 ######
 # IMPORTANT: You must add your source folders to VPATH for make to find them
 ######
-VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js/muJS:Source/js/duktape:Source/js/QuickJS
+VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js/muJS:Source/js/duktape:Source/js/QuickJS:Source/js/xs_moddable/sources:Source/js/xs_moddable/platforms
 
 # List C source files here (grows as phases land)
 SRC = \
@@ -103,6 +103,52 @@ SRC = \
 	Source/js/muJS/utf.c \
 	Source/js/duktape/duktape.c \
 	Source/html/qjs_shim_quickjs.c \
+	Source/html/jsbridge_xs.c \
+	Source/js/xs_moddable/sources/xsAll.c \
+	Source/js/xs_moddable/sources/xsAPI.c \
+	Source/js/xs_moddable/sources/xsArguments.c \
+	Source/js/xs_moddable/sources/xsArray.c \
+	Source/js/xs_moddable/sources/xsAtomics.c \
+	Source/js/xs_moddable/sources/xsBigInt.c \
+	Source/js/xs_moddable/sources/xsBoolean.c \
+	Source/js/xs_moddable/sources/xsCode.c \
+	Source/js/xs_moddable/sources/xsCommon.c \
+	Source/js/xs_moddable/sources/xsDataView.c \
+	Source/js/xs_moddable/sources/xsDate.c \
+	Source/js/xs_moddable/sources/xsDebug.c \
+	Source/js/xs_moddable/sources/xsDefaults.c \
+	Source/js/xs_moddable/sources/xsError.c \
+	Source/js/xs_moddable/sources/xsFunction.c \
+	Source/js/xs_moddable/sources/xsGenerator.c \
+	Source/js/xs_moddable/sources/xsGlobal.c \
+	Source/js/xs_moddable/sources/xsJSON.c \
+	Source/js/xs_moddable/sources/xsLexical.c \
+	Source/js/xs_moddable/sources/xsLockdown.c \
+	Source/js/xs_moddable/sources/xsMapSet.c \
+	Source/js/xs_moddable/sources/xsMarshall.c \
+	Source/js/xs_moddable/sources/xsMath.c \
+	Source/js/xs_moddable/sources/xsMemory.c \
+	Source/js/xs_moddable/sources/xsModule.c \
+	Source/js/xs_moddable/sources/xsNumber.c \
+	Source/js/xs_moddable/sources/xsObject.c \
+	Source/js/xs_moddable/sources/xsPlatforms.c \
+	Source/js/xs_moddable/sources/xsProfile.c \
+	Source/js/xs_moddable/sources/xsPromise.c \
+	Source/js/xs_moddable/sources/xsProperty.c \
+	Source/js/xs_moddable/sources/xsProxy.c \
+	Source/js/xs_moddable/sources/xsRegExp.c \
+	Source/js/xs_moddable/sources/xsRun.c \
+	Source/js/xs_moddable/sources/xsScope.c \
+	Source/js/xs_moddable/sources/xsScript.c \
+	Source/js/xs_moddable/sources/xsSourceMap.c \
+	Source/js/xs_moddable/sources/xsString.c \
+	Source/js/xs_moddable/sources/xsSymbol.c \
+	Source/js/xs_moddable/sources/xsSyntaxical.c \
+	Source/js/xs_moddable/sources/xsTree.c \
+	Source/js/xs_moddable/sources/xsType.c \
+	Source/js/xs_moddable/sources/xsdtoa.c \
+	Source/js/xs_moddable/sources/xsre.c \
+	Source/js/xs_moddable/sources/xsmc.c \
 	Source/html/qjs_shim_libregexp.c \
 	Source/html/qjs_shim_libunicode.c \
 	Source/html/qjs_shim_cutils.c \
@@ -110,7 +156,7 @@ SRC = \
 	Source/html/qjs_pthread_stubs.c
 
 # List all user directories here
-UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS
+UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS Source/js/xs_moddable/sources Source/js/xs_moddable/platforms
 
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
@@ -144,6 +190,18 @@ UDEFS += -Dpthread_mutex_lock=pluto_qjs_pthread_mutex_lock \
          -Dpthread_cond_wait=pluto_qjs_pthread_cond_wait \
          -Dpthread_cond_timedwait=pluto_qjs_pthread_cond_timedwait \
          -Dclock_gettime=pluto_qjs_clock_gettime
+
+# ── XS (Moddable) 9.5.0 (vendored stock under Source/js/xs_moddable — never
+# modified): compiled per-file exactly like upstream's xst tool
+# (xs/makefiles/lin/xst.mk), with Source/html/xs_platform.h routed through
+# XS's OWN platform hook (-DINCLUDE_XSPLATFORM -DXSPLATFORM=...). No engine
+# source is touched: all adaptation (allocator, abort containment, C-stack
+# guard, metering) lives in Source/html/xs_platform.h + jsbridge_xs.c.
+#
+# No threads (no mxUsePOSIXThreads/mxUseGCCAtomics): single-threaded like
+# the device, Atomics.wait throws instead of blocking. mxMetering bounds
+# runaway scripts; mx32bitID matches the 32-bit device target.
+UDEFS += -DINCLUDE_XSPLATFORM '-DXSPLATFORM="xs_platform.h"'
 
 # ── muJS resource limits (device stack safety) ────────────────────────────────
 # The vendored muJS 1.3.10 ships with limits sized for servers, not for a
@@ -228,3 +286,11 @@ CPFLAGS += -fstack-usage
 # re-added per-target so incremental builds stay correct.
 QJS_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage
 build/Source/html/qjs_shim_%.o: CPFLAGS = $(QJS_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+
+# Same treatment for the ~100K-line XS engine (Source/js/xs_moddable): skip
+# the per-file assembly listing emission (10+ min penalty) but keep the .su
+# stack-usage reports for the device stack audits, plus warning noise
+# suppression so real diagnostics stay visible. Dependency tracking is
+# re-added per-target so incremental builds stay correct.
+XS_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage
+build/Source/js/xs_moddable/sources/%.o: CPFLAGS = $(XS_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d

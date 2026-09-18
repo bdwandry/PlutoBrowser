@@ -52,8 +52,10 @@ void bridge_take_error_text(JsBridge *b, const char *msg)
 
 void jsbridge_set_engine(int engine)
 {
-    g_selectedEngine = (engine == JS_ENGINE_DUKTAPE ||
-                        engine == JS_ENGINE_QUICKJS)
+    g_selectedEngine = (engine == JS_ENGINE_MUJS ||
+                        engine == JS_ENGINE_DUKTAPE ||
+                        engine == JS_ENGINE_QUICKJS ||
+                        engine == JS_ENGINE_XS)
                            ? engine
                            : JS_ENGINE_MUJS;
 }
@@ -67,6 +69,7 @@ int jsbridge_current_engine(void)
 extern const JsEngineImpl js_engine_mujs;
 extern const JsEngineImpl js_engine_duktape;
 extern const JsEngineImpl js_engine_quickjs;
+extern const JsEngineImpl js_engine_xs;
 
 const JsEngineImpl *js_bridge_impl(JsBridge *b)
 {
@@ -81,6 +84,10 @@ const JsEngineImpl *js_bridge_impl(JsBridge *b)
     if (b->engine == JS_ENGINE_QUICKJS)
     {
         return &js_engine_quickjs;
+    }
+    if (b->engine == JS_ENGINE_XS)
+    {
+        return &js_engine_xs;
     }
     return &js_engine_mujs;
 }
@@ -457,8 +464,10 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     /* Engine selection comes from Settings ("Javascript Engine"): the
      * choice routes ALL of this page's scripts to exactly one engine (no
      * cross-execution, no fallback). */
-    b->engine = (g_selectedEngine == JS_ENGINE_DUKTAPE ||
-                 g_selectedEngine == JS_ENGINE_QUICKJS)
+    b->engine = (g_selectedEngine == JS_ENGINE_MUJS ||
+                 g_selectedEngine == JS_ENGINE_DUKTAPE ||
+                 g_selectedEngine == JS_ENGINE_QUICKJS ||
+                 g_selectedEngine == JS_ENGINE_XS)
                     ? g_selectedEngine
                     : JS_ENGINE_MUJS;
 
@@ -475,6 +484,11 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
         JFree(b);
         return -1;
     }
+    /* Attach-time proof: name the engine that will run THIS page, taken
+     * from the live vtable (not the Settings value) so a routing mismatch
+     * can never hide again. The matching close log is [js] close[<name>]. */
+    logger_log("[jsbridge] page attach: %s (engine=%d)", impl->name,
+               b->engine);
 
     /* ── Script discovery + execution order (ENGINE-AGNOSTIC) ── */
     const char *starts[JSBRIDGE_MAX_SCRIPTS];

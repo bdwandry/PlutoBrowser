@@ -36,7 +36,7 @@ typedef struct
 
 struct JsBridge
 {
-    int engine; /* 0 = muJS, 1 = Duktape, 2 = QuickJS (JsEngine) */
+    int engine; /* 0 = muJS, 1 = Duktape, 2 = QuickJS, 3 = XS (JsEngine) */
     void *implState; /* engine-private state (js_State* / duk_context* /
                       * QjsState*) */
 
@@ -64,7 +64,8 @@ typedef enum
 {
     JS_ENGINE_MUJS = 0,
     JS_ENGINE_DUKTAPE = 1,
-    JS_ENGINE_QUICKJS = 2
+    JS_ENGINE_QUICKJS = 2,
+    JS_ENGINE_XS = 3
 } JsEngine;
 
 /* Exported from jsbridge.h so main.c/settings can select the engine; the
