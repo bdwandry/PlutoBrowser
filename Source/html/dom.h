@@ -22,6 +22,7 @@
 
 #include <stddef.h>
 
+#include "core/pluto_mem.h"
 #include "html/tokenizer.h"
 
 /* Depth cap for the iterative id lookup (dom_node_by_id). Real-world pages
@@ -43,9 +44,11 @@ typedef struct
     char *value; /* arena-owned decoded string, "", or PLUTO_TOK_ATTR_TRUE */
 } DomAttr;
 
-/* Runtime DOM-node id: assigned lazily by the JS bridge (node_id_init) so
- * script-visible document.getElementById("_dN") targets survive tree edits.
- * 0 = unassigned. Not part of the parsed HTML. */
+/* ── SW8: arena + paging support (implemented in dom.c / pluto_page.c) ──
+ * The paging module allocates restored strings from the doc's OWN arena so
+ * dom_free_result's wholesale arena free stays exact; the facade below
+ * makes the internal allocator callable from Source/core/pluto_page.c. */
+
 struct DomNode
 {
     DomKind kind;
@@ -59,6 +62,11 @@ struct DomNode
     int childCap;
     /* text */
     char *text; /* arena-owned */
+    /* SW8 disk-backed DOM paging: non-zero when this node is a STUB whose
+     * subtree lives in the persistent store under this key. Materialized
+     * transparently by dom_touch() (called at the bridge/walker touch
+     * points). 0 = fully RAM-resident. */
+    unsigned long pagedKey;
 };
 
 typedef struct
@@ -72,7 +80,13 @@ typedef struct
     int skippedDepth;
     void *_arena; /* internal string arena */
     int nextNodeId; /* runtime node-id counter (jsbridge/dom mutation) */
+    /* SW8 paging: stub shells left by dom_page_out stay LINKED in the live
+     * tree (empty leaves carrying pagedKey), so the normal tree free pass
+     * releases them — no separate bookkeeping needed. */
 } DomResult;
+
+/* Duplicate (s,len) into the arena, NUL-terminated. NULL on exhaustion. */
+char *dom_arena_dup(DomResult *dom, const char *s, int len);
 
 /* Build a DOM tree from tokenized input (tokenizer_tokenize output).
  * Returns 0 ok, -1 alloc failure. Consume with dom_free_result. */
@@ -116,6 +130,13 @@ int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child);
  * Returns 0 ok, -1 not found. */
 int dom_remove_child(DomNode *parent, DomNode *child);
 
+/* Insert `child` into `parent`'s children BEFORE existing child `ref`.
+ * ref == NULL appends (insertBefore's null-ref semantics). If `child` is
+ * already a child of `parent` it is MOVED (removed then re-inserted),
+ * matching DOM insertBefore. Returns 0 ok, -1 bad args / ref not a child. */
+int dom_insert_before(DomResult *dom, DomNode *parent, DomNode *child,
+                      const DomNode *ref);
+
 /* Replace all of `el`'s text-node children with one text node (child
  * elements are kept — innerText semantics keep sub-element markup). Use
  * dom_set_text_all to also drop child elements. Returns 0 ok, -1 alloc. */
@@ -134,7 +155,65 @@ DomNode *dom_first_element_child(const DomNode *node);
 /* Next element sibling (children after `node` in its parent). */
 DomNode *dom_next_element_sibling(const DomNode *node);
 
+/* ── SW5: class attribute as a token list (classList, O4) ─────────────────
+ * All ops are 0 ok / -1 on alloc failure (or bad args). Mutations rewrite
+ * the element's class attribute through the arena (same ownership as any
+ * attr value); a class list that becomes empty removes the attribute
+ * (browsers keep class="" on set; removal matches the CSS matcher's
+ * NULL-class fast path). Token compare is case-sensitive (CSS semantics). */
+int dom_class_has(const DomNode *el, const char *token);
+int dom_class_add(DomResult *dom, DomNode *el, const char *token);
+int dom_class_remove(DomResult *dom, DomNode *el, const char *token);
+/* 1 added, 0 removed, -1 alloc failure. */
+int dom_class_toggle(DomResult *dom, DomNode *el, const char *token);
+
+/* ── SW5: querySelector machinery (O3) ────────────────────────────────────
+ * Selector strings come from the JS caller; parsing (compound grammar:
+ * type/.class/#id/*, whitespace = descendant) is css_parse_selector with a
+ * CALLER-PROVIDED scratch buffer (the parsed compounds point into it — one
+ * 256B buffer per call site, stack-safe on device). Matching walks the
+ * subtree under `scope` (inclusive) iteratively; elements only. Both take
+ * an optional out-callback: qs_all invokes it per match (with the caller's
+ * usize context) and returns the total match count (a callback error stops
+ * the walk early); qs_first stops at the first hit. Returns -1 for an
+ * unusable selector (callers surface null, never throw). */
+#define DOM_QS_SCRATCH 256
+int dom_query_selector_all(const DomResult *dom, const DomNode *scope,
+                           const char *sel, char *scratch, size_t scratchSize,
+                           int (*emit)(DomNode *el, void *ud), void *ud);
+DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
+                                  const char *sel, char *scratch,
+                                  size_t scratchSize);
+
+
+
 /* Release all storage owned by a DomResult (tree, attrs, arena). */
 void dom_free_result(DomResult *res);
+
+/* ── SW8: disk-backed DOM paging (implemented in core/pluto_page.c) ──────── */
+
+/* Serialize the subtree under `root` (root included) into the persistent
+ * spill store under key FNV-1a(baseUrl "/" rootId), stamp the stub marker
+ * on `root`, and free the subtree EXCEPT root (root stays linked in its
+ * parent's children[] carrying the marker). Returns 0 ok, -1 failure (the
+ * tree is untouched — page-out is all-or-nothing). */
+int dom_page_out(DomResult *dom, DomNode *root, const char *baseUrl);
+
+/* Materialize a stub node's subtree from the store: bulk-read once, decode
+ * into the doc's arena, graft the restored children INTO the stub node
+ * (in-place: node identity — pointer, nodeId, parent — is preserved, so
+ * callers may hold node pointers across a touch). The store entry itself
+ * is left in place: the spill family has no per-key delete; the quota
+ * sweep (or invalidate_all on navigation) reclaims it, like SW4's
+ * bytecode cache. No-op when the node is RAM-resident. On failure the
+ * stub survives with its marker cleared (degrades to an empty leaf). */
+void dom_touch(DomResult *dom, DomNode *node);
+
+/* 1 when the node is a paged-out stub. */
+int dom_is_paged(const DomNode *node);
+
+/* Free a partially-built subtree (pluto_page.c internal failure path;
+ * exposed for tests). Strings live in the doc's arena — they die with it. */
+void dom_page_free_subtree(DomNode *n);
 
 #endif /* PLUTO_DOM_H */

@@ -302,6 +302,19 @@ typedef struct
     struct JsExtScript_ *extScripts; /* heap array; body owned here */
     int extScriptCount;              /* unique src= URLs stored */
     void *_extArena;                 /* jsext scratch arena (document.c frees) */
+    /* <noscript> handling policy for this page (parsed and every rewalk):
+     * 0 = render the fallback content (JavaScript setting Off, reader mode);
+     * 1 = suppress it (an engine ran this page — browser parity: the
+     * scripting flag is on, so <noscript> is invisible). Set by
+     * document_parse_ex after the script policy is known; document_rewalk
+     * copies it onto the walker (the browser never sets it by hand). */
+    int suppressNoscript;
+    /* ── CSS engine (html/css.h; roadmap #2) ──
+     * _css owns the parsed <style> rules for this page; heap-allocated,
+     * freed by document_free. NULL when the page has no stylesheets.
+     * Survives across document_rewalk (rules are re-applied to JS-mutated
+     * DOMs; sheet text points into rawHtml which lives as long as the doc). */
+    void *_css; /* opaque CssEngine* (html/css.h) */
     /* Walker output */
     DocBlock **blocks; /* heap array */
     int blockCount;
@@ -377,11 +390,45 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
                       const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
                       struct JsBridge **outBridge, DocParseResult *out);
 
+/* True when the block text matches an SPA no-JS warning that desktop
+ * browsers hide when scripting is enabled ("You need to enable JavaScript
+ * to run this app." and its React/webpack variants). Case/space/punct
+ * insensitive, "JavaScript" optional, ≤96 chars. Used to suppress
+ * <noscript> fallback text for pages that ran an engine
+ * (DocParseResult.suppressNoscript). Never touches non-noscript content. */
+int doc_is_noscript_warning(const char *text);
+
 /* Re-run ONLY the element walker over the (possibly JS-mutated) live DOM
  * kept by doc->_dom: blocks/links are rebuilt without re-parsing HTML or
  * re-running scripts. Layout must be cleared first (it borrows strings).
  * Returns 0 ok, -1 alloc failure. */
 int document_rewalk(DocParseResult *doc);
+
+/* ── SW6 snapshot support: the walker's string/object arena ───────────────
+ * pluto_snap allocates restored strings/blocks from a fresh arena with
+ * these calls, and document_free frees the arena exactly as it does for a
+ * parsed doc (restored docs mirror the walker's memory model: arena
+ * structs+strings, heap pointer arrays). The struct is defined here (not
+ * opaque) so the snapshot module can allocate one on its own; layout of
+ * the chunk list is otherwise private to document.c. */
+typedef struct DocChunk DocChunk;
+
+typedef struct DocArena
+{
+    struct DocChunk *head;
+} DocArena;
+
+/* Allocate n bytes (8-byte aligned) from the arena. NULL on OOM. */
+void *doc_arena_alloc(DocArena *a, size_t n);
+
+/* Free every chunk of the arena (does not free the DocArena itself). */
+void doc_arena_free_all(DocArena *a);
+
+/* Allocate a zero-initialized (n+1)-byte arena string. NULL on OOM. */
+char *doc_arena_alloc_str(DocArena *a, size_t n);
+
+/* Duplicate str into the arena ("") never NULL. NULL on OOM. */
+char *doc_arena_strdup(DocArena *a, const char *str);
 
 void document_free(DocParseResult *doc);
 

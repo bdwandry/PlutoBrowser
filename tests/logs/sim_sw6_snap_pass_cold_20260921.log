@@ -1,0 +1,40 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[19:21:10 #1] === PlutoBrowser boot ===
+[19:21:10 #2] eventHandler: kEventInit, osversion=30101
+[19:21:10 #3] STORAGE: init enter
+[19:21:10 #4] STORAGE: load enter
+[19:21:10 #5] STORAGE: file opened, parsing
+[19:21:10 #6] STORAGE: init exit
+[19:21:10 #7] [jsbridge] boot engine: XS (Moddable)
+[19:21:10 #8] [snap] invalidated all snapshots
+[19:21:10 #9] [snap-autotest] store invalidated for a cold run
+[19:21:10 #10] KB new: entering
+[19:21:10 #11] KB new: allocated
+[19:21:10 #12] KB load: font...
+[19:21:10 #13] KB load: font ok h=36
+[19:21:10 #14] KB load: menu-space ok
+[19:21:10 #15] KB load: menu-ok ok
+[19:21:10 #16] KB load: menu-del ok
+[19:21:10 #17] KB load: menu-cancel ok
+[19:21:10 #18] KB new: font+images loaded
+[19:21:10 #19] DISPLAY: refresh rate set to 30 fps
+[19:21:10 #20] navigate_to: about:acidtest
+[19:21:10 #21] state -> 1 (frame 1)
+[19:21:10 #22] updateFrame: first frame executed
+[19:21:10 #23] [jsbridge] page attach: XS (Moddable) (engine=3)
+[19:21:10 #24] [js] live page: listeners=0 ran=0 errs=0
+[19:21:10 #25] [snap] saved url=about:acidtest blocks=93 links=3 bytes=33616
+[19:21:10 #26] state -> 2 (frame 5)
+[19:21:11 #27] [snap-autotest] first render live (blocks=93), navigating home
+[19:21:11 #28] navigate_to: about:home
+[19:21:11 #29] state -> 0 (frame 32)
+[19:21:12 #30] [snap-autotest] home reached, navigating back
+[19:21:12 #31] navigate_to: about:acidtest
+[19:21:12 #32] [snap] hit url=about:acidtest blocks=93 links=3
+[19:21:12 #33] [snap] fast path: about:acidtest
+[19:21:12 #34] [js] close[XS (Moddable)]: ran=0 errs=0 listeners=0 timers=0 budgetLeft=1536
+[19:21:12 #35] state -> 2 (frame 62)
+[19:21:13 #36] [snap-autotest] PASS: revisit served from snapshot (hits=1, blocks=93, title=HTML Renderer Test Suite)
+[19:21:21 #37] updateFrame: heartbeat frame=300 fps=27 overlay=0 stackPeak=0B/61800B heap=910KB peak=995KB bigAlloc=384KB refusals=0
+[19:21:32 #38] updateFrame: heartbeat frame=600 fps=28 overlay=0 stackPeak=0B/61800B heap=910KB peak=995KB bigAlloc=384KB refusals=0

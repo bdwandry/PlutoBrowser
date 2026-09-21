@@ -62,12 +62,22 @@ typedef int txSocket;
 
 /*
  * ── 2. memory functions ─────────────────────────────────────────────
- * Default is fine: the stock platform layer maps c_malloc/c_calloc/
- * c_realloc/c_free to libc malloc/calloc/realloc/free, which the Playdate
- * SDK's pdex toolchain routes through the SDK heap on device. XS grows
- * its heap in whole malloc'd chunks (fxAllocateChunks), so the SDK's
- * realloc-realloc plumbing the other engines use is not required.
+ * XS grows its heap in whole malloc'd chunks (fxAllocateChunks) via the
+ * c_malloc/c_realloc/c_free macros below (stock xsPlatform.h maps them to
+ * libc when not overridden). We override them HERE — in OUR platform
+ * header, not the engine — to route XS chunk allocations through the same
+ * SW1 telemetry funnel as everything else (core/pluto_mem.c). The engine
+ * source is untouched; only the macro mapping changes.
  */
+void *pluto_mem_realloc(void *ptr, size_t n);
+#define c_malloc(sz)   pluto_mem_realloc(NULL, (sz))
+/* calloc must ZERO: use a dedicated zeroing helper (realloc does not). */
+void *pluto_mem_calloc(size_t n, size_t sz);
+#define c_calloc(n, sz) pluto_mem_calloc((n), (sz))
+#define c_realloc(p, sz) pluto_mem_realloc((p), (sz))
+#define c_free(p)      pluto_mem_realloc((p), 0)
+#define c_free_uint32(p) pluto_mem_realloc((p), 0)
+#define c_malloc_uint32(sz) pluto_mem_realloc(NULL, (sz))
 
 /*
  * ── 3. no threads, no atomics, no shared chunks ─────────────────────

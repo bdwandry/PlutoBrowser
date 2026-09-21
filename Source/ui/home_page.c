@@ -39,6 +39,7 @@
 #include "core/logger.h"
 #include "render/style.h"
 #include "pd_api.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
@@ -495,7 +496,7 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
                 pages[ti].name)
             {
                 size_t n = strlen(pages[ti].name) + 1;
-                char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+                char *out = (char *)pluto_mem_realloc(NULL, n);
                 if (out)
                 {
                     memcpy(out, pages[ti].name, n);
@@ -508,7 +509,7 @@ char *home_page_handle_input(unsigned int pushed, void (*settingsCallback)(void)
         if (bm)
         {
             size_t n = strlen(bm->url) + 1;
-            char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+            char *out = (char *)pluto_mem_realloc(NULL, n);
             if (out)
             {
                 memcpy(out, bm->url, n);

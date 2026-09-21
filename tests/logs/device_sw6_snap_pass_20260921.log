@@ -1,0 +1,43 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[19:25:43 #1] === PlutoBrowser boot ===
+[19:25:43 #2] eventHandler: kEventInit, osversion=30101
+[19:25:43 #3] STORAGE: init enter
+[19:25:43 #4] STORAGE: load enter
+[19:25:43 #5] STORAGE: file opened, parsing
+[19:25:43 #6] STORAGE: init exit
+[19:25:43 #7] [jsbridge] boot engine: muJS
+[19:25:43 #8] [snap] invalidated all snapshots
+[19:25:43 #9] [snap-autotest] store invalidated for a cold run
+[19:25:43 #10] KB new: entering
+[19:25:43 #11] KB new: allocated
+[19:25:43 #12] KB load: font...
+[19:25:43 #13] KB load: font ok h=36
+[19:25:43 #14] KB load: menu-space ok
+[19:25:43 #15] KB load: menu-ok ok
+[19:25:43 #16] KB load: menu-del ok
+[19:25:43 #17] KB load: menu-cancel ok
+[19:25:43 #18] KB new: font+images loaded
+[19:25:43 #19] DISPLAY: refresh rate set to 30 fps
+[19:25:43 #20] navigate_to: about:acidtest
+[19:25:43 #21] state -> 1 (frame 1)
+[19:25:43 #22] updateFrame: first frame executed
+[19:25:43 #23] [jsbridge] page attach: muJS (engine=0)
+[19:25:43 #24] [js] live page: listeners=0 ran=0 errs=0
+[19:25:43 #25] [snap] saved url=about:acidtest blocks=93 links=3 bytes=33616
+[19:25:43 #26] state -> 2 (frame 4)
+[19:25:44 #27] [snap-autotest] first render live (blocks=93), navigating home
+[19:25:44 #28] navigate_to: about:home
+[19:25:44 #29] state -> 0 (frame 32)
+[19:25:45 #30] [snap-autotest] home reached, navigating back
+[19:25:45 #31] navigate_to: about:acidtest
+[19:25:45 #32] [snap] hit url=about:acidtest blocks=93 links=3
+[19:25:45 #33] [snap] fast path: about:acidtest
+[19:25:45 #34] [js] close[muJS]: ran=0 errs=0 listeners=0 timers=0 budgetLeft=1536
+[19:25:46 #35] state -> 2 (frame 62)
+[19:25:46 #36] [snap-autotest] PASS: revisit served from snapshot (hits=1, blocks=93, title=HTML Renderer Test Suite)
+[19:25:53 #37] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=2848B/61800B heap=177KB peak=326KB bigAlloc=32KB refusals=0
+[19:26:03 #38] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=2848B/61800B heap=177KB peak=326KB bigAlloc=32KB refusals=0
+[19:26:13 #39] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=2848B/61800B heap=177KB peak=326KB bigAlloc=32KB refusals=0
+[19:26:23 #40] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=2848B/61800B heap=177KB peak=326KB bigAlloc=32KB refusals=0
+[19:26:32 #41] eventHandler: kEventTerminate, frames=1467

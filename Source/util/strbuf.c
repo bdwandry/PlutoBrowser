@@ -9,14 +9,15 @@
 
 #include "pd_api.h"
 #include "util/strbuf.h"
+#include "core/pluto_mem.h"
 
 /* Accessor implemented in main.c; lets this module use the SDK allocator. */
 extern PlaydateAPI *pluto_pd(void);
 
 /* Use the SDK allocator so memory is accounted by the Playdate runtime. */
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_REALLOC(p, n) pluto_pd()->system->realloc((p), (n))
-#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_REALLOC(p, n) pluto_mem_realloc((p), (n))
+#define PLUTO_FREE(p) pluto_mem_realloc((p), 0)
 
 int strbuf_init(StrBuf *sb)
 {

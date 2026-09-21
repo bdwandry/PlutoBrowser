@@ -31,11 +31,12 @@
 #include "pd_api.h"
 #include "core/logger.h"
 #include "html/entities.h"
+#include "../core/pluto_mem.h"
 
 PlaydateAPI *pluto_pd(void);
 void pluto_free(void *p);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_mem_realloc((p), 0)
 
 const char PLUTO_TOK_ATTR_TRUE[1] = { '\x01' };
 

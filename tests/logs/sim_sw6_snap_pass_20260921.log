@@ -1,0 +1,41 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[18:34:43 #1] === PlutoBrowser boot ===
+[18:34:43 #2] eventHandler: kEventInit, osversion=30101
+[18:34:43 #3] STORAGE: init enter
+[18:34:43 #4] STORAGE: load enter
+[18:34:43 #5] STORAGE: file opened, parsing
+[18:34:43 #6] STORAGE: init exit
+[18:34:43 #7] [jsbridge] boot engine: XS (Moddable)
+[18:34:43 #8] KB new: entering
+[18:34:43 #9] KB new: allocated
+[18:34:43 #10] KB load: font...
+[18:34:43 #11] KB load: font ok h=36
+[18:34:43 #12] KB load: menu-space ok
+[18:34:43 #13] KB load: menu-ok ok
+[18:34:43 #14] KB load: menu-del ok
+[18:34:43 #15] KB load: menu-cancel ok
+[18:34:43 #16] KB new: font+images loaded
+[18:34:43 #17] DISPLAY: refresh rate set to 30 fps
+[18:34:43 #18] navigate_to: about:acidtest
+[18:34:43 #19] state -> 1 (frame 1)
+[18:34:43 #20] updateFrame: first frame executed
+[18:34:43 #21] [jsbridge] page attach: XS (Moddable) (engine=3)
+[18:34:43 #22] [js] live page: listeners=0 ran=0 errs=0
+[18:34:43 #23] [snap] saved url=about:acidtest blocks=93 links=3 bytes=33616
+[18:34:43 #24] state -> 2 (frame 5)
+[18:34:44 #25] [snap-autotest] first render live (blocks=93), navigating home
+[18:34:44 #26] navigate_to: about:home
+[18:34:44 #27] state -> 0 (frame 32)
+[18:34:45 #28] [snap-autotest] home reached, navigating back
+[18:34:45 #29] navigate_to: about:acidtest
+[18:34:45 #30] [snap] hit url=about:acidtest blocks=93 links=3
+[18:34:45 #31] [snap] fast path: about:acidtest
+[18:34:45 #32] [js] close[XS (Moddable)]: ran=0 errs=0 listeners=0 timers=0 budgetLeft=1536
+[18:34:45 #33] state -> 2 (frame 62)
+[18:34:46 #34] [snap-autotest] PASS: revisit served from snapshot (hits=1, blocks=93, title=HTML Renderer Test Suite)
+[18:34:53 #35] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B heap=488KB peak=963KB bigAlloc=384KB refusals=0
+[18:35:03 #36] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B heap=488KB peak=963KB bigAlloc=384KB refusals=0
+[18:35:13 #37] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B heap=488KB peak=963KB bigAlloc=384KB refusals=0
+[18:35:23 #38] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=0B/61800B heap=488KB peak=963KB bigAlloc=384KB refusals=0
+[18:35:33 #39] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=0B/61800B heap=488KB peak=963KB bigAlloc=384KB refusals=0

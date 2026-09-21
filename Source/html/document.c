@@ -34,6 +34,7 @@
  * Lua — and every helper parses attrs["style"] internally via parseStyle.
  */
 #include "core/logger.h"
+#include "html/css.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,11 +51,13 @@
 #include "core/constants.h"
 #include "core/url.h"
 #include "util/strbuf.h"
+#include "../core/pluto_mem.h"
+#include "../core/pluto_spill.h"
 
 extern PlaydateAPI *pluto_pd(void);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_REALLOC(p, n) pluto_pd()->system->realloc((p), (n))
-#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_REALLOC(p, n) pluto_mem_realloc((p), (n))
+#define PLUTO_FREE(p) pluto_mem_realloc((p), 0)
 
 /* Lua string.lower: ASCII only. */
 static char lua_lower(char c)
@@ -599,6 +602,123 @@ int doc_valid_href(const char *raw)
     return 1;
 }
 
+/* ── SPA no-JS warning matcher (noscript suppression aid) ────────────────────
+ * React/webpack boot pages render <noscript>You need to enable JavaScript
+ * to run this app.</noscript>-style fallbacks. Desktop browsers with the
+ * scripting flag ON never show that text; our suppressNoscript gate hides
+ * the whole <noscript> subtree on such pages. This matcher is the safety net
+ * for the two paths where an SPA warning could still reach the screen from
+ * OUTSIDE a <noscript> element (e.g. created by document.write):
+ *   1. main.c's DOM_SHOW wrapper (createElement/appendChild) — gated here.
+ *   2. Future debug tooling that wants to classify the text.
+ * It NEVER gates arbitrary page text: the match window is 96 chars and the
+ * pattern is the full warning shape (not a bare substring).
+ * Normalization: whitespace collapsed, alphanumerics only, case-folded:
+ *   "You need to enable JavaScript to run this app." → "youneedtoenable…"
+ *   "You need to enable JavaScript to run this app. 1" → prefix + "1" → MATCH
+ *   "Please enable JavaScript to continue" → NOT matched (no run-this-app tail)
+ */
+/* Tail check: buf must end with `tail`, optionally followed by a short run
+ * of digits (webpack emits "You need to enable JavaScript to run this
+ * app.1" with a chunk counter when code-splitting). */
+static int ns_tail_match(const char *buf, size_t L, const char *tail,
+                         size_t tlen)
+{
+    if (L < tlen)
+    {
+        return 0;
+    }
+    if (strcmp(buf + L - tlen, tail) == 0)
+    {
+        return 1;
+    }
+    size_t k = 0;
+    while (k < L && buf[L - 1 - k] >= '0' && buf[L - 1 - k] <= '9')
+    {
+        k++;
+    }
+    if (k == 0 || L - k < tlen)
+    {
+        return 0;
+    }
+    return strncmp(buf + L - k - tlen, tail, tlen) == 0;
+}
+
+int doc_is_noscript_warning(const char *text)
+{
+    char buf[97 + 8]; /* 96 content chars + head byte + slack */
+    int n = 0;
+    int alpha = 0, digit = 0, other = 0;
+    const char *p = text ? text : "";
+
+    for (; *p; p++)
+    {
+        char c = *p;
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f')
+        {
+            continue; /* collapse all runs */
+        }
+        if (c >= '0' && c <= '9')
+        {
+            if (n + 1 >= (int)sizeof(buf))
+            {
+                return 0; /* over-length window: never match */
+            }
+            buf[n++] = c;
+            digit++;
+        }
+        else if ((c >= 'a' && c <= 'z'))
+        {
+            if (n + 1 >= (int)sizeof(buf))
+            {
+                return 0;
+            }
+            buf[n++] = c;
+            alpha++;
+        }
+        else if (c >= 'A' && c <= 'Z')
+        {
+            if (n + 1 >= (int)sizeof(buf))
+            {
+                return 0;
+            }
+            buf[n++] = (char)(c + 32);
+            alpha++;
+        }
+        else
+        {
+            other++; /* punctuation dropped; still bounded by length gate */
+        }
+        if (alpha + digit + other > 96)
+        {
+            return 0;
+        }
+    }
+    buf[n] = '\0';
+
+    /* Normalized shape: ["you need"|"please"] "to enable" … "to run this
+     * app" ["properly"] [0-9 chunk counter]. The "JavaScript" word itself is
+     * OPTIONAL (React drops it in minified builds; webpack keeps it) — the
+     * NEED/ENABLE head plus the RUN-THIS-APP tail is the fingerprint. */
+    static const char head1[] = "youneedtoenable";
+    static const char head2[] = "pleaseenable";
+    static const char head3[] = "needtoenable";
+    static const char tail1[] = "torunthisapp";
+    static const char tail2[] = "torunthisappproperly";
+    size_t L = (size_t)n;
+    size_t t1 = sizeof(tail1) - 1;
+    size_t t2 = sizeof(tail2) - 1;
+    int headOk = (strncmp(buf, head1, sizeof(head1) - 1) == 0) ||
+                 (strncmp(buf, head2, sizeof(head2) - 1) == 0) ||
+                 (strncmp(buf, head3, sizeof(head3) - 1) == 0);
+    if (!headOk)
+    {
+        return 0;
+    }
+    return ns_tail_match(buf, L, tail1, t1) ||
+           ns_tail_match(buf, L, tail2, t2);
+}
+
 /* ── serializeSvgNode ───────────────────────────────────────────────────────── */
 
 static int svg_append_escaped_attr(StrBuf *sb, const char *v)
@@ -709,14 +829,13 @@ typedef struct DocChunk
     size_t cap;
 } DocChunk;
 
-typedef struct
-{
-    DocChunk *head;
-} DocArena;
+/* DocArena struct itself lives in document.h (SW6: snapshot restore path
+ * allocates one; document.c owns the chunk-list layout). */
 
 typedef struct Walker Walker;
 
-static void *doc_arena_alloc(DocArena *a, size_t n)
+/* ── SW6: arena helpers exposed via document.h (snapshot restore path) ──── */
+void *doc_arena_alloc(DocArena *a, size_t n)
 {
     n = (n + 7u) & ~(size_t)7u;
     if (a->head && a->head->used + n <= a->head->cap)
@@ -738,7 +857,7 @@ static void *doc_arena_alloc(DocArena *a, size_t n)
     return (char *)ch + sizeof(DocChunk);
 }
 
-static void doc_arena_free_all(DocArena *a)
+void doc_arena_free_all(DocArena *a)
 {
     DocChunk *ch = a->head;
     while (ch)
@@ -858,6 +977,14 @@ typedef struct FigureCtx
     DocBlock *image;
 } FigureCtx;
 
+/* CSS integration (roadmap #2): five of the engine's computed bits ARE the
+ * walker's inline flags numerically — static-assert the contract. */
+_Static_assert(CSS_F_BOLD == DOC_INF_BOLD, "css/doc flag ABI");
+_Static_assert(CSS_F_ITALIC == DOC_INF_ITALIC, "css/doc flag ABI");
+_Static_assert(CSS_F_UNDERLINE == DOC_INF_UNDERLINE, "css/doc flag ABI");
+_Static_assert(CSS_F_STRIKE == DOC_INF_STRIKE, "css/doc flag ABI");
+_Static_assert(CSS_F_INVERT == DOC_INF_INVERT, "css/doc flag ABI");
+
 /* Exit-frame actions (post-children work the Lua handler does inline). */
 enum
 {
@@ -878,7 +1005,8 @@ enum
     WX_DIALOG_END,   /* dialog: box_close */
     WX_SPAN_END,     /* span/font/time/data/…: fallback + restore style */
     WX_FIGCAP_END,   /* figcaption: restore figureCaptionDone */
-    WX_INERT_END     /* inert attribute: restore state.inert after the subtree */
+    WX_INERT_END,    /* inert attribute: restore state.inert after the subtree */
+    WX_CSS_END       /* CSS-inherited inline flags: restore pre-CSS state */
 };
 
 typedef struct ExitCtx
@@ -902,6 +1030,7 @@ typedef struct ExitCtx
     char *formAction;
     char *formMethod;
     int inertSaved; /* inert attribute: state.inert at entry */
+    unsigned cssFlags; /* CSS-inherited inline bits added at entry (restore) */
 } ExitCtx;
 
 typedef struct WFrame
@@ -928,6 +1057,14 @@ struct Walker
     char *currentHref; /* arena */
     int currentAnchorIndex;
     StrBuf linkText;
+
+    /* <noscript> policy for THIS walk (browser parity): 1 = skip noscript
+     * subtrees entirely (an engine ran the page — the scripting flag is on
+     * and desktop browsers hide the fallback content); 0 = render it (the
+     * historical JavaScript-Off behavior). Copied from
+     * DocParseResult.suppressNoscript by document_parse_ex and
+     * document_rewalk so every re-render keeps the same policy. */
+    int suppressNoscript;
 
     /* pre / textarea / math */
     int inPre;
@@ -984,6 +1121,33 @@ static char *doc_arena_str(Walker *w, const char *s)
         return NULL;
     }
     memcpy(p, s, n + 1);
+    return p;
+}
+
+/* ── SW6 (document.h): arena string helpers for the snapshot restore path ── */
+char *doc_arena_alloc_str(DocArena *a, size_t n)
+{
+    char *p = (char *)doc_arena_alloc(a, n);
+    if (p)
+    {
+        memset(p, 0, n);
+    }
+    return p;
+}
+
+char *doc_arena_strdup(DocArena *a, const char *str)
+{
+    if (!str)
+    {
+        str = "";
+    }
+    size_t n = strlen(str);
+    char *p = (char *)doc_arena_alloc(a, n + 1);
+    if (!p)
+    {
+        return NULL;
+    }
+    memcpy(p, str, n + 1);
     return p;
 }
 
@@ -1981,6 +2145,96 @@ static const DomNode *first_child_tag(const DomNode *node, const char *tag)
 
 /* ── handleElement — the full dispatch (document.lua ~530–1395) ───────────── */
 
+/* ── CSS engine integration (roadmap #2) ───────────────────────────────
+ * The per-page CssEngine lives on doc->_css (parsed once in
+ * document_parse_ex, survives rewals). The walker consults it at every
+ * element: block-level effects land on the block, inline flags OR into
+ * w->flags, and display:none suppresses the subtree (checked in walk_node). */
+
+/* nth-ancestor DOM adapter for css.c descendant matching. i=0 → parent.
+ * Element ancestors only (text nodes can't match selectors anyway). */
+static const void *css_dom_ancestor(const void *node, int i,
+                                    const char **tagLower,
+                                    const char **classAttr,
+                                    const char **idAttr)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n)
+    {
+        return NULL;
+    }
+    for (int d = 0; d <= i; d++)
+    {
+        n = n->parent;
+        if (!n || n->kind != DOM_ELEMENT)
+        {
+            if (!n)
+            {
+                return NULL;
+            }
+            d--; /* non-element ancestor: don't count it */
+        }
+    }
+    *tagLower = n->tag ? n->tag : "";
+    const DomAttr *ca = NULL;
+    const DomAttr *ia = NULL;
+    for (int k = 0; k < n->attrCount; k++)
+    {
+        if (!ca && strcmp(n->attrs[k].key, "class") == 0)
+        {
+            ca = &n->attrs[k];
+        }
+        else if (!ia && strcmp(n->attrs[k].key, "id") == 0)
+        {
+            ia = &n->attrs[k];
+        }
+    }
+    *classAttr = ca ? ca->value : NULL;
+    *idAttr = ia ? ia->value : NULL;
+    return n;
+}
+
+/* Run CSS resolution for one element; returns CSS_F_* bits (0 when the
+ * page has no engine). */
+static unsigned walk_css_compute(Walker *w, const DomNode *node,
+                                 const char *tagLower, AttrList a)
+{
+    if (!w->doc || !w->doc->_css)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    for (int k = 0; k < a.count; k++)
+    {
+        if (!classAttr && strcmp(a.items[k].key, "class") == 0)
+        {
+            classAttr = a.items[k].value;
+        }
+        else if (!idAttr && strcmp(a.items[k].key, "id") == 0)
+        {
+            idAttr = a.items[k].value;
+        }
+    }
+    CssDom dom;
+    dom.ancestor = css_dom_ancestor;
+    return css_compute((CssEngine *)w->doc->_css, tagLower, classAttr,
+                       idAttr, &dom, node);
+}
+
+/* Apply computed CSS to the walker state at element entry. The caller
+ * (walk_node) has already pushed the WX_CSS_END exit and snapshotted the
+ * pre-CSS state into the exit ctx, so this only ORs the inherited mask
+ * (numerically DOC_INF_* bits) into the live flags. */
+static void walk_css_apply(Walker *w, unsigned css)
+{
+    unsigned inherited = css & CSS_INHERIT_MASK;
+    if (inherited)
+    {
+        w->flags |= inherited;
+    }
+}
+
 static void handle_element(Walker *w, const DomNode *node)
 {
     const char *tag = node->tag ? node->tag : "";
@@ -2212,6 +2466,15 @@ static void handle_element(Walker *w, const DomNode *node)
              strcmp(tag, "noframes") == 0 || strcmp(tag, "slot") == 0 ||
              strcmp(tag, "annotation-xml") == 0)
     {
+        if (strcmp(tag, "noscript") == 0 && w->suppressNoscript)
+        {
+            /* Scripting is enabled (an engine ran this page): browser
+             * parity — <noscript> content is invisible. Keeps SPA boot
+             * warnings ("You need to enable JavaScript to run this app.")
+             * off the 1-bit screen; the empty <div id="root"> that the
+             * warning sits next to renders as blank space either way. */
+            return;
+        }
         push_children(w, node);
     }
 
@@ -2738,6 +3001,13 @@ static void handle_element(Walker *w, const DomNode *node)
         flush_current_block(w);
         if (w->cell)
         {
+            /* A table inside a table cell (nested tables — HN's whole page,
+             * phpBB indexes, legacy layouts): we have no recursive table
+             * layout, but dropping the subtree loses ALL its text and links.
+             * Instead the nested table is transparent: its rows/cells lose
+             * their own structure and every text node + link flows into the
+             * open cell (w->cell is still set, so routing below works). */
+            push_children(w, node);
             return;
         }
         DocTable *tbl = (DocTable *)doc_arena_alloc(&w->arena, sizeof(DocTable));
@@ -2814,10 +3084,21 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             handle_row(w, node, w->table);
         }
+        else if (w->cell)
+        {
+            /* Row of a nested table inside a cell: transparent (see the
+             * <table> branch) — children flow into the open cell. */
+            push_children(w, node);
+        }
     }
     else if (strcmp(tag, "td") == 0 || strcmp(tag, "th") == 0)
     {
-        /* Cells are processed by handleRow; stray cells are ignored. */
+        /* Cells are processed by handleRow; a stray cell inside an open
+         * cell (nested-table case, see the <table> branch) is transparent. */
+        if (w->cell)
+        {
+            push_children(w, node);
+        }
     }
     else if (strcmp(tag, "caption") == 0)
     {
@@ -4061,6 +4342,15 @@ static void run_exit(Walker *w, ExitCtx *x)
     case WX_INERT_END:
         w->inert = x->inertSaved;
         break;
+    case WX_CSS_END:
+        /* CSS scope restore: x->flags holds the pre-CSS walker state
+         * (snapshotted at entry in walk_node); restore only when CSS
+         * actually added bits, so non-CSS walks are untouched. */
+        if (x->cssFlags)
+        {
+            w->flags = x->flags;
+        }
+        break;
     case WX_SPAN_END:
         if (x->fallback &&
             (x->hadInlines < 0 ||
@@ -4085,7 +4375,7 @@ static void run_exit(Walker *w, ExitCtx *x)
                 add_inline(w, inl);
             }
         }
-        w->flags = x->flags;
+        w->flags = x->flags; /* full pre-entry snapshot (incl. CSS state) */
         break;
     case WX_FIGCAP_END:
         w->figureCaptionDone = 1;
@@ -4109,8 +4399,22 @@ static void walk_node(Walker *w, const DomNode *node)
         return;
     }
     AttrList a = attrs_of(node);
-    /* hidden/popover/display:none suppress the element AND its subtree */
-    if (walk_display_none(a))
+    /* CSS (roadmap #2): resolve the element's <style>-rule matches once.
+     * display:none/visibility:hidden suppresses the element AND its subtree
+     * (identical semantics to the hidden attribute). */
+    unsigned cssBits = 0;
+    int cssHidden = 0;
+    if (w->doc && w->doc->_css)
+    {
+        cssBits = walk_css_compute(w, node, node->tag, a);
+        cssHidden = (cssBits & CSS_F_HIDDEN) != 0;
+    }
+    /* hidden/popover/display:none styles suppress the element AND subtree */
+    if (!cssHidden && walk_display_none(a))
+    {
+        return;
+    }
+    if (cssHidden)
     {
         return;
     }
@@ -4127,7 +4431,44 @@ static void walk_node(Walker *w, const DomNode *node)
             x->inertSaved = wasInert;
         }
     }
+    /* CSS-inherited inline flags scope over this element's subtree. The
+     * exit is pushed BEFORE handle_element, so it runs after every exit the
+     * handler pushes (LIFO) — matching CSS scoping (child styles die at the
+     * child's boundary, the element's own CSS dies at the element's). */
+    if (cssBits & CSS_INHERIT_MASK)
+    {
+        ExitCtx *cx = push_exit(w, WX_CSS_END);
+        if (cx)
+        {
+            cx->flags = w->flags; /* pre-CSS snapshot */
+            cx->cssFlags = cssBits & CSS_INHERIT_MASK;
+            walk_css_apply(w, cssBits);
+        }
+    }
     handle_element(w, node);
+    /* CSS block-level effects (align / invert) — applied AFTER the handler
+     * ran so they attach to the block THIS element created (if any), and
+     * inline style wins: CSS fills only when the handler left align unset. */
+    if ((cssBits & (CSS_F_ALIGN_CENTER | CSS_F_ALIGN_RIGHT | CSS_F_INVERT)) &&
+        w->currentBlock)
+    {
+        DocBlock *b = w->currentBlock;
+        if (!b->align)
+        {
+            if (cssBits & CSS_F_ALIGN_CENTER)
+            {
+                b->align = doc_arena_str(w, "center");
+            }
+            else if (cssBits & CSS_F_ALIGN_RIGHT)
+            {
+                b->align = doc_arena_str(w, "right");
+            }
+        }
+        if (cssBits & CSS_F_INVERT)
+        {
+            b->invert = 1;
+        }
+    }
 }
 
 static int walk_children(Walker *w, const DomNode *parent)
@@ -4139,6 +4480,20 @@ static int walk_children(Walker *w, const DomNode *parent)
     int base = w->frameCount; /* re-entrant calls only unwind their own frames */
     if (parent)
     {
+        /* SW8 touch point: a stub encountered during descent materializes
+         * its subtree from the spill store FIRST — the walker then sees a
+         * fully restored child list. dom_touch is a no-op for RAM nodes. */
+        if (parent->pagedKey && w->doc && w->doc->_dom)
+        {
+            dom_touch((DomResult *)w->doc->_dom, (DomNode *)parent);
+        }
+        for (int i = 0; i < parent->childCount; i++)
+        {
+            if (parent->children[i]->pagedKey && w->doc && w->doc->_dom)
+            {
+                dom_touch((DomResult *)w->doc->_dom, parent->children[i]);
+            }
+        }
         for (int i = parent->childCount - 1; i >= 0; i--)
         {
             if (push_enter(w, parent->children[i]))
@@ -4758,6 +5113,33 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     {
         strcpy(out->rawHtml, htmlString);
     }
+    /* 4c. CSS engine (roadmap #2): extract <style> bodies from the raw HTML
+     * (the tokenizer skips them, so the DOM never carries stylesheet text)
+     * and parse the rules once. The engine lives on the result and survives
+     * rewals — sheet text points into rawHtml, which dies only with the doc.
+     * Zero dynamic rule storage beyond the engine itself (fixed tables). */
+    if (out->rawHtml)
+    {
+        CssSheet sheets[CSS_MAX_SHEETS];
+        int sheetCount = css_scan_sheets(out->rawHtml, sheets, CSS_MAX_SHEETS);
+        if (sheetCount > 0)
+        {
+            CssEngine *eng = (CssEngine *)PLUTO_MALLOC(sizeof(CssEngine));
+            if (eng)
+            {
+                css_parse_sheets(eng, sheets,
+                                 sheetCount < CSS_MAX_SHEETS ? sheetCount
+                                                             : CSS_MAX_SHEETS);
+                out->_css = eng;
+            }
+            /* engine alloc failure: page renders without CSS (graceful) */
+        }
+    }
+    /* <noscript> policy follows the script policy (browser "scripting flag"):
+     * any mode that runs an engine hides noscript fallback content; Off and
+     * reader mode keep rendering it. document_rewalk reads the same flag so
+     * JS-mutation re-renders stay consistent. */
+    out->suppressNoscript = (scriptPolicy != DOC_SCRIPT_OFF) ? 1 : 0;
     if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
     {
         /* Promote the stack DomResult to the heap so it can outlive this
@@ -4821,6 +5203,11 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     w.opts = opts;
     w.formAction = NULL;
     w.formMethod = doc_arena_str_lower(&w, "get");
+    /* Browser parity: a page whose engine attached (or that the tokenizer
+     * treated as scripting) hides its <noscript> fallback content. DOC_SCRIPT_OFF
+     * keeps the historical render-it behavior (JavaScript setting Off — the
+     * warning is genuinely useful there). */
+    w.suppressNoscript = out->suppressNoscript;
     int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
                  strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
     int werr = sbFail;
@@ -4925,6 +5312,7 @@ int document_rewalk(DocParseResult *doc)
     w.opts = NULL;
     w.formAction = NULL;
     w.formMethod = doc_arena_str_lower(&w, "get");
+    w.suppressNoscript = doc->suppressNoscript; /* keep the parse policy */
     int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
                  strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
     int werr = sbFail;
@@ -5004,12 +5392,29 @@ void document_free(DocParseResult *doc)
         PLUTO_FREE(doc->_arena);
         doc->_arena = NULL;
     }
+    if (doc->_css)
+    {
+        /* Fixed-table engine: one allocation, no interior pointers. */
+        PLUTO_FREE(doc->_css);
+        doc->_css = NULL;
+    }
     if (doc->extScripts)
     {
-        /* NOTE: the ext array AND its bodies are arena-allocated by
+        /* NOTE: the ext array AND its RAM bodies are arena-allocated by
          * html/jsext (jsext_collect allocates the array inside the scratch
-         * arena) — everything dies with _extArena below. Freeing either
-         * here would be an interior-pointer free → heap corruption. */
+         * arena) — freeing either here would be an interior-pointer free →
+         * heap corruption; they die with _extArena below. SW2b: DISK-
+         * resident sources (spill >= 0) live OUTSIDE the arena and are
+         * released HERE, before the arrays go away. */
+        for (int k = 0; k < doc->extScriptCount; k++)
+        {
+            JsExtScript *se = &((JsExtScript *)doc->extScripts)[k];
+            if (se->spill >= 0)
+            {
+                pluto_spill_discard(se->spill);
+                se->spill = -1;
+            }
+        }
         doc->extScripts = NULL;
         doc->extScriptCount = 0;
     }

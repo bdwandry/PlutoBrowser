@@ -16,10 +16,11 @@
 #include "render/decoders/webp-internal.h"
 #include "render/decoders/scale.h"
 #include "render/decoders/dither.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_mem_realloc((p), 0)
 
 /* ── parseWebP (webp.lua 2737-2763) ─────────────────────────────────────── */
 

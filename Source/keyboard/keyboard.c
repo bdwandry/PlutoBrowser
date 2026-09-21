@@ -7,6 +7,7 @@
 
 #include "keyboard.h"
 #include "core/logger.h"
+#include "../core/pluto_mem.h"
 
 typedef int bool_t;
 #define false 0
@@ -503,7 +504,7 @@ static void drawKeyboard(PDKeyboard * _Nonnull self) {
  * device, and free()ing SDK pointers corrupts the heap. */
 static void PDKeyboardTextFree(PDKeyboardText * _Nonnull self) {
     if (self->data) {
-        playdate->system->realloc(self->data, 0);
+        pluto_mem_realloc(self->data, 0);
         self->data = NULL;
         self->count = 0;
     }
@@ -513,7 +514,7 @@ static void PDKeyboardTextFree(PDKeyboardText * _Nonnull self) {
 
 static void PDKeyboardMutableTextFree(PDKeyboardMutableText * _Nonnull self) {
     if (self->super.data) {
-        playdate->system->realloc(self->super.data, 0);
+        pluto_mem_realloc(self->super.data, 0);
         self->super.data = NULL;
         self->super.count = 0;
         self->capacity = 0;
@@ -534,7 +535,7 @@ static void PDKeyboardMutableTextEnsureCapacity(PDKeyboardMutableText * _Nonnull
 }
 
 static void PDKeyboardMutableTextGrow(PDKeyboardMutableText * _Nonnull self, int newSize) {
-    self->super.data = playdate->system->realloc(self->super.data, newSize * sizeof(char));
+    self->super.data = pluto_mem_realloc(self->super.data, newSize * sizeof(char));
     self->capacity = newSize;
 }
 
@@ -1034,7 +1035,7 @@ static void loadFontAndImages(void) {
 
 static PDKeyboard * _Nonnull PDKeyboardNew(void) {
     logger_log("KB new: entering");
-    PDKeyboard *self = playdate->system->realloc(NULL, sizeof(PDKeyboard));
+    PDKeyboard *self = pluto_mem_realloc(NULL, sizeof(PDKeyboard));
     logger_log("KB new: allocated");
 
     loadFontAndImages();
@@ -1091,7 +1092,7 @@ static void PDKeyboardFree(PDKeyboard * _Nonnull self) {
     PDKeyboardMutableTextFree(&self->text);
     PDKeyboardTextFree(&self->originalText);
     freeSounds(self);
-    playdate->system->realloc(self, 0);
+    pluto_mem_realloc(self, 0);
 }
 
 static void PDKeyboardShow(PDKeyboard * _Nonnull self, const char * _Nullable newText, const unsigned int newTextLength) {
@@ -1114,7 +1115,7 @@ static void PDKeyboardShow(PDKeyboard * _Nonnull self, const char * _Nullable ne
     self->selectedCharacterRect.origin.x = columnPositions[self->selectedColumn];
     self->selectedCharacterRect.size.width = columnWidths[self->selectedColumn];
 
-    self->originalText.data = playdate->system->realloc(self->originalText.data, newTextLength + 1);
+    self->originalText.data = pluto_mem_realloc(self->originalText.data, newTextLength + 1);
     memcpy(self->originalText.data, newText, newTextLength * sizeof(char));
     self->originalText.data[newTextLength] = '\0';
     self->originalText.count = newTextLength;
@@ -1161,7 +1162,7 @@ static void PDKeyboardSetRefreshRate(PDKeyboard * _Nonnull self, float refreshRa
 
 static void PDKeyboardGetText(PDKeyboard * _Nonnull self, char * _Nonnull * _Nullable text, unsigned int * _Nullable count) {
     const unsigned int charCount = self->text.super.count;
-    char *data = playdate->system->realloc(*text, (charCount + 1) * sizeof(char));
+    char *data = pluto_mem_realloc(*text, (charCount + 1) * sizeof(char));
     memcpy(data, self->text.super.data, charCount * sizeof(char));
     data[charCount] = '\0';
     *text = data;

@@ -14,6 +14,7 @@
 #include "core/constants.h"
 #include "render/style.h"
 #include "pd_api.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
@@ -81,7 +82,7 @@ char *error_page_handle_input(unsigned int current, unsigned int pushed,
                              : g_selectedIndex == 2  ? "search"
                                                      : "home";
         size_t n = strlen(action) + 1;
-        char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+        char *out = (char *)pluto_mem_realloc(NULL, n);
         if (out)
         {
             memcpy(out, action, n);

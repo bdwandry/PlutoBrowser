@@ -8,6 +8,7 @@
 #include "pd_api.h"
 #include "core/constants.h"
 #include "render/link_manager.h"
+#include "../core/pluto_mem.h"
 
 /* SDK API pointer (pluto_pd is defined in main.c; same allocator family). */
 extern PlaydateAPI *pluto_pd(void);
@@ -21,13 +22,13 @@ static int g_selectedIndex = 0; /* 0 = none (Lua nil) */
 static void *lm_alloc(size_t n)
 {
     PlaydateAPI *pd = pluto_pd();
-    return pd ? pd->system->realloc(NULL, n) : malloc(n);
+    return pd ? pluto_mem_realloc(NULL, n) : malloc(n);
 }
 
 static void *lm_realloc(void *ptr, size_t n)
 {
     PlaydateAPI *pd = pluto_pd();
-    return pd ? pd->system->realloc(ptr, n) : realloc(ptr, n);
+    return pd ? pluto_mem_realloc(ptr, n) : realloc(ptr, n);
 }
 
 static char *lm_strdup(const char *s)

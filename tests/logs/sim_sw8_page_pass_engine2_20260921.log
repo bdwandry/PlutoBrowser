@@ -1,0 +1,47 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[22:12:47 #1] === PlutoBrowser boot ===
+[22:12:47 #2] eventHandler: kEventInit, osversion=30101
+[22:12:47 #3] STORAGE: init enter
+[22:12:47 #4] STORAGE: load enter
+[22:12:47 #5] STORAGE: file opened, parsing
+[22:12:47 #6] STORAGE: init exit
+[22:12:47 #7] [jsbridge] boot engine: muJS
+[22:12:47 #8] [page-autotest] boot: engine=2 mode=1 (RAW_HTML, snap bypass), navigating to acidtest
+[22:12:47 #9] KB new: entering
+[22:12:47 #10] KB new: allocated
+[22:12:47 #11] KB load: font...
+[22:12:47 #12] KB load: font ok h=36
+[22:12:47 #13] KB load: menu-space ok
+[22:12:47 #14] KB load: menu-ok ok
+[22:12:47 #15] KB load: menu-del ok
+[22:12:47 #16] KB load: menu-cancel ok
+[22:12:47 #17] KB new: font+images loaded
+[22:12:47 #18] DISPLAY: refresh rate set to 30 fps
+[22:12:47 #19] navigate_to: about:acidtest
+[22:12:47 #20] state -> 1 (frame 1)
+[22:12:47 #21] updateFrame: first frame executed
+[22:12:47 #22] [jsbridge] page attach: QuickJS (engine=2)
+[22:12:47 #23] [js] live page: listeners=0 ran=0 errs=0
+[22:12:47 #24] [snap] saved url=about:acidtest blocks=93 links=3 bytes=33616
+[22:12:48 #25] state -> 2 (frame 5)
+[22:12:48 #26] [page-autotest] budget=911806 (live+512K), floor=1KB (forced pressure)
+[22:12:48 #27] [page] paged out id=1 key=3572048f275c0049 bytes=9390
+[22:12:48 #28] [page-autotest] paged=1 stubs=1 (blocks before=93, live=367569)
+[22:12:48 #29] [page-autotest] live=367569 bytes after paging
+[22:12:50 #30] [page-autotest] triggering rewalk (materialization should be transparent)
+[22:12:50 #31] state -> 1 (frame 61)
+[22:12:50 #32] render: rewalk start (live DOM mutation re-render)
+[22:12:50 #33] [page] materialized key=3572048f275c0049 nodes=417 bytes=9390
+[22:12:50 #34] render: rewalk done blocks=93 links=3
+[22:12:50 #35] state -> 2 (frame 63)
+[22:12:51 #36] [page-autotest] PASS: rewalk materialized the paged DOM (stubs=0, blocks=93 == 93, live=459061)
+[22:12:58 #37] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B heap=448KB peak=448KB bigAlloc=48KB refusals=0
+[22:13:03 #38] [http] gzip body (compressed -1 bytes)
+[22:13:03 #39] IMGDEC FAIL https://example.com/test.png sync (head 3c 21 64 6f, 559 bytes)
+[22:13:05 #40] [http] gzip body (compressed -1 bytes)
+[22:13:05 #41] IMGDEC FAIL https://example.com/test.png sync (head 3c 21 64 6f, 559 bytes)
+[22:13:08 #42] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B heap=456KB peak=456KB bigAlloc=48KB refusals=0
+[22:13:10 #43] [http] gzip body (compressed -1 bytes)
+[22:13:10 #44] IMGDEC FAIL https://example.com/test.png sync (head 3c 21 64 6f, 559 bytes)
+[22:13:18 #45] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B heap=459KB peak=460KB bigAlloc=48KB refusals=0

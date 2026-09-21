@@ -14,6 +14,10 @@
 #endif
 
 #include "core/logger.h"
+#include "core/pluto_mem.h"
+#include "core/pluto_spill.h"
+#include "core/pluto_page.h"
+#include "core/pluto_snap.h"
 #include "core/encoding.h"
 #include "core/cookie_jar.h"
 #include "core/http_client.h"
@@ -100,14 +104,25 @@ static char *pluto_strdup(const char *s)
     return d;
 }
 
-/* Shared realloc mirror (pluto_free's counterpart). */
-void *pluto_realloc(void *p, size_t n)
+/* SW1 telemetry funnel backend: the RAW SDK call (no accounting, no
+ * recursion). pluto_realloc (below) wraps THIS with accounting; the funnel
+ * (core/pluto_mem.c) calls this directly for the underlying allocation. */
+void *pluto_mem_sdk_realloc(void *p, size_t n);
+void *pluto_mem_sdk_realloc(void *p, size_t n)
 {
     if (!pd)
     {
         return NULL;
     }
     return pd->system->realloc(p, n);
+}
+
+/* Shared realloc mirror (pluto_free's counterpart). Routes through the
+ * SW1 telemetry funnel (core/pluto_mem.c): same SDK call underneath, plus
+ * live/peak byte accounting and (when enabled) the SW3a soft budget. */
+void *pluto_realloc(void *p, size_t n)
+{
+    return pluto_mem_realloc(p, n);
 }
 
 /* Forward declaration (implementation below). */
@@ -345,6 +360,15 @@ static void settings_cleared_cookies(void)
 static PDMenuItem *g_viewMenuItem = NULL;
 static const char *k_viewOptions[2] = { "Reader", "HTML" };
 
+/* ── SW6 snapshot cache ────────────────────────────────────────────────── */
+/* SW6 fast-path telemetry: how many navigations rendered from a snapshot
+ * (also consumed by the snap autotest for a deterministic PASS verdict). */
+static int g_snapFastPathHits = 0;
+static int snapBypass = 0; /* 1 = next navigation skips the snapshot load
+                            * (hard reload: view-mode flip, settings save) */
+#define SNAP_TTL_SECONDS (7UL * 24UL * 3600UL) /* 7-day freshness window */
+#define SNAP_MAX_ENTRIES 8                     /* storage-pressure LRU cap */
+
 static void view_menu_callback(void *ud)
 {
     (void)ud;
@@ -359,6 +383,7 @@ static void view_menu_callback(void *ud)
         currentBrowseMode = newMode;
         storage_set_setting_int("mode", currentBrowseMode);
         storage_save();
+        snapBypass = 1; /* hard reload: snapshot would be for the OLD mode */
         if (currentDoc && currentDoc->rawHtml && currentDoc->rawHtml[0] &&
             currentUrlObj)
         {
@@ -457,6 +482,30 @@ static void page_swap_doc(RenderTask *rt)
                    jsbridge_listener_count(g_pageJs), currentDoc->jsRan,
                    currentDoc->jsErrors);
     }
+    /* SW6: snapshot the finished page (walk output) so a revisit within
+     * the TTL skips network + parse + engine entirely. Failures are logged
+     * inside pluto_snap and never affect the live render. Toggle re-renders
+     * and JS-mutation rewalks snapshot too — the walk output is the current
+     * truth (toggle states / JS mutations included). */
+    if (currentDoc && !currentDoc->parseError && currentUrlObj &&
+        currentUrlObj->normalized[0])
+    {
+        unsigned long now = 0;
+        uint32_t ms = 0;
+        now = pd->system->getSecondsSinceEpoch(&ms);
+        pluto_snap_save(currentDoc, currentUrlObj->normalized,
+                        (int)currentBrowseMode, now);
+        pluto_snap_lru_sweep(SNAP_MAX_ENTRIES);
+    }
+    /* SW8: under RAM pressure, page the largest cold DOM subtrees of the
+     * live page out to the spill store. Only JS-mode pages have a live
+     * DomResult (dom.h paging requires one); materialization is automatic
+     * at the walker/bridge touch points. Silent no-op when comfortable. */
+    if (currentDoc && !currentDoc->parseError && currentDoc->_dom)
+    {
+        dom_page_out_under_pressure((DomResult *)currentDoc->_dom,
+                                    currentDoc->baseUrl);
+    }
 }
 
 /* Live re-render after a JS DOM mutation (preventDefault path): re-walk the
@@ -501,9 +550,367 @@ static int page_handle_js_click(int linkIndex)
     return 1;
 }
 
+/* ── JS timer pump (setTimeout / setInterval delivery) ────────────────────
+ * The router owns the timer table; this is the event loop. Once per frame
+ * (only while a page with a live engine is showing): fire due callbacks,
+ * and when one consumed DOM budget, re-render through the SAME rewalk path
+ * a preventDefault click uses (scripts keep running — no reload). All caps
+ * (timers/page, fires/interval, batch/frame, nested pumps) live in the
+ * router — a runaway page is contained, never a lock-up. */
+static void js_timers_update(void)
+{
+    if (!g_pageJs || isRendering || currentState != STATE_PAGE)
+    {
+        return; /* no live engine / mid-render / not on a page */
+    }
+    unsigned nowMs = pd->system->getCurrentTimeMilliseconds();
+    int mutations = 0;
+    (void)jsbridge_timers_pump(g_pageJs, nowMs, &mutations);
+    /* Roadmap #3: deliver settled XHR/fetch completions through the SAME
+     * engine bracket + re-render path (the HTTP client was pumped earlier
+     * this frame by http_update; completions it settled are pending here). */
+    int xhrMutations = 0;
+    (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    if (mutations || xhrMutations)
+    {
+        page_rewalk_now();
+    }
+}
+
+#if defined(PLUTO_JS_TIMERS_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic end-to-end proof
+ * that setTimeout/setInterval actually FIRE in the running browser (not just
+ * in host tests). Auto-navigates to about:javascript at boot, then:
+ *   phase 0: wait for the page + live engine, arm phase 1 (one-shot fire).
+ *   phase 1: wait for the suite's 50ms one-shot to rewrite its line to
+ *            "timer-fired-ok (one-shot, 50ms)" and the interval's first beat.
+ *   phase 2: wait ~3.2s of frames, require the interval beat counter ≥ 3.
+ * PASS/FAIL lands in pluto.log via [jstimers-autotest] lines. */
+static int g_timersTestPhase = 0;
+static unsigned g_timersTestFrames = 0;
+static int doc_inline_contains(const char *needle)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk || !blk->inlines)
+        {
+            continue;
+        }
+        for (int j = 0; j < blk->inlineCount; j++)
+        {
+            const DocInline *in = blk->inlines[j];
+            if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                strstr(in->text, needle))
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+/* Diagnostics: dump every rendered line mentioning timers/interval so a
+ * FAIL names what the DOM actually holds (never silent about state). */
+static void doc_dump_timer_lines(void)
+{
+    if (!currentDoc)
+    {
+        return;
+    }
+    int dumped = 0;
+    for (int i = 0; i < currentDoc->blockCount && dumped < 5; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk || !blk->inlines)
+        {
+            continue;
+        }
+        for (int j = 0; j < blk->inlineCount && dumped < 5; j++)
+        {
+            const DocInline *in = blk->inlines[j];
+            if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                (strstr(in->text, "beat") || strstr(in->text, "timer") ||
+                 strstr(in->text, "fired") || strstr(in->text, "error") ||
+                 strstr(in->text, "MISS") || strstr(in->text, "banner")))
+            {
+                logger_log("[jstimers-autotest] dom: %.90s", in->text);
+                dumped++;
+            }
+        }
+    }
+    if (dumped == 0)
+    {
+        logger_log("[jstimers-autotest] dom: (no timer lines found)");
+    }
+}
+static void js_timers_autotest_tick(void)
+{
+    if (g_timersTestPhase == 3 || isRendering)
+    {
+        return;
+    }
+    if (strncmp(currentDoc->baseUrl, "about:javascript", 16) != 0)
+    {
+        return;
+    }
+    ++g_timersTestFrames;
+    if (g_timersTestPhase == 0)
+    {
+        if (g_timersTestFrames < 30)
+        {
+            return; /* settle ~0.5s */
+        }
+        logger_log("[jstimers-autotest] armed (page live, engine attached)");
+        g_timersTestPhase = 1;
+        g_timersTestFrames = 0;
+        return;
+    }
+    if (g_timersTestPhase == 1)
+    {
+        if (doc_inline_contains("timer-fired-ok"))
+        {
+            logger_log("[jstimers-autotest] PASS-A: one-shot setTimeout "
+                       "fired and re-rendered (frame %u)",
+                       g_timersTestFrames);
+            g_timersTestPhase = 2;
+            g_timersTestFrames = 0;
+        }
+        else if (g_timersTestFrames > 600) /* ~10s: 50ms never came */
+        {
+            logger_log("[jstimers-autotest] FAIL-A: one-shot never fired");
+            doc_dump_timer_lines();
+            g_timersTestPhase = 3;
+        }
+        return;
+    }
+    /* Phase 2: interval — the suite clears its 400ms interval after 5
+     * beats; its FINAL write ("interval beat 5", right before clearInterval)
+     * persists in the DOM. Sample for that — earlier beats are overwritten
+     * within 400ms and may be gone before we look. */
+    if (doc_inline_contains("interval beat 5"))
+    {
+        logger_log("[jstimers-autotest] PASS-B: setInterval fired "
+                   "repeatedly (5 beats + self-clear, frame %u)",
+                   g_timersTestFrames);
+        g_timersTestPhase = 3;
+    }
+    else if (g_timersTestFrames > 900) /* ~30s: 5 beats of 400ms never */
+    {
+        logger_log("[jstimers-autotest] FAIL-B: interval never completed "
+                   "5 beats");
+        doc_dump_timer_lines();
+        g_timersTestPhase = 3;
+    }
+}
+#endif
+
+#if defined(PLUTO_SNAP_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic end-to-end proof
+ * of the SW6 rendered-snapshot cache. Boot navigates to about:acidtest
+ * (content-rich, no live JS — a legit snapshot target). This tick then:
+ *   phase 0: wait for the live render (save happened in render_done;
+ *            fast-path hits must still be 0 — first visit is NOT cached).
+ *   phase 1: navigate to about:home (a different, never-saved page).
+ *   phase 2: navigate back and require the revisit to come from the
+ *            snapshot fast path (g_snapFastPathHits >= 1).
+ * PASS/FAIL lands in pluto.log via [snap-autotest] lines. */
+static int g_snapTestPhase = 0;
+static unsigned g_snapTestFrames = 0;
+static void snap_autotest_tick(void)
+{
+    if (g_snapTestPhase == 3 || isRendering)
+    {
+        return;
+    }
+    ++g_snapTestFrames;
+    if (g_snapTestFrames < 30)
+    {
+        return; /* settle ~0.5s per phase */
+    }
+    if (g_snapTestPhase == 0)
+    {
+        if (currentState != STATE_PAGE || !currentDoc ||
+            strncmp(currentDoc->baseUrl, "about:acidtest", 14) != 0)
+        {
+            if (g_snapTestFrames > 600)
+            {
+                logger_log("[snap-autotest] FAIL: acidtest never rendered "
+                           "(state=%d)", currentState);
+                g_snapTestPhase = 3;
+            }
+            return;
+        }
+        if (g_snapFastPathHits != 0)
+        {
+            logger_log("[snap-autotest] FAIL: fast path fired on FIRST visit "
+                       "(hits=%d)", g_snapFastPathHits);
+            g_snapTestPhase = 3;
+            return;
+        }
+        logger_log("[snap-autotest] first render live (blocks=%d), "
+                   "navigating home", currentDoc->blockCount);
+        g_snapTestPhase = 1;
+        g_snapTestFrames = 0;
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:home");
+        return;
+    }
+    if (g_snapTestPhase == 1)
+    {
+        if (currentState == STATE_HOME)
+        {
+            logger_log("[snap-autotest] home reached, navigating back");
+            g_snapTestPhase = 2;
+            g_snapTestFrames = 0;
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                     "about:acidtest");
+        }
+        else if (g_snapTestFrames > 600)
+        {
+            logger_log("[snap-autotest] FAIL: never reached about:home");
+            g_snapTestPhase = 3;
+        }
+        return;
+    }
+    /* Phase 2: the revisit must render from the snapshot. */
+    if (g_snapFastPathHits >= 1 && currentState == STATE_PAGE && currentDoc &&
+        strncmp(currentDoc->baseUrl, "about:acidtest", 14) == 0)
+    {
+        logger_log("[snap-autotest] PASS: revisit served from snapshot "
+                   "(hits=%d, blocks=%d, title=%.40s)",
+                   g_snapFastPathHits, currentDoc->blockCount, pageTitle);
+        g_snapTestPhase = 3;
+    }
+    else if (g_snapTestFrames > 600)
+    {
+        logger_log("[snap-autotest] FAIL: revisit missed the snapshot "
+                   "(hits=%d, state=%d)", g_snapFastPathHits, currentState);
+        g_snapTestPhase = 3;
+    }
+}
+#endif
+
 /* Static error buffer: tasks fire onError(data) with the task's data pointer
  * (see tasks.c), so the real message travels through this side channel. */
 static char g_renderErrMsg[192];
+
+#if defined(PLUTO_PAGE_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic end-to-end proof
+ * of SW8 disk-backed DOM paging. Boot forced JS on and navigated to
+ * about:acidtest. This tick:
+ *   phase 0: wait for the live render (JS-mode page → live DomResult),
+ *            then force the RAM budget down (sim only) and call the REAL
+ *            pressure policy (render_done runs it too) until stubs exist.
+ *   phase 1: page_rewalk_now() — the walker touch points must
+ *            transparently materialize every stub from the spill store.
+ *   phase 2: require stubs==0 after rewalk, block count identical to the
+ *            pre-paging render, and zero errors. Restores the budget.
+ * PASS/FAIL lands in pluto.log via [page-autotest] lines. The run forces
+ * the SW3a gate (budget = live + 512K) on BOTH sim and device so the
+ * device run exercises the real flash I/O path deterministically. */
+static int g_pageTestPhase = 0;
+static unsigned g_pageTestFrames = 0;
+static int g_pageTestBlocks = 0;
+static unsigned long g_pageTestSavedBudget = 0;
+static void page_autotest_tick(void)
+{
+    if (g_pageTestPhase == 3 || isRendering)
+    {
+        return;
+    }
+    ++g_pageTestFrames;
+    if (g_pageTestFrames < 30)
+    {
+        return; /* settle ~0.5s per phase */
+    }
+    if (g_pageTestPhase == 0)
+    {
+        if (currentState != STATE_PAGE || !currentDoc || !currentDoc->_dom ||
+            strncmp(currentDoc->baseUrl, "about:acidtest", 14) != 0)
+        {
+            if (g_pageTestFrames > 900)
+            {
+                logger_log("[page-autotest] FAIL: acidtest never rendered with "
+                           "a live DOM (state=%d)", currentState);
+                g_pageTestPhase = 3;
+            }
+            return;
+        }
+        g_pageTestBlocks = currentDoc->blockCount;
+        g_pageTestSavedBudget = pluto_mem_budget();
+        /* Force the SW3a gate on BOTH sim and device: budget = live + 512K
+         * → headroom 512K < the 1.5MB trigger. A fresh boot never has
+         * natural pressure, and the point of the device run is to prove
+         * the flash I/O path (the SW6 lesson: device disk latency). The
+         * boot budget is restored in phase 2 / failure paths. */
+        pluto_mem_set_budget(pluto_mem_live() + 512UL * 1024UL);
+        dom_page_set_subtree_floor(1024); /* acidtest subtrees are small */
+        logger_log("[page-autotest] budget=%lu (live+512K), floor=1KB "
+                   "(forced pressure)", pluto_mem_budget());
+        int paged = dom_page_out_under_pressure(
+            (DomResult *)currentDoc->_dom, currentDoc->baseUrl);
+        int stubs = dom_page_stub_count((DomResult *)currentDoc->_dom);
+        logger_log("[page-autotest] paged=%d stubs=%d (blocks before=%d, "
+                   "live=%lu)", paged, stubs, g_pageTestBlocks,
+                   pluto_mem_live());
+        if (paged == 0 || stubs == 0)
+        {
+            logger_log("[page-autotest] FAIL: pressure policy paged nothing "
+                       "(paged=%d stubs=%d)", paged, stubs);
+            pluto_mem_set_budget(g_pageTestSavedBudget);
+            dom_page_set_subtree_floor(0);
+            g_pageTestPhase = 3;
+            return;
+        }
+        logger_log("[page-autotest] live=%lu bytes after paging",
+                   pluto_mem_live());
+        g_pageTestPhase = 1;
+        g_pageTestFrames = 0;
+        return;
+    }
+    if (g_pageTestPhase == 1)
+    {
+        logger_log("[page-autotest] triggering rewalk (materialization "
+                   "should be transparent)");
+        page_rewalk_now();
+        g_pageTestPhase = 2;
+        g_pageTestFrames = 0;
+        return;
+    }
+    /* Phase 2: rewalk done — everything must be back in RAM. */
+    if (currentState == STATE_PAGE && currentDoc && currentDoc->_dom)
+    {
+        int stubs = dom_page_stub_count((DomResult *)currentDoc->_dom);
+        int blocks = currentDoc->blockCount;
+        pluto_mem_set_budget(g_pageTestSavedBudget); /* restore boot budget */
+        dom_page_set_subtree_floor(0);
+        if (stubs == 0 && blocks == g_pageTestBlocks)
+        {
+            logger_log("[page-autotest] PASS: rewalk materialized the paged "
+                       "DOM (stubs=0, blocks=%d == %d, live=%lu)", blocks,
+                       g_pageTestBlocks, pluto_mem_live());
+        }
+        else
+        {
+            logger_log("[page-autotest] FAIL: stubs=%d blocks=%d (expected "
+                       "%d)", stubs, blocks, g_pageTestBlocks);
+        }
+        g_pageTestPhase = 3;
+    }
+    else if (g_pageTestFrames > 900)
+    {
+        logger_log("[page-autotest] FAIL: rewalk never completed");
+        pluto_mem_set_budget(g_pageTestSavedBudget);
+        dom_page_set_subtree_floor(0);
+        g_pageTestPhase = 3;
+    }
+}
+#endif
 
 #if defined(PLUTO_HOME_TEST_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic probe for the
@@ -675,6 +1082,482 @@ static void js_click_autotest_tick(void)
                "since page load",
                g_jsClickTestFrames);
     g_jsClickTestPhase = 2;
+}
+#endif
+
+#if defined(PLUTO_FIELDTEST_AUTOTEST)
+/* SW0 BENCHMARK MATRIX (SIMULATOR-ONLY): reads fieldtest_urls.txt from the
+ * project root — one site per line: "<engine 0|1|2> <url> [| <criterion>]".
+ * The criterion is a keyword that MUST appear in the rendered document text
+ * (case-insensitive; scanned across blocks AND table cells). PASS/FAIL is
+ * logged per site and tallied; the final line is the matrix score:
+ *   [fieldtest] done (N sites): PASS p / FAIL f — matrix p/N
+ * Lines without a criterion PASS if any text renders (with a warning).
+ * One retry per site on a network-error page (transient sim -16 flake).
+ * Never defined for device builds. */
+#define FIELDTEST_MAX_SITES 24
+#define FIELDTEST_EXPECTED_SITES 20 /* resume only if the list matches */
+#define FIELDTEST_FRAMES_PER_SITE 450 /* 15s @30fps */
+static char ftUrl[FIELDTEST_MAX_SITES][512];
+static int ftEngine[FIELDTEST_MAX_SITES];
+static char ftCrit[FIELDTEST_MAX_SITES][128];
+static unsigned char ftRetried[FIELDTEST_MAX_SITES];
+static int ftCount = 0;
+static int ftIndex = -1;
+static unsigned ftFrames = 0;
+static int ftPhase = 0; /* 0=boot-wait, 1=running, 2=done */
+static int ftPass = 0, ftFail = 0;
+/* Checkpoint file: macOS's AppKit automatic termination can kill the sim
+ * mid-matrix (long idle stretches); state persists so a supervisor relaunch
+ * RESUMES instead of restarting - the run stays one logical session. */
+#define FIELDTEST_STATE_PATH \
+    "/Users/bwandrych/Developer/PlaydateSDK/Disk/Data/" \
+    "com.bryanwandrych.plutobrowser/fieldtest_state.txt"
+static void fieldtest_state_save(void)
+{
+    FILE *f = fopen(FIELDTEST_STATE_PATH, "w");
+    if (!f)
+    {
+        return;
+    }
+    fprintf(f, "%d %d %d %d\n", ftCount, ftIndex, ftPass, ftFail);
+    fclose(f);
+}
+static int fieldtest_state_load(void)
+{
+    FILE *f = fopen(FIELDTEST_STATE_PATH, "r");
+    if (!f)
+    {
+        return 0;
+    }
+    int count = 0, index = -1, pass = 0, fail = 0;
+    if (fscanf(f, "%d %d %d %d", &count, &index, &pass, &fail) != 4 ||
+        count != FIELDTEST_EXPECTED_SITES || index < 0 ||
+        index >= FIELDTEST_MAX_SITES)
+    {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    ftIndex = index;
+    ftPass = pass;
+    ftFail = fail;
+    return 1;
+}
+static void fieldtest_state_clear(void)
+{
+    remove(FIELDTEST_STATE_PATH);
+}
+/* Append-mode history: pluto.log truncates at boot, but a matrix now spans
+ * multiple sim sessions (checkpoint resume) — this file survives and
+ * accumulates every per-site verdict across relaunches. */
+#define FIELDTEST_HIST_PATH \
+    "/Users/bwandrych/Developer/PlaydateSDK/Disk/Data/" \
+    "com.bryanwandrych.plutobrowser/fieldtest_history.txt"
+static void fieldtest_hist_log(const char *verdict, const char *url)
+{
+    FILE *f = fopen(FIELDTEST_HIST_PATH, "a");
+    if (!f)
+    {
+        return;
+    }
+    fprintf(f, "%s %s\n", verdict, url);
+    fclose(f);
+}
+static void fieldtest_lcase(char *s)
+{
+    for (; *s; s++)
+    {
+        if (*s >= 'A' && *s <= 'Z')
+        {
+            *s += 32;
+        }
+    }
+}
+static int fieldtest_text_hit(const char *text, const char *needle)
+{
+    char hay[256];
+    snprintf(hay, sizeof(hay), "%s", text);
+    fieldtest_lcase(hay);
+    return strstr(hay, needle) != NULL;
+}
+static int fieldtest_dom_contains(const char *needle)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk)
+        {
+            continue;
+        }
+        if (blk->inlines)
+        {
+            for (int j = 0; j < blk->inlineCount; j++)
+            {
+                const DocInline *in = blk->inlines[j];
+                if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                    in->text[0] && fieldtest_text_hit(in->text, needle))
+                {
+                    return 1;
+                }
+            }
+        }
+        if (blk->type == DOC_BLOCK_TABLE && blk->table)
+        {
+            const DocTable *t = blk->table;
+            for (int r = 0; r < t->rowCount; r++)
+            {
+                const DocRow *row = t->rows[r];
+                if (!row)
+                {
+                    continue;
+                }
+                for (int c = 0; c < row->cellCount; c++)
+                {
+                    const DocCell *cell = row->cells[c];
+                    if (!cell)
+                    {
+                        continue;
+                    }
+                    for (int k = 0; k < cell->inlineCount; k++)
+                    {
+                        const DocInline *in = cell->inlines[k];
+                        if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                            in->text[0] && fieldtest_text_hit(in->text, needle))
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+static int fieldtest_any_text(void)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk || !blk->inlines)
+        {
+            continue;
+        }
+        for (int j = 0; j < blk->inlineCount; j++)
+        {
+            const DocInline *in = blk->inlines[j];
+            if (in && in->type == DOC_INLINE_TEXT && in->text && in->text[0])
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+static void fieldtest_load_list(void)
+{
+    FILE *f = fopen("/Users/bwandrych/Desktop/PlutoBrowser/fieldtest_urls.txt", "r");
+    if (!f)
+    {
+        logger_log("[fieldtest] no fieldtest_urls.txt — seam idle");
+        ftPhase = 2;
+        return;
+    }
+    char line[768];
+    while (ftCount < FIELDTEST_MAX_SITES && fgets(line, sizeof(line), f))
+    {
+        int eng = 0;
+        char url[512];
+        url[0] = '\0';
+        if (sscanf(line, "%d %511[^|\r\n]", &eng, url) >= 2 && url[0] &&
+            (url[0] == 'h' || url[0] == 'a'))
+        {
+            /* trim trailing spaces from the URL */
+            size_t len = strlen(url);
+            while (len > 0 && (url[len - 1] == ' ' || url[len - 1] == '\t'))
+            {
+                url[--len] = '\0';
+            }
+            char crit[128] = "";
+            const char *bar = strchr(line, '|');
+            if (bar)
+            {
+                sscanf(bar + 1, " %127[^\r\n]", crit);
+            }
+            snprintf(ftUrl[ftCount], sizeof(ftUrl[0]), "%s", url);
+            ftEngine[ftCount] = (eng >= 0 && eng <= 3) ? eng : 0; /* 3 = XS */
+            snprintf(ftCrit[ftCount], sizeof(ftCrit[0]), "%s", crit);
+            ftCount++;
+        }
+    }
+    fclose(f);
+    logger_log("[fieldtest] loaded %d sites", ftCount);
+    if (ftCount == 0)
+    {
+        ftPhase = 2;
+        return;
+    }
+    /* Resume support: a previous sim session may have died mid-matrix
+     * (macOS automatic termination). Its checkpoint seeds where to start. */
+    fieldtest_state_load();
+}
+static void fieldtest_dump_page(void)
+{
+    if (!currentDoc)
+    {
+        logger_log("[fieldtest] dom: (no document)");
+        return;
+    }
+    int lines = 0;
+    for (int i = 0; i < currentDoc->blockCount && lines < 8; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk || !blk->inlines)
+        {
+            continue;
+        }
+        for (int j = 0; j < blk->inlineCount && lines < 8; j++)
+        {
+            const DocInline *in = blk->inlines[j];
+            if (in && in->type == DOC_INLINE_TEXT && in->text && in->text[0])
+            {
+                logger_log("[fieldtest] dom: %.70s", in->text);
+                lines++;
+            }
+        }
+    }
+    if (lines == 0)
+    {
+        logger_log("[fieldtest] dom: (empty render)");
+    }
+}
+static void fieldtest_score_page(void)
+{
+    if (ftCrit[ftIndex][0])
+    {
+        char needle[128];
+        snprintf(needle, sizeof(needle), "%s", ftCrit[ftIndex]);
+        fieldtest_lcase(needle);
+        int ok = fieldtest_dom_contains(needle);
+        logger_log("[fieldtest] RESULT: %s site=%s crit=%s",
+                   ok ? "PASS" : "FAIL", ftUrl[ftIndex], ftCrit[ftIndex]);
+        fieldtest_hist_log(ok ? "PASS" : "FAIL", ftUrl[ftIndex]);
+        if (ok)
+        {
+            ftPass++;
+        }
+        else
+        {
+            ftFail++;
+        }
+    }
+    else if (fieldtest_any_text())
+    {
+        logger_log("[fieldtest] RESULT: PASS (no criterion) site=%s",
+                   ftUrl[ftIndex]);
+        fieldtest_hist_log("PASS", ftUrl[ftIndex]);
+        ftPass++;
+    }
+    else
+    {
+        logger_log("[fieldtest] RESULT: FAIL (empty render) site=%s",
+                   ftUrl[ftIndex]);
+        fieldtest_hist_log("FAIL", ftUrl[ftIndex]);
+        ftFail++;
+    }
+}
+static void fieldtest_navigate_current(void)
+{
+    storage_set_setting_int("jsEngine", ftEngine[ftIndex]);
+    jsbridge_set_engine(ftEngine[ftIndex]);
+    /* Measure the LIVE pipeline exactly like the SW0 baseline: the SW6
+     * snapshot fast path would serve repeat visits from cache and change
+     * what we're scoring (network/parse/engine outcome). Speed gains from
+     * the cache are a separate measurement. */
+    snapBypass = 1;
+    ftFrames = 0;
+    if (ftCrit[ftIndex][0])
+    {
+        logger_log("[fieldtest] === site %d/%d engine=%d %s | %s", ftIndex + 1,
+                   ftCount, ftEngine[ftIndex], ftUrl[ftIndex], ftCrit[ftIndex]);
+    }
+    else
+    {
+        logger_log("[fieldtest] === site %d/%d engine=%d %s", ftIndex + 1,
+                   ftCount, ftEngine[ftIndex], ftUrl[ftIndex]);
+    }
+    navigate_to(ftUrl[ftIndex]);
+}
+static void fieldtest_tick(void)
+{
+    if (ftPhase == 2)
+    {
+        return;
+    }
+    ftFrames++;
+    if (ftPhase == 0)
+    {
+        if (ftFrames < 20)
+        {
+            return;
+        }
+        fieldtest_load_list();
+        if (ftPhase == 2)
+        {
+            return;
+        }
+        storage_set_setting_int("jsEnabled", 2); /* Full: external scripts */
+        if (ftIndex < 0)
+        {
+            /* fresh session: start at site 0 (fieldtest_state_load may have
+             * already set ftIndex/ftPass/ftFail for a resumed session) */
+            ftIndex = 0;
+        }
+        else
+        {
+            logger_log("[fieldtest] RESUMED at site %d/%d (PASS %d / FAIL %d)",
+                       ftIndex + 1, ftCount, ftPass, ftFail);
+        }
+        ftPhase = 1;
+        fieldtest_navigate_current();
+        return;
+    }
+    /* phase 1: spend FIELDTEST_FRAMES_PER_SITE on each site */
+    if (ftFrames >= FIELDTEST_FRAMES_PER_SITE)
+    {
+        if (currentState == STATE_ERROR && !ftRetried[ftIndex])
+        {
+            /* transient sim network flake (-16): one retry per site */
+            ftRetried[ftIndex] = 1;
+            logger_log("[fieldtest] retry (network error) %s", ftUrl[ftIndex]);
+            fieldtest_navigate_current();
+            return;
+        }
+        logger_log("[fieldtest] --- snapshot %s", ftUrl[ftIndex]);
+        fieldtest_dump_page();
+        fieldtest_score_page();
+        ftIndex++;
+        if (ftIndex >= ftCount)
+        {
+            logger_log("[fieldtest] done (%d sites): PASS %d / FAIL %d — "
+                       "matrix %d/%d",
+                       ftCount, ftPass, ftFail, ftPass, ftCount);
+            fieldtest_state_clear();
+            ftPhase = 2;
+            return;
+        }
+        fieldtest_state_save();
+        fieldtest_navigate_current();
+    }
+}
+#endif /* PLUTO_FIELDTEST_AUTOTEST */
+
+#if defined(PLUTO_CSS_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): deterministic proof that the
+ * roadmap-#2 CSS engine applies <style> rules in the RUNNING browser
+ * (static styling needs no JS; the JS-suite line only reports DOM checks).
+ * PASS/FAIL lands in pluto.log via [css-autotest] lines. */
+static int g_cssTestPhase = 0; /* 0=waiting, 1=done */
+static unsigned g_cssTestFrames = 0;
+static int css_doc_inline_contains(const char *needle)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk || !blk->inlines)
+        {
+            continue;
+        }
+        for (int j = 0; j < blk->inlineCount; j++)
+        {
+            const DocInline *in = blk->inlines[j];
+            if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                strstr(in->text, needle))
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+static int css_doc_any_hidden_leak(void)
+{
+    return css_doc_inline_contains("HIDDEN-BY-CSS") ? 1 : 0;
+}
+static int css_doc_center_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (blk && blk->align && strcmp(blk->align, "center") == 0)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+static int css_doc_invert_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (blk && blk->invert)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+static void css_autotest_tick(void)
+{
+    if (g_cssTestPhase == 1 || isRendering)
+    {
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc)
+    {
+        return;
+    }
+    if (strncmp(currentDoc->baseUrl, "about:javascript", 16) != 0)
+    {
+        return;
+    }
+    ++g_cssTestFrames;
+    if (g_cssTestFrames < 30)
+    {
+        return; /* settle ~0.5s */
+    }
+    int hidden = css_doc_any_hidden_leak();
+    int centered = css_doc_center_count();
+    int inverted = css_doc_invert_count();
+    int bold = css_doc_inline_contains("CSS bold text");
+    if (!hidden && centered >= 1 && inverted >= 1 && bold)
+    {
+        logger_log("[css-autotest] PASS: display:none hidden (no leak), "
+                   "%d centered, %d inverted, bold applied (frame %u)",
+                   centered, inverted, g_cssTestFrames);
+    }
+    else
+    {
+        logger_log("[css-autotest] FAIL: hiddenLeak=%d centered=%d "
+                   "inverted=%d bold=%d (frame %u)",
+                   hidden, centered, inverted, bold, g_cssTestFrames);
+    }
+    g_cssTestPhase = 1;
 }
 #endif
 
@@ -1193,6 +2076,57 @@ static void navigate_to(const char *urlString)
         currentUrlObj = (UrlParsed *)malloc(sizeof(UrlParsed));
     }
     url_parse(urlBuf, currentUrlObj);
+
+    /* ── SW6 snapshot fast path: a fresh, valid snapshot for THIS url in
+     * THIS view mode renders from the cached walk output — no network, no
+     * parse, no engine. The restored doc has no live DOM (links navigate,
+     * clicks degrade gracefully) and rawHtml is absent (view-mode flip
+     * re-navigates through the full pipeline). A bypass (hard reload) or
+     * any miss/expiry falls through to the classic fetch path. */
+    {
+        unsigned long now = 0;
+        uint32_t ms = 0;
+        now = pd->system->getSecondsSinceEpoch(&ms);
+        DocParseResult *snap = snapBypass ? NULL
+            : pluto_snap_load(urlBuf, (int)currentBrowseMode, now,
+                              SNAP_TTL_SECONDS);
+        snapBypass = 0;
+        if (snap)
+        {
+            ++g_snapFastPathHits;
+            logger_log("[snap] fast path: %s", urlBuf);
+            /* Tear down the old page exactly as render_done would have. */
+            layout_clear();
+            if (currentDoc)
+            {
+                if (currentDoc->_jsbridge)
+                {
+                    js_doc_close(currentDoc->_jsbridge);
+                }
+                document_free(currentDoc);
+                free(currentDoc);
+            }
+            currentDoc = snap;
+            g_pageJs = NULL;
+            snprintf(pageTitle, sizeof(pageTitle), "%s",
+                     snap->title[0] ? snap->title
+                                    : (currentUrlObj->host[0] ? currentUrlObj->host
+                                                              : "Web Page"));
+            currentState = STATE_PAGE;
+            scrollY = 0;
+            targetScrollY = 0;
+            crankVelocity = 0;
+            layout_build(snap);
+            if (!navigatingHistory)
+            {
+                push_history(urlBuf);
+            }
+            navigatingHistory = 0;
+            update_system_menu();
+            return;
+        }
+    }
+
     currentState = STATE_LOADING;
     progressCurrent = 0;
     progressTotal = 0;
@@ -1736,6 +2670,7 @@ static void settings_on_change(void)
     /* Route all subsequent page loads to the selected JS engine (0=muJS,
      * 1=Duktape). Pages never mix engines: the chosen one runs everything. */
     jsbridge_set_engine(storage_setting_int("jsEngine"));
+    snapBypass = 1; /* settings may change rendering: reload, don't replay */
     logger_log("[jsbridge] engine selected: %s", engine_name());
     if (currentBrowseMode != MODE_READER && currentBrowseMode != MODE_RAW_HTML)
     {
@@ -1803,6 +2738,26 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
     js_click_autotest_tick();
+#endif
+
+#if defined(PLUTO_JS_TIMERS_AUTOTEST)
+    js_timers_autotest_tick();
+#endif
+
+#if defined(PLUTO_SNAP_AUTOTEST)
+    snap_autotest_tick();
+#endif
+
+#if defined(PLUTO_PAGE_AUTOTEST)
+    page_autotest_tick();
+#endif
+
+#if defined(PLUTO_CSS_AUTOTEST)
+    css_autotest_tick();
+#endif
+
+#if defined(PLUTO_FIELDTEST_AUTOTEST)
+    fieldtest_tick();
 #endif
 
 #if defined(PLUTO_NAV_AUTOTEST)
@@ -2426,11 +3381,13 @@ static int updateFrame(void *userdata)
         if (btnPushed & (1 << 4)) /* B: cancel */
         {
             http_cancel();
+            pluto_spill_reset(); /* SW2b: drop aborted page's spill files */
             go_home();
         }
         if (btnPushed & (1 << 0)) /* Left: back */
         {
             http_cancel();
+            pluto_spill_reset(); /* SW2b: drop aborted page's spill files */
             const char *prev = go_back();
             pendingNavUrlSet = 1;
             snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
@@ -2612,8 +3569,10 @@ static int updateFrame(void *userdata)
     /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
     if (frameCount % 300 == 0)
     {
-        logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d stackPeak=%uB/61800B",
-                   frameCount, g_fpsValue, g_showFps, logger_stack_peak());
+        logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d stackPeak=%uB/61800B heap=%luKB peak=%luKB bigAlloc=%luKB refusals=%lu",
+                   frameCount, g_fpsValue, g_showFps, logger_stack_peak(),
+                   pluto_mem_live() / 1024, pluto_mem_peak() / 1024,
+                   pluto_mem_peak_alloc() / 1024, pluto_mem_refusals());
     }
 
 
@@ -2661,6 +3620,10 @@ static int updateFrame(void *userdata)
     /* Drive cooperative tasks (Lua Tasks.update parity). */
     tasks_update();
 
+    /* Deliver due JS timers (setTimeout/setInterval); a callback that
+     * mutated the DOM schedules the standard re-render via page_rewalk_now. */
+    js_timers_update();
+
     /* Return non-zero to tell the system to update the display. */
     return 1;
 }
@@ -2688,6 +3651,20 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
         pdtimer_init(pd);
         http_client_init(pd);
+        pluto_spill_init(); /* SW2b: disk-backed streaming storage dir */
+        /* SW3/SW3a: enable the soft heap budget — the guarded-RAM raise.
+         * Everything on the device allocates through the SW1 funnel, so this
+         * one gate turns "allocate until the OS panics" into "refuse, log,
+         * fall back to disk". 6.5MB against the ~7.5MB usable app pool:
+         * 1MB of true headroom keeps Duktape's OOM-fatal handler out of the
+         * picture and leaves room for non-funneled SDK internals.
+         * DEVICE-ONLY: the simulator's app-resident watermark is ~45MB of
+         * host-side allocations — enforcing a device-scale budget there would
+         * refuse every large allocation and turn Duktape OOM fatal. The sim
+         * stays pure telemetry (budget 0); its suites pin behavior instead. */
+#ifdef TARGET_PLAYDATE
+        pluto_mem_set_budget(6 * 1024UL * 1024UL + 512 * 1024UL);
+#endif
         imgdec_init(pd);
         tasks_init(pd);
 
@@ -2969,6 +3946,55 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
     #endif
 #endif /* TARGET_SIMULATOR guard above */
 
+#if defined(PLUTO_JS_TIMERS_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): navigate straight to
+         * the JS test suite and watch its timers actually fire in the
+         * running browser (PASS/FAIL via [jstimers-autotest] log lines). */
+        if (storage_setting_int("jsEnabled") == 0)
+        {
+            storage_set_setting_int("jsEnabled", 1);
+            logger_log("[jstimers-autotest] jsEnabled was Off, bumped to 1");
+        }
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:javascript");
+#endif
+
+#if defined(PLUTO_SNAP_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): navigate to the
+         * content-rich about:acidtest page; snap_autotest_tick then returns
+         * to it to prove the SW6 snapshot fast path end-to-end
+         * ([snap-autotest] PASS/FAIL lines in the log). The store is wiped
+         * first so the run is hermetic: snapshots persist across sessions
+         * (by design), which would otherwise make the first visit a HIT. */
+        pluto_snap_invalidate_all();
+        logger_log("[snap-autotest] store invalidated for a cold run");
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:acidtest");
+#endif
+
+#if defined(PLUTO_PAGE_AUTOTEST)
+        /* TEMPORARY (autotest builds, sim + device): prove SW8 end-to-end.
+         * JS on (muJS first), navigate to the acidtest page, then force the
+         * RAM budget down so the SW8 pressure policy pages real subtrees of
+         * the LIVE DOM out to the spill store. A rewalk must transparently
+         * materialize everything (stub count 0) with identical block count.
+         * The device build uses its real 6.5MB budget (no override). */
+        storage_set_setting_int("jsEnabled", 1);
+        storage_set_setting_int("mode", 1); /* RAW_HTML: JS runs in this mode */
+        currentBrowseMode = MODE_RAW_HTML;
+        snapBypass = 1; /* SW6 fast path serves NO live DOM — force the
+                         * classic parse so the page has a live DomResult */
+#ifdef PLUTO_PAGE_AUTOTEST_ENGINE
+        storage_set_setting_int("jsEngine", PLUTO_PAGE_AUTOTEST_ENGINE);
+#endif
+        jsbridge_set_engine(storage_setting_int("jsEngine"));
+        logger_log("[page-autotest] boot: engine=%d mode=%d (RAW_HTML, "
+                   "snap bypass), navigating to acidtest",
+                   storage_setting_int("jsEngine"), currentBrowseMode);
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:acidtest");
+#endif
+
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
         /* TEMPORARY (autotest builds, sim + device): navigate straight to
          * the JS test suite so the Event-demo click repro is deterministic.
@@ -3019,7 +4045,17 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
          * PLUTO_JSEXT_AUTOTEST_URL overrides the target (sim-only: a
          * loopback HTTP server for the real-network run; on device there
          * is no dev machine to serve it). */
+#ifdef PLUTO_JSEXT_AUTOTEST_ENGINE
+        /* Force a specific engine for the run: 1=Duktape 2=QuickJS 3=XS
+         * (Moddable). Storage AND the live router are set before navigation;
+         * the [jsbridge] page attach / [js] close[<name>] lines prove which
+         * engine binaries ran the page. */
+        storage_set_setting_int("jsEngine", PLUTO_JSEXT_AUTOTEST_ENGINE);
+        jsbridge_set_engine(PLUTO_JSEXT_AUTOTEST_ENGINE);
+        logger_log("[jsext-autotest] engine forced: %d", (int)PLUTO_JSEXT_AUTOTEST_ENGINE);
+#endif
         storage_set_setting_int("jsEnabled", 2);
+        logger_log("[jsext-autotest] armed (jsEnabled=2)"); /* device-build marker */
         pendingNavUrlSet = 1;
 #ifdef PLUTO_JSEXT_AUTOTEST_URL
 /* The target URL lives in jsext_autotest_url.h (generated at the project
@@ -3058,6 +4094,7 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         break;
 
     case kEventTerminate:
+        pluto_spill_reset(); /* SW2b: no orphan spill files across sessions */
         logger_log("eventHandler: kEventTerminate, frames=%u", frameCount);
         break;
 

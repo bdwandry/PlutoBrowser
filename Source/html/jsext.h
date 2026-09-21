@@ -48,6 +48,10 @@ int jsext_prefetch_step(void *state);
 /* Opaque session (created by jsext_prefetch_begin; owns the arena). */
 typedef struct JsExtFetch JsExtFetch;
 
+/* Override the per-page RAM-residency budget for the NEXT session (tests;
+ * production leaves the JSBRIDGE_EXT_PAGE_BUDGET default). 0 restores it. */
+void jsext_set_page_budget(size_t bytes);
+
 /* Begin a session over the collected externals (takes ownership of `arena`
  * and the arrays). Returns NULL when there is nothing to fetch (extCount 0),
  * in which case ownership stays with the caller. */

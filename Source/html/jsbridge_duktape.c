@@ -37,29 +37,38 @@
 #include "duktape.h"
 #include "../core/logger.h"
 #include "../util/strbuf.h"
+#include "../core/pluto_mem.h"
+#include "../html/dom.h"
 
 extern PlaydateAPI *pluto_pd(void);
-#define JMalloc(n) pluto_pd()->system->realloc(NULL, (n))
-#define JFree(p) pluto_pd()->system->realloc((p), 0)
+#define JMalloc(n) pluto_mem_realloc(NULL, (n))
+#define JFree(p) pluto_mem_realloc((p), 0)
 
 /* Hidden props on element wrapper objects: */
 #define DUK_NODE_PROP "\xFF" "pluto.node" /* heapptr-free: raw DomNode* as pointer */
+static int duk_xhr_open(duk_context *ctx);
+static int duk_xhr_send(duk_context *ctx);
+static int duk_xhr_abort(duk_context *ctx);
+static void duk_push_xhr(duk_context *ctx, JsBridge *b);
+static void duktape_define_xhr(duk_context *ctx, JsBridge *b);
+static int duk_xhr_id(duk_context *ctx);
+
 
 /* ── heap allocators: route engine memory through the SDK ────────────────── */
 static void *duk_sdk_alloc(void *udata, duk_size_t size)
 {
     (void)udata;
-    return pluto_pd()->system->realloc(NULL, (unsigned)size);
+    return pluto_mem_realloc(NULL, (unsigned)size);
 }
 static void *duk_sdk_realloc(void *udata, void *ptr, duk_size_t size)
 {
     (void)udata;
-    return pluto_pd()->system->realloc(ptr, (unsigned)size);
+    return pluto_mem_realloc(ptr, (unsigned)size);
 }
 static void duk_sdk_free(void *udata, void *ptr)
 {
     (void)udata;
-    pluto_pd()->system->realloc(ptr, 0);
+    pluto_mem_realloc(ptr, 0);
 }
 static void duk_sdk_fatal(void *udata, const char *msg)
 {
@@ -262,7 +271,7 @@ static duk_ret_t duk_el_set_textContent(duk_context *ctx)
     }
     return 0;
 }
-/* PARTIAL: treated as textContent (no markup parsing here) — muJS parity. */
+/* SW5: REAL markup assignment through the router (was textContent). */
 static duk_ret_t duk_el_set_innerHTML(duk_context *ctx)
 {
     JsBridge *b = bridge_of(ctx);
@@ -270,7 +279,11 @@ static duk_ret_t duk_el_set_innerHTML(duk_context *ctx)
     BUDGET_OR_THROW(b);
     if (n && n->kind == DOM_ELEMENT)
     {
-        dom_set_text(b->dom, n, duk_to_string(ctx, 0));
+        const char *s = duk_to_string(ctx, 0);
+        if (jsbridge_el_set_inner_html(b, n, s, s ? strlen(s) : 0) != 0)
+        {
+            duk_error(ctx, DUK_ERR_ERROR, "innerHTML assignment failed");
+        }
     }
     return 0;
 }
@@ -338,6 +351,380 @@ static duk_ret_t duk_el_removeChild(duk_context *ctx)
     }
     return 0;
 }
+/* ── SW5: insertBefore / querySelector(All) (methods) ───────────────────── */
+static duk_ret_t duk_el_insertBefore(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    DomNode *c = arg_node(ctx, 0);
+    DomNode *ref = duk_is_null_or_undefined(ctx, 1) ? NULL : arg_node(ctx, 1);
+    BUDGET_OR_THROW(b);
+    if (!n || !c || dom_insert_before(b->dom, n, c, ref) != 0)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "insertBefore failed");
+    }
+    return 0;
+}
+
+/* querySelector emit: Duktape pushes wrappers into the array being built
+ * at index `arr` (carried through the user data pointer). */
+typedef struct
+{
+    duk_context *ctx;
+    duk_idx_t arr;
+    duk_uarridx_t k;
+    JsBridge *b;
+} DukQsEmit;
+
+static int qs_emit_duktape(void *elp, void *ud)
+{
+    DukQsEmit *e = (DukQsEmit *)ud;
+    duk_push_element(e->ctx, e->b, (DomNode *)elp);
+    duk_put_prop_index(e->ctx, e->arr, e->k++);
+    return 0;
+}
+
+static duk_ret_t duk_el_querySelectorAll(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    duk_idx_t arr = duk_push_array(ctx);
+    DukQsEmit e = {ctx, arr, 0, b};
+    jsbridge_el_query_selector_all(b, n, sel, scratch, sizeof(scratch),
+                                   qs_emit_duktape, &e);
+    return 1;
+}
+
+static duk_ret_t duk_el_querySelector(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    duk_push_element(ctx, b,
+                     (DomNode *)jsbridge_el_query_selector_first(
+                         b, n, sel, scratch, sizeof(scratch)));
+    return 1;
+}
+
+/* ── SW5 (O4): classList object — fresh plain object per access whose
+ * methods close over the DomNode via a hidden pointer prop. */
+static DomNode *cl_node(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "\xFF" "cl.node");
+    DomNode *n = (DomNode *)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    return n;
+}
+
+static duk_ret_t duk_cl_add(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    if (jsbridge_el_class_add(b, cl_node(ctx), duk_to_string(ctx, 0)) != 0)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "classList.add failed");
+    }
+    return 0;
+}
+
+static duk_ret_t duk_cl_remove(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    if (jsbridge_el_class_remove(b, cl_node(ctx), duk_to_string(ctx, 0)) != 0)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "classList.remove failed");
+    }
+    return 0;
+}
+
+static duk_ret_t duk_cl_toggle(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    int rc = jsbridge_el_class_toggle(b, cl_node(ctx), duk_to_string(ctx, 0));
+    if (rc < 0)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "classList.toggle failed");
+    }
+    duk_push_boolean(ctx, rc == 1);
+    return 1;
+}
+
+static duk_ret_t duk_cl_contains(duk_context *ctx)
+{
+    duk_push_boolean(ctx,
+                     jsbridge_el_class_has(cl_node(ctx), duk_to_string(ctx, 0)));
+    return 1;
+}
+
+static duk_ret_t duk_cl_item(duk_context *ctx)
+{
+    DomNode *n = cl_node(ctx);
+    int idx = duk_is_undefined(ctx, 0) ? -1 : (int)duk_to_int(ctx, 0);
+    const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
+                                                    : NULL;
+    int k = 0;
+    const char *p = cls;
+    while (p && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               *p == '\f')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        int n2 = 0;
+        while (p[n2] && !strchr(" \t\n\r\f", p[n2]))
+        {
+            n2++;
+        }
+        if (k++ == idx)
+        {
+            char tok[64];
+            int cpy = n2 < (int)sizeof(tok) - 1 ? n2 : (int)sizeof(tok) - 1;
+            memcpy(tok, p, (size_t)cpy);
+            tok[cpy] = '\0';
+            duk_push_string(ctx, tok);
+            return 1;
+        }
+        p += n2;
+    }
+    duk_push_null(ctx);
+    return 1;
+}
+
+static duk_ret_t duk_cl_length(duk_context *ctx)
+{
+    DomNode *n = cl_node(ctx);
+    const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
+                                                    : NULL;
+    int k = 0;
+    const char *p = cls;
+    while (p && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               *p == '\f')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        k++;
+        while (*p && !strchr(" \t\n\r\f", *p))
+        {
+            p++;
+        }
+    }
+    duk_push_int(ctx, k);
+    return 1;
+}
+
+/* Fresh classList object for `node`. */
+static void put_method(duk_context *ctx, duk_idx_t obj, const char *name,
+                       duk_c_function fn, duk_idx_t nargs); /* fwd: below */
+static void duk_push_classlist(duk_context *ctx, JsBridge *b, DomNode *node)
+{
+    (void)b;
+    duk_idx_t obj = duk_push_object(ctx);
+    duk_push_pointer(ctx, (void *)node);
+    duk_put_prop_string(ctx, obj, "\xFF" "cl.node");
+    put_method(ctx, obj, "add", duk_cl_add, 1);
+    put_method(ctx, obj, "remove", duk_cl_remove, 1);
+    put_method(ctx, obj, "toggle", duk_cl_toggle, 1);
+    put_method(ctx, obj, "contains", duk_cl_contains, 1);
+    put_method(ctx, obj, "item", duk_cl_item, 1);
+    duk_push_string(ctx, "length");
+    duk_push_c_function(ctx, duk_cl_length, 0);
+    duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_SET_ENUMERABLE);
+}
+
+/* ── SW5: style object — hidden node pointer + has/put through a getter/
+ * setter trap: Duktape has no generic property hook on plain objects, so
+ * style objects expose the WALKER vocabulary as accessors (display/
+ * visibility/textAlign/fontWeight/fontStyle/textDecoration + cssFloat)
+ * backed by one shared style-string reader/writer. Legacy write patterns
+ * for other property names are accepted no-ops (contained, no throw). */
+static void style_read_prop(const DomNode *n, const char *prop, char *out,
+                            size_t outsz)
+{
+    out[0] = '\0';
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    const char *st = dom_get_attr(n, "style");
+    if (!st)
+    {
+        return;
+    }
+    size_t plen = strlen(prop);
+    const char *p = st;
+    while (*p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        {
+            p++;
+        }
+        const char *seg = p;
+        while (*p && *p != ';')
+        {
+            p++;
+        }
+        const char *colon = memchr(seg, ':', (size_t)(p - seg));
+        if (colon && (size_t)(colon - seg) == plen &&
+            strncmp(seg, prop, plen) == 0)
+        {
+            const char *vs = colon + 1;
+            const char *ve = p;
+            while (vs < ve && (*vs == ' ' || *vs == '\t'))
+            {
+                vs++;
+            }
+            while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t'))
+            {
+                ve--;
+            }
+            size_t vn = (size_t)(ve - vs);
+            if (vn >= outsz)
+            {
+                vn = outsz - 1;
+            }
+            memcpy(out, vs, vn);
+            out[vn] = '\0';
+            return;
+        }
+        if (*p)
+        {
+            p++;
+        }
+    }
+}
+
+/* Rewrite one property of the inline style attr, preserving others. */
+static void style_write_prop(JsBridge *b, DomNode *n, const char *prop,
+                             const char *value)
+{
+    static char buf[512]; /* static: off the device game-task stack */
+    size_t off = 0;
+    size_t plen = strlen(prop);
+    buf[0] = '\0';
+    const char *st = dom_get_attr(n, "style");
+    const char *p = st;
+    while (st && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        {
+            p++;
+        }
+        const char *seg = p;
+        while (*p && *p != ';')
+        {
+            p++;
+        }
+        const char *colon = memchr(seg, ':', (size_t)(p - seg));
+        size_t segLen = (size_t)(p - seg);
+        if (!colon || (size_t)(colon - seg) != plen ||
+            strncmp(seg, prop, plen) != 0)
+        {
+            while (segLen > 0 && (seg[segLen - 1] == ' ' ||
+                                  seg[segLen - 1] == '\t'))
+            {
+                segLen--;
+            }
+            if (segLen && off + segLen + 2 < sizeof(buf))
+            {
+                if (off)
+                {
+                    buf[off++] = ';';
+                }
+                memcpy(buf + off, seg, segLen);
+                off += segLen;
+                buf[off] = '\0';
+            }
+        }
+        if (*p)
+        {
+            p++;
+        }
+    }
+    if (value && value[0])
+    {
+        int n1 = snprintf(buf + off, sizeof(buf) - off, "%s%s: %s",
+                          off ? ";" : "", prop, value);
+        if (n1 < 0 || (size_t)n1 >= sizeof(buf) - off)
+        {
+            return; /* overflow: drop the write, don't throw */
+        }
+    }
+    dom_set_attr(b->dom, n, "style", buf);
+}
+
+static DomNode *style_node(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, "\xFF" "st.node");
+    DomNode *n = (DomNode *)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    return n;
+}
+
+/* Shared getter/setter bodies, switched by the lightfunc's magic index into
+ * a property-name table. */
+static const char *const STYLE_PROPS[] = {
+    "display", "visibility", "text-align", "font-weight", "font-style",
+    "text-decoration", "color", "background"};
+
+static duk_ret_t duk_style_get(duk_context *ctx)
+{
+    int which = (int)duk_get_current_magic(ctx);
+    char val[128];
+    style_read_prop(style_node(ctx), STYLE_PROPS[which], val, sizeof(val));
+    duk_push_string(ctx, val);
+    return 1;
+}
+
+static duk_ret_t duk_style_set(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    int which = (int)duk_get_current_magic(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = style_node(ctx);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        style_write_prop(b, n, STYLE_PROPS[which], duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+static void duk_push_style(duk_context *ctx, JsBridge *b, DomNode *node)
+{
+    (void)b;
+    duk_idx_t obj = duk_push_object(ctx);
+    duk_push_pointer(ctx, (void *)node);
+    duk_put_prop_string(ctx, obj, "\xFF" "st.node");
+    for (int i = 0; i < (int)(sizeof(STYLE_PROPS) / sizeof(STYLE_PROPS[0]));
+         i++)
+    {
+        duk_push_string(ctx, STYLE_PROPS[i]); /* key */
+        /* lightfuncs carry the magic switch compactly (8 accessors). */
+        duk_push_c_lightfunc(ctx, duk_style_get, 0, 0, i);
+        duk_push_c_lightfunc(ctx, duk_style_set, 1, 1, i);
+        /* [obj, key, getter, setter] → target at -4; def pops all three. */
+        duk_def_prop(ctx, -4,
+                     DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_HAVE_SETTER |
+                         DUK_DEFPROP_SET_ENUMERABLE);
+    }
+}
+
 static duk_ret_t duk_el_addEventListener(duk_context *ctx)
 {
     JsBridge *b = bridge_of(ctx);
@@ -414,6 +801,36 @@ static duk_ret_t duk_el_getElementsByTagName(duk_context *ctx)
     return 1;
 }
 
+/* ── SW5 accessors: navigation + classList/style objects ────────────────── */
+static duk_ret_t duk_el_get_firstElementChild(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    duk_push_element(ctx, b, n ? dom_first_element_child(n) : NULL);
+    return 1;
+}
+static duk_ret_t duk_el_get_nextElementSibling(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    duk_push_element(ctx, b, n ? dom_next_element_sibling(n) : NULL);
+    return 1;
+}
+static duk_ret_t duk_el_get_classList(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    duk_push_classlist(ctx, b, n);
+    return 1;
+}
+static duk_ret_t duk_el_get_style(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    duk_push_style(ctx, b, n);
+    return 1;
+}
+
 /* Push a fresh wrapper object for `node` (NULL → null). */
 static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
 {
@@ -441,6 +858,10 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"childElementCount", duk_el_get_childElementCount, NULL},
         {"children", duk_el_get_children, NULL},
         {"nodeType", duk_el_get_nodeType, NULL},
+        {"firstElementChild", duk_el_get_firstElementChild, NULL},
+        {"nextElementSibling", duk_el_get_nextElementSibling, NULL},
+        {"classList", duk_el_get_classList, NULL},
+        {"style", duk_el_get_style, NULL},
     };
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
@@ -474,6 +895,9 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"removeAttribute", duk_el_removeAttribute, 1},
         {"appendChild", duk_el_appendChild, 1},
         {"removeChild", duk_el_removeChild, 1},
+        {"insertBefore", duk_el_insertBefore, 2},
+        {"querySelector", duk_el_querySelector, 1},
+        {"querySelectorAll", duk_el_querySelectorAll, 1},
         {"addEventListener", duk_el_addEventListener, 2},
         {"getElementsByTagName", duk_el_getElementsByTagName, 1},
     };
@@ -638,6 +1062,34 @@ static duk_ret_t duk_document_createTextNode(duk_context *ctx)
     duk_push_element(ctx, b, t);
     return 1;
 }
+
+/* document.querySelector(All): scoped at the document root (SW5). */
+static duk_ret_t duk_document_querySelector(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    DomNode *root = b->dom ? b->dom->root : NULL;
+    duk_push_element(ctx, b,
+                     (DomNode *)jsbridge_el_query_selector_first(
+                         b, root, sel, scratch, sizeof(scratch)));
+    return 1;
+}
+
+static duk_ret_t duk_document_querySelectorAll(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    DomNode *root = b->dom ? b->dom->root : NULL;
+    duk_idx_t arr = duk_push_array(ctx);
+    DukQsEmit e = {ctx, arr, 0, b};
+    jsbridge_el_query_selector_all(b, root, sel, scratch, sizeof(scratch),
+                                   qs_emit_duktape, &e);
+    return 1;
+}
 /* document.title getter: walk the live tree's <title> so scripts and the
  * chrome agree (doc->title is only filled by the walker, after scripts). */
 static duk_ret_t duk_document_getTitle(duk_context *ctx)
@@ -715,6 +1167,84 @@ static void put_method(duk_context *ctx, duk_idx_t obj, const char *name,
     duk_put_prop_string(ctx, obj, name);
 }
 
+/* ── timers (setTimeout / setInterval): router table + engine refs ──────── */
+/* Registration entry: [0]=fn [1]=delay. Registers in the ROUTER table and
+ * returns the public id. Throws on refusal (table full / not a function). */
+static duk_ret_t duk_timer_setup(duk_context *ctx, JsBridge *b,
+                                 JsTimerKind kind)
+{
+    if (!duk_is_callable(ctx, 0))
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR, "timer callback must be a function");
+    }
+    if (b->timerCount >= JSBRIDGE_TIMERS_MAX)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "too many timers");
+    }
+    int delay = 0;
+    if (!duk_is_undefined(ctx, 1) && !duk_is_null(ctx, 1))
+    {
+        delay = (int)duk_to_number(ctx, 1);
+    }
+    if (delay < 0)
+    {
+        delay = 0;
+    }
+    /* Pin the FUNCTION in the global stash (GC-safe, same contract as
+     * listeners) and remember its stable heapptr for dispatch. */
+    char key[32];
+    snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.tid.%d"),
+             b->timerIdSeq + 1); /* next id the router will hand out */
+    duk_push_global_stash(ctx);
+    duk_dup(ctx, 0);
+    duk_put_prop_string(ctx, -2, key);
+    duk_pop(ctx);
+    void *fnHeapptr = duk_get_heapptr(ctx, 0);
+    int id = jsbridge_timer_start(b, kind, fnHeapptr, (unsigned)delay);
+    if (id == 0)
+    {
+        duk_push_global_stash(ctx);
+        duk_del_prop_string(ctx, -1, key);
+        duk_pop(ctx);
+        duk_error(ctx, DUK_ERR_ERROR, "too many timers");
+    }
+    /* Verify the router handed out the id we keyed the stash with (it
+     * must — registration is single-threaded and ids are sequential). */
+    if (id != b->timerIdSeq)
+    {
+        /* Defensive: impossible today, but never leak a stash pin. */
+        duk_push_global_stash(ctx);
+        duk_del_prop_string(ctx, -1, key);
+        duk_pop(ctx);
+    }
+    duk_push_number(ctx, (duk_double_t)id);
+    return 1;
+}
+
+static duk_ret_t duk_setTimeout(duk_context *ctx)
+{
+    return duk_timer_setup(ctx, bridge_of(ctx), JS_TIMER_TIMEOUT);
+}
+
+static duk_ret_t duk_setInterval(duk_context *ctx)
+{
+    return duk_timer_setup(ctx, bridge_of(ctx), JS_TIMER_INTERVAL);
+}
+
+static duk_ret_t duk_clearTimeout(duk_context *ctx)
+{
+    int id = duk_is_undefined(ctx, 0) ? 0 : (int)duk_to_number(ctx, 0);
+    duk_push_number(ctx, (duk_double_t)jsbridge_timer_clear(bridge_of(ctx), id));
+    return 1;
+}
+
+static duk_ret_t duk_clearInterval(duk_context *ctx)
+{
+    int id = duk_is_undefined(ctx, 0) ? 0 : (int)duk_to_number(ctx, 0);
+    duk_push_number(ctx, (duk_double_t)jsbridge_timer_clear(bridge_of(ctx), id));
+    return 1;
+}
+
 static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
 {
     /* window: identity alias for the global object. */
@@ -726,6 +1256,8 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
     put_method(ctx, doc, "getElementById", duk_document_getElementById, 1);
     put_method(ctx, doc, "createElement", duk_document_createElement, 1);
     put_method(ctx, doc, "createTextNode", duk_document_createTextNode, 1);
+    put_method(ctx, doc, "querySelector", duk_document_querySelector, 1);
+    put_method(ctx, doc, "querySelectorAll", duk_document_querySelectorAll, 1);
     duk_push_string(ctx, "title");
     duk_push_c_function(ctx, duk_document_getTitle, 0);
     duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_SET_ENUMERABLE);
@@ -771,11 +1303,11 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
     put_method(ctx, glob, "alert", duk_alert, 1);
     put_method(ctx, glob, "confirm", duk_noop, 1);
     put_method(ctx, glob, "prompt", duk_noop, 1);
-    put_method(ctx, glob, "setTimeout", duk_noop, 2);
-    put_method(ctx, glob, "setInterval", duk_noop, 2);
-    put_method(ctx, glob, "clearTimeout", duk_noop, 1);
-    put_method(ctx, glob, "clearInterval", duk_noop, 1);
-    put_method(ctx, glob, "requestAnimationFrame", duk_noop, 1);
+    put_method(ctx, glob, "setTimeout", duk_setTimeout, 2);
+    put_method(ctx, glob, "setInterval", duk_setInterval, 2);
+    put_method(ctx, glob, "clearTimeout", duk_clearTimeout, 1);
+    put_method(ctx, glob, "clearInterval", duk_clearInterval, 1);
+    put_method(ctx, glob, "requestAnimationFrame", duk_setTimeout, 1);
     put_method(ctx, glob, "addEventListener", duk_doc_addEventListener, 2);
     duk_pop(ctx);
 }
@@ -796,6 +1328,7 @@ static int duktape_init(JsBridge *b, const char *baseUrl)
     duk_put_prop_string(ctx, -2, DUK_BRIDGE_STASH_KEY);
     duk_pop(ctx);
     define_globals(ctx, b, baseUrl);
+    duktape_define_xhr(ctx, b);
     return 0;
 }
 
@@ -803,9 +1336,9 @@ static void duktape_run_script(JsBridge *b, const char *src, size_t len,
                                int index)
 {
     duk_context *ctx = (duk_context *)b->implState;
-    if (len == 0 || len > JSBRIDGE_MAX_SCRIPT_BYTES)
+    if (len == 0 || len > JSBRIDGE_MAX_SCRIPT_SOURCE)
     {
-        if (len > JSBRIDGE_MAX_SCRIPT_BYTES)
+        if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
         {
             b->errs++;
             if (!b->lastError[0])
@@ -828,14 +1361,19 @@ static void duktape_run_script(JsBridge *b, const char *src, size_t len,
         logger_log("[js] script %d skipped (nesting guard)", index);
         return;
     }
-    char *buf = (char *)JMalloc(len + 1);
+    /* SW5: ES5 builtin compat prefix (Set/Map/Image) — self-guarding. */
+    const char *prefix = NULL;
+    size_t plen = jsbridge_sw5_prefix(&prefix);
+    char *buf = (char *)JMalloc(plen + len + 1);
     if (!buf)
     {
         b->errs++;
         return;
     }
-    memcpy(buf, src, len);
-    buf[len] = '\0';
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, src, len);
+    buf[plen + len] = '\0';
+    len += plen;
 
     b->ran++;
     duk_push_string(ctx, buf);     /* source */
@@ -909,6 +1447,57 @@ static int duktape_dispatch_click(JsBridge *b, const void *anchorNode)
     return fired ? JSB_CLICK_NAVIGATE : JSB_CLICK_NONE;
 }
 
+/* Timer vtable: release one stash-pinned function (slot already inert). */
+static void duktape_clear_timer_ref(JsBridge *b, void *fnRef)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !fnRef)
+    {
+        return;
+    }
+    /* Find + delete the stash entry whose heapptr matches. */
+    duk_push_global_stash(ctx);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    while (duk_next(ctx, -1, 0))
+    {
+        const char *k = duk_get_string(ctx, -1);
+        if (k && strstr(k, "\xFF" "pluto.tid."))
+        {
+            duk_get_prop(ctx, -2); /* stash[key] */
+            void *hp = duk_get_heapptr(ctx, -1);
+            duk_pop(ctx);
+            if (hp == fnRef)
+            {
+                duk_del_prop(ctx, -2);
+                break;
+            }
+        }
+        duk_pop(ctx); /* key */
+    }
+    duk_pop_2(ctx); /* enum, stash */
+}
+
+/* Invoke one pinned callback. Returns 0 ok, 1 contained error, -1 abort. */
+static int duktape_run_timer_ref(JsBridge *b, void *fnRef)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !fnRef)
+    {
+        return 1;
+    }
+    duk_push_heapptr(ctx, fnRef);
+    duk_push_undefined(ctx); /* this */
+    if (duk_pcall(ctx, 0) != DUK_EXEC_SUCCESS)
+    {
+        int firstErr = !b->lastError[0];
+        bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+        duk_pop(ctx);
+        return firstErr ? -1 : 1;
+    }
+    duk_pop(ctx);
+    return 0;
+}
+
 static void duktape_close(JsBridge *b)
 {
     duk_context *ctx = (duk_context *)b->implState;
@@ -916,12 +1505,276 @@ static void duktape_close(JsBridge *b)
     {
         return;
     }
+    /* Safety net: sweep any timer stash pins the router did not release
+     * (paranoia — js_doc_close clears the table before close). */
+    duk_push_global_stash(ctx);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    while (duk_next(ctx, -1, 0))
+    {
+        const char *k = duk_get_string(ctx, -1);
+        if (k && strstr(k, "\xFF" "pluto.tid."))
+        {
+            duk_del_prop(ctx, -2);
+        }
+        duk_pop(ctx);
+    }
+    duk_pop_2(ctx);
     /* Heap destruction frees every engine object — listener stash entries,
      * element wrappers and compiled code included (no per-listener unref). */
     duk_destroy_heap(ctx);
     b->implState = NULL;
 }
 
+
+/* ── XMLHttpRequest (async HTTP → JS callbacks) ────────────────────────────
+ * Same thin-glue contract as the muJS bridge: wrapper object carries the
+ * public request id as a pointer prop; live state reads go straight to the
+ * router table; onload/onerror/onreadystatechange are pinned at send by
+ * stashing them in the global stash (GC-safe) and remembering heapptrs.
+ * Caps + validation + byte budgets live in the router (jsbridge.c). */
+#define DUK_XHR_ID_PROP "\xFF" "pluto.xhrid"
+
+/* Wrapper factory: fresh object + methods + request-id prop. */
+static void duk_push_xhr(duk_context *ctx, JsBridge *b)
+{
+    (void)b;
+    duk_idx_t obj = duk_push_object(ctx);
+    /* request id lives as a pointer prop (0 = unopened); updated by open. */
+    duk_push_pointer(ctx, (void *)0);
+    duk_put_prop_string(ctx, obj, DUK_XHR_ID_PROP);
+
+    duk_push_c_function(ctx, duk_xhr_open, 2);
+    duk_put_prop_string(ctx, obj, "open");
+    duk_push_c_function(ctx, duk_xhr_send, 0);
+    duk_put_prop_string(ctx, obj, "send");
+    duk_push_c_function(ctx, duk_xhr_abort, 0);
+    duk_put_prop_string(ctx, obj, "abort");
+}
+
+static int duk_xhr_open(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    duk_push_this(ctx);
+    const char *method = duk_to_string(ctx, 0);
+    const char *url = duk_to_string(ctx, 1);
+    int id = jsbridge_xhr_open(b, method, url);
+    if (id == 0)
+    {
+        return duk_error(ctx, DUK_ERR_ERROR, "%s",
+                         b->lastError[0] ? b->lastError : "xhr open failed");
+    }
+    duk_push_pointer(ctx, (void *)(intptr_t)id);
+    duk_put_prop_string(ctx, -2, DUK_XHR_ID_PROP);
+    return 0;
+}
+
+static int duk_xhr_id(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, DUK_XHR_ID_PROP);
+    int id = (int)(intptr_t)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    return id;
+}
+
+static int duk_xhr_send(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    int id = duk_xhr_id(ctx);
+    if (id <= 0)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "xhr: send before open");
+    }
+    /* Pin the completion handler (onload → onerror → onreadystatechange
+     * precedence) in the global stash and remember its heapptr. */
+    static const char *const names[] = {"onload", "onerror",
+                                        "onreadystatechange"};
+    void *fnHeapptr = NULL;
+    char key[40];
+    snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.xfn.%d"),
+             b->xhrIdSeq + 1); /* next id the router hands out on start */
+    for (int i = 0; i < 3 && !fnHeapptr; i++)
+    {
+        duk_push_this(ctx);
+        if (duk_get_prop_string(ctx, -1, names[i]) && duk_is_callable(ctx, -1))
+        {
+            duk_push_global_stash(ctx);
+            duk_dup(ctx, -2); /* the handler value */
+            duk_put_prop_string(ctx, -2, key);
+            duk_pop(ctx); /* stash */
+            duk_dup(ctx, -2);
+            fnHeapptr = duk_get_heapptr(ctx, -1);
+            duk_pop(ctx); /* dup */
+        }
+        duk_pop_2(ctx); /* prop value + this */
+    }
+    if (!fnHeapptr)
+    {
+        duk_error(ctx, DUK_ERR_ERROR,
+                  "xhr: no onload/onerror/onreadystatechange handler");
+    }
+    /* Pin the wrapper object as `this` for the completion. */
+    char okey[40];
+    snprintf(okey, sizeof(okey), DUK_HIDDEN_SYMBOL("pluto.xobj.%d"),
+             b->xhrIdSeq + 1);
+    duk_push_this(ctx);
+    void *objHeapptr = duk_get_heapptr(ctx, -1);
+    duk_push_global_stash(ctx);
+    duk_dup(ctx, -2);
+    duk_put_prop_string(ctx, -2, okey);
+    duk_pop(ctx); /* stash */
+    duk_pop(ctx); /* this */
+
+    jsbridge_xhr_send(b, id, fnHeapptr, objHeapptr);
+    return 0;
+}
+
+static int duk_xhr_abort(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    jsbridge_xhr_abort(b, duk_xhr_id(ctx));
+    return 0;
+}
+
+/* Read-only live accessors (implemented as plain methods bound via
+ * defineProperty on the prototype below — Duktape wrappers here are
+ * per-instance, so the accessors are attached in duk_push_xhr instead). */
+static int duk_xhr_get_readyState(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, duk_xhr_id(ctx));
+    duk_push_int(ctx, r ? r->state : 0);
+    return 1;
+}
+static int duk_xhr_get_status(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, duk_xhr_id(ctx));
+    duk_push_int(ctx, (r && r->state >= JS_XHR_DONE) ? r->status : 0);
+    return 1;
+}
+static int duk_xhr_get_responseText(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, duk_xhr_id(ctx));
+    duk_push_string(ctx, (r && r->body) ? r->body : "");
+    return 1;
+}
+static int duk_xhr_get_responseURL(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, duk_xhr_id(ctx));
+    duk_push_string(ctx, (r && r->url[0]) ? r->url : "");
+    return 1;
+}
+
+/* Constructor global: new XMLHttpRequest() / XHR() both return a wrapper. */
+static duk_ret_t duk_xmlhttprequest_new(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    duk_push_xhr(ctx, b);
+    return 1;
+}
+
+static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
+{
+    duk_push_c_function(ctx, duk_xmlhttprequest_new, 0);
+    duk_push_object(ctx); /* prototype for instances */
+    {
+        duk_push_c_function(ctx, duk_xhr_open, 2);
+        duk_put_prop_string(ctx, -2, "open");
+        duk_push_c_function(ctx, duk_xhr_send, 0);
+        duk_put_prop_string(ctx, -2, "send");
+        duk_push_c_function(ctx, duk_xhr_abort, 0);
+        duk_put_prop_string(ctx, -2, "abort");
+        struct
+        {
+            const char *name;
+            duk_c_function get;
+        } accs[] = {
+            {"readyState", duk_xhr_get_readyState},
+            {"status", duk_xhr_get_status},
+            {"responseText", duk_xhr_get_responseText},
+            {"response", duk_xhr_get_responseText},
+            {"responseURL", duk_xhr_get_responseURL},
+        };
+        for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
+        {
+            duk_push_string(ctx, accs[i].name);
+            duk_push_c_function(ctx, accs[i].get, 0);
+            duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER |
+                                      DUK_DEFPROP_SET_ENUMERABLE);
+        }
+    }
+    duk_put_prop_string(ctx, -2, "prototype");
+    duk_put_global_string(ctx, "XMLHttpRequest");
+}
+
+/* XHR vtable: delete the stash pins whose heapptrs match. */
+static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx)
+    {
+        return;
+    }
+    duk_push_global_stash(ctx);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    while (duk_next(ctx, -1, 0))
+    {
+        const char *k = duk_get_string(ctx, -1);
+        if (k && (strstr(k, "\xFF" "pluto.xfn.") || strstr(k, "\xFF" "pluto.xobj.")))
+        {
+            duk_get_prop(ctx, -2); /* stash[key] */
+            void *hp = duk_get_heapptr(ctx, -1);
+            duk_pop(ctx);
+            if (hp == fnRef || hp == objRef)
+            {
+                duk_del_prop(ctx, -2);
+            }
+        }
+        duk_pop(ctx); /* key */
+        if (!fnRef && !objRef)
+        {
+            break;
+        }
+    }
+    duk_pop(ctx); /* enum */
+    duk_pop(ctx); /* stash */
+}
+
+/* Invoke the pinned completion: fn(responseText), this = wrapper. */
+static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
+                               const JsHttpRequest *r)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !fnRef)
+    {
+        return 1;
+    }
+    duk_push_heapptr(ctx, fnRef);
+    if (objRef)
+    {
+        duk_push_heapptr(ctx, objRef); /* this */
+    }
+    else
+    {
+        duk_push_undefined(ctx);
+    }
+    duk_push_string(ctx, (r && r->body) ? r->body : "");
+    if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
+    {
+        int firstErr = !b->lastError[0];
+        bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+        duk_pop(ctx);
+        return firstErr ? -1 : 1;
+    }
+    duk_pop(ctx);
+    return 0;
+}
+
 const JsEngineImpl js_engine_duktape = {
-    duktape_init, duktape_run_script, duktape_dispatch_click, duktape_close,
+    duktape_init,     duktape_run_script,    duktape_dispatch_click,
+    duktape_clear_timer_ref, duktape_run_timer_ref,
+    duktape_run_xhr_ref,     duktape_clear_xhr_refs, duktape_close,
     "Duktape"};
