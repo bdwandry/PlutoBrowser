@@ -61,7 +61,9 @@ PlaydateAPI *pluto_pd(void)
     return &g_fakeApi;
 }
 void pluto_free(void *p) { free(p); }
-void *pluto_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pluto_mem_realloc(void *p, size_t n); /* core/pluto_mem.c funnel */
+void *pluto_mem_sdk_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pluto_realloc(void *p, size_t n) { return pluto_mem_realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
 /* http_client stubs: jsext.c references these for the NETWORK prefetch
@@ -72,6 +74,11 @@ int http_get(const char *url, const HttpCallbacks *cb)
     (void)url;
     (void)cb;
     return 0; /* "immediate failure" — never expected in this test */
+}
+size_t http_internal_page_body(const char *url, const char **bodyOut)
+{
+    if (bodyOut) { *bodyOut = NULL; }
+    return 0;
 }
 void http_cancel(void) {}
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
@@ -132,6 +139,7 @@ static const char JSEXT_PAGE[] =
     "<script>window.__inlineA = (window.__extCount === 1) ? 'A_OK' : 'A_BAD';</script>"
     "<script src=\"jsext-dup.js\"></script>"
     "<script src=\"jsext-huge.js\"></script>"
+    "<script src=\"data:application/javascript;base64,d2luZG93Ll9fZGF0YVJhbj0xOw==\"></script>"
     "<script src=\"jsext-big.js\"></script>"
     "<script src=\"jsext-big2.js\"></script>"
     "<script src=\"jsext-big3.js\"></script>"
@@ -161,12 +169,16 @@ static const char JSEXT_PAGE[] =
     "    return window.__inlineA === 'A_OK'; });"
     "  T('dup: downloaded once, executed twice', function(){"
     "    return window.__extCount === 2; });"
-    "  T('over-cap file refused (no execution)', function(){"
-    "    return typeof window.__huge === 'undefined'; });"
+    "  T('over-cap file executed (disk-resident)', function(){"
+    "    return window.__huge === 1; });"
     "  T('over-budget file refused (no execution)', function(){"
     "    return typeof window.__big3 === 'undefined'; });"
     "  T('big files did not break the engine', function(){"
     "    return typeof window.__extOrder === 'string'; });"
+    "  T('72KB file ran from disk (SW2b)', function(){"
+    "    return window.__huge === 1; });"
+    "  T('data:-URL script executed (SW2d)', function(){"
+    "    return window.__dataRan === 1; });"
     "  var b = document.getElementById('banner');"
     "  b.textContent = pass + ' passed, ' + fail + ' failed.';"
     "} catch (e) {"
@@ -193,11 +205,12 @@ int main(void)
     int total = jsext_collect(JSEXT_PAGE, "about:jsext", &slots, &slotCount,
                               &ext, &extCount, &arena);
     CHECK(total > 0 && slots && ext && arena, "collect: slot table built");
-    CHECK(extCount == 14,
+    CHECK(extCount == 14, /* SW2d: the data: script adds NO ext entry */
           "collect: 14 unique externals (dup stored once, missing kept)");
     /* Document-order interleaving: order, missing, dup#1, INLINE, dup#2,
      * huge, big1..big8, big9, write, INLINE-report. */
-    CHECK(total == 17, "collect: 17 script elements in document order");
+    CHECK(total == 18, /* SW2d: +1 data:-URL script element */
+          "collect: 18 script elements in document order");
     CHECK(slots[0].isExt == 1 && slots[0].extIndex == 0,
           "collect: slot0 = first external");
     CHECK(slots[2].isExt == 1 && slots[2].extIndex == 2 &&
@@ -208,6 +221,10 @@ int main(void)
     CHECK(strcmp(ext[1].url, "jsext-missing.js") == 0,
           "collect: about: base keeps the raw relative src for local fill");
 
+    /* SW3: pin the CLASSIC 160KB page budget for the refusal fixture below
+     * (the production default rose to 512KB, under which everything fits).
+     * Must be set BEFORE local_fill — it reads the effective budget. */
+    jsext_set_page_budget(160 * 1024);
     CHECK(jsext_local_fill(arena, ext, extCount) == extCount,
           "local fill: ran over the whole table");
     for (int i = 0; i < extCount; i++)
@@ -219,8 +236,11 @@ int main(void)
           "local fill: order.js served");
     CHECK(ext[1].url[0] == '\0' && !ext[1].body,
           "local fill: missing.js zeroed (skip + log path)");
-    CHECK(ext[3].url[0] == '\0' && !ext[3].body,
-          "local fill: 70KB huge.js refused by the 64KB per-script cap");
+    /* SW2b: huge.js (72,819B > 64KB RAM threshold) is now DISK-resident —
+     * accepted, not refused. body stays NULL; spill holds the bytes. */
+    CHECK(ext[3].url[0] != '\0' && !ext[3].body && ext[3].spill >= 0 &&
+              ext[3].len == 72819,
+          "local fill: 72KB huge.js accepted as disk-resident (SW2b)");
     CHECK(ext[4].body && ext[4].len == 16800 &&
               ext[11].body && ext[11].len == 16800,
           "local fill: all eight 16KB files accepted (first + last checked)");
@@ -243,20 +263,36 @@ int main(void)
         printf("  [diag] full: jsRan=%d jsErrors=%d last='%s'\n", d->jsRan,
                d->jsErrors, d->jsLastError);
         CHECK(d->jsErrors == 0, "full: no JS errors");
-        CHECK(d->jsRan == 14,
-              "full: 14 runs (order, dup x2, big1-8, write, 2 inline)");
+        CHECK(d->jsRan == 16, /* SW2b disk + SW2d data: leg */
+              "full: 15 runs (order, dup x2, big1-8, huge, write, 2 inline)");
         CHECK(find_inline_text(d, "[PASS] external defined global"),
               "full(6): external global visible to the engine");
         CHECK(find_inline_text(d, "[PASS] inline-after-external"),
               "full(6): later INLINE script consumed external state");
         CHECK(find_inline_text(d, "[PASS] dup: downloaded once, executed twice"),
               "full(9): same file executed at both slots");
-        CHECK(find_inline_text(d, "[PASS] over-cap file refused"),
-              "full(10): over-cap file never executed");
+        CHECK(find_inline_text(d, "[PASS] over-cap file executed"),
+              "full(10): former over-cap file now runs from disk (SW2b)");
         CHECK(find_inline_text(d, "[PASS] over-budget file refused"),
               "full(11): over-budget file never executed");
-        CHECK(find_inline_text(d, "6 passed, 0 failed"),
-              "full: page banner shows 6 passed, 0 failed");
+        CHECK(find_inline_text(d, "8 passed, 0 failed"),
+              "full: page banner shows 8 passed, 0 failed (SW2b+SW2d)");
+        if (!find_inline_text(d, "8 passed, 0 failed"))
+        {
+            /* [diag] dump every inline text so a banner mismatch shows. */
+            for (int bi = 0; bi < d->blockCount && bi < 60; bi++)
+            {
+                const DocBlock *db = d->blocks[bi];
+                if (!db || !db->inlines)
+                    continue;
+                for (int j = 0; j < db->inlineCount; j++)
+                {
+                    const DocInline *in = db->inlines[j];
+                    if (in && in->text && in->type == DOC_INLINE_TEXT)
+                        printf("  [diag] text: %.90s\n", in->text);
+                }
+            }
+        }
         CHECK(find_inline_text(d, "EXT-WROTE"),
               "full(7): external document.write output rendered");
         printf("  [diag] post-close, pre-free\n");

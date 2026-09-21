@@ -24,6 +24,7 @@
 #include "core/logger.h"
 #include "render/style.h"
 #include "pd_api.h"
+#include "core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
 
@@ -268,7 +269,7 @@ static void save_and_close(char **out)
     settings_page_close();
     if (out)
     {
-        *out = (char *)pluto_pd()->system->realloc(NULL, 6);
+        *out = (char *)pluto_mem_realloc(NULL, 6);
         if (*out)
         {
             strcpy(*out, "save");
@@ -281,7 +282,7 @@ static void cancel_and_close(char **out)
     settings_page_close();
     if (out)
     {
-        *out = (char *)pluto_pd()->system->realloc(NULL, 7);
+        *out = (char *)pluto_mem_realloc(NULL, 7);
         if (*out)
         {
             strcpy(*out, "close");

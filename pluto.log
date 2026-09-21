@@ -1,0 +1,5 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[12:34:00 #1] [jsbridge] page attach: QuickJS (engine=2)
+[12:34:00 #2] [js] script 1 failed (bc hit)
+[12:34:00 #3] [js] close[QuickJS]: ran=1 errs=1 listeners=0 timers=0 budgetLeft=511 last=TypeError: invalid 'in' operand

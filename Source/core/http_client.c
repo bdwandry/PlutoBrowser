@@ -13,12 +13,30 @@
 #include "core/logger.h"
 #include "util/strbuf.h"
 #include "util/pdtimer.h"
+#include "core/pluto_mem.h"
+#include "core/pluto_spill.h"
+#include "render/decoders/inflate.h"
+
+/* ── SW2b: disk-backed response body storage ─────────────────────────────
+ * The RAW response (headers + body) is written to a spill file as it
+ * arrives — disk holds the bulk, RAM holds one bounded read window. The
+ * RAM StrBuf keeps ONLY the head up to the header terminator (headers +
+ * maybe a few body bytes); from the first post-header byte, everything
+ * streams to disk. MAX_RESPONSE_SIZE becomes the RESIDENCY cap for the
+ * done-path materialization (a byte-array consumer must fit it in RAM),
+ * not a download cap. Byte-array consumers (http_internal_body) opt OUT
+ * of spill and keep the historical RAM-growth behavior. */
+#define SPILL_NONE 0
+#define SPILL_ACTIVE 1
+static SpillFile g_spill = PLUTO_SPILL_INVALID;
+static int g_spillMode = SPILL_NONE; /* SPILL_ACTIVE once streaming */
+static long g_bodySpilled = 0;       /* body bytes written to disk     */
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
 
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_mem_realloc((p), 0)
 
 /* ── Constants (verbatim from the reference) ─────────────────────────────── */
 #define MAX_RESPONSE_SIZE  2097152 /* 2 MB hard cap to prevent memory growth */
@@ -32,6 +50,17 @@ extern void pluto_free(void *p);
 static char g_readChunk[READ_CHUNK];
 #define SDK_READ_BUFFER    16384   /* Lua setReadBufferSize(16384)           */
 #define SDK_TIMEOUT_MS     10000   /* Lua passed 10 (seconds); C takes ms    */
+
+/* SW2b: disk-side runaway cap (no Content-Length + server never closes):
+ * bound the spill file so a hostile/hung stream cannot fill flash. */
+#define SPILL_MAX_BODY (16 * 1024 * 1024) /* 16MB — far above real pages  */
+
+/* SW2c: gzip delivery ceiling. Compressed staging lives on disk (SW2b spill
+ * or the RAM StrBuf); the DECOMPRESSED body is materialized in RAM once at
+ * completion, so it must fit the same residency budget as any other body.
+ * gzip's expansion factor on real web payloads is ~3×, so this leaves wide
+ * margin; a claim beyond it is treated as corrupt (no delivery). */
+#define GZIP_DELIVERY_CAP MAX_RESPONSE_SIZE /* 2MB decompressed */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
 typedef enum
@@ -57,6 +86,8 @@ static StrBuf g_buf;               /* raw response (headers + body) */
 static size_t g_bodyStart = 0;     /* 0 = headers not parsed yet    */
 static int g_isChunked = 0;
 static long g_contentLength = -1;
+static int g_isGzip = 0; /* SW2c: Content-Encoding includes gzip */
+static int g_gzipHold = 0; /* SW2c: freeze spill — compressed staging in RAM */
 static int g_connOpen = 0;         /* open callback fired, connected */
 static int g_openFailed = 0;
 static int g_connClosed = 0;
@@ -243,16 +274,36 @@ static const char JSTEST_HTML[] =
     "<h2>DOM</h2>\n"
     "<div id=\"domout\">[..] running</div>\n"
     "<p id=\"domhint\">ready</p>\n"
+    "<div id=\"sw5out\">[..] SW5 running</div>\n"
     "<ul id=\"demoList\"><li>one</li><li>two</li><li>three</li></ul>\n"
+    "<style>\n"
+    ".css-hidden { display: none }\n"
+    "h2.css-center { text-align: center }\n"
+    ".css-bold { font-weight: bold }\n"
+    ".css-invert { background-color: black; color: white }\n"
+    "</style>\n"
+    "<h2 class=\"css-center\">CSS demo</h2>\n"
+    "<div class=\"css-hidden\" id=\"css-hidden-probe\">[HIDDEN-BY-CSS this line must never render]</div>\n"
+    "<p class=\"css-bold\">CSS bold text (this line renders bold)</p>\n"
+    "<p class=\"css-invert\" id=\"css-invert-probe\">CSS inverted block (renders inverted)</p>\n"
+    "<div id=\"cssout\">[..] css checks running</div>\n"
+    "<h2>XHR demo</h2>\n"
+    "<p id=\"xhrout\">[..] XHR not fired yet</p>\n"
+    "<p id=\"fetchout\">[..] fetch not fired yet</p>\n"
     "<h2>Event demo</h2>\n"
     "<p><a href=\"https://example.com/blocked\" id=\"clickme\">Click me</a> - clicks: <b id=\"clickcount\">0</b></p>\n"
     "<p id=\"clickresult\">Handler has not fired yet.</p>\n"
+    "<h2>Timer demo</h2>\n"
+    "<p id=\"timerout\">[..] timer not fired yet</p>\n"
+    "<p id=\"oneshot\">[..] one-shot not fired yet</p>\n"
     "<h2>Known unavailable</h2>\n"
-    "<p>Timers (setTimeout/setInterval), localStorage, fetch/XMLHttpRequest,\n"
-    "CSS via JS, and ES6+ syntax (let/const/arrow functions) are not\n"
-    "supported by this muJS ES5 build. document/window-level listeners are\n"
-    "accepted but not dispatched; per-element click listeners work.\n"
-    "innerHTML degrades to text-only (no markup parsing).</p>\n"
+    "<p>localStorage, CSS via JS, and ES6+ syntax\n"
+    "(let/const/arrow functions) are not supported on the ES5 engines.\n"
+    "document/window-level listeners are accepted but not dispatched;\n"
+    "per-element click listeners work. Timers (setTimeout/setInterval) fire\n"
+    "between frames with per-page caps. innerHTML degrades to text-only.\n"
+    "XMLHttpRequest (GET) and QuickJS fetch() are supported async.\n"
+    "</p>\n"
     "<script>\n"
     "var banner = document.getElementById('banner');\n"
     "var pass = 0, part = 0, miss = 0;\n"
@@ -271,6 +322,7 @@ static const char JSTEST_HTML[] =
     "    else if (r === false) { report(c, name, 'MISS'); mark('MISS'); }\n"
     "    else { report(c, name, 'PART', '' + r); mark('PART'); }\n"
     "  } catch (e) { report(c, name, 'MISS', 'threw'); mark('MISS'); }\n"
+    "  if (typeof console !== 'undefined' && console.log) console.log('[sw-t] ' + name + ' → ' + r);\n"
     "}\n"
     "function P(c, name, fn, note) {\n"
     "  try { if (fn() === true) { report(c, name, 'PART', note); mark('PART'); return; } }\n"
@@ -286,6 +338,9 @@ static const char JSTEST_HTML[] =
     "  document.getElementById('engine').textContent = isDuk ? 'Duktape 2.7.0' : isQjs ? 'QuickJS 2026-06-04' : isXs ? 'XS 9.5.0' : 'muJS 1.3.10';\n"
     "  var lang = document.getElementById('langout');\n"
     "  var dom = document.getElementById('domout');\n"
+    "  var timers = document.getElementById('timerout');\n"
+    "  var cssbox = document.getElementById('cssout');\n"
+    "  var xhrbox = document.getElementById('xhrout');\n"
     "  T(lang, 'variables + arithmetic', function(){ var a = 6*7; return a === 42; });\n"
     "  T(lang, 'strings + concatenation', function(){ return 'foo' + 1 + true === 'foo1true'; });\n"
     "  T(lang, 'typeof', function(){ return typeof 1 === 'number' && typeof 'x' === 'string' && typeof undefined === 'undefined' && typeof null === 'object'; });\n"
@@ -322,7 +377,66 @@ static const char JSTEST_HTML[] =
     "  T(dom, 'location.href (read)', function(){ return typeof location.href === 'string' && location.href.length > 0; });\n"
     "  T(dom, 'navigator.userAgent', function(){ return navigator.userAgent.indexOf('muJS') > 0 || navigator.userAgent.indexOf('Duktape') > 0 || navigator.userAgent.indexOf('QuickJS') > 0 || navigator.userAgent.indexOf('XS/Moddable') > 0; });\n"
     "  T(dom, 'document.title', function(){ return document.title === 'JavaScript Test Suite'; });\n"
+    "  T(timers, 'setTimeout returns an id', function(){ var id = setTimeout(function(){}, 50); clearTimeout(id); return typeof id === 'number' && id > 0; });\n"
+    "  T(timers, 'clearTimeout(null-ish) is safe', function(){ clearTimeout(0); clearTimeout(undefined); return true; });\n"
+    "  T(cssbox, 'CSS: styled elements present in DOM', function(){\n"
+    "    var hid = document.getElementById('css-hidden-probe');\n"
+    "    var inv = document.getElementById('css-invert-probe');\n"
+    "    if (!hid || !inv) return false;\n"
+    "    return typeof hid.textContent === 'string' && inv.textContent.indexOf('inverted') >= 0; });\n"
+    "  setTimeout(function(){\n"
+    "    var out = document.getElementById('oneshot');\n"
+    "    if (out) out.textContent = 'timer-fired-ok (one-shot, 50ms)';\n"
+    "  }, 50);\n"
+    "  var beats = 0;\n"
+    "  var beatId = setInterval(function(){\n"
+    "    beats++;\n"
+    "    var out = document.getElementById('timerout');\n"
+    "    if (out) out.textContent = 'interval beat ' + beats;\n"
+    "    if (beats >= 5) clearInterval(beatId);\n"
+    "  }, 400);\n"
     "  P(dom, 'innerHTML (write)', function(){ var d = document.getElementById('domhint'); d.innerHTML = 'html-as-text'; var v = d.textContent === 'html-as-text'; d.textContent = 'ready'; return v; }, 'no markup parsing - text only');\n"
+    "  var sw5 = document.getElementById('sw5out');\n"
+    "  T(sw5, 'querySelector (descendant)', function(){ var p = document.querySelector('#demoList li'); return !!p && p.tagName === 'LI'; });\n"
+    "  T(sw5, 'querySelector (id selector)', function(){ return document.querySelector('#domhint').id === 'domhint'; });\n"
+    "  T(sw5, 'querySelector no-match returns null', function(){ return document.querySelector('#nope-xyz') === null; });\n"
+    "  T(sw5, 'querySelectorAll returns all matches', function(){ var a = document.querySelectorAll('#demoList li'); return a.length === 3; });\n"
+    "  T(sw5, 'querySelectorAll scoped to element', function(){ var d = document.getElementById('domout'); var p = document.createElement('p'); d.appendChild(p); var a = d.querySelectorAll('p'); var ok = a.length >= 1; d.removeChild(p); return ok; });\n"
+    "  T(sw5, 'insertBefore inserts before first child', function(){ var ul = document.getElementById('demoList'); var li = document.createElement('li'); li.textContent = 'zero'; ul.insertBefore(li, ul.children[0]); var ok = ul.children[0].textContent === 'zero' && ul.childElementCount === 4; ul.removeChild(li); return ok; });\n"
+    "  T(sw5, 'firstElementChild/nextElementSibling', function(){ var one = document.getElementById('demoList').firstElementChild; return !!one && one.textContent === 'one' && one.nextElementSibling.textContent === 'two'; });\n"
+    "  T(sw5, 'classList add/contains/remove', function(){ var d = document.getElementById('domout'); d.classList.add('a1'); d.classList.add('a1'); var ok1 = d.classList.contains('a1') && d.classList.length === 1; d.classList.remove('a1'); return ok1 && !d.classList.contains('a1'); });\n"
+    "  T(sw5, 'classList toggle', function(){ var d = document.getElementById('domout'); var on = d.classList.toggle('tg'); var off = d.classList.toggle('tg'); return on === true && off === false && !d.classList.contains('tg'); });\n"
+    "  T(sw5, 'classList item', function(){ var d = document.getElementById('domout'); d.classList.add('x1'); d.classList.add('x2'); var it = d.classList.item(1); var ok = it === 'x2'; d.classList.remove('x1'); d.classList.remove('x2'); return ok; });\n"
+    "  T(sw5, 'style write + readback', function(){ var d = document.getElementById('domhint'); d.style.display = 'none'; var v = d.style.display; d.style.display = ''; return v === 'none' && d.style.display === ''; });\n"
+    "  T(sw5, 'style preserves other properties', function(){ var d = document.getElementById('domhint'); d.style.color = 'red'; d.style.display = 'none'; var ok = d.style.color === 'red' && d.style.display === 'none'; d.style.color = ''; d.style.display = ''; return ok; });\n"
+    "  T(sw5, 'Set: add/has/size', function(){ var s = new Set(); s.add(1); s.add(1); s.add('x'); return s.has(1) && s.has('x') && !s.has(2) && s.size === 2; });\n"
+    "  T(sw5, 'Map: set/get/has/delete', function(){ var m = new Map(); m.set('k', 42); var v = m.get('k'); var gone = m['delete']('k'); return v === 42 && gone === true && m.has('k') === false && m.get('k') === undefined; });\n"
+    "  T(sw5, 'Image: construct', function(){ var img = new Image(); img.src = 'x.png'; return img != null; });\n"
+    "  T(dom, 'XMLHttpRequest exists', function(){ return typeof XMLHttpRequest === 'function' || typeof XMLHttpRequest === 'object'; });\n"
+    "  if (typeof XMLHttpRequest !== 'undefined') {\n"
+    "    var x = new XMLHttpRequest();\n"
+    "    x.open('GET', 'about:jsext');\n"
+    "    x.onload = function(t) {\n"
+    "      var el = document.getElementById('xhrout');\n"
+    "      if (el) el.textContent = 'XHR ok: ' + x.status + ', ' + x.responseText.length + ' bytes, body[0..15]=' + String(x.responseText).substring(0, 15);\n"
+    "    };\n"
+    "    x.onerror = function(t) {\n"
+    "      var el = document.getElementById('xhrout');\n"
+    "      if (el) el.textContent = 'XHR failed';\n"
+    "    };\n"
+    "    x.send();\n"
+    "    P(dom, 'XMLHttpRequest send accepted', function(){ return true; }, 'async - result appears in the XHR demo section');\n"
+    "  }\n"
+    "  if (typeof fetch === 'function') {\n"
+    "    fetch('about:javascript').then(function(body) {\n"
+    "      var el = document.getElementById('fetchout');\n"
+    "      if (el) el.textContent = 'fetch ok: ' + body.length + ' bytes';\n"
+    "    }, function(err) {\n"
+    "      var el = document.getElementById('fetchout');\n"
+    "      if (el) el.textContent = 'fetch failed: ' + err;\n"
+    "    });\n"
+    "    P(dom, 'fetch() accepted', function(){ return true; }, 'async - result appears in the XHR demo section');\n"
+    "  }\n"
     "  var link = document.getElementById('clickme');\n"
     "  if (link && typeof link.addEventListener === 'function') {\n"
     "    var clicks = 0;\n"
@@ -335,9 +449,12 @@ static const char JSTEST_HTML[] =
     "    P(dom, 'element click listener', function(){ return true; }, 'registered - click the link above to fire it');\n"
     "  }\n"
     "  document.getElementById('summary').textContent = pass + ' passed, ' + part + ' partial, ' + miss + ' missing.';\n"
+    "  console.log('[sw-suite] ' + pass + ' passed, ' + part + ' partial, ' + miss + ' missing');\n"
     "  document.write('<p>[INFO] document.write appended this line during page load.</p>');\n"
     "} catch (e) {\n"
-    "  banner.textContent = 'JS suite error: ' + (e && e.message ? e.message : e);\n"
+    "  var emsg = (e && e.message ? e.message : String(e));\n"
+    "  banner.textContent = 'JS suite error: ' + emsg;\n"
+    "  console.log('suite error: ' + emsg + ' [Set=' + typeof Set + ' Map=' + typeof Map + ' Image=' + typeof Image + ' XHR=' + typeof XMLHttpRequest + ']');\n"
     "}\n"
     "</script>\n"
     "</body></html>";
@@ -366,6 +483,9 @@ static const char JSEXTTEST_HTML[] =
     "<script src=\"jsext-dup.js\"></script>\n"
     /* 10: 70KB > 64KB per-script cap → refused BEFORE execution. */
     "<script src=\"jsext-huge.js\"></script>\n"
+    /* SW2d: data:-URL script (RFC 2397) — payload decodes + executes like
+     * an inline body, no fetch. base64 payload = window.__dataRan=1; */
+    "<script src=\"data:application/javascript;base64,d2luZG93Ll9fZGF0YVJhbj0xOw==\"></script>\n"
     /* 11a–11h: ~16KB each, cap-legal and engine-runnable; together with the
      * tiny scripts they consume ~114KB of the 160KB page budget. */
     "<script src=\"jsext-big.js\"></script>\n"
@@ -399,12 +519,16 @@ static const char JSEXTTEST_HTML[] =
     "    return window.__inlineA === 'A_OK'; });\n"
     "  T('dup: downloaded once, executed twice', function(){\n"
     "    return window.__extCount === 2; });\n"
-    "  T('over-cap file refused (no execution)', function(){\n"
-    "    return typeof window.__huge === 'undefined'; });\n"
+    "  T('over-cap file executed (disk-resident)', function(){\n"
+    "    return window.__huge === 1; });\n"
     "  T('over-budget file refused (no execution)', function(){\n"
     "    return typeof window.__big3 === 'undefined'; });\n"
     "  T('big files did not break the engine', function(){\n"
     "    return typeof window.__extOrder === 'string'; });\n"
+    "  T('72KB file ran from disk (SW2b)', function(){\n"
+    "    return window.__huge === 1; });\n"
+    "  T('data:-URL script executed (SW2d)', function(){\n"
+    "    return window.__dataRan === 1; });\n"
     "  var b = document.getElementById('banner');\n"
     "  b.textContent = pass + ' passed, ' + fail + ' failed.';\n"
     "  console.log('[jsext-test] summary: ' + pass + ' passed, ' + fail + ' failed');\n"
@@ -434,6 +558,31 @@ static const HttpTestPage TEST_PAGES[] = {
     { "about:javascript", "JavaScript Test Suite" },
     { "about:jsext", "Full JS Test Suite" },
 };
+
+size_t http_internal_page_body(const char *url, const char **bodyOut)
+{
+    if (bodyOut)
+    {
+        *bodyOut = NULL;
+    }
+    if (!url)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(INTERNAL_PAGES) / sizeof(INTERNAL_PAGES[0]);
+         i++)
+    {
+        if (strcmp(url, INTERNAL_PAGES[i].name) == 0)
+        {
+            if (bodyOut)
+            {
+                *bodyOut = INTERNAL_PAGES[i].html;
+            }
+            return strlen(INTERNAL_PAGES[i].html);
+        }
+    }
+    return 0;
+}
 
 int http_test_pages(const HttpTestPage **entries)
 {
@@ -487,11 +636,20 @@ static void reset_state(void)
         pluto_free(g_parsed);
         g_parsed = NULL;
     }
+    if (g_spill != PLUTO_SPILL_INVALID)
+    {
+        pluto_spill_discard(g_spill);
+        g_spill = PLUTO_SPILL_INVALID;
+    }
+    g_spillMode = SPILL_NONE;
+    g_bodySpilled = 0;
     strbuf_reset(&g_buf);
     g_status = 200;
     g_bodyStart = 0;
     g_isChunked = 0;
     g_contentLength = -1;
+    g_isGzip = 0;
+    g_gzipHold = 0;
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
@@ -515,6 +673,10 @@ static void build_request(StrBuf *out)
     strbuf_appendf(out, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
     strbuf_appendf(out, "Accept: text/html,text/plain;q=0.8\r\n");
     strbuf_appendf(out, "Accept-Language: en-US,en;q=0.9\r\n");
+    /* SW2c: opt into gzip. deflate (zlib) is NOT requested — our raw-
+     * entry inflate handles the rare HTTP "deflate" as raw deflate if a
+     * server sends it, but we do not advertise it. */
+    strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
     char cookie[768];
     cookie_jar_get_header(g_parsed->host, g_parsed->path, g_parsed->isSsl,
                           cookie, sizeof(cookie));
@@ -523,6 +685,105 @@ static void build_request(StrBuf *out)
         strbuf_appendf(out, "Cookie: %s\r\n", cookie);
     }
     strbuf_appendf(out, "Connection: close\r\n\r\n");
+}
+
+/* SW2c: gzip member header/footer unwrap. RFC 1952: ID1=0x1f ID2=0x8b
+ * CM=8, 4-byte MTIME, XFL, OS, then optional FEXTRA/FNAME/FCOMMENT/FHCRC
+ * fields, then the raw deflate payload. Returns the payload size (the
+ * deflate stream ends 8 bytes before the buffer end — CRC32 + ISIZE),
+ * or 0 if this is not a well-formed single-member gzip buffer.
+ * Servers send single-member streams; multi-member inputs would need
+ * the footer skip repeated — treated as malformed here (0). */
+static size_t gzip_payload_span(const unsigned char *b, size_t len)
+{
+    if (len < 18 || b[0] != 0x1f || b[1] != 0x8b || b[2] != 8)
+    {
+        return 0;
+    }
+    size_t p = 10;
+    unsigned char flg = b[3];
+    if (flg & 0x04) /* FEXTRA */
+    {
+        if (p + 2 > len)
+        {
+            return 0;
+        }
+        size_t xlen = (size_t)b[p] | ((size_t)b[p + 1] << 8);
+        p += 2 + xlen;
+    }
+    if (flg & 0x08) /* FNAME: NUL-terminated */
+    {
+        while (p < len && b[p] != 0)
+        {
+            p++;
+        }
+        p++;
+    }
+    if (flg & 0x10) /* FCOMMENT */
+    {
+        while (p < len && b[p] != 0)
+        {
+            p++;
+        }
+        p++;
+    }
+    if (flg & 0x02) /* FHCRC */
+    {
+        p += 2;
+    }
+    if (p + 8 >= len) /* payload + 8-byte footer must fit */
+    {
+        return 0;
+    }
+    return len - 8 - p;
+}
+
+/* Returns the byte offset of the raw deflate payload inside a gzip member
+ * (after the 10-byte fixed header and any optional fields), or 0 when the
+ * buffer is not a well-formed gzip member (for a real member the offset
+ * is always ≥ 10). */
+static size_t gzip_payload_offset(const unsigned char *b, size_t len)
+{
+    if (len < 18 || b[0] != 0x1f || b[1] != 0x8b || b[2] != 8)
+    {
+        return 0;
+    }
+    size_t p = 10;
+    unsigned char flg = b[3];
+    if (flg & 0x04) /* FEXTRA */
+    {
+        if (p + 2 > len)
+        {
+            return 0;
+        }
+        size_t xlen = (size_t)b[p] | ((size_t)b[p + 1] << 8);
+        p += 2 + xlen;
+    }
+    if (flg & 0x08) /* FNAME: NUL-terminated */
+    {
+        while (p < len && b[p] != 0)
+        {
+            p++;
+        }
+        p++;
+    }
+    if (flg & 0x10) /* FCOMMENT */
+    {
+        while (p < len && b[p] != 0)
+        {
+            p++;
+        }
+        p++;
+    }
+    if (flg & 0x02) /* FHCRC */
+    {
+        p += 2;
+    }
+    if (p + 8 >= len) /* payload + 8-byte footer must fit */
+    {
+        return 0;
+    }
+    return p;
 }
 
 /* Decode a chunked-encoded body. Returns a malloc'd string while the chunk
@@ -637,6 +898,8 @@ static int parse_headers_saved(void)
     g_savedHeaderCount = 0;
     g_isChunked = 0;
     g_contentLength = -1;
+    g_isGzip = 0;
+    g_gzipHold = 0;
     g_status = 200;
 
     /* Status line: first line. Lua: tonumber(match("HTTP/%d+%.%d+ (%d+)")) */
@@ -771,7 +1034,46 @@ static int parse_headers_saved(void)
         g_contentLength = cl ? atol(cl) : -1;
     }
 
+    /* SW2c: detect gzip Content-Encoding. Any token-list containing the
+     * exact token "gzip" (x-gzip treated as gzip, per browser practice). */
+    {
+        const char *ce = saved_header("content-encoding");
+        g_isGzip = ce != NULL && (strstr(ce, "gzip") != NULL ||
+                                  strstr(ce, "x-gzip") != NULL);
+        if (g_isGzip)
+        {
+            logger_log("[http] gzip body (compressed %ld bytes)",
+                       g_contentLength);
+        }
+    }
+
     g_bodyStart = (size_t)(hEnd - buf) + 4;
+
+    /* SW2b: switch to disk streaming from here on. If headers landed with
+     * zero body bytes in the same TCP read, open the spill file now; the
+     * pump starts streaming on the next read. Any body bytes already in
+     * RAM stay there (they are the prefix; disk continues after them). */
+    if (g_status >= 200 && g_status < 300)
+    {
+        if (g_isGzip)
+        {
+            /* SW2c: no spill file at all — compressed staging stays in the
+             * RAM StrBuf (one contiguous member for the one-shot gunzip).
+             * g_gzipHold also raises the pump's StrBuf cap. */
+            g_gzipHold = 1;
+        }
+        else
+        {
+            pluto_spill_init();
+            g_spill = pluto_spill_begin();
+            g_spillMode = (g_spill != PLUTO_SPILL_INVALID) ? SPILL_ACTIVE
+                                                           : SPILL_NONE;
+            if (g_spillMode == SPILL_ACTIVE)
+            {
+                logger_log("[http] spill: streaming body to disk");
+            }
+        }
+    }
     return 1;
 }
 
@@ -895,6 +1197,8 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_bodyStart = 0;
     g_isChunked = 0;
     g_contentLength = -1;
+    g_isGzip = 0;
+    g_gzipHold = 0;
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
@@ -1181,7 +1485,7 @@ void http_update(void)
     {
         if (now - g_requestStart > REQUEST_TIMEOUT_MS)
         {
-            if (g_buf.len > 512)
+            if (g_buf.len > 512 || g_bodySpilled > 0)
             {
                 g_state = HS_DONE; /* partial content wins */
             }
@@ -1241,10 +1545,66 @@ void http_update(void)
             int n = g_pd->network->tcp->read(g_tcp, g_readChunk, want);
             if (n > 0)
             {
-                if (g_buf.len < MAX_RESPONSE_SIZE)
+                /* SW2c: gzip bodies do NOT stream to disk — the compressed
+                 * staging stays in the RAM StrBuf so the whole member is
+                 * in one contiguous buffer for the one-shot gunzip at the
+                 * done path. g_gzipHold freezes spill from the first
+                 * post-header byte (headers alone are < MTU-sized TCP
+                 * reads, so the entire compressed body lands in RAM). */
+                if (g_bodyStart && !g_gzipHold &&
+                    g_spillMode == SPILL_ACTIVE &&
+                    g_spill != PLUTO_SPILL_INVALID)
+                {
+                    /* SW2b: stream body bytes straight to disk. The header
+                     * terminator is fully in RAM before bodyStart is set,
+                     * so every chunk here is pure body — no seam math. */
+                    if (pluto_spill_write(g_spill, g_readChunk, (size_t)n) != 0)
+                    {
+                        /* Disk failure: reassemble the true stream order in
+                         * RAM (prefix already there, spilled bytes read back,
+                         * then this chunk) and finish in RAM, residency-
+                         * capped like the old behavior. */
+                        logger_log("[http] spill write failed; RAM fallback");
+                        g_spillMode = SPILL_NONE;
+                        size_t prefixLen = g_buf.len;
+                        size_t need = prefixLen + (size_t)g_bodySpilled +
+                                      (size_t)n;
+                        char *nb = (char *)PLUTO_MALLOC(need + 1);
+                        if (nb)
+                        {
+                            memcpy(nb, g_buf.data, prefixLen);
+                            if (g_bodySpilled > 0)
+                            {
+                                pluto_spill_read(g_spill, 0,
+                                                 nb + prefixLen,
+                                                 (size_t)g_bodySpilled);
+                            }
+                            memcpy(nb + prefixLen + g_bodySpilled,
+                                   g_readChunk, (size_t)n);
+                            nb[need] = '\0';
+                            pluto_free(g_buf.data);
+                            g_buf.data = nb;
+                            g_buf.len = need;
+                            g_buf.cap = need + 1;
+                        }
+                        else
+                        {
+                            strbuf_append_n(&g_buf, g_readChunk, (size_t)n);
+                        }
+                        g_bodySpilled = 0; /* now redundant (in g_buf) */
+                    }
+                    else
+                    {
+                        g_bodySpilled += n;
+                    }
+                }
+                else if (g_buf.len <
+                         (g_gzipHold ? GZIP_DELIVERY_CAP : MAX_RESPONSE_SIZE))
                 {
                     strbuf_append_n(&g_buf, g_readChunk, (size_t)n);
                 }
+                /* else: over cap — bytes dropped; completion/overflow checks
+                 * below turn this into the "too large" error path. */
                 long tot = g_contentLength;
                 if (tot < 0)
                 {
@@ -1253,7 +1613,8 @@ void http_update(void)
                 long cur = 0;
                 if (g_bodyStart)
                 {
-                    cur = (long)(g_buf.len - g_bodyStart);
+                    /* SW2b: body bytes = RAM prefix + disk-streamed tail. */
+                    cur = (long)(g_buf.len - g_bodyStart) + g_bodySpilled;
                     if (cur < 0)
                     {
                         cur = 0;
@@ -1338,16 +1699,27 @@ void http_update(void)
     /* ── Detect a complete body ───────────────────────────────────────────── */
     if (g_state == HS_READING && g_bodyStart)
     {
-        size_t bodyBytes = g_buf.len - g_bodyStart;
+        /* SW2b: bodyBytes = RAM prefix + disk-streamed tail. */
+        size_t bodyBytes = (g_buf.len > g_bodyStart ? g_buf.len - g_bodyStart
+                                                    : 0) +
+                           (size_t)g_bodySpilled;
         if (g_isChunked)
         {
-            size_t decLen;
-            char *dec = decode_chunked(g_buf.data + g_bodyStart,
-                                       g_buf.len - g_bodyStart, &decLen);
-            if (dec)
+            /* SW2b: only decode for completion once ALL bytes are in one
+             * place. Spill mode keeps the tail on disk, so completion is
+             * declared when the connection closes (below). A spilled
+             * chunked stream therefore always waits for connClosed — same
+             * total wait as Content-Length-less streams, correct result. */
+            if (!g_spillMode)
             {
-                pluto_free(dec);
-                g_state = HS_DONE;
+                size_t decLen;
+                char *dec = decode_chunked(g_buf.data + g_bodyStart,
+                                           g_buf.len - g_bodyStart, &decLen);
+                if (dec)
+                {
+                    pluto_free(dec);
+                    g_state = HS_DONE;
+                }
             }
         }
         else if (g_contentLength >= 0)
@@ -1357,7 +1729,16 @@ void http_update(void)
                 g_state = HS_DONE;
             }
         }
-        if (g_buf.len >= MAX_RESPONSE_SIZE)
+        if (g_spillMode == SPILL_ACTIVE &&
+            (size_t)g_bodySpilled >= SPILL_MAX_BODY)
+        {
+            /* Runaway no-length stream (server ignore/close semantics):
+             * bound the disk file. Delivered as a partial body. */
+            logger_log("[http] spill cap %d reached; partial delivery",
+                       SPILL_MAX_BODY);
+            g_state = HS_DONE;
+        }
+        if (!g_spillMode && g_buf.len >= MAX_RESPONSE_SIZE)
         {
             g_state = HS_DONE;
         }
@@ -1366,7 +1747,7 @@ void http_update(void)
     /* ── Server closed the connection ─────────────────────────────────────── */
     if (g_state == HS_READING && g_connClosed)
     {
-        if (g_buf.len == 0)
+        if (g_buf.len == 0 && g_bodySpilled == 0)
         {
             snprintf(g_error, sizeof(g_error),
                      "Connection closed before any data was received.");
@@ -1383,31 +1764,280 @@ void http_update(void)
     {
         /* Save everything the callback needs (Lua saved locals). */
         g_savedStatus = g_status;
-        strbuf_reset(&g_savedBuf);
-        strbuf_append_n(&g_savedBuf, g_buf.data, g_buf.len);
         g_savedBodyStart = g_bodyStart;
         g_savedIsChunked = g_isChunked;
-
         size_t bodyOff = g_savedBodyStart ? g_savedBodyStart : 0;
-        size_t bodyLen = g_savedBuf.len > bodyOff ? g_savedBuf.len - bodyOff : 0;
-        size_t deliveredLen = bodyLen;
+        size_t bodyLen;
+        size_t deliveredLen;
         char *body = NULL;
-        if (g_savedIsChunked && bodyLen)
+
+        /* SW2c: gunzip delivery. gzip bodies stage compressed (spill frozen
+         * via g_gzipHold), so the delivery buffer is the DECOMPRESSED body:
+         * unwrap the gzip member, inflate the raw deflate payload, enforce
+         * the footer ISIZE as a strict bound (input consumed must equal
+         * declared size — never deliver trailing-garbage output). Corrupt
+         * input = clean onError, no HTML partial-render. Chunked bodies
+         * de-chunk FIRST (the member arrives in chunks; the gunzip input
+         * must be one contiguous buffer). */
+        char *gzSource = NULL;
+        size_t gzSourceLen = 0;
+        if (g_isGzip)
         {
-            body = decode_chunked(g_savedBuf.data + bodyOff, bodyLen, &deliveredLen);
-            if (!body)
+            if (g_savedIsChunked)
             {
-                body = strbuf_detach(&g_savedBuf) + bodyOff; /* unreachable */
+                size_t decLen = 0;
+                gzSource = decode_chunked(g_buf.data + bodyOff,
+                                          g_buf.len - bodyOff, &decLen);
+                gzSourceLen = decLen;
+                if (!gzSource)
+                {
+                    snprintf(g_error, sizeof(g_error),
+                             "Corrupt chunked gzip body received.");
+                    char errSnapshot[256];
+                    strncpy(errSnapshot, g_error, sizeof(errSnapshot) - 1);
+                    errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+                    HttpCallbacks errCb = g_cb;
+                    reset_state();
+                    if (errCb.onError)
+                    {
+                        errCb.onError(errSnapshot);
+                    }
+                    return;
+                }
+                /* The chunk-decode buffer is now the delivery buffer's
+                 * source; ownership transfers to the gunzip path below
+                 * (freed there via PLUTO_FREE). */
+            }
+            else
+            {
+                gzSource = g_buf.data + bodyOff;
+                gzSourceLen = g_buf.len - bodyOff;
             }
         }
-        if (!body)
+
+        if (g_isGzip && gzSource)
         {
-            /* NUL-terminate a copy of the body slice for the callback. */
+            const unsigned char *cbuf = (const unsigned char *)gzSource;
+            size_t clen = gzSourceLen;
+            size_t payload = gzip_payload_span(cbuf, clen);
+            size_t poff = gzip_payload_offset(cbuf, clen);
+            size_t isize = 0;
+            if (payload > 0)
+            {
+                isize = (size_t)cbuf[clen - 4] |
+                        ((size_t)cbuf[clen - 3] << 8) |
+                        ((size_t)cbuf[clen - 2] << 16) |
+                        ((size_t)cbuf[clen - 1] << 24);
+            }
+            /* Chunked sources are heap buffers from decode_chunked (PLUTO
+             * allocator) — release them on every exit; g_buf slices are
+             * interior pointers, never freed here. */
+#define GZ_FREE_SOURCE()                                               \
+    do                                                                 \
+    {                                                                  \
+        if (gzSource && gzSource != (char *)(g_buf.data + bodyOff))    \
+        {                                                              \
+            PLUTO_FREE(gzSource);                                      \
+        }                                                              \
+    } while (0)
+
+            if (payload == 0 || isize > (size_t)GZIP_DELIVERY_CAP)
+            {
+                logger_log("[http] gzip member malformed (payload=%zu "
+                           "isize=%zu)", payload, isize);
+                GZ_FREE_SOURCE();
+                snprintf(g_error, sizeof(g_error),
+                         "Corrupt gzip body received.");
+                char errSnapshot[256];
+                strncpy(errSnapshot, g_error, sizeof(errSnapshot) - 1);
+                errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+                HttpCallbacks errCb = g_cb;
+                reset_state();
+                if (errCb.onError)
+                {
+                    errCb.onError(errSnapshot);
+                }
+                return;
+            }
+            bodyLen = isize;
+            deliveredLen = 0;
+            body = (char *)PLUTO_MALLOC(isize + 1);
+            if (body)
+            {
+                size_t got = 0;
+                if (isize == 0)
+                {
+                    body[0] = '\0';
+                    deliveredLen = 0;
+                }
+                else
+                {
+                    InflateStream *is = inflate_stream_new_raw(cbuf + poff, payload);
+                    if (is)
+                    {
+                        for (;;)
+                        {
+                            size_t chunk = 0;
+                            const uint8_t *p = inflate_stream_read(
+                                is, 8192, &chunk);
+                            if (!p || chunk == 0)
+                            {
+                                break; /* end of stream */
+                            }
+                            if (got + chunk > isize)
+                            {
+                                logger_log("[http] gzip output exceeds "
+                                           "ISIZE (%zu > %zu)",
+                                           got + chunk, isize);
+                                got = 0;
+                                break;
+                            }
+                            memcpy(body + got, p, chunk);
+                            got += chunk;
+                        }
+                        inflate_stream_free(is);
+                    }
+                    body[got] = '\0';
+                    deliveredLen = got;
+                    if (got != isize)
+                    {
+                        logger_log("[http] gunzip short: got %zu of %zu",
+                                   got, isize);
+                        PLUTO_FREE(body);
+                        body = NULL;
+                        GZ_FREE_SOURCE();
+                        snprintf(g_error, sizeof(g_error),
+                                 "Corrupt gzip body received.");
+                        char errSnapshot[256];
+                        strncpy(errSnapshot, g_error,
+                                sizeof(errSnapshot) - 1);
+                        errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+                        HttpCallbacks errCb = g_cb;
+                        reset_state();
+                        if (errCb.onError)
+                        {
+                            errCb.onError(errSnapshot);
+                        }
+                        return;
+                    }
+                }
+            }
+            if (!body)
+            {
+                /* Allocation failure (or isize==0 without a buffer): surface
+                 * as error — a silent no-callback DONE would hang the caller. */
+                GZ_FREE_SOURCE();
+                snprintf(g_error, sizeof(g_error),
+                         "Out of memory delivering response.");
+                char errSnapshot[256];
+                strncpy(errSnapshot, g_error, sizeof(errSnapshot) - 1);
+                errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+                HttpCallbacks errCb = g_cb;
+                reset_state();
+                if (errCb.onError)
+                {
+                    errCb.onError(errSnapshot);
+                }
+                return;
+            }
+            /* Success: skip the legacy assembly below. */
+            GZ_FREE_SOURCE();
+        }
+        else if (g_spillMode == SPILL_ACTIVE && g_spill != PLUTO_SPILL_INVALID)
+        {
+            /* SW2b: assemble the delivery buffer ONCE, exact size — the RAM
+             * prefix (headers + first body bytes) followed by the disk tail
+             * read back in bounded chunks. One body-sized allocation
+             * replaces the old ~3× response peak (live buffer + full saved
+             * copy + body slice). Overflow-guarded against hostile lengths. */
+            long diskBytes = pluto_spill_finish(g_spill);
+            SpillFile sp = g_spill;      /* handle stays valid for reads */
+            g_spill = PLUTO_SPILL_INVALID;
+            g_spillMode = SPILL_NONE;
+            size_t ramBody = g_buf.len > bodyOff ? g_buf.len - bodyOff : 0;
+            if (diskBytes < 0 ||
+                ramBody > (size_t)MAX_RESPONSE_SIZE ||
+                (size_t)diskBytes > (size_t)MAX_RESPONSE_SIZE ||
+                ramBody + (size_t)diskBytes > (size_t)MAX_RESPONSE_SIZE)
+            {
+                logger_log("[http] spill delivery over residency cap "
+                           "(ram=%zu disk=%ld)", ramBody, diskBytes);
+                pluto_spill_discard(sp);
+                snprintf(g_error, sizeof(g_error),
+                         "Response too large to deliver.");
+                g_state = HS_ERROR;
+                /* g_buf still holds the prefix; the ERROR path below frees
+                 * it via reset_state — handle immediately, not next frame: */
+                char errSnapshot[256];
+                strncpy(errSnapshot, g_error, sizeof(errSnapshot) - 1);
+                errSnapshot[sizeof(errSnapshot) - 1] = '\0';
+                HttpCallbacks errCb = g_cb;
+                reset_state();
+                if (errCb.onError)
+                {
+                    errCb.onError(errSnapshot);
+                }
+                return;
+            }
+            bodyLen = ramBody + (size_t)diskBytes;
+            deliveredLen = bodyLen;
             body = (char *)PLUTO_MALLOC(bodyLen + 1);
             if (body)
             {
-                memcpy(body, g_savedBuf.data + bodyOff, bodyLen);
-                body[bodyLen] = '\0';
+                if (ramBody)
+                {
+                    memcpy(body, g_buf.data + bodyOff, ramBody);
+                }
+                size_t done = ramBody;
+                while (done < bodyLen)
+                {
+                    size_t want = bodyLen - done;
+                    if (want > READ_CHUNK)
+                    {
+                        want = READ_CHUNK;
+                    }
+                    long got = pluto_spill_read(sp, (long)done,
+                                                body + done, want);
+                    if (got <= 0)
+                    {
+                        logger_log("[http] spill read short at %zu", done);
+                        break;
+                    }
+                    done += (size_t)got;
+                }
+                body[done] = '\0';
+                deliveredLen = done;
+            }
+            pluto_spill_discard(sp);
+        }
+        else
+        {
+            /* RAM path (unchanged semantics): keep the saved-copy flow —
+             * spill consumers already materialized their own delivery. */
+            strbuf_reset(&g_savedBuf);
+            strbuf_append_n(&g_savedBuf, g_buf.data, g_buf.len);
+            bodyLen = g_savedBuf.len > bodyOff
+                          ? g_savedBuf.len - bodyOff
+                          : 0;
+            deliveredLen = bodyLen;
+            if (g_savedIsChunked && bodyLen)
+            {
+                body = decode_chunked(g_savedBuf.data + bodyOff, bodyLen,
+                                      &deliveredLen);
+                if (!body)
+                {
+                    body = strbuf_detach(&g_savedBuf) + bodyOff; /* unreachable */
+                }
+            }
+            if (!body)
+            {
+                /* NUL-terminate a copy of the body slice for the callback. */
+                body = (char *)PLUTO_MALLOC(bodyLen + 1);
+                if (body)
+                {
+                    memcpy(body, g_savedBuf.data + bodyOff, bodyLen);
+                    body[bodyLen] = '\0';
+                }
             }
         }
 
@@ -1454,4 +2084,19 @@ void http_update(void)
             cb.onError(errSnapshot);
         }
     }
+}
+
+/* TEST-ONLY accessor (host CSS verification): the raw body of an internal
+ * page. Not in the header — host tests declare it extern. */
+const char *pluto_internal_body_for_test(const char *url)
+{
+    for (size_t i = 0; i < sizeof(INTERNAL_PAGES) / sizeof(INTERNAL_PAGES[0]);
+         i++)
+    {
+        if (strcmp(url, INTERNAL_PAGES[i].name) == 0)
+        {
+            return INTERNAL_PAGES[i].html;
+        }
+    }
+    return NULL;
 }

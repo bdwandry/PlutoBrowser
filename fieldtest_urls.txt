@@ -1,0 +1,27 @@
+# SW0 Benchmark Matrix — 20 sites, 10 classes
+# Format: <engine> <url> [| <criterion>]
+#   criterion = keyword that must appear in the rendered text (case-insensitive,
+#   scanned across blocks AND table cells). No criterion = PASS if any text renders
+#   (for classes whose content changes constantly — the test is "renders content").
+# Score line in pluto.log: [fieldtest] done (N sites): PASS p / FAIL f — matrix p/N
+# Full JS mode is forced for every site (jsEnabled=2) by the seam.
+0 https://lite.duckduckgo.com/lite/ | duckduckgo
+0 https://html.duckduckgo.com/html/?q=playdate | playdate
+0 https://text.npr.org/ | npr
+0 https://www.reuters.com/ | reuters
+0 https://en.wikipedia.org/wiki/Playdate_(console) | playdate
+0 https://en.wikipedia.org/wiki/Special:Random | wikipedia
+0 https://news.ycombinator.com/ | hacker news
+0 https://lobste.rs/ | lobsters
+0 https://www.bing.com/search?q=playdate | bing
+0 https://search.marginalia.nu/search?query=playdate | marginalia
+0 https://example.com/ | example domain
+0 https://motherfuckingwebsite.com/ | motherfucking website
+0 https://bryanwandrych.com/ | bryan
+0 https://daringfireball.net/ | daring fireball
+0 https://old.reddit.com/ | reddit
+0 https://textboard.org/ | textboard
+0 https://www.gutenberg.org/browse/scores/top | gutenberg
+0 https://www.w3.org/ | w3c
+0 https://lite.cnn.com/ | cnn
+0 https://www.bbc.com/news | bbc

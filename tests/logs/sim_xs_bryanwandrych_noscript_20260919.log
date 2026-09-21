@@ -1,0 +1,41 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[18:23:17 #1] === PlutoBrowser boot ===
+[18:23:17 #2] eventHandler: kEventInit, osversion=30101
+[18:23:17 #3] STORAGE: init enter
+[18:23:17 #4] STORAGE: load enter
+[18:23:17 #5] STORAGE: file opened, parsing
+[18:23:17 #6] STORAGE: init exit
+[18:23:17 #7] [jsbridge] boot engine: XS (Moddable)
+[18:23:17 #8] [jsext-autotest] engine forced: 3
+[18:23:17 #9] KB new: entering
+[18:23:17 #10] KB new: allocated
+[18:23:17 #11] KB load: font...
+[18:23:17 #12] KB load: font ok h=36
+[18:23:17 #13] KB load: menu-space ok
+[18:23:17 #14] KB load: menu-ok ok
+[18:23:17 #15] KB load: menu-del ok
+[18:23:17 #16] KB load: menu-cancel ok
+[18:23:17 #17] KB new: font+images loaded
+[18:23:17 #18] DISPLAY: refresh rate set to 30 fps
+[18:23:17 #19] navigate_to: https://bryanwandrych.com/
+[18:23:17 #20] state -> 1 (frame 1)
+[18:23:17 #21] updateFrame: first frame executed
+[18:23:20 #22] [jsext] 2 external script(s) on page
+[18:23:20 #23] [jsext] FAIL https://smtpjs.com/v3/smtp.js status=403
+[18:23:21 #24] [jsext] FAIL https://bryanwandrych.com/static/js/main.44a5d502.js too big (cut mid-stream, cap 65536)
+[18:23:21 #25] [jsext] prefetch done: 2 file(s), 0 bytes
+[18:23:21 #26] [jsbridge] page attach: XS (Moddable) (engine=3)
+[18:23:21 #27] [js] ext skip (not fetched): https://smtpjs.com/v3/smtp.js
+[18:23:21 #28] [js] ext skip (not fetched): https://bryanwandrych.com/static/js/main.44a5d502.js
+[18:23:21 #29] [js] live page: listeners=0 ran=0 errs=0
+[18:23:21 #30] STORAGE: save open
+[18:23:21 #31] STORAGE: save writing (bm=10 hist=7)
+[18:23:21 #32] STORAGE: save close
+[18:23:21 #33] STORAGE: save exit
+[18:23:21 #34] state -> 2 (frame 110)
+[18:23:28 #35] updateFrame: heartbeat frame=300 fps=28 overlay=0 stackPeak=0B/61800B
+[18:23:39 #36] updateFrame: heartbeat frame=600 fps=27 overlay=0 stackPeak=0B/61800B
+[18:23:49 #37] updateFrame: heartbeat frame=900 fps=28 overlay=0 stackPeak=0B/61800B
+[18:24:00 #38] updateFrame: heartbeat frame=1200 fps=28 overlay=0 stackPeak=0B/61800B
+[18:24:11 #39] updateFrame: heartbeat frame=1500 fps=28 overlay=0 stackPeak=0B/61800B

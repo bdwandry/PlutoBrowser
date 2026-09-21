@@ -34,12 +34,21 @@
  * Mirrors Inflate.decompress including its nil-on-short-input behavior. */
 uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen);
 
+/* SW2c: raw-deflate variants — NO zlib-container sniff. The HTTP gzip
+ * path strips the gzip member header itself (gzip header parse + name
+ * fields + 8-byte footer, see http_client.c) and feeds the raw deflate
+ * payload here. Using the sniffing entry points on HTTP bodies would
+ * false-positive a raw stream as zlib-wrapped ~1/500 of the time
+ * ((cmf*256+flg)%31==0) and corrupt the output. */
+uint8_t *inflate_decompress_raw(const uint8_t *data, size_t len, size_t *outLen);
+
 /* Streaming inflate (Lua Inflate.createStream). Keeps a 64KB window;
  * read() returns up to *outLen bytes (owned by the stream until the next
  * read) or NULL at end of stream. */
 typedef struct InflateStream InflateStream;
 
 InflateStream *inflate_stream_new(const uint8_t *data, size_t len);
+InflateStream *inflate_stream_new_raw(const uint8_t *data, size_t len);
 const uint8_t *inflate_stream_read(InflateStream *s, size_t want, size_t *outLen);
 void inflate_stream_free(InflateStream *s);
 

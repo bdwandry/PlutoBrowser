@@ -28,6 +28,10 @@ SRC = \
 	Source/core/cookie_jar.c \
 	Source/core/storage.c \
 	Source/core/http_client.c \
+	Source/core/pluto_mem.c \
+	Source/core/pluto_spill.c \
+	Source/core/pluto_snap.c \
+	Source/core/pluto_page.c \
 	Source/render/style.c \
 	Source/render/link_manager.c \
 	Source/render/image_decoder.c \
@@ -71,6 +75,7 @@ SRC = \
 	Source/html/jsbridge_duktape.c \
 	Source/html/jsbridge_quickjs.c \
 	Source/html/jsext.c \
+	Source/html/css.c \
 	Source/keyboard/keyboard.c \
 	Source/core/tasks.c \
 	Source/util/strbuf.c \

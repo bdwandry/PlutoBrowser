@@ -37,11 +37,19 @@
 #include "core/logger.h"
 #include "core/http_client.h"
 #include "pd_api.h"
+#include "../core/pluto_mem.h"
+#include "../core/pluto_spill.h"
+
+/* SW2b: bodies at or over this size become disk-resident (re-spilled);
+ * smaller ones stay arena RAM copies exactly as before. The old per-script
+ * cap REFUSED these; they now download fully and live on disk. */
+#define JSEXT_SPILL_THRESHOLD JSBRIDGE_MAX_SCRIPT_BYTES
 
 PlaydateAPI *pluto_pd(void);
 void pluto_free(void *p);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+static size_t jsext_page_budget(void); /* forward: SW3 unified budget lookup */
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_mem_realloc((p), 0)
 
 /* Response over-cap headroom: a body larger than this cannot be a valid
  * script (the per-script source cap is JSBRIDGE_MAX_SCRIPT_BYTES), so the
@@ -133,6 +141,58 @@ static const char *find_from(const char *p, const char *end,
         }
     }
     return NULL;
+}
+
+/* SW2d: span variant of tag_attr_value — returns pointers INTO the tag
+ * (start + length of the value) instead of copying. data: URLs can carry
+ * the whole script in the attribute, so the value must be located without
+ * the JSBRIDGE_EXT_URL_MAX copy truncation; the payload is only ever read
+ * (never modified) before the page HTML dies with the document. */
+static int tag_attr_value_span(const char *afterName, const char *gt,
+                               const char *name, size_t nlen,
+                               const char **outStart, size_t *outLen)
+{
+    for (const char *q = afterName; q + nlen + 1 <= gt;)
+    {
+        if ((q[0] | 0x20) == (name[0] | 0x20) &&
+            strncasecmp(q, name, nlen) == 0)
+        {
+            const char *v = q + nlen;
+            if (v >= gt)
+            {
+                return 0;
+            }
+            if (*v == '=')
+            {
+                v++;
+                if (v < gt && (*v == '"' || *v == '\''))
+                {
+                    char quote = *v++;
+                    const char *close = v;
+                    while (close < gt && *close != quote)
+                    {
+                        close++;
+                    }
+                    *outStart = v;
+                    *outLen = (size_t)(close - v);
+                    return 1;
+                }
+                const char *e = v;
+                while (e < gt && *e != ' ' && *e != '\t' && *e != '\n' &&
+                       *e != '\r')
+                {
+                    e++;
+                }
+                *outStart = v;
+                *outLen = (size_t)(e - v);
+                return 1;
+            }
+            q = v;
+            continue;
+        }
+        q++;
+    }
+    return 0;
 }
 
 /* Extract the value of attr `name` from a tag's attribute region
@@ -259,15 +319,33 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
             continue; /* <scriptx … */
         }
 
-        /* src= present? (same 3-byte check as the legacy scanner) */
+        /* src= present? (same 3-byte check as the legacy scanner). SW2d:
+         * capture the value span so data:-URL payloads can be located in
+         * the page HTML at execution time (they can exceed the 512B URL
+         * storage — the payload IS the script). */
         int hasSrc = 0;
-        for (const char *q = afterName; q + 3 <= gt; q++)
+        const char *srcStart = NULL;
+        size_t srcLen = 0;
         {
-            if ((q[0] | 0x20) == 's' && (q[1] | 0x20) == 'r' &&
-                (q[2] | 0x20) == 'c')
+            const char *q = afterName;
+            while (q + 3 <= gt)
             {
-                hasSrc = 1;
-                break;
+                if ((q[0] | 0x20) == 's' && (q[1] | 0x20) == 'r' &&
+                    (q[2] | 0x20) == 'c')
+                {
+                    hasSrc = 1;
+                    /* Read back the full attribute value via the span
+                     * variant (search backwards for the attr start is
+                     * unnecessary — re-locate precisely below). */
+                    if (!tag_attr_value_span(afterName, gt, "src", 3,
+                                             &srcStart, &srcLen))
+                    {
+                        srcStart = NULL;
+                        srcLen = 0;
+                    }
+                    break;
+                }
+                q++;
             }
         }
 
@@ -293,6 +371,26 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
             break; /* unterminated: drop (tokenizer parity) */
         }
 
+        if (hasSrc && srcStart && srcLen >= 5 &&
+            (srcStart[0] | 0x20) == 'd' && (srcStart[1] | 0x20) == 'a' &&
+            (srcStart[2] | 0x20) == 't' && (srcStart[3] | 0x20) == 'a' &&
+            srcStart[4] == ':')
+        {
+            /* SW2d: data:-URL script — the payload IS the source. Mark the
+             * slot with the JS_SCRIPT_DATA sentinel; execution decodes the
+             * payload straight out of the page HTML (no URL storage, no
+             * fetch). Dedup/budget stay on the URL path only. */
+            if (count < slotMax)
+            {
+                slots[count].isExt = 1;
+                slots[count].inlineStart = srcStart;
+                slots[count].inlineLen = srcLen;
+                slots[count].extIndex = JS_SCRIPT_DATA;
+            }
+            count++;
+            pos = close + 8;
+            goto advance;
+        }
         if (hasSrc)
         {
             /* Record (or skip) the external reference, then advance past
@@ -409,6 +507,10 @@ int jsext_collect(const char *html, const char *pageUrl,
         return 0;
     }
     memset(ext, 0, (size_t)extCap * sizeof(JsExtScript));
+    for (int i = 0; i < extCap; i++)
+    {
+        ext[i].spill = -1; /* no spill handle (0 is a VALID handle) */
+    }
 
     int slotCap = JSBRIDGE_MAX_SCRIPTS;
     JsScriptSlot *slots = (JsScriptSlot *)arena_alloc(
@@ -429,7 +531,7 @@ int jsext_collect(const char *html, const char *pageUrl,
      * enforce the per-page budget. Slots pointing at a dropped file (over
      * budget, unresolvable, over the unique-file cap) carry extIndex=-1 and
      * are skipped at execution time (logged once here). */
-    size_t budget = JSBRIDGE_EXT_PAGE_BUDGET;
+    size_t budget = jsext_page_budget();
     for (int i = 0; i < extCount; i++)
     {
         char raw[JSBRIDGE_EXT_URL_MAX];
@@ -453,12 +555,17 @@ int jsext_collect(const char *html, const char *pageUrl,
         }
         if (budget < JSBRIDGE_MAX_SCRIPT_BYTES)
         {
+            /* Pre-flight RAM-budget gate: only skips files that could never
+             * fit the arena as RAM residents. SW2b: big files are disk-
+             * residents and don't consume this budget, so this gate never
+             * refuses them — the source ceiling applies at execution. */
             logger_log("[jsext] page budget exhausted: skip %s", ext[i].url);
             ext[i].url[0] = '\0'; /* never fetched, never executed */
             continue;
         }
     }
-    /* (Budget is enforced against DELIVERED bytes — see jsext_prefetch_step
+    /* (RAM budget is enforced against DELIVERED RAM bytes — see
+     * jsext_prefetch_step
      * and jsext_local_fill, the only paths that fill ext[i].body — so the
      * cap covers what actually lands on the device, not optimistic guesses.) */
 
@@ -520,11 +627,10 @@ static const char JSEXT_BIG_B[] = JSEXT_PAD300;
  * budget (~25KB) can't cover it → budget refusal, observable in-page. */
 static const char JSEXT_BIG_C[] = JSEXT_PAD1000 "window.__big3 = 1;\n";
 
-/* Test 10: 72,821 bytes — refused by the per-script cap BEFORE execution;
- * the page asserts the marker never appeared. */
+/* Test 10: 72,821 bytes — SW2b: now ACCEPTED (the old per-script download
+ * cap is gone); it becomes a RAM-resident source under the page budget and
+ * the per-script SOURCE ceiling gates it at execution. */
 static const char JSEXT_HUGE[] = JSEXT_PAD1000 JSEXT_PAD300 "window.__huge = 1;\n";
-
-/* One served file: matched by file-name TAIL of the resolved src= URL. */
 typedef struct
 {
     const char *name;
@@ -554,7 +660,7 @@ int jsext_local_fill(JsExtArena *arena, JsExtScript *ext, int extCount)
     {
         return 0;
     }
-    size_t budget = JSBRIDGE_EXT_PAGE_BUDGET;
+    size_t budget = jsext_page_budget();
     for (int i = 0; i < extCount; i++)
     {
         if (ext[i].url[0] == '\0')
@@ -584,10 +690,36 @@ int jsext_local_fill(JsExtArena *arena, JsExtScript *ext, int extCount)
             continue;
         }
         size_t len = strlen(hit->source);
-        if (len > JSBRIDGE_MAX_SCRIPT_BYTES)
+        if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
         {
-            logger_log("[jsext] local %s over per-script cap (%zu)", hit->name,
-                       len);
+            /* SW2b: the SOURCE ceiling (execution), not a download cap. */
+            logger_log("[jsext] local %s over script source ceiling (%zu)",
+                       hit->name, len);
+            ext[i].url[0] = '\0';
+            continue;
+        }
+        if (len > JSEXT_SPILL_THRESHOLD)
+        {
+            /* SW2b: over the RAM-residency threshold — ALWAYS disk-resident
+             * (same as the network path), regardless of budget. The arena
+             * cannot hold a source this size anyway (small-block chunks). */
+            SpillFile sp = pluto_spill_begin();
+            if (sp != PLUTO_SPILL_INVALID &&
+                pluto_spill_write(sp, hit->source, len) == 0)
+            {
+                pluto_spill_finish(sp);
+                ext[i].body = NULL;
+                ext[i].spill = sp;
+                ext[i].len = len;
+                logger_log("[jsext] local ok %s (%zu bytes, disk-resident)",
+                           hit->name, len);
+                continue;
+            }
+            if (sp != PLUTO_SPILL_INVALID)
+            {
+                pluto_spill_discard(sp);
+            }
+            logger_log("[jsext] FAIL %s spill write (no disk?)", hit->name);
             ext[i].url[0] = '\0';
             continue;
         }
@@ -614,6 +746,202 @@ int jsext_local_fill(JsExtArena *arena, JsExtScript *ext, int extCount)
     return extCount; /* array unchanged; unfilled entries have body==NULL */
 }
 
+/* ── SW2d: data:-URL script decoder ──────────────────────────────────── */
+
+/* Hex digit value 0-15, or -1 (NUL and non-hex both rejected — unlike
+ * strchr, which also matches the terminator). */
+static int jsext_hex_val(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/* RFC 3986 pct-decode: %XX hex pairs (also decodes '+' as space? NO —
+ * data: URLs are NOT form-encoded; '+' is literal). Invalid escapes
+ * (short or non-hex) pass through literally, matching lenient web
+ * practice. Returns decoded length ≤ srcLen (decoding only shrinks). */
+static size_t jsext_pct_decode(const char *src, size_t len, char *out)
+{
+    size_t r = 0, w = 0;
+    while (r < len)
+    {
+        if (src[r] == '%' && r + 2 < len)
+        {
+            int v1 = jsext_hex_val(src[r + 1]);
+            int v2 = jsext_hex_val(src[r + 2]);
+            if (v1 >= 0 && v2 >= 0)
+            {
+                out[w++] = (char)(v1 * 16 + v2);
+                r += 3;
+                continue;
+            }
+        }
+        out[w++] = src[r++];
+    }
+    return w;
+}
+
+static int jsext_b64_val(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* Decode the payload of a data: URL (RFC 2397) into a malloc'd NUL-
+ * terminated string (the script source), or NULL on malformed input.
+ * Expected shape: data:[mediatype][;base64],payload — everything before
+ * the FIRST comma is metadata; the payload may itself contain commas. */
+char *jsext_decode_data_script(const char *src, size_t len)
+{
+    if (!src || len < 6)
+    {
+        return NULL;
+    }
+    /* Metadata region: up to the first comma. */
+    const char *comma = NULL;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (src[i] == ',')
+        {
+            comma = &src[i];
+            break;
+        }
+    }
+    if (!comma)
+    {
+        return NULL;
+    }
+    /* Mediatype params (everything before ','): look for ";base64"
+     * (case-insensitive) — the only parameter we act on. */
+    int isB64 = 0;
+    {
+        size_t metaLen = (size_t)(comma - src);
+        if (metaLen >= 7)
+        {
+            /* scan for ";base64" allowing any case */
+            for (size_t i = 0; i + 7 <= metaLen; i++)
+            {
+                if ((src[i] | 0x20) == ';' &&
+                    (src[i + 1] | 0x20) == 'b' &&
+                    (src[i + 2] | 0x20) == 'a' &&
+                    (src[i + 3] | 0x20) == 's' &&
+                    (src[i + 4] | 0x20) == 'e' &&
+                    (src[i + 5] | 0x20) == '6' &&
+                    (src[i + 6] | 0x20) == '4')
+                {
+                    isB64 = 1;
+                    break;
+                }
+            }
+        }
+    }
+    const char *payload = comma + 1;
+    size_t plen = len - (size_t)(payload - src);
+    if (plen == 0)
+    {
+        return NULL;
+    }
+
+    if (isB64)
+    {
+        /* base64: 4 chars → 3 bytes. Skip whitespace; '=' = padding.
+         * Ceiling: plen/4*3+3 — allocate exactly that. */
+        size_t cap = plen / 4 * 3 + 3;
+        unsigned char *buf = (unsigned char *)PLUTO_MALLOC(cap);
+        if (!buf)
+        {
+            return NULL;
+        }
+        size_t w = 0;
+        int quad[4], qn = 0;
+        for (size_t i = 0; i < plen; i++)
+        {
+            int c = (unsigned char)payload[i];
+            if (c == '\n' || c == '\r' || c == ' ' || c == '\t')
+            {
+                continue;
+            }
+            if (c == '=')
+            {
+                quad[qn++] = -2; /* padding */
+            }
+            else
+            {
+                int v = jsext_b64_val(c);
+                if (v < 0)
+                {
+                    PLUTO_FREE(buf);
+                    return NULL; /* non-alphabet char: malformed */
+                }
+                quad[qn++] = v;
+            }
+            if (qn == 4)
+            {
+                int a = quad[0], b = quad[1], c2 = quad[2], d = quad[3];
+                buf[w++] = (unsigned char)(a << 2 | (b >> 4));
+                if (c2 != -2)
+                {
+                    buf[w++] = (unsigned char)(b << 4 | (c2 >> 2));
+                }
+                if (d != -2)
+                {
+                    buf[w++] = (unsigned char)(c2 << 6 | d);
+                }
+                qn = 0;
+            }
+        }
+        /* Reject a dangling 1- or 2-char final quad (malformed). 3-char is
+         * legal (one padding char). */
+        if (qn == 1 || qn == 2)
+        {
+            PLUTO_FREE(buf);
+            return NULL;
+        }
+        if (qn == 3)
+        {
+            int a = quad[0], b = quad[1], c2 = quad[2];
+            buf[w++] = (unsigned char)(a << 2 | (b >> 4));
+            buf[w++] = (unsigned char)(b << 4 | (c2 >> 2));
+        }
+        /* The script source is text; NUL-terminate for run_script callers. */
+        char *out = (char *)PLUTO_MALLOC(w + 1);
+        if (!out)
+        {
+            PLUTO_FREE(buf);
+            return NULL;
+        }
+        memcpy(out, buf, w);
+        out[w] = '\0';
+        PLUTO_FREE(buf);
+        return out;
+    }
+
+    /* Percent-encoded (or plain) text payload. Decode in place-ish. */
+    char *out = (char *)PLUTO_MALLOC(plen + 1);
+    if (!out)
+    {
+        return NULL;
+    }
+    size_t w = jsext_pct_decode(payload, plen, out);
+    out[w] = '\0';
+    return out;
+}
+
 /* ── Fetch session ───────────────────────────────────────────────────── */
 struct JsExtFetch
 {
@@ -624,7 +952,7 @@ struct JsExtFetch
     int extCount;
     int idx;        /* current external being fetched */
     int fetching;   /* 1 while an http_get is in flight */
-    int overCap;    /* current file exceeded the response cap */
+    int overCap;    /* current file exceeded the response cap (RAM fallback) */
     size_t totalBytes;
 };
 
@@ -635,14 +963,15 @@ static size_t g_lastBytes = 0;
  * active session; reset in jsext_prefetch_begin. */
 static size_t g_pageBudget = 0;
 
-/* Current-file response sink: success with a capped body. */
+/* Current-file response sink. SW2b: big bodies are re-spilled to disk
+ * (uncapped download — the old 65KB socket cut is gone); small bodies
+ * stay arena RAM copies under the page budget. */
 static void fetch_on_success(int status, char **keys, char **vals, int hc,
                              const char *body, size_t bodyLen, const char *url)
 {
     (void)keys;
     (void)vals;
     (void)hc;
-    (void)body;
     JsExtFetch *f = g_fetch;
     if (!f || !f->fetching || !url)
     {
@@ -653,23 +982,74 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
     {
         logger_log("[jsext] FAIL %s status=%d", url, status);
     }
-    else if (f->overCap || bodyLen > JSBRIDGE_MAX_SCRIPT_BYTES)
+    else if (f->overCap)
     {
-        /* overCap means the progress sink cut the socket — the buffer only
-         * holds the head of an oversized file; report what we saw. */
-        logger_log("[jsext] FAIL %s too big (>%d bytes, cap %d)", url,
-                   JSEXT_MAX_RESPONSE, JSBRIDGE_MAX_SCRIPT_BYTES);
+        /* Legacy RAM fallback path only (spill mode never over-caps). */
+        logger_log("[jsext] FAIL %s too big (no spill, cap %d)", url,
+                   JSEXT_MAX_RESPONSE);
     }
     else if (!body || bodyLen == 0)
     {
         logger_log("[jsext] FAIL %s empty body", url);
     }
-    else if (bodyLen > g_pageBudget)
+    else if (bodyLen > JSEXT_SPILL_THRESHOLD)
     {
-        /* Per-page budget (delivered bytes): refuse like the per-script cap
-         * — the page and later scripts still run. */
-        logger_log("[jsext] FAIL %s over page budget (%zu left, need %zu)",
-                   url, g_pageBudget, bodyLen);
+        /* Disk-resident adoption: write the delivered body to a spill file
+         * (one sequential flash write; the RAM copy dies with the callback).
+         * No page budget: disk residency is the point of SW2b. The per-
+         * script SOURCE ceiling applies at materialization (execution). */
+        SpillFile sp = pluto_spill_begin();
+        if (sp != PLUTO_SPILL_INVALID &&
+            pluto_spill_write(sp, body, bodyLen) == 0)
+        {
+            pluto_spill_finish(sp);
+            f->ext[i].body = NULL;
+            f->ext[i].spill = sp;
+            f->ext[i].len = bodyLen;
+            f->totalBytes += bodyLen;
+            logger_log("[jsext] ok %s (%zu bytes, disk-resident)", url,
+                       bodyLen);
+        }
+        else
+        {
+            if (sp != PLUTO_SPILL_INVALID)
+            {
+                pluto_spill_discard(sp);
+            }
+            logger_log("[jsext] FAIL %s spill write (no disk?)", url);
+        }
+    }
+    else if (bodyLen > g_pageBudget ||
+             bodyLen > pluto_mem_headroom_bytes())
+    {
+        /* SW3a AUTO-PLACEMENT (the runtime budget manager): RAM residency is
+         * granted only while BOTH the page budget AND the live app heap have
+         * room — the same uniform threshold for every site, no site knowledge.
+         * Under pressure the body goes to DISK instead and materializes
+         * just-in-time at execution (SW2b path): behavior is identical, only
+         * residency changes. NULL-body slots still run from disk via spill. */
+        SpillFile sp = pluto_spill_begin();
+        if (sp != PLUTO_SPILL_INVALID &&
+            pluto_spill_write(sp, body, bodyLen) == 0)
+        {
+            pluto_spill_finish(sp);
+            f->ext[i].body = NULL;
+            f->ext[i].spill = sp;
+            f->ext[i].len = bodyLen;
+            f->totalBytes += bodyLen;
+            logger_log("[jsext] ok %s (%zu bytes, disk-resident [heap-pressure])",
+                       url, bodyLen);
+        }
+        else
+        {
+            if (sp != PLUTO_SPILL_INVALID)
+            {
+                pluto_spill_discard(sp);
+            }
+            logger_log("[jsext] FAIL %s over page budget (%zu left, need %zu) "
+                       "and spill write failed",
+                       url, g_pageBudget, bodyLen);
+        }
     }
     else
     {
@@ -682,8 +1062,8 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
             f->ext[i].len = bodyLen;
             f->totalBytes += bodyLen;
             g_pageBudget -= bodyLen;
-            logger_log("[jsext] ok %s (%zu bytes, %zu budget left)", url,
-                       bodyLen, g_pageBudget);
+            logger_log("[jsext] ok %s (%zu bytes, ram-resident, %zu budget left)",
+                       url, bodyLen, g_pageBudget);
         }
         else
         {
@@ -694,8 +1074,10 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
     f->idx++; /* advance: otherwise the session re-fetches this file forever */
 }
 
-/* Progress sink: cut the socket the moment the response passes the cap so a
- * huge file cannot flood the HTTP client's 2MB buffer. */
+/* Progress sink. SW2b: NO socket cut anymore — http_client streams the
+ * body to disk (uncapped), so a 500KB script no longer trips anything
+ * here. The sink remains only for logging large downloads in flight.
+ * (The legacy overCap path stays armed for the no-spill RAM fallback.) */
 static void fetch_on_progress(int cur, int total)
 {
     (void)total;
@@ -704,15 +1086,7 @@ static void fetch_on_progress(int cur, int total)
     {
         return;
     }
-    if (cur > JSEXT_MAX_RESPONSE)
-    {
-        f->overCap = 1;
-        http_cancel();
-        /* Cancel is silent (callbacks are zeroed, no onError fires): close
-         * out this file here or the session waits on it forever. */
-        f->fetching = 0;
-        f->idx++;
-    }
+    (void)cur;
 }
 
 static void fetch_on_error(const char *message)
@@ -726,6 +1100,19 @@ static void fetch_on_error(const char *message)
                f->ext[f->idx].url[0] ? f->ext[f->idx].url : "(url)", message);
     f->fetching = 0;
     f->idx++; /* advance past the failed file: skip-on-fail semantics */
+}
+
+/* SW3 test hook: 0 = production default (JSBRIDGE_EXT_PAGE_BUDGET). */
+static size_t g_pageBudgetOverride = 0;
+
+void jsext_set_page_budget(size_t bytes) { g_pageBudgetOverride = bytes; }
+
+/* Effective per-page RAM budget — override first, production default else.
+ * Consulted by collect pre-flight, local fill, and the delivery callback. */
+static size_t jsext_page_budget(void)
+{
+    return g_pageBudgetOverride ? g_pageBudgetOverride
+                                : JSBRIDGE_EXT_PAGE_BUDGET;
 }
 
 JsExtFetch *jsext_prefetch_begin(JsExtArena *arena,
@@ -751,7 +1138,7 @@ JsExtFetch *jsext_prefetch_begin(JsExtArena *arena,
     f->slotCount = slotCount;
     g_fetch = f;
     g_lastBytes = 0;
-    g_pageBudget = JSBRIDGE_EXT_PAGE_BUDGET;
+    g_pageBudget = jsext_page_budget();
     return f;
 }
 
@@ -783,6 +1170,11 @@ int jsext_prefetch_step(void *state)
     cbs.onProgress = fetch_on_progress;
     cbs.onError = fetch_on_error;
     f->overCap = 0;
+    /* SW2b note: http_client owns the response's spill stream and delivers
+     * one materialized body here. fetch_on_success RE-SPILLS bodies over
+     * the old per-script cap to disk (one flash write, RAM transient) and
+     * adopts that handle as the disk-resident source — the arena never
+     * holds big sources. */
     int before = f->idx;
     if (!http_get(e->url, &cbs))
     {
@@ -852,12 +1244,64 @@ void jsext_prefetch_abort(JsExtFetch *f)
         http_cancel(); /* client's stale-callback generations make this safe */
         logger_log("[jsext] aborted at file %d/%d", f->idx, f->extCount);
     }
+    /* SW2b: release any disk-resident sources adopted before the abort —
+     * the arena free below takes the arrays, but spill files live outside
+     * it and would leak until pluto_spill_reset. */
+    for (int k = 0; k < f->extCount; k++)
+    {
+        if (f->ext[k].spill >= 0)
+        {
+            pluto_spill_discard(f->ext[k].spill);
+            f->ext[k].spill = -1;
+        }
+    }
     if (g_fetch == f)
     {
         g_fetch = NULL;
     }
     jsext_arena_free(f->arena);
     PLUTO_FREE(f);
+}
+
+char *jsext_materialize_spill_script(const JsExtScript *e)
+{
+    if (!e || e->body || e->spill < 0 || e->len == 0)
+    {
+        return NULL;
+    }
+    if (e->len > JSBRIDGE_MAX_SCRIPT_SOURCE)
+    {
+        logger_log("[jsext] %s over script source ceiling (%zu > %d) — skipped",
+                   e->url[0] ? e->url : "(url)", e->len,
+                   JSBRIDGE_MAX_SCRIPT_SOURCE);
+        return NULL;
+    }
+    char *buf = (char *)PLUTO_MALLOC(e->len + 1);
+    if (!buf)
+    {
+        logger_log("[jsext] materialize OOM (%zu bytes)", e->len);
+        return NULL;
+    }
+    size_t done = 0;
+    while (done < e->len)
+    {
+        size_t want = e->len - done;
+        if (want > 16384)
+        {
+            want = 16384;
+        }
+        long got = pluto_spill_read(e->spill, (long)done, buf + done, want);
+        if (got <= 0)
+        {
+            logger_log("[jsext] materialize read short at %zu/%zu", done,
+                       e->len);
+            PLUTO_FREE(buf);
+            return NULL;
+        }
+        done += (size_t)got;
+    }
+    buf[e->len] = '\0';
+    return buf;
 }
 
 size_t jsext_last_bytes(void)

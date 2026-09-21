@@ -1,0 +1,51 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[18:28:18 #1] === PlutoBrowser boot ===
+[18:28:18 #2] eventHandler: kEventInit, osversion=30101
+[18:28:18 #3] STORAGE: init enter
+[18:28:18 #4] STORAGE: load enter
+[18:28:18 #5] STORAGE: no data file -> defaults
+[18:28:18 #6] STORAGE: defaults done (bm=10)
+[18:28:18 #7] STORAGE: save enter
+[18:28:18 #8] STORAGE: save open
+[18:28:18 #9] STORAGE: save writing (bm=10 hist=0)
+[18:28:18 #10] STORAGE: save close
+[18:28:18 #11] STORAGE: save exit
+[18:28:18 #12] STORAGE: save done
+[18:28:18 #13] STORAGE: init exit
+[18:28:18 #14] [jsbridge] boot engine: muJS
+[18:28:18 #15] [jsext-autotest] engine forced: 3
+[18:28:18 #16] KB new: entering
+[18:28:18 #17] KB new: allocated
+[18:28:18 #18] KB load: font...
+[18:28:18 #19] KB load: font ok h=36
+[18:28:18 #20] KB load: menu-space ok
+[18:28:18 #21] KB load: menu-ok ok
+[18:28:18 #22] KB load: menu-del ok
+[18:28:18 #23] KB load: menu-cancel ok
+[18:28:18 #24] KB new: font+images loaded
+[18:28:18 #25] DISPLAY: refresh rate set to 30 fps
+[18:28:18 #26] navigate_to: https://bryanwandrych.com/
+[18:28:18 #27] state -> 1 (frame 1)
+[18:28:18 #28] updateFrame: first frame executed
+[18:28:27 #29] [jsext] 2 external script(s) on page
+[18:28:28 #30] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=632B/61800B
+[18:28:35 #31] [jsext] FAIL https://smtpjs.com/v3/smtp.js status=403
+[18:28:38 #32] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=632B/61800B
+[18:28:46 #33] [jsext] FAIL https://bryanwandrych.com/static/js/main.44a5d502.js too big (cut mid-stream, cap 65536)
+[18:28:46 #34] [jsext] prefetch done: 2 file(s), 0 bytes
+[18:28:46 #35] [jsbridge] page attach: XS (Moddable) (engine=3)
+[18:28:46 #36] [js] ext skip (not fetched): https://smtpjs.com/v3/smtp.js
+[18:28:46 #37] [js] ext skip (not fetched): https://bryanwandrych.com/static/js/main.44a5d502.js
+[18:28:46 #38] [js] live page: listeners=0 ran=0 errs=0
+[18:28:46 #39] STORAGE: save open
+[18:28:46 #40] STORAGE: save writing (bm=10 hist=1)
+[18:28:46 #41] STORAGE: save close
+[18:28:46 #42] STORAGE: save exit
+[18:28:46 #43] state -> 2 (frame 837)
+[18:28:48 #44] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=2232B/61800B
+[18:28:58 #45] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=2232B/61800B
+[18:29:08 #46] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=2232B/61800B
+[18:29:18 #47] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=2232B/61800B
+[18:29:28 #48] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=2232B/61800B
+[18:29:37 #49] eventHandler: kEventTerminate, frames=2376

@@ -1,0 +1,70 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[21:00:09 #1] === PlutoBrowser boot ===
+[21:00:09 #2] eventHandler: kEventInit, osversion=30101
+[21:00:09 #3] STORAGE: init enter
+[21:00:09 #4] STORAGE: load enter
+[21:00:09 #5] STORAGE: file opened, parsing
+[21:00:09 #6] STORAGE: init exit
+[21:00:09 #7] [jsbridge] boot engine: XS (Moddable)
+[21:00:09 #8] KB new: entering
+[21:00:09 #9] KB new: allocated
+[21:00:09 #10] KB load: font...
+[21:00:09 #11] KB load: font ok h=36
+[21:00:09 #12] KB load: menu-space ok
+[21:00:09 #13] KB load: menu-ok ok
+[21:00:09 #14] KB load: menu-del ok
+[21:00:09 #15] KB load: menu-cancel ok
+[21:00:09 #16] KB new: font+images loaded
+[21:00:09 #17] DISPLAY: refresh rate set to 30 fps
+[21:00:09 #18] navigate_to: about:javascript
+[21:00:09 #19] state -> 1 (frame 1)
+[21:00:09 #20] updateFrame: first frame executed
+[21:00:09 #21] [jsbridge] page attach: XS (Moddable) (engine=3)
+[21:00:09 #22] [js] timer #1 set timeout 50ms bridge=0xaad7e1400
+[21:00:09 #23] [js] timer #1 cleared
+[21:00:09 #24] [js] timer #2 set timeout 50ms bridge=0xaad7e1400
+[21:00:09 #25] [js] timer #3 set interval 400ms bridge=0xaad7e1400
+[21:00:09 #26] [js] page: ran=1 errs=0
+[21:00:09 #27] [js] live page: listeners=1 ran=1 errs=0
+[21:00:10 #28] state -> 2 (frame 5)
+[21:00:10 #29] [js] timer #2 fire #1 timeout now=422 due=407 active=1 bridge=0xaad7e1400
+[21:00:10 #30] state -> 1 (frame 7)
+[21:00:10 #31] render: rewalk start (live DOM mutation re-render)
+[21:00:10 #32] render: rewalk done blocks=62 links=1
+[21:00:10 #33] state -> 2 (frame 9)
+[21:00:10 #34] [js] timer #3 fire #1 interval now=788 due=757 active=1 bridge=0xaad7e1400
+[21:00:10 #35] state -> 1 (frame 18)
+[21:00:10 #36] render: rewalk start (live DOM mutation re-render)
+[21:00:10 #37] render: rewalk done blocks=62 links=1
+[21:00:10 #38] state -> 2 (frame 20)
+[21:00:10 #39] [js] timer #3 fire #2 interval now=1188 due=1157 active=1 bridge=0xaad7e1400
+[21:00:10 #40] state -> 1 (frame 30)
+[21:00:10 #41] render: rewalk start (live DOM mutation re-render)
+[21:00:10 #42] render: rewalk done blocks=62 links=1
+[21:00:10 #43] state -> 2 (frame 32)
+[21:00:11 #44] [jstimers-autotest] armed (page live, engine attached)
+[21:00:11 #45] [jstimers-autotest] PASS-A: one-shot setTimeout fired and re-rendered (frame 1)
+[21:00:11 #46] [js] timer #3 fire #3 interval now=1588 due=1557 active=1 bridge=0xaad7e1400
+[21:00:11 #47] state -> 1 (frame 42)
+[21:00:11 #48] render: rewalk start (live DOM mutation re-render)
+[21:00:11 #49] render: rewalk done blocks=62 links=1
+[21:00:11 #50] state -> 2 (frame 44)
+[21:00:11 #51] [js] timer #3 fire #4 interval now=1986 due=1957 active=1 bridge=0xaad7e1400
+[21:00:11 #52] state -> 1 (frame 54)
+[21:00:11 #53] render: rewalk start (live DOM mutation re-render)
+[21:00:11 #54] render: rewalk done blocks=62 links=1
+[21:00:11 #55] state -> 2 (frame 56)
+[21:00:11 #56] [js] timer #3 fire #5 interval now=2384 due=2357 active=1 bridge=0xaad7e1400
+[21:00:11 #57] [js] timer #3 cleared
+[21:00:12 #58] state -> 1 (frame 66)
+[21:00:12 #59] render: rewalk start (live DOM mutation re-render)
+[21:00:12 #60] render: rewalk done blocks=62 links=1
+[21:00:12 #61] [jstimers-autotest] PASS-B: setInterval fired repeatedly (5 beats + self-clear, frame 21)
+[21:00:12 #62] state -> 2 (frame 68)
+[21:00:19 #63] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B
+[21:00:29 #64] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B
+[21:00:39 #65] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B
+[21:00:49 #66] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=0B/61800B
+[21:00:59 #67] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=0B/61800B
+[21:01:09 #68] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=0B/61800B

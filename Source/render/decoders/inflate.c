@@ -495,6 +495,141 @@ uint8_t *inflate_decompress(const uint8_t *data, size_t len, size_t *outLen)
     return out.d;
 }
 
+uint8_t *inflate_decompress_raw(const uint8_t *data, size_t len, size_t *outLen)
+{
+    logger_stack_touch();
+    if (outLen)
+    {
+        *outLen = 0;
+    }
+    if (!data || len < 1)
+    {
+        return NULL;
+    }
+
+    /* Identical to inflate_decompress minus the container sniff. */
+    BitStream bs = { data, len, 0, 0, 0 };
+    OutBuf out = {0};
+    int isFinal = 0;
+
+    while (isFinal == 0)
+    {
+        uint32_t f;
+        if (!bs_read_bits(&bs, 1, &f))
+        {
+            break;
+        }
+        isFinal = (int)f;
+        uint32_t btype;
+        if (!bs_read_bits(&bs, 2, &btype))
+        {
+            break;
+        }
+
+        if (btype == 0)
+        {
+            bs_align_byte(&bs);
+            uint32_t blen, bnlen;
+            int okLen = bs_read_bits(&bs, 16, &blen);
+            (void)bs_read_bits(&bs, 16, &bnlen);
+            if (!okLen)
+            {
+                break;
+            }
+            for (uint32_t i = 0; i < blen; i++)
+            {
+                uint32_t b;
+                if (!bs_read_bits(&bs, 8, &b))
+                {
+                    break;
+                }
+                out_push(&out, (uint8_t)b);
+            }
+        }
+        else if (btype == 1 || btype == 2)
+        {
+            const HuffTable *litT;
+            const HuffTable *distT;
+            HuffTable *dynLit = &g_dynLit;
+            HuffTable *dynDist = &g_dynDist;
+            if (btype == 1)
+            {
+                inf_fixed_tables();
+                litT = &fixedLit;
+                distT = &fixedDist;
+            }
+            else
+            {
+                if (!inf_read_dynamic(&bs, dynLit, dynDist, 0))
+                {
+                    break;
+                }
+                litT = dynLit;
+                distT = dynDist;
+            }
+
+            for (;;)
+            {
+                int sym = inf_decode_symbol(&bs, litT);
+                if (sym < 0 || sym == 256)
+                {
+                    break;
+                }
+                if (sym < 256)
+                {
+                    out_push(&out, (uint8_t)sym);
+                }
+                else
+                {
+                    int li = sym - 257;
+                    int baseL = (li >= 0 && li < 29) ? lengthBaseTab[li] : 3;
+                    int exB = (li >= 0 && li < 29) ? lengthExtraTab[li] : 0;
+                    uint32_t extraL = exB > 0 ? bs_read_bits_or0(&bs, exB) : 0;
+                    int matchLen = baseL + (int)extraL;
+
+                    int distSym = inf_decode_symbol(&bs, distT);
+                    if (distSym < 0)
+                    {
+                        distSym = 0;
+                    }
+                    int baseD = distSym <= 29 ? distBaseTab[distSym] : 1;
+                    int edB = distSym <= 29 ? distExtraTab[distSym] : 0;
+                    uint32_t extraD = edB > 0 ? bs_read_bits_or0(&bs, edB) : 0;
+                    int matchDist = baseD + (int)extraD;
+
+                    long long src0 = (long long)out.n - matchDist;
+                    for (int i = 0; i < matchLen; i++)
+                    {
+                        uint8_t b = (src0 + i >= 0 && src0 + i < (long long)out.n)
+                                        ? out.d[src0 + i]
+                                        : 0;
+                        out_push(&out, b);
+                    }
+                }
+            }
+        }
+    }
+
+    if (out.failed)
+    {
+        free(out.d);
+        return NULL;
+    }
+    if (!out.d)
+    {
+        out.d = (uint8_t *)malloc(1);
+        if (!out.d)
+        {
+            return NULL;
+        }
+    }
+    if (outLen)
+    {
+        *outLen = out.n;
+    }
+    return out.d;
+}
+
 /* ── Streaming (Lua Inflate.createStream / s:read) ─────────────────────── */
 #define INF_WIN_KEEP 32768
 #define INF_WIN_MAX 65536
@@ -710,6 +845,31 @@ InflateStream *inflate_stream_new(const uint8_t *data, size_t len)
     s->bs.data = data + startPos;
     s->bs.len = len - startPos;
     s->mode = 0; /* "block" */
+    s->win = (uint8_t *)malloc(INF_WIN_MAX);
+    if (!s->win)
+    {
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+
+InflateStream *inflate_stream_new_raw(const uint8_t *data, size_t len)
+{
+    /* Identical to inflate_stream_new minus the container sniff. */
+    logger_stack_touch();
+    if (!data || len < 1)
+    {
+        return NULL;
+    }
+    InflateStream *s = (InflateStream *)calloc(1, sizeof(InflateStream));
+    if (!s)
+    {
+        return NULL;
+    }
+    s->bs.data = data;
+    s->bs.len = len;
+    s->mode = 0;
     s->win = (uint8_t *)malloc(INF_WIN_MAX);
     if (!s->win)
     {

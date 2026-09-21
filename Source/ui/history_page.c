@@ -13,6 +13,7 @@
 #include "core/storage.h"
 #include "render/style.h"
 #include "pd_api.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
 
@@ -38,7 +39,7 @@ int history_page_selected_index(void)
 static char *dup_url(const char *s)
 {
     size_t n = strlen(s) + 1;
-    char *out = (char *)pluto_pd()->system->realloc(NULL, n);
+    char *out = (char *)pluto_mem_realloc(NULL, n);
     if (out)
     {
         memcpy(out, s, n);

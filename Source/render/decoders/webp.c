@@ -16,10 +16,11 @@
 #include "render/decoders/webp.h"
 #include "render/decoders/webp-internal.h"
 #include "core/logger.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_mem_realloc((p), 0)
 
 /* ── Module constants (webp.lua lines 33-69, verbatim values) ────────────── */
 const uint8_t webp_code_length_extra_bits[3] = { 2, 3, 7 };

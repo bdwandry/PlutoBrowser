@@ -45,7 +45,9 @@ PlaydateAPI *pluto_pd(void)
     return &g_fakeApi;
 }
 void pluto_free(void *p) { free(p); }
-void *pluto_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pluto_mem_realloc(void *p, size_t n); /* core/pluto_mem.c funnel */
+void *pluto_mem_sdk_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pluto_realloc(void *p, size_t n) { return pluto_mem_realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
 /* http_client stubs: html/jsext.c (linked for jsext_arena_free) references
@@ -57,13 +59,20 @@ int http_get(const char *url, const HttpCallbacks *cb)
     (void)cb;
     return 0;
 }
+size_t http_internal_page_body(const char *url, const char **bodyOut)
+{
+    if (bodyOut) { *bodyOut = NULL; }
+    return 0;
+}
 void http_cancel(void) {}
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
 
 #include "html/document.h"
+#include "html/jsbridge_internal.h"
 #include "core/constants.h"
+
 
 static int g_pass = 0, g_fail = 0;
 
@@ -393,6 +402,62 @@ int main(void)
                 found = 1;
         }
         CHECK(found, "bare col becomes implicit group");
+        free_doc(d);
+    }
+
+    /* 20. Nested table inside a cell is TRANSPARENT (row/cell structure of
+     * the inner table is dropped, but its text and links flow into the open
+     * cell instead of vanishing — HN renders its entire front page as
+     * nested tables; the old code returned early and produced an empty
+     * page). The inner <td> text must survive inside the outer table. */
+    {
+        DocParseResult *d = parse(
+            "<table>"
+            "<tr><td>header-cell</td></tr>"
+            "<tr><td>"
+            "<table>"
+            "<tr><td>1.</td><td><a href=\"https://x.example/a\">story title</a></td></tr>"
+            "<tr><td>2.</td><td><a href=\"https://x.example/b\">second story</a></td></tr>"
+            "</table>"
+            "</td></tr>"
+            "</table>");
+        int foundTitle = 0, foundRank = 0, foundHeader = 0;
+        for (int i = 0; i < d->blockCount && (!foundTitle || !foundRank);
+             i++)
+        {
+            const DocBlock *b = d->blocks[i];
+            if (!b || b->type != DOC_BLOCK_TABLE || !b->table)
+                continue;
+            const DocTable *t = b->table;
+            for (int r = 0; r < t->rowCount; r++)
+            {
+                const DocRow *row = t->rows[r];
+                if (!row)
+                    continue;
+                for (int c = 0; c < row->cellCount; c++)
+                {
+                    const DocCell *cell = row->cells[c];
+                    if (!cell)
+                        continue;
+                    for (int k = 0; k < cell->inlineCount; k++)
+                    {
+                        const DocInline *in = cell->inlines[k];
+                        if (!in || in->type != DOC_INLINE_TEXT || !in->text)
+                            continue;
+                        if (strstr(in->text, "story title"))
+                            foundTitle = 1;
+                        if (strcmp(in->text, "1.") == 0)
+                            foundRank = 1;
+                        if (strstr(in->text, "header-cell"))
+                            foundHeader = 1;
+                    }
+                }
+            }
+        }
+        CHECK(foundHeader, "nested table: outer cell text intact");
+        CHECK(foundRank, "nested table: inner rank text flows into cell");
+        CHECK(foundTitle,
+              "nested table: inner story text survives (HN pattern)");
         free_doc(d);
     }
 

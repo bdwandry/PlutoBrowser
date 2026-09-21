@@ -6,7 +6,54 @@
 >
 > **Lua Files Ported: 38 / 38 — ALL LUA FILES PORTED**
 >
-> **CURRENT TASK:** Home-page Google-card navigation stack-overflow crash — FIXED (2026-09-16). See the record below the CURRENT PHASE entry.
+> **NEXT UP — WORK QUEUE (single tracked list; updated 2026-09-21 after SW8.** Nothing else
+> counts as "next" unless it lands here. Order = priority; every item ships via the standing
+> rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for anything
+> touching JS → physical device per AGENTS.md.)
+>
+> **T1 — CLEAN RELEASE DEPLOY (P0, quick).** The device is currently running the SW8 AUTOTEST
+> build (PLUTO_PAGE_AUTOTEST strings compiled in). Build a clean release (0 seam strings via a
+> strings check), deploy per AGENTS.md (datadisk, MD5 verify, eject, 60s, launch), boot-verify
+> 30fps/empty crashlog+errorlog, leave the device running it.
+>
+> **T2 — O2: fetch() for muJS / Duktape / XS (P1, next build item).** Only QuickJS has fetch()
+> (native Promises). Plan (per the O-list sketch, unchanged): tiny Promise/A+ subset shim
+> (~1-2KB, then/catch/resolve/reject only, pumped from the existing timer/XHR frame loop, no
+> engine edits) + fetch() implemented over the existing XHR router surface, per engine; caps
+> inherited (≤4/page, ≤1 on wire, 64KB body). Follows the proven timer-router pattern; keep
+> every engine's pins snapshot-safe (see SW7 note). Done = same fetch-based page code runs
+> identically on all four engines (sim + device).
+>
+> **T3 — CSR EMPTY-RENDER DIAGNOSIS (P1, parallel-friendly).** The 4 sites that render empty on
+> EVERY engine (old.reddit, bryanwandrych.com, textboard.org, lite.cnn) are bundle-level
+> blockers, not API gaps. Plan: add per-script error capture to the sim seam (capture compile
+> vs runtime errors, first-throw location, and the byte offset where a bundle dies) and get a
+> verdict per site: fixable (missing builtin / parser limit) vs unwinnable (bot-wall/heap
+> ceiling). reuters is already a known bot-wall (unwinnable, do not spend time).
+>
+> **T4 — O5: external <link rel=stylesheet> (P2).** CSS engine reads inline <style> only.
+> Extend the jsext prefetch machinery (single-flight, 64KB cap, budget) to fetch stylesheets
+> at parse time into the existing rule pipeline. Closes the last known gap in the CSS story
+> (HN's news.css is link-fed).
+>
+> **T5 — O6: localStorage for JS (P3, stretch).** String-only, ~4KB/site, on the existing
+> storage layer, router-style guardrails. Defer until T2/T3 land and demand is shown.
+>
+> **SW7 — XS whole-VM snapshot: PARKED (closed 2026-09-21, evidence-based).** Rationale:
+> (a) its original use case does not exist (no background tabs; navigation replaces the page);
+> (b) SW6 already makes back-navigation renders instant (network 0 / parse 0 / engine 0) —
+> only JS-state resume is missing, which few passing sites need; (c) XS-only breaks the
+> 4-engine symmetry every other feature maintains and taxes future bridge work; (d) no
+> measured pressure need (SW1/SW3a budget gates + SW8 DOM paging cover the big consumers).
+> Feasibility was VERIFIED (stock xsSnapshot.c is vendored, uncompiled; fxWriteSnapshot/
+> fxReadSnapshot with spill-streamable read/write callbacks + version patch hook) — the API
+> is not the obstacle. UNPARK TRIGGERS: (1) any tab/back-stack feature lands where resume-not-
+> reload is user-visible, or (2) device measurements show XS engine heaps causing budget
+> refusals on real pages. Revisit only on a trigger.
+>
+> **CURRENT TASK:** **SW8 (disk-backed DOM paging) COMPLETE (2026-09-21), proven HOST + SIMULATOR (ALL FOUR engines) + DEVICE.** Delivered: Source/core/pluto_page.[ch] + SW8 fields on DomNode (pagedKey stub marker) — the RAM↔disk "swap" for the layer we own (engine heaps can't be swapped; the DOM is ours). PAGE-OUT: dom_page_out serializes a subtree (root included) into the SW4 persistent spill-store family (bc_<id>_<key>.bin keyed FNV-1a(baseUrl "/" rootId); header carries the root id for collision checks), stamps the stub marker, frees the subtree EXCEPT root — the stub stays LINKED in the live tree as an empty leaf (no spine bookkeeping; dom_free_result frees it via the normal walk). Strings restored from the doc's OWN arena via a new dom_arena_dup facade (wholesale arena free stays exact); boolean attributes round-trip the PLUTO_TOK_ATTR_TRUE sentinel (flag+string on the wire). dom_page_out_under_pressure = the automatic policy, aligned with the SW3a gate: engages only when headroom < 1.5MB (the same threshold that sends page bodies to disk), picks the LARGEST child subtree clearing a 12KB floor (deepest-first, most RAM freed per file), loops until headroom is restored or nothing qualifies; wired in render_done (JS-mode pages only — they are the only ones with a live DomResult); budget-0 builds keep pure-RAM behavior. MATERIALIZE: dom_touch bulk-reads the image ONCE (the SW6 device lesson) and restores IN PLACE — children grafted into the stub node, identity (pointer/nodeId/parent) preserved, callers may hold node pointers across a touch. TRANSPARENCY: (1) dom_node_by_id — the universal bridge choke point (all four engines resolve "_dN" handles through it) — does a fast RAM-only pass (stubs skipped, zero flash cost) and only on a miss materializes one stub per retry (≤8, corrupt-store safe): JS-held ids inside paged subtrees resolve again; (2) the document.c walker (walk_children) touches parent + children before push, so a rewalk materializes transparently with identical output. BUGS FOUND & FIXED: (1) DEVICE STACK OVERFLOW — the decoder staged strings through per-recursion-level stack buffers (char text[16KB]); the device game-task stack (61KB) blew up on restore (crashlog cfsr=MSTKERR, fault addr in the stack region, right after "rewalk start") while the sim's 8MB stack masked it → zero-copy pr_str_ref decodes straight out of the RAM image with validated lengths (no in-image NUL clobber — it corrupts the next field; dom_arena_dup(len) terminates its own copy). (2) reader/writer wire-order mismatch on the attr flag (caught by hex-dumping the spill file after a silent decode fail) — format now symmetric. (3) test-side use-after-free of the freed stub pointer (ASan) motivated the in-place restore design. HOST: tests/page_host_test.c 64/64 under ASan+UBSan (round-trip with forced ids, nodeIds+text+attrs+sentinel verbatim, root-is-stub case, missing-entry/corrupt/truncated refusal, double-page-out no-op, arg validation, free-with-stubs cycles, (baseUrl,rootId) key scoping); snap 25/25, jsbridge 111/111, css 45/45 (neighbor suites rebuilt with pluto_page.c — document.c now calls dom_touch). SIMULATOR (new PLUTO_PAGE_AUTOTEST seam; forces the gate: budget=live+512K, floor=1KB, snapBypass=1 — the SW6 fast path serves no live DOM — RAW_HTML mode, engine pinned via -DPLUTO_PAGE_AUTOTEST_ENGINE=N): muJS/Duktape/QuickJS/XS ALL "[page-autotest] PASS: rewalk materialized the paged DOM (stubs=0, blocks=93 == 93)" — paged 417 nodes / 9390B, restored identically per engine (logs/sim_sw8_page_pass_engine{0..3}_20260921.log). DEVICE (AGENTS.md procedure, MD5 b4862743… match; DEVICEDEFS (not SIMDEFS) reaches the device compile): SAME PASS on hardware in ~2s — paged 9390B to flash, rewalk materialized 417 nodes, blocks 93==93, NO crashlog, NO errorlog (logs/device_sw8_page_pass_20260921.log). One wasted device cycle: SIMDEFS does not touch CPFLAGS — the first deploy ran without the seam (silent no-op); device flags go through DEVICEDEFS. NOTE: device PLUTO_JS_AUTOTEST-style builds need `make device DEVICEDEFS=...` + plain `make pdx` (pdc) for packaging. NEXT: none left on the SW track — SW7 (XS whole-VM snapshot) stays parked; remaining O-list items (fetch() for the 3 non-QuickJS engines, external stylesheets, localStorage stretch) and the QuickJS-empty CSR diagnosis are the open work. **SW track — SW0 (14/20 baseline) + SW1 (telemetry) + SW2a/b/c/d/e (SW2 STAGE CLOSED) + SW3 (guarded RAM raise + SW3a auto RAM-vs-disk placement) + SW4 (QuickJS bytecode cache) + SW5 (DOM API surface) + SW6 (rendered-snapshot cache) COMPLETE (2026-09-21).** **SW6 (rendered-snapshot cache) COMPLETE (2026-09-21), proven HOST + SIMULATOR + DEVICE.** Delivered: Source/core/pluto_snap.[ch] — after every successful render (render_done; toggle re-renders and JS rewalks re-snapshot the current truth) the FINAL WALK OUTPUT (blocks/links/tables/maps/datalists + title/baseUrl/metaRefresh, i.e. the post-JS DOM state) is serialized into the SW4 persistent store family (bc_<id>_<key>.bin keyed by FNV-1a(url,mode); [snap] saved) and a revisit within the TTL (SNAP_TTL_SECONDS, age check vs the epoch in the header) renders from the snapshot: network 0, parse 0, engine 0 (navigate_to fast path BEFORE the fetch; layout_build consumes the restored walk output unchanged — document_rewalk proves that path self-sufficient; the restored doc has NO live DOM/JS: links navigate, clicks degrade gracefully, view-mode flip re-navigates, hard reload + settings-change bypass via snapBypass). Skip policy: about:javascript/about:jsext are NEVER cached (suite pages must run live — replaying them would break the JS autotests); LRU sweep caps SNAP_MAX_ENTRIES. BUGS FOUND & FIXED: (1) DEVICE WATCHDOG CRASH (the hard one): pluto_snap_load read the file PER FIELD — thousands of tiny pluto_spill_read calls, each an open+seek+read+close on device flash — main-thread stall long enough to trip the Playdate watchdog (crashlog 2026-09-21; PCs symbolized from build/pdex.elf at load base 0x24000000 landed in the css/parse pipeline = the fallback classic render, which stalls the same way on acidtest; the simulator's host FS masked it entirely). Fix: bulk-read the WHOLE snapshot into one RAM buffer at open and decode from memory — one flash transaction; the spill layer's per-read reopen pattern is fine for SW2b's chunked scripts but fatal at per-field granularity. (2) pluto_spill_store_invalidate_all did not force the lazy boot scan (invalidate before any store op = no-op; stale entries survived) and pluto_snap_invalidate_all looped over a pre-scan count (0) — both now scan-then-wipe (this is also why a sim run after a device run saw a warm cache). (3) stream format drift: save-side w_bytes length prefixes vs raw reads, markerType u8-vs-i32, table width written unconditionally but read conditionally — all fixed; format now symmetric and version-gated. HOST: snap_host_test 25/25 under ASan+UBSan (round-trip of every block/link/table/map/datalist kind, TTL expiry, wrong-mode, magic/version rejection, truncate/corrupt refusal, LRU eviction, invalidate, store coexistence with SW4 bc entries), jsbridge 111/111, css 45/45. SIMULATOR: new PLUTO_SNAP_AUTOTEST seam (boot-navigates about:acidtest, bounces to home, returns — asserts the first visit was NOT cached (hits==0) and the revisit came from the fast path; hermetic via a boot invalidate_all; sim quirk: the game boots only on alternating opens — launch the simulator binary directly with the PDX as argv): [snap-autotest] PASS hits=1 blocks=93 title=HTML Renderer Test Suite (logs/sim_sw6_snap_pass_cold_20260921.log). DEVICE (AGENTS.md procedure, MD5 035f7c08… match): SAME PASS on hardware in ~3s — cold invalidate → live render + save 33616B → home → revisit [snap] hit → fast-path PASS; NO watchdog reset, NO crashlog, NO errorlog (logs/device_sw6_snap_pass_20260921.log). NEXT: re-run the SW0 20-site matrix to measure the SW5+SW6 payoff (reuters/bing/old.reddit were triaged to SW5); SW8 (disk-backed DOM paging) is now unblocked. **SW0 MATRIX RE-SCORE (2026-09-21, sim): 14/20 officially — zero flips, zero regressions vs baseline — plus one TEST-validity fix: bing's criterion ("bing") was unpassable (the literal string never appears in rendered text); corrected to "playdate", bing PASSES ON ALL FOUR ENGINES (muJS/Duktape/QuickJS/XS) → effective score 15/20. 4-engine grid on the 6 baseline failures (harness engine range fixed 0-2→0-3 for XS; snapBypass pins the measurement to the live pipeline): only bing flips; reuters (renders "Please enable JS and disable any ad blocker" bot-wall), bryanwandrych.com + old.reddit + textboard.org (empty render — CSR bundles; the ES5 muJS cannot even parse them and QuickJS still comes up empty), lite.cnn (empty on every engine incl. QuickJS — giant inline script) fail IDENTICALLY on all four engines → these are bundle-level blockers, not DOM-API or engine-selection gaps; next lever is per-site diagnosis of the QuickJS empties (script-error capture) not more engine work. Infra hardened for long matrices: macOS AppKit automatic termination kills the sim mid-run (clean exit, no crash report) → fieldtest checkpoint/resume file + append-mode per-site history file + supervisor relaunch loop; pluto.log truncates per boot so the history file is the cross-session record. SW5 (DOM API surface) COMPLETE (2026-09-21), proven HOST + SIMULATOR + DEVICE on ALL FOUR engines. Delivered: (1) querySelector/querySelectorAll — css_parse_selector exposed in css.c (whitespace-separated compounds, the SAME compound grammar the rule parser uses; 0 = unusable selector → null result, never an exception) + css_compound_matches_attrs; dom.c iterative sub-tree walk (stack-safe), element-scoped AND document-scoped (scope = root), first-match + capped collect; every engine binds both surfaces. (2) insertBefore (dom.c, ref/NULL-append semantics). (3) Element navigation: firstElementChild / nextElementSibling. (4) classList object (add/remove/toggle/contains/item/length, DOM-token dedupe) — router-owned in jsbridge.c so all engines share token semantics. (5) style object (get/put over the live style= attribute, known-property vocabulary, '' clears, write-through so the standard rewalk applies it). (6) ES5 shims prepended per-script (JSBRIDGE_SW5_PREFIX ~1.4KB, typeof-gated so native wins): Set/Map (linear-array, ===-keyed, add/set/get/has/delete/clear/forEach/values/keys/size) + Image constructor. (7) innerHTML upgraded text-only → real parse-and-adopt (router jsbridge_el_set_inner_html: tokenizer → fragment → adopt under target, budget-charged). (8) about:javascript suite extended with the SW5 section (Set/Map/Image/classList/style/query/insertBefore) synced in BOTH copies (http_client.c + jsbridge_host_test mirror); [sw-t] per-check trace + [sw-suite] summary line for sim/device log proof; the suite's outer catch prints typeof Set/Map/Image/XHR diagnostics. Bugs found & fixed: QsCtx.found uninitialized (Duktape sim SEGV — walk only assigns when still NULL), muJS style_put stale-buffer on clear (uninitialized buf re-wrote the old value after the preserve-skip), muJS/Duktape prefix-prepend heap sizing (ASan overflow: malloc'd len+1, wrote plen+len+1), Duktape duk_push_style wrong duk_def_prop index (key-as-target throw), QuickJS setter_magic ABI (value is a PARAMETER not argv — garbage read crashed), XS def_fn decl/def length-type mismatch (device build), XS document-level querySelector wrongly bound to the element fns on a host-data-NULL object (this_node→NULL → null/undefined), XS XMLHttpRequest registered via xsNewHostFunction (no constructor flag → "new: not a constructor" on the suite's only unguarded new) → xsNewHostConstructor. HOST: jsbridge 111/111 + css 45/45 under ASan+UBSan. SIMULATOR (PLUTO_JS_AUTOTEST seam, per-engine via the persisted jsEngine setting — sim-only guard): muJS/Duktape/QuickJS/XS ALL "[sw-suite] 55 passed, 3-4 partial, 0 missing"; QuickJS bc-cache hit unaffected (prefix is part of the hashed source). DEVICE (PLUTO_JS_TIMERS_AUTOTEST seam build — PLUTO_JS_AUTOTEST is sim-only, so device autotest navigation rides the timers seam; MD5 ae317686… match per AGENTS.md): muJS 55/0 missing, Duktape 55/0, QuickJS 55/0 (+ bc store ccb2daa3 on-device), XS 55/0 — PASS-A/PASS-B timer seams too, EMPTY crashlog/errorlog every run, device restored to muJS default. NEXT: re-run the SW0 20-site matrix against the SW5 surface (reuters/bing/old.reddit were triaged to SW5). The JS-site-compatibility core (#1 timers, #2 CSS, #3 XHR/fetch — all proven sim + device) is DONE; the nested-table empty-render bug (HN-class sites) was found and fixed by O1 field testing (htmltags 25/25); roadmap #4 (proxy) REJECTED per user constraint: everything runs on device, no external services. NOW EXECUTING section 6 (SW track — RAM↔disk architecture): SW0 = 20-site/10-class benchmark matrix, auto-scored by the PLUTO_FIELDTEST_AUTOTEST seam (sim-only; per-site criterion scan of the full DOM incl. table cells; final tally line "matrix p/N"); BASELINE 14/20 (logs/sim_matrix_baseline_20260920.log) — PASS: DDG lite+html, text.npr, Wikipedia ×2, HN, lobste.rs, Marginalia, example.com, motherfuckingwebsite, daringfireball, Gutenberg, w3.org, BBC; FAIL (6) triaged by stage: reuters (bot-wall → SW5), bing (JS-built results → SW5), bryanwandrych.com (64KB cap + CSR → SW2+SW5), old.reddit (data:-scripts skipped + missing builtins Set/Image → SW2+SW5), lite.cnn (inline script too large → SW2/SW3), textboard.org (host refused -21, slot to re-scope). Matrix is VERIFICATION ONLY — the runtime RAM-vs-disk policy is SW1+SW2+SW3a (user clarification 2026-09-20). SW1 = Source/core/pluto_mem.[ch] allocation funnel across all 69 call sites/28 files + all 4 engines' allocator hooks (stock APIs only; XS via c_malloc/c_realloc/c_calloc/c_free overrides in OUR xs_platform.h) with live/peak/bigAlloc/refusals accounting, 2048-entry pointer→size table, calloc helper, and the SW3a soft-budget gate (built, disabled at 0). Bugs found & fixed: recursion trap (pluto_realloc→funnel→pluto_realloc — main.c now provides pluto_mem_sdk_realloc as the raw backend), XS c_calloc must zero (BUS in fxFindKey, caught by host suite), free-accounting before the realloc(p,0) NULL return. Heartbeat now logs heap=/peak=/bigAlloc=/refusals=. HOST: jsbridge 101/101, htmltags 25/25, jsext 30/30, css 45/45 under ASan+UBSan. SIM: home page heap 226KB→1.1MB (peak 1.2MB). DEVICE: MD5 09a4c1c5…, home steady 14KB, 30fps, EMPTY crashlog/errorlog (logs/device_mem_telemetry_20260920.log). **SW2a = Source/core/pluto_spill.[ch] — the disk half of the RAM↔disk architecture, now built and proven.** Per-page-load spill file (Data/*/pluto_spill/spill_NNN.bin) written and read through a bounded 8KB RAM buffer — the pattern for ALL SW2 downloads (disk holds bulk, RAM holds the active window); APIs: begin/write(append)/finish(size→name persisted)/size/read(offset — random access for script re-fetch, DOM paging, snapshot streaming)/list-LRU (oldest-first, quota enforcement hook)/unlink/reset (whole-dir, for tests); name-collision-free via generation counter stored in slot table; directory auto-created on first use. HOST: tests/spill_host_test.c 46/46 PASS under ASan+UBSan (1.5MB sequential write ≫ any RAM cap, head/middle/tail random reads byte-exact across 64KB-chunk boundaries, two live files interleaved, LRU order, unlink, reset) — one TEST bug fixed during bring-up (tail/middle windows spanned the 64KB chunk boundary; expected bytes now composed from the fill formula). Not yet wired to the fetch path — that is SW2b. **SW2b = SW2's core plumbing, COMPLETE on all three tiers.** (1) http_client streams response bodies to a spill file from the first post-header byte (RAM holds headers only; MAX_RESPONSE_SIZE became the DELIVERY-residency cap; done path assembles ONE exact-size buffer RAM-head+disk-tail in 16KB chunks — replaces the old ~3× response RAM peak; chunked streams over spill complete on conn-close; spill write-failure reassembles into RAM as fallback; 16MB disk runaway cap for length-less streams). (2) jsext DUAL-MODE sources: bodies ≤64KB stay arena RAM copies under the 160KB page budget; bodies >64KB are re-spilled to disk (one flash write, uncapped — the 65KB socket-cut in fetch_on_progress is GONE); JsExtScript gained `int spill` (init -1 everywhere — 0 is a valid handle; memset trap found & fixed); local_fill mirrors the same policy. (3) Execution ceiling JSBRIDGE_MAX_SCRIPT_SOURCE (256KB) replaces the 64KB cap in ALL FOUR engine bridges uniformly (muJS/Duktape/QuickJS/XS) — sized to the measured bundle class minus 1MB-heap compile expansion; SW3 raises both via stock allocator APIs. (4) jsbridge.c executor materializes disk-resident sources just-in-time (jsext_materialize_spill_script: ceiling gate, 16KB chunked read, OOM/short-read safe) then frees — RAM holds ONE active script. document_free releases spill handles before the arena dies; prefetch_abort cleans adopted handles. main.c: pluto_spill_init at boot, spill_reset on cancel/back navigation + kEventTerminate. **PROOF**: spill host 46/46, jsext host 30/30 (updated to pin NEW semantics: 72KB huge.js disk-resident, 15 runs, banner 7 passed — page mirrors updated in BOTH http_client.c and the test), jsbridge 101/101, htmltags 25/25, css 45/45 under sanitizers; SIM (QuickJS seam): "[jsext] local ok jsext-huge.js (72819 bytes, disk-resident)" → "[js] ext ran from disk: jsext-huge.js (72819 bytes)" → summary 7 passed, 0 failed, ran=15 errs=0, 30fps, heap 1.87MB steady (logs/sim_sw2b_diskscript_20260920.log); DEVICE: clean release (0 seam strings) MD5 17040191… match, 30fps stackPeak 640B, EMPTY crashlog/errorlog (logs/device_sw2b_boot_20260920.log). **DEVICE 4-ENGINE SWEEP (user-reported device FAIL → root-caused & fixed 2026-09-20):** user screenshot showed jsext suite 2 FAILs on hardware while sim passed — root cause: pluto_spill.c host-path discriminator `!defined(TARGET_SIMULATOR)` caught the DEVICE too (common.mk device DDEFS define TARGET_PLAYDATE, never TARGET_SIMULATOR), so spill was compiled OFF on hardware and disk-resident scripts had no disk. Fix: ready iff (PLUTO_SPILL_HOST || TARGET_PLAYDATE || TARGET_SIMULATOR). Sim re-verified 7/7 with the corrected guard; then per-engine device runs via the persisted `S|jsEngine=` TEXT setting line in comet_browser_data (settings file is sectioned text, NOT binary — byte-offset edit was wrong; SIMDEFS never reach the device compile so engine cycling on hardware = flip storage + relaunch, launch the app explicitly with `pdutil run Games/PlutoBrowser.pdx` after eject+60s): muJS 7/7 (device_sw2b_mujs_7of7_20260920.log), Duktape 7/7 (…duktape…), QuickJS 7/7 (…qjs…), XS 7/7 (…xs…) — every engine executed the disk-resident 72819B script on hardware, ran=15 errs=0, EMPTY crashlog/errorlog on all four. User's jsEngine restored to Duktape; clean release (0 seam strings) MD5-matched, boot-verified 30fps stackPeak 640B, empty logs, device left running it. Bugs found during bring-up: duplicate JSEXT_HUGE definition (no-op str_replace), JSEXT_SPILL_THRESHOLD defined below first use (order-of-define compile error), spill host-path selection (host suites without PLUTO_SPILL_HOST dereferenced null PD — now not-ready → RAM fallback), spill_read fd leak on seek failure. (Earlier: Roadmap #3 — fetch / XHR with async callbacks — COMPLETE (2026-09-20), proven on simulator AND device.) DESIGN (timer-router pattern): router-owned JsHttpRequest table in JsBridge (jsbridge.c) — stable slots {id, method, url, readyState, status, body (64KB cap), err, active}; ≤4 requests/page, ≤1 on the wire (single-flight HTTP client; extra sends queue and the pump starts them when idle); URLs resolved via url_resolve against the page base; local about: pages answered by the router via http_internal_page_body (no network, deterministic tests); stale-completion guards (a settle only delivers if it belongs to the session that started it); page close → http_cancel + slot release. Engines only pin the wrapper object + primary handler and call jsbridge_xhr_open/send/abort — identical contract to timers. XMLHttpRequest (constructor/open/send/abort; onreadystatechange/readyState/status/responseText getters; onload/onerror) implemented in ALL FOUR engines (muJS userdata box with has/put hooks mirroring the DOM-element pattern, Duktape global-stash pins, QuickJS class with pin arrays, XS host object + xsRemember); fetch() on QuickJS ONLY (the one vendored engine with native Promise + JS_ParseJSON; the others have nothing to resolve a promise with) — JSON responses parsed to JS values, then-chains drained via the job queue after each delivery. main.c: jsbridge_xhr_pump in the updateFrame JS path (after http_update), DOM mutation → page_rewalk_now. about:javascript suite: XHR demo (fetches about:jsext locally, renders byte count + status) + QuickJS fetch leg + console.log on route/deliver; the suite's outer catch now console.logs its error (observability fix — device errors were silent before). BUGS FOUND & FIXED: (1) QuickJS pin arrays xfn[]/xobj[]/xres[] never initialized — all-zero JSValue reads as a valid INT tag, so every slot scan reported "pin slots full" and send() threw inside the page's try/catch (sim log had open, never send); tfn[] had the explicit JS_UNDEFINED init loop, the new arrays didn't. (2) QuickJS leaks — two JS_GetGlobalObject() results never freed + xhrProto never released at close (host teardown assert). (3) muJS has/put hooks read js_touserdata(J,0) — stack slot 0 — but muJS passes the box as the hook's p parameter; slot 0 holds an unrelated interpreter local, so any script with locals broke with "not a pluto.xhr" (host tests passed by luck: tiny scripts kept the box at slot 0; the device suite page exposed it). Fixed to read p + host regression X9 (5 decoy locals + property GET). (4) muJS constructor: js_newcconstructor requires the prototype pushed below it (rot2) — the empty-stack call read below the stack base (ASan caught it). HOST: jsbridge 102/102 (X1–X9: routing, relative-URL resolution, pump semantics, error paths, caps, abort, in-flight close-cancel, engine isolation, slot-0 regression), css 45/45, htmltags 22/22, jsext 30/30 — under ASan+UBSan (UBSan halt_on_error=0 for the vendored QuickJS peephole signed-shift report; ASan stays fatal). SIMULATOR (QuickJS seam build): xhr #1 local ok 2142B + fetch about:javascript 12126B, page ran=1 errs=0, rewalk after each delivery, 0 suite errors, click/timers/CSS seams PASS — logs/sim_xhr_pass_20260920.log. DEVICE (AGENTS.md procedure, MD5 aee6dcff…): XHR local ok 2142B on hardware (muJS), page ran=1 errs=0, all seams PASS, 30fps stackPeak 2568B, EMPTY crashlog/errorlog — logs/device_xhr_pass_20260920.log (the fetch leg is QuickJS-only by design). Clean release (0 seam strings) MD5 767def27… deployed, boot-verified 30fps stackPeak 632B, clean terminate, empty logs, device left running it. (Earlier: Roadmap #2 — Minimal CSS engine — COMPLETE (2026-09-19), proven on simulator AND device (QuickJS).) `Source/html/css.c/.h`: <style>-block scanner (browser-correct `</style` validation — `</stylenot>` is NOT a close), tokenizer, parser (type/class/id/descendant compounds; at-rules dropped; pseudo/attr selectors skipped safely), specificity-ordered rule list, per-property last-wins cascade, `css_rule_prop` length-delimited API. Parser bugs found & fixed by the suite: type-name scan stopped at digits (h1–h6 selectors unparseable) and decl-block parsing accepted garbage. document.c walker integration: `walk_css_compute()` matches rules per element and cascades over ancestor chains (css_dom_ancestor), applying to the EXISTING 1-bit layout vocabulary — display:none (element dropped from output, content stays in the DOM), text-align center (block align), background/invert (1-bit inverted blocks), font-weight bold; `WX_CSS_END` scoped-exit kind restores only the CSS bits so the existing WX_FLUSH/stack mechanics are untouched; inline `style=` handling unchanged. about:javascript suite page: new CSS demo section (static <style> + hidden/centered/inverted/bold elements + #cssout container) + JS checks (hidden text PRESENT in DOM per CSS semantics but absent from render, styled elements resolve). New TEMPORARY PLUTO_CSS_AUTOTEST seam (sim + device, engine-independent — pure DOM/render checks): asserts hidden-leak count 0, exactly-1 centered, exactly-1 inverted, bold applied; PASS line [css-autotest]. HOST: css_host_test 45/45 (incl. JS-rewalk re-application via setAttribute('class',…)), jsbridge 101/101, htmltags 22/22, jsext 30/30 — all under ASan+UBSan. SIMULATOR (QuickJS forced seam build): [css-autotest] PASS: display:none hidden (no leak), 1 centered, 1 inverted, bold applied + click PASS + timers PASS-A/B — log archived tests/logs/sim_css_seam_20260919.log. DEVICE (AGENTS.md procedure, MD5 66c8784b…): SAME PASS line on hardware, zero crashlog/errorlog. Clean release (0 seam strings) deployed MD5-verified, boot-verified, device left running it.
+> (Earlier: Roadmap #1 — JS timers — COMPLETE (2026-09-19), proven on simulator (XS engine) AND device (muJS engine).) Previously all timer globals were NO-OPS — the biggest real-world gap for lightweight JS sites (content built/revealed after load never appeared). DESIGN — router-owned table, engine-held refs: JsTimer table lives in JsBridge (jsbridge.c), stable-slot layout (slots NEVER move while a callback can run; clear/retire only mark active=0 with release deferred to the post-pump sweep — engine refs are never released inside an engine bracket); each engine's setTimeout pins its callback (muJS registry-ref string, Duktape global-stash heapptr, QuickJS JS_DupValue, XS tfn[] slot + xsRemember) and calls jsbridge_timer_start(bridge, kind, ref, delayMs) which returns the public id; the router pump (jsbridge_timers_pump, called from main.c js_timers_update() in updateFrame while a page is live) fires due callbacks through the engine vtable run_timer_ref, detects DOM-mutation via callBudget consumption, and the caller re-renders through the standard page_rewalk_now path. CAPS (all in the router, device-safe): 12 timers/page, min 50ms delay (battery + thrash), max 60s, ≤16 fires per pump batch, 64 lifetime fires per interval (runaway retirement), nested-pump chain ≤4. about:javascript suite extended (Timer demo section: id-type check, clearTimeout safety, live 50ms one-shot + 400ms×5 interval writing rendered text). BUGS FOUND & FIXED during bring-up: (1) muJS arg ABI — c-function args are 1-BASED (index 0 is `this`); timer glue initially read index 0 and never registered. (2) XS slot-0 sentinel — slot 0 encoded as (void*)0 = the router's refusal sentinel, so the FIRST timer was always refused ("too many timers"); slot 0 now reserved. (3) GHOST-SLOT double-fire — the pump iterated ALL JSBRIDGE_TIMERS_MAX slots instead of timerCount; after compaction moved a live timer left, the vacated right-hand bytes still read active=1, so the timer fired from BOTH slots (device log: "beat 6" after a 5-beat self-clear). Fix: iterate [0,timerCount) AND memset the vacated tail after compacting. Regression test (e2): dead one-shot before an interval, final-DOM "beat-3" assertion (a double-fire lands on an even beat). (4) Seam sampling bugs (test-side only): the suite's one-shot wrote into timerout which the interval's first beat overwrote before the seam looked — one-shot now writes its own #oneshot element; PASS-B waits for the interval's FINAL persistent text "interval beat 5" (earlier beats are overwritten within 400ms). HOST: jsbridge_host_test 93/93 under ASan (11 new timer tests incl. all-engine coverage + XS interval/self-clear + ghost-slot regression; fake PD API extended with file/clock shims so logger traces are visible on host), htmltags 22/22, jsext 30/30. SIMULATOR (PLUTO_JS_TIMERS_AUTOTEST seam, XS engine): [jstimers-autotest] PASS-A (one-shot fired + re-rendered) + PASS-B (5 beats + self-clear), every fire logged ONCE, 0 errors. DEVICE (AGENTS.md procedure, MD5 verified): seam run on muJS — PASS-A + PASS-B on hardware, fires ~400ms apart, stackPeak 2568B, 30fps, clean terminate, EMPTY crashlog/errorlog; clean release (seam strings absent, per-fire telemetry dropped) deployed and boot-verified (stackPeak 632B, empty logs), device left running it. Logs: tests/logs/{sim,device}_timers_{pass,seam}_*.log. NOT in scope (next candidates): fetch/XHR dispatch into JS, class/id CSS selector engine, style attribute handling.
+> (Earlier: Home-page Google-card navigation stack-overflow crash — FIXED (2026-09-16). See the record below the CURRENT PHASE entry.
 > (Earlier: FOURTH DEVICE CRASH CLUSTER (2026-09-16 16:09-16:13, build b2db9147) — STACK OVERFLOW ROOT-CAUSED & FIXED via Makefile UDEFS (Source/js untouched).** errorlog: 4x "stack overflow in task gameTask", flow = home-page Google card -> https://google.com with jsEnabled=2 SAVED (Full mode persisted from the jsext seam run). Google serves ~10 inline scripts (one 41KB) + 16 regex literals; pristine muJS compile/exec chains demand hundreds of KB of game-task stack: js_regcompx embeds Reclass cclass[128] = 33,536B frame PER REGEX (16 regexes = 536KB worst case), ASTLIMIT 400 x ~1.4KB worst parser chain, REG_MAXREC 4096-deep regex parse recursion, JS_ENVLIMIT 1024 x ~600B C recursion per JS call (runtime call recursion was bounded ONLY by heap growth). FIX (all outside Source/js — every knob is #ifndef-guarded in the vendored engine): Makefile UDEFS += -DJS_ASTLIMIT=48 -DJS_ENVLIMIT=64 -DJS_TRYLIMIT=8 -DREG_MAXREC=48 -DREG_MAXCLASS=16 -DJS_STACKSIZE=2048 (sim + device share the flags, so the sim validates the same code the device runs). Measured: js_regcompx 33,536B -> 4,416B frame; worst JS-compile chain ~7KB; runtime JS-call chain 64 x 600B = 38KB worst case (fails clean with "stack overflow"/"too much recursion" instead of killing the task). ALSO hardened pluto_script_compile_safe: +PLUTO_SCAN_MAX_OPENS 2000 (bounds total parser WORK, not just depth) and +PLUTO_SCAN_MAX_REGEXES 12 per script (bounds js_regcompx call count; google script 1 has 9 regexes = still legal, gate only rejects pathological pages). Google page result unchanged: ran=9 errs=4, one script skipped by the nesting gate, page renders. New TEMPORARY PLUTO_NAV_AUTOTEST seam (sim + device): boots, cranks to the Google speed-dial card, presses A through the REAL home-page input path, asserts state->2 render + 10s task survival. HOST: jsbridge 29/29 + htmltags 22/22 + jsext 30/30 under ASan+UBSan. SIMULATOR: nav-autotest PASS (rendered in 192 frames, task alive 10s). DEVICE deploy #1 (seam, MD5 23ce8fc3...): navigate_to google.com -> state->2, logo decoded, stackPeak 2232B/61800B, 60s+ stable heartbeats, clean terminate, EMPTY errorlog+crashlog (the same flow that overflowed 4x). Device deploy #2 (clean release, same MD5 — seam is compile-time-only): boot PASS stackPeak 632B, empty logs, device left running it.
 > **CURRENT PHASE:** Home-page Test Cases section — all 5 built-in about: pages navigable as cards, verified on Simulator + device.
 > **CURRENT TASK:** **QuickJS 2026-06-04 as third JS engine — COMPLETE (2026-09-17).** Stock vendored from bellard.org (19-file embed set, all byte-identical to the official tarball) into Source/js/QuickJS — zero engine edits, everything in OUR code. **Engine coexistence (the hard problem):** muJS's internal allocator wrappers (jsi.h) collide with QuickJS's public js_malloc/js_free/js_realloc/js_strdup → resolved with 5 compile-time adapter TUs (Source/html/qjs_shim_*.c: quickjs, libregexp, libunicode, cutils, dtoa) that #define the rename then #include the STOCK sources — QuickJS gets pluto_qjs_* symbols, muJS untouched. **Device portability (all in our shims/stubs, engine pristine):** empty Source/fenv.h compat header (newlib lacks fenv.h; vendored include is vestigial, zero fenv symbols used); shim preamble _GNU_SOURCE+feature macros and __TM_GMTOFF=tm_gmtoff (BSD struct member); Source/html/qjs_pthread_stubs.c provides no-op mutex/condvar (browser single-threaded; Atomics.wait needs a SAB that QuickJS cannot create — waiting paths fail safely with logger lines) AND the exact GCC libfunc ABI names __atomic_*_8 (Cortex-M7 toolchain has no libatomic; every reference is SAB-only) AND pluto_qjs_clock_gettime via -Dclock_gettime rename (newlib stub links but returns error — only used by unreachable Atomics.wait). **Router:** JS_ENGINE_QUICKJS=2, third vtable js_engine_quickjs in jsbridge_quickjs.c replicating the identical DOM surface (globals/document/listeners/document.write/click dispatch); settings row cycles muJS→Duktape→QuickJS (storage jsEngine 0/1/2, default 0); new jsbridge_current_engine() getter for seam proof. **Stack safety:** JS_SetMaxStackSize(40KB) on device / 64KB host (empirically: QuickJS's per-call stack accounting is fat — fib(10) needs ~56KB at -O0; device -O2 validated on hardware at stackPeak 2560B+limit<61.8KB), JS_SetMemoryLimit(1MB), CONFIG_VERSION defined by the build. **Build fix:** SDK's -fverbose-asm -Wa,-ahlms= listing emission cost 10+ min on the 60K-line shim TU — pattern-specific CPFLAGS override for qjs_shim_*.o only (keeps -fstack-usage .su reports + dep tracking); UDEFS mirrored to the sim's monolithic rule (DYLIB_FLAGS += $(UDEFS)) so both targets compile identical code. **Testing:** host suites with QuickJS section green (jsbridge incl. suite UA check for all 3 engines, jsext 30/30, htmltags 22/22); two build bugs found by the suite (JS_NewClassID RETURNS the id — my !=0 success check inverted; QuickJS honors explicit len and reads the sentinel byte at input[len] — bridge now NUL-terminates like the other bridges). Simulator (fresh storage each run): Run A settings seam 3-way cycle PASS (muJS→RIGHT→Duktape→RIGHT→QuickJS→LEFT→Duktape→LEFT→muJS, Off-lock + live mirror) + suite on forced QuickJS ran=1 errs=0 listeners=1; Run B muJS regression (zero other-engine mentions); Run C Duktape regression; Run D click seam on QuickJS PASS (dispatch rc=1, preventDefault, re-render). Device (AGENTS.md procedure, data-disk, MD5 verified): seam self-test MD5 75ee82cb… PASS on hardware — QuickJS forced, suite ran=1 errs=0, click rc=1, rewalk blocks=57 links=1, 30fps stackPeak=2560B/61800B, clean kEventTerminate, EMPTY crashlog+errorlog. Clean release MD5 ed651ded… deployed (seams absent via strings check, all three engines linked, .su audit: quickjs_init 304B worst frame), storage jsEngine byte restored to default muJS, boot PASS 30fps stackPeak 632B, empty logs, device left running the release. Logs archived: tests/logs/{sim_quickjs_run{A,B,C,D},device_quickjs_seam,device_quickjs_release}_20260917*.
@@ -45,6 +92,423 @@
 > **🔴 ACTIVE BLOCKER** (2026-09-05, evening): after eject, `pdutil datadisk` accepts requests (rc=0) but `/Volumes/PLAYDATE` will NOT re-mount — retried 5+ times over ~15 min (incl. stale pdutil kill). Same class of issue as the earlier resolved blocker: serial port needs a physical USB replug on the console. P19 device re-verify pending this.
 
 ---
+
+## 0. JS SITE-COMPATIBILITY ROADMAP (general-purpose JS support — standing tracker)
+
+> The four options for widening JS site coverage, discussed 2026-09-19, tracked here permanently.
+> Ordered by payoff. Items 2–3 are on-device code (feasible now); item 4 is infrastructure and
+> needs an explicit user decision because it requires running a server.
+
+### ✅ 1. Timers that actually fire (`setTimeout` / `setInterval` + clear + `requestAnimationFrame`) — COMPLETE (2026-09-19)
+
+The single biggest unlock. A huge number of sites (jQuery era through modern lightweight sites)
+build or reveal content after load: lazy-loaded text, countdown reveals, slideshows,
+"click to show more," comment widgets. Previously those scripts scheduled work that never
+happened, so the page showed only its initial shell.
+
+Delivered: router-owned, capped timer subsystem (12 timers/page, 50ms floor, 60s ceiling,
+≤16 fires/frame, 64-fire interval lifetime cap, nested-pump ≤4) pumped from the update loop;
+DOM-mutating callbacks re-render through the standard `page_rewalk_now` path. Proven on
+simulator AND device on THREE engines (XS, muJS, QuickJS — the QuickJS pass 2026-09-19 late
+evening also proved the click-listener path end to end on hardware); host suites 101/101
+(19 timer tests incl. the QuickJS slot-0 + churn regressions). Bugs fixed on the way:
+muJS 1-based arg ABI, XS slot-0 refusal-sentinel collision, QuickJS slot-0 refusal-sentinel
+collision (found LIVE in the simulator: the suite's try/catch masked it as "JS suite error:
+too many timers"), ghost-slot double-fire after table compaction (regression-tested).
+Full record: CURRENT TASK entry at the top of this file.
+
+### ✅ 2. Minimal CSS engine (class/id/tag selectors, `display:none`, alignment, weight) — COMPLETE (2026-09-19)
+
+Delivered: `Source/html/css.c/.h` (scanner → tokenizer → parser → specificity matcher →
+per-property cascade, `<style>` extraction) + document.c walker integration (hide /
+center / invert / bold via the existing 1-bit layout bits, WX_CSS_END scoped restore,
+ancestor-chain cascade). Class-driven hide/show — the most common way sites reveal
+content — now works on all engines and even with JS Off (styling is parse-time).
+Verified: host css suite 45/45 + all suites green under ASan+UBSan; simulator seam
+PASS on QuickJS; device seam PASS on hardware (AGENTS.md procedure); clean release
+left running. Known limit (by design): selectors are type/class/id/descendant only —
+pseudo-classes, attribute selectors and specificity ties beyond source order are out of
+scope for a 1-bit screen. External `<link rel=stylesheet>` fetch remains future work.
+
+### ✅ 3. `fetch` / XHR with async callbacks — COMPLETE (2026-09-20)
+
+XMLHttpRequest in ALL FOUR engines + fetch() on QuickJS (the only vendored engine with native
+Promises). Router-owned request table in jsbridge.c mirrors the timer architecture: ≤4 requests
+per page, ≤1 on the wire, 64KB body cap, relative URLs resolved against the page base, about:
+pages answered locally, stale-completion guards, page close = cancel. Completions pump per
+frame from main.c and re-render through page_rewalk_now — pages can now pull JSON (feeds,
+search results) and mutate the DOM.
+
+Verified: host jsbridge 102/102 (XHR X1–X9 incl. the muJS slot-0 regression) + css 45/45 +
+htmltags 22/22 + jsext 30/30 under ASan+UBSan; simulator seam PASS on QuickJS (XHR + fetch
+local-ok, rewalk after delivery); device seam PASS on muJS hardware (XHR local-ok, empty
+crashlog/errorlog); clean release deployed and left running. Logs:
+logs/{sim,device}_xhr_pass_20260920.log. Bugs fixed en route: QuickJS uninitialized pin
+arrays (send() silently threw "pin slots full"), QuickJS global-object leaks, muJS has/put
+hook slot-0 protocol bug (must read the p parameter, never stack slot 0), muJS constructor
+stack-rot misuse.
+
+### ⊘ 4. Rendering proxy (Opera Mini architecture) — DECISION: REJECTED (2026-09-20)
+
+User requirement: **everything stays on device** — no external server is part of the project.
+The rendering proxy is by definition a server-side architecture (a headless browser renders the
+page off-device and streams a digest to the browser), so it cannot exist under that constraint.
+Permanently closed as a roadmap item, not deferred.
+
+**The on-device JS site-compatibility effort is therefore COMPLETE with #1–#3** (timers, minimal
+css, XHR/fetch). SPA-class pages remain out of reach on-device by physics (see ceiling note);
+what can still be improved on-device is incremental DOM/API coverage (e.g. fetch polyfill for
+the three engines without native Promises, querySelector/classList) — polish, not a new tier.
+
+> **Context ceiling (stated once):** a 502KB minified React bundle can never compile+run within
+> the device's 61.8KB task stack / ~3MB heap budgets — that is physics, not a bug. With #4
+> rejected, that class of site stays out of reach by design; the browser serves its server-
+> rendered shell or a graceful error, which is the correct behavior for an on-device browser.
+
+### 5. ON-DEVICE ROADMAP (post-#3) — user constraint: EVERYTHING RUNS LOCAL, no external services ever
+
+With the proxy rejected, this is the remaining on-device work plan. Standing rule for every item:
+no server dependencies, general-purpose (never site-specific), verified host suite → simulator
+→ device per AGENTS.md before "complete". Order below is priority order.
+
+**O1. Field-test the real web and produce a gap report — COMPLETE (2026-09-20).**
+Method: TEMPORARY sim-only PLUTO_FIELDTEST_AUTOTEST seam in main.c — at boot reads
+fieldtest_urls.txt (lines of "<engine 0|1|2> <url>"), forces jsEnabled=2 (Full), navigates each
+site in sequence (20s each), then logs a 14-line rendered-text snapshot per site via
+[fieldtest] lines; driven end-to-end in ONE shell command (background sim children die with the
+wrapper — same-command rule reconfirmed). FINDINGS:
+
+- **REAL BUG FOUND & FIXED (document.c nested tables):** news.ycombinator.com fetched fine but
+  rendered EMPTY. Root cause: HN's page is nested tables; the walker's `<table>` branch did
+  `if (w->cell) return;` — a table inside a table cell was DROPPED with its whole subtree, so
+  ~all page content vanished (host probe: DOM tree perfect — 92 story rows — but walker output
+  had a 4-row table with ZERO text). Fix: nested-table markup inside an open cell is now
+  TRANSPARENT — `<table>`/`<tr>`/`<td>` lose their structure but every text node + link flows
+  into the open cell (w->cell stays set, routing works; same transparent treatment for stray
+  `<tr>`/`<td>` under an open cell). Probe after fix: 98 rows, rank + story text present.
+  REGRESSION: htmltags test 20 (outer cell text intact, inner rank text flows, inner story
+  text survives). SUITES: jsbridge 101/101, htmltags 25/25, css 45/45, jsext 30/30 under
+  ASan+UBSan. DEVICE: fixed build deployed MD5 a2a06466…, boot-verified 30fps stackPeak 632B,
+  EMPTY crashlog/errorlog, device left running it.
+- **bryanwandrych.com: empty render — physics, working as designed.** Both external scripts
+  skip: smtpjs.com/v3/smtp.js → HTTP 403 (third-party block), main.44a5d502.js → over the
+  64KB prefetch cap (and it is a minified React bundle: even uncapped it cannot compile+run
+  inside the device budget — the #4-rejected ceiling). Client-side-rendered shell = empty.
+- **WORKING (sim, muJS):** lite.duckduckgo.com/lite (search form), text.npr.org (full news
+  front page incl. headlines), example.com, motherfuckingwebsite.com, news.ycombinator.com
+  (after the fix), about: suite pages. Page fetches to npr/hn/example/mfw once failed with
+  PDNetErr -16 (NET_NOT_CONNECTED_TO_AP) mid-run yet the SAME hosts fetched fine in the same
+  session minutes later — transient sim network-stack flakiness (machine-wide wifi wobble
+  suspected), NOT a browser bug; watch for recurrence on device.
+- Ranking impact: O3 (querySelector) + O4 (classList) rise (sites like HN/legacy boards are
+  markup-driven, not framework-driven); O2 (fetch polyfill) stands; O5 stylesheets stands
+  (HN's news.css is <link>-fed). No new gaps found that change the O-list.
+
+Logs: logs/sim_fieldtest_20260920.log (final batch), fieldtest_urls.txt (site list).
+Original plan sketch (superseded by findings above): load bryanwandrych.com plus a batch of
+lightweight JS-driven sites in the simulator with #1–#3 live; for each, log which scripts ran
+(ran/errs), what rendered, and the exact missing API or failure for what didn't.
+
+**O2. fetch() polyfill for muJS / Duktape / XS.** (Tracked as T2 in the NEXT UP work queue at the top of this file.) Today only QuickJS has fetch() (native
+Promises). Add a tiny Promise/A+-subset shim (~1–2KB, then/catch/resolve/reject only, pumped
+from the existing timer/XHR frame loop — no engine edits, vendored code stays pristine) plus
+fetch() implemented on top of the existing XMLHttpRequest surface, per engine. Same page code
+then works on all four engines; the settings engine selector stops changing site behavior.
+Caps inherited from the XHR router (≤4/page, ≤1 on wire, 64KB body).
+
+**O3. DELIVERED by SW5 (2026-09-21)** — querySelector/querySelectorAll in all four engines
+(css_parse_selector compound grammar + iterative DOM matching; see the SW5 record).
+
+**O4. DELIVERED by SW5 (2026-09-21)** — classList (add/remove/toggle/contains/item/length) in
+all four engines, router-owned token semantics.
+
+**O5. External `<link rel=stylesheet>`.** The CSS engine reads <style> blocks only. Extend the
+jsext prefetch machinery (single-flight, 64KB cap, budget) to fetch stylesheets at parse time
+and feed them into the existing rule pipeline. Closes the last known gap in the #2 CSS story.
+
+**O6. (Stretch) localStorage for JS.** On-device persistent key-value (storage layer already
+persists browser settings/bookmarks); string-only, small quota (~4KB/site), same router-style
+API guardrails. Unlocks "remembered" site state without any server. Defer until O1 shows demand.
+
+Not on the list, on purpose: anything requiring a server, live-list DOM semantics, the full CSS
+cascade, or event delegation — either physically out of reach or out of scale for a 1-bit
+device. If O1's gap report disagrees, the report wins and this list gets revised.
+
+### 6. SW TRACK — RAM↔DISK ARCHITECTURE (opened 2026-09-20, user decision)
+
+**User decision (2026-09-20):** in Full JS mode, render time is explicitly acceptable at any
+duration, as long as the page renders correctly. Goal: load "entire websites, even big ones"
+on-device. CONSTRAINT: **Source/js stays STOCK — zero edits to any vendored engine, ever.**
+**USER CORRECTION (2026-09-20, binding): STOP anchoring on any single site (bryanwandrych.com
+was only a measurement example). The goal is ALL SITES, expressed as THRESHOLDS + CATEGORIES,
+never a site list. Every SW stage is judged by how many site CATEGORIES it unlocks and by the
+benchmark matrix pass rate (SW0) — no site-specific claims, no site-specific tuning.**
+
+**SW0 BENCHMARK MATRIX (do first, standing acceptance test) — BASELINE SCORED: 14/20
+(2026-09-20, logs/sim_matrix_baseline_20260920.log).** 20 real sites across 10 classes
+(search ×3 engines, news ×3 (text/lite/heavy), wiki ×2, forums ×3, minimal ×2, personal,
+blog, social-old-UI, books catalog, standards docs), recorded in tests/benchmark_matrix.md
+with per-site criterion keywords; PLUTO_FIELDTEST_AUTOTEST seam now SCORES automatically
+(full-DOM case-insensitive criterion scan incl. table cells, one network-retry per site,
+final tally line "matrix p/N"). Baseline PASS (14): DDG lite + html results, text.npr,
+Wikipedia ×2, HN, lobste.rs, Marginalia, example.com, motherfuckingwebsite, daringfireball,
+Gutenberg, w3.org, BBC. Baseline FAIL (6) triaged by stage: reuters (bot-wall JS check →
+SW5), bing (JS-built results → SW5), bryanwandrych.com (64KB cap + CSR → SW2+SW5),
+old.reddit (NEW DISCOVERY: `data:text/javascript` scripts skipped by our pipeline + missing
+JS builtins Set/Image → SW2 data:-support + SW5), lite.cnn (inline script "too large" →
+SW2/SW3), textboard.org (server refused -21 — host-side; matrix slot to be re-scoped).
+The matrix immediately paid for itself: data:-script support is a general fix no single-site
+anchor would have found. Every SW stage must raise this N/20 to ship.
+**ROLE CLARIFICATION (user question, 2026-09-20):** the matrix is VERIFICATION, not runtime
+logic — the browser never consults it. The RUNTIME auto-decision ("does this fit in RAM, or
+spill to disk?") is built by SW1+SW2+SW3: live heap accounting + soft budgets + disk streaming
+together form the automatic placement policy the user expects (no manual caps, no per-site
+knowledge). The matrix is how we PROVE that policy holds across many site classes before
+shipping — a crash-test, not a feature. Zero site-specific tuning exists anywhere in the code.
+
+**Physics boundary, stated once (reviewed against the user's swap proposal):** true swap is
+impossible without an MMU — live engine memory is raw C pointers touched millions of times
+per second, and there is no page-fault trap to intercept. Making engine memory fault to disk
+would require editing Source/js (forbidden). THEREFORE: no transparent swap of LIVE engine
+memory, ever. Everything in this track works WITH that constraint: disk holds BULK data
+(sources, assets, snapshots), RAM holds what is actively being executed/rendered, and large
+work happens in bounded, sequential phases instead of page-faulted residency.
+
+**Measured anchor (bryanwandrych.com):** main.44a5d502.js = 502,716 bytes raw / 166,275 gzipped
+(measured 2026-09-20). The 64KB prefetch cap — our own guardrail, not physics — is what blocks
+it today. The source string fits the 8MB pool easily; the danger is parse-time AST/bytecode
+expansion (transient, multi-MB) and CPU time (minutes at 180MHz — user-accepted).
+
+**Stage gates (order matters; each stage verified per AGENTS.md before the next):**
+
+- **SW1 Heap telemetry (foundation) — COMPLETE (2026-09-20).** New Source/core/pluto_mem.[ch]:
+  ONE allocation funnel (pluto_mem_realloc) now used by ALL ~69 call sites across 28 files —
+  every PLUTO_MALLOC/PLUTO_REALLOC/PLUTO_FREE/JMalloc/JFree macro, the direct call sites, the
+  keyboard, and ALL THREE engines' allocator hooks (muJS js_alloc, Duktape heap fns, QuickJS
+  qjs_sdk_*) plus XS via c_malloc/c_realloc/c_calloc/c_free route-through defines in OUR
+  xs_platform.h (engine untouched). Funnel wraps the raw SDK call (pluto_mem_sdk_realloc in
+  main.c — NEVER via pluto_realloc, which wraps the funnel: infinite-recursion trap found and
+  fixed) with: live byte counter, all-time peak, biggest-single-alloc, refusal counter, a
+  2048-entry pointer→size tracking table, a calloc helper (XS tables need zeroed memory —
+  found by the host suite crashing in fxFindKey), and the SW3a soft-budget gate (disabled at
+  0 = pure telemetry until SW3). Heartbeat line extended: heap=/peak=/bigAlloc=/refusals=.
+  Bugs found by verification: (1) the recursion trap above; (2) c_calloc must ZERO — routing
+  it to realloc corrupted XS key tables (BUS in fxFindKey on host); (3) free-accounting must
+  run before the NULL return check (realloc(p,0) returns NULL). HOST: jsbridge 101/101,
+  htmltags 25/25, jsext 30/30, css 45/45 under ASan+UBSan, zero sanitizer reports. SIM:
+  boot→home shows heap 226KB→1.1MB (peak 1.2MB, bigAlloc 48KB) — first real numbers in the
+  8MB pool. DEVICE: MD5 09a4c1c5…, home screen steady 14KB, 30fps, EMPTY crashlog/errorlog
+  (logs/device_mem_telemetry_20260920.log), device left running it.
+- **SW2 Disk-backed resource fetch — SUB-STAGES a+b COMPLETE (2026-09-20); c/d/e remain.**
+  **SW2a pluto_spill.[ch] COMPLETE** (the disk half: per-page spill file, bounded 8KB window,
+  write/read/finish/LRU/unlink/reset APIs; host suite 46/46 under sanitizers — details in the
+  CURRENT TASK header). **SW2b COMPLETE** (fetch path routed through spill: http_client streams
+  bodies to disk UNCAPPED — RAM holds headers only, delivery assembles ONE exact-size buffer;
+  jsext dual-mode sources ≤64KB arena RAM / >64KB disk-resident, the 65KB socket-cut is GONE;
+  execution ceiling 64KB→JSBRIDGE_MAX_SCRIPT_SOURCE 256KB uniformly in all four engine bridges;
+  just-in-time materialization in the jsbridge executor — RAM holds ONE active script; device
+  4-engine sweep muJS/Duktape/QuickJS/XS all 7/7 on hardware after the TARGET_PLAYDATE
+  discriminator fix — details in the CURRENT TASK header). Remaining under SW2: **SW2e re-score the SW0 matrix on sim (then device spot-check) to
+  measure what SW2 bought — NEXT.** **SW2d data:-URL scripts COMPLETE (2026-09-20).**
+  RFC 2397 data:-URL <script src> payloads (the old.reddit pattern the matrix found) now
+  decode + execute: the shared scanner (jsbridge_scan_scripts) detects `data:` src values
+  via a new span variant of the attr reader (no 512B URL-storage truncation — payloads live
+  in the page HTML and slots point INTO it with the JS_SCRIPT_DATA (-2) sentinel; both scan
+  call sites — jsext_collect and the jsbridge executor — stay index-aligned by design), the
+  executor decodes at run time (jsext_decode_data_script: metadata-before-first-comma,
+  case-insensitive ;base64 param, RFC 3986 pct-decode with a correct hex-nibble helper —
+  the first cut's strchr (%16) broke on uppercase A–F, caught by the host suite — '+' is
+  literal per RFC, base64 quad machinery with strict padding/dangling-quad rejection) into
+  a transient malloc'd buffer, runs it, frees it (RAM holds one at a time, same pattern as
+  the spill materializer). Dedup/budget/URL-table untouched: data: scripts consume NO ext
+  entries, NO fetch, NO page budget. Malformed input (no comma, empty payload, dangling
+  quad, non-alphabet base64) = skip + log, page continues. HOST: NEW tests/dataurl_host_test.c
+  15/15 under ASan+UBSan (scanner sentinel + span location, slot-kind/order alignment across
+  inline+data:+ext mixes, decoder fixtures incl. 600B no-truncation payload, 5 malformed
+  inputs — 3 initial FAILs were TEST fixture bugs: misspelled base64, short length, comma
+  in the mediatype); jsext suite extended with a live data: leg (banner now 8 passed;
+  16 runs, extCount still 14 — data: adds no ext entry) 30/30; jsbridge 101/101, htmltags
+  25/25, css 45/45, gzip 8/8. SIM: about:jsext seam run — "[js] data: script ran (19 bytes)"
+  → summary 8 passed 0 failed, ran=16 errs=0, 30fps (logs/sim_sw2d_dataurl_20260920.log).
+  DEVICE: seam build MD5-matched, SAME PASS on hardware, 30fps stackPeak 2568B, EMPTY
+  crashlog/errorlog (logs/device_sw2d_dataurl_20260920.log); clean release (0 seam strings)
+  MD5-matched, boot-verified 30fps, empty logs, device left running it.
+  **SW2c gzip COMPLETE (2026-09-20).** Requests now send `Accept-Encoding: gzip` (deflate is
+  NOT advertised); `Content-Encoding: gzip` detection treats x-gzip as gzip. Design: the
+  compressed body stages CONTIGUOUS in the RAM StrBuf (g_gzipHold freezes spill entirely for
+  gzip responses — no flash churn), the pump's cap becomes GZIP_DELIVERY_CAP (2MB decompressed
+  residency), completion still counts WIRE bytes (Content-Length = compressed size — no
+  change needed; chunked+gzip completes on conn-close). Done path: gzip member unwrap
+  (RFC 1952 header incl. FEXTRA/FNAME/FCOMMENT/FHCRC, single-member) → raw-deflate inflate
+  via NEW stock-entry points inflate_decompress_raw/inflate_stream_new_raw (the bundled
+  inflate's container sniff is zlib/PNG-only and false-positives raw streams ~1/500 — never
+  feed HTTP bodies to the sniffing entries) → strict footer-ISIZE accounting (output >ISIZE
+  or short = corrupt → clean onError, no partial delivery); timeout partial-delivery and the
+  overflow path also gunzip (progress bar counts wire bytes correctly). inflate.c now also
+  frees as an about:page dep (jsbridge pull-in) in host suites. HOST: NEW tests/gzip_host_test.c
+  8/8 under ASan+UBSan (build_gz.sh: Python-zlib fixtures — CL flag passed via extra_head;
+  byte-exact strict-ISIZE delivery, chunked+gzip, all optional header fields, empty member,
+  identity regression untouched, corrupt/truncated/ISIZE-lie → onError); REGRESSION: jsbridge
+  101/101, htmltags 25/25, css 45/45, jsext 30/30. SIM: seam build navigates
+  lite.duckduckgo.com — "[http] gzip body" → page attach → 30fps, steady heap (logs/
+  sim_sw2c_gzip_ddg_20260920.log). DEVICE: seam build MD5-matched, DDG-lite gzip fetched on
+  hardware, page rendered, 30fps stackPeak 2240B, EMPTY crashlog/errorlog (logs/
+  device_sw2c_gzip_ddg_20260920.log); clean release (0 seam strings) MD5-matched, boot
+  verified 30fps, empty logs, device left running it.
+  Per-site disk quota/LRU eviction is part of the spill layer's LRU hook (wired when SW2e
+  shows wear/pressure to matter). Stream-parse HTML from disk in chunks stays OPTIONAL — the
+  delivery path already bounds RAM to one body buffer; revisit only if telemetry shows a need.
+  **SW2e RE-SCORE COMPLETE (2026-09-20, sim, all sites engine=0 muJS) — matrix 12/20
+  (logs/sim_matrix_rescore_20260920.log); baseline's 14/20 included 2 sites the baseline
+  scored on STALE DOM (see below), so the like-for-like cohort moved 10→12.** Scoreboard:
+  PASS = DDG lite + DDG html + text.npr + Wikipedia ×2 + HN + lobste.rs + Marginalia +
+  example.com + daringfireball + Gutenberg + w3.org (11) **+ old.reddit — 1st time ANY
+  content: the 502KB bundle runs from disk (SW2b), all 21 scripts incl. the 24.8KB data: URL
+  script execute (SW2d), muJS flat report ran=21** (render still empty — muJS ES5 gaps below).
+  FAIL (8) triaged to stages: motherfuckingwebsite + bbc.com + lite.cnn = `Connection failed:
+  -16` and textboard.org = `-21` — TRANSIENT NETWORK, snapshots caught the previous site's
+  DOM (reuters' "Example Domain" text under motherfuckingwebsite, w3.org's "Standards &
+  groups" under bbc; baseline old.reddit also rendered Empty); all 4 sites return 200 to
+  curl from the same machine today except textboard.org (000 — refuses our IP/client, keep
+  re-scoped out); NOT a browser regression — matrix retry on a fresh run should flip these.
+  reuters (DataDome bot-wall serves a captcha shell, scripts 403 — needs SW5-class DOM/JS
+  or a bot-wall-compatible UA story) · bing (JS-built results; muJS ran=2 errs=2 — SW5 +
+  engine builtins) · bryanwandrych.com (502KB bundle ran from disk via SW2b+SW2c-gzip!
+  CSR still yields empty render — needs SW5 DOM surface; separate smtp.js 403 is incidental)
+  · old.reddit (biggest SW2 win: content executes now; render empty — muJS `ReferenceError:
+  'Set' is not defined` + `'Image' is not defined` + 4 compile fails — ES5-only engine vs
+  modern bundles; fixes = SW5 engine builtins (Set/Map/Image shims) OR test the page on
+  Duktape/QuickJS engines). Heap telemetry across the run: 22MB (start) → 45.5MB (end)
+  app-resident watermark, refusals=0 throughout — SW1 budget gate never tripped. NET SW2
+  VERDICT: byte-limit era bugs are GONE (500KB-class bundles download, cache to disk, and
+  run); the residual blockers are (a) transient Wi-Fi in the harness, (b) modern-JS builtins
+  in the engines, (c) full DOM API surface = SW5. SW2 STAGE CLOSED.
+- **SW3 Guarded RAM raise + SW3a auto-placement — COMPLETE (2026-09-20), all 3 tiers.**
+  CHANGES (all in OUR code; engines untouched): (1) JSBRIDGE_MAX_SCRIPT_SOURCE 256KB→**768KB**
+  (the matrix proved real 502716-byte bundles refused at 256KB while downloading fine —
+  "over script source ceiling (502716 > 262144) — skipped"); JSBRIDGE_EXT_PAGE_BUDGET
+  160KB→**512KB** RAM residency; QJS_MEM_LIMIT 1MB→**2.5MB** via stock JS_SetMemoryLimit
+  (a 502KB minified bundle compiles to ~2.1x source in RAM). (2) pluto_mem_set_budget(6.5MB)
+  enabled at device boot — DEVICE ONLY #ifdef TARGET_PLAYDATE (sim lesson: the sim's live
+  watermark is ~45MB of host allocations; a device-scale gate refused everything and Duktape
+  went FATAL on the first sim run — caught by the sim proof, gate stays telemetry-only on
+  sim). 1MB true headroom keeps Duktape's OOM-fatal handler out of play. (3) **SW3a:**
+  NEW pluto_mem_headroom_bytes() (budget − live) consulted by jsext's network delivery —
+  RAM residency granted only while BOTH the page budget AND the live heap have room; under
+  pressure the body goes to DISK automatically (same uniform threshold every site, no site
+  knowledge) and materializes just-in-time at execution; spill-failure falls back to refuse
+  + log. (4) jsext_set_page_budget() test hook + unified jsext_page_budget() lookup (the
+  raised default flipped the jsext suite's over-budget fixture; suite pins 160KB explicitly).
+  HOST: jsbridge 101/101, jsext 30/30, htmltags 25/25, css 45/45, gzip 8/8, dataurl 15/15
+  under ASan+UBSan. SIM: seam run navigates the REAL bryanwandrych.com — "ext ran from disk:
+  …main.44a5d502.js (502716 bytes)" under Duktape, 30fps, heap 5.9MB sim-side
+  (logs/sim_sw3_bundle_executes_duktape.log). DEVICE **4-ENGINE SWEEP** (standing rule):
+  the same 502KB bundle ran from disk on hardware under **muJS, Duktape, QuickJS, AND XS**
+  (storage-flip procedure; all 30fps, stackPeak ≤2240B, refusals=0, EMPTY crash/error logs
+  — logs/device_sw3_{duktape,mujs,qjs,xs}_502kb.log). Clean release (0 seam strings) MD5
+  d008906d… deployed, boot-verified 30fps, empty logs, device left running it.
+  **Matrix re-score under SW3 (composite, sim; the seam build SIGTRAPs the macOS Simulator
+  mid-run on long sessions — reproducible at run ~2.5–3min, an SDK/host env issue, NOT our
+  device binary: device never crashed; worked around by scoring the 20 sites in 3 chunks):
+  14/20 — PASS: DDG lite+html, NPR, wiki ×2, HN, lobste.rs, marginalia, example, MFW,
+  daringfireball, gutenberg, w3c, **bbc.com (net-flake recovered)**; FAIL (6): reuters
+  (bot-wall → SW5), bing (JS-built results → SW5), bryanwandrych.com (bundle EXECUTES now —
+  CSR still empty render → SW5), old.reddit (content executes; render empty — muJS ES5
+  builtins Set/Image → SW5), lite.cnn (net flake this chunk; was P at baseline).
+  Net: like-for-like 12→14, BBC/MFW recovered from transient net; the 4 residual fails are
+  ALL SW5-class (DOM API surface + engine builtins), no longer resource-class.
+  Logs: sim_matrix_rescore (SW2e), sim_sw3_matrix_{attempt,sites11to15,sites16to20}.
+  (Design notes preserved from planning:) Custom allocators are a PUBLIC engine feature:
+  QuickJS JS_NewRuntime2, muJS via Makefile -D renames, Duktape custom alloc, XS allocation
+  hooks — engines REFUSE gracefully via existing skip paths, never panic.
+- **SW4 QuickJS bytecode cache — COMPLETE (2026-09-21).** Stock API: JS_Eval(…,
+  JS_EVAL_FLAG_COMPILE_ONLY) → JS_WriteObject to disk → JS_ReadObject + JS_EvalFunction on
+  reuse; one compile serves store AND run. Content-addressed store (bc_<id>_<fnv1a-key>.bin)
+  in pluto_spill: persistent across page loads AND process relaunches (keys ride in FILENAMES;
+  boot scan re-registers entries — host dirent / device listfiles; survives spill_reset which
+  kills only session files). Caps: source ≥4KB (small scripts parse faster than serialize),
+  bytecode ≤4MB, store bounded by the 12-slot pool. Diagnostics on every path: bc store/hit
+  with sizes, serialize-failed, slot-unavailable, over-cap, unreadable→reparse. Fixed during
+  bring-up: JS_WriteObject buffer must free via the ENGINE's pluto_qjs_free (rt-arena memory,
+  ASan caught the funnel free), spill host mkdir, SPILL_NAME_MAX 48→128 (truncated 20-digit
+  key = scan never matched), host scan unsigned-long sscanf, probe harness wiped its own store.
+  **DEVICE CRASH ROOT-CAUSED (the stage's hard lesson):** first hardware deploy hard-faulted
+  ("stack overflow in task gameTask" + 10s-stall in errorlog) where sim was clean. Evidence
+  chain: SW3's device legs NEVER parsed the bundle (old guard skipped it, ran=0) — SW4's
+  guard raise let QuickJS parse it on hardware for the FIRST time → QuickJS's parse recursion
+  is NOT stack-probed (only regex compiler + interpreter are; vendored quickjs.c) and depth-19
+  nesting × ~3KB/level of ARM -O2 parser frames overran the 61.8KB gameTask stack. Fix (our
+  code, engines stock): pluto_script_compile_safe_ex(src,len,max_depth) — engine- and
+  target-aware cap; PLUTO_SCAN_MAX_DEPTH_QJS=12 on device QuickJS (sim keeps 40: 8MB host
+  stack), others unchanged. Device re-run: deep bundle refused GRACEFULLY (nesting-guard log
+  line), 30fps, EMPTY crashlog/errorlog; muJS regression leg PASS (bundle runs); also hardened
+  pluto_spill_write to 16KB chunks on device (a single 2.25MB file->write was off the proven
+  path). PROOF: host bc_store 33/33 + 5/5 relaunch-scan phase + all suites green (jsbridge
+  106, jsext 30, htmltags 25, css 45, dataurl 15, gzip 8) under sanitizers; 502KB-bundle probe:
+  cold bc store (2.25MB bytecode) → warm bc hit with byte-identical behavior, zero sanitizer
+  errors; SIM: store then HIT ACROSS RELAUNCH (bc_1_18199741066874582537.bin reused, not
+  re-created), 28fps; DEVICE: graceful depth refusal + clean release MD5 123a2d8d… booted
+  30fps stackPeak 640B, empty logs, device left running it. Logs: logs/sim_sw4_bc_hit_20260921.log,
+  logs/device_sw4_release_boot.log. KNOWN LIMIT (SW5-adjacent): scripts deeper than 12 never
+  parse under device QuickJS — other engines handle depth-40; QuickJS is also the only
+  engine with a bytecode cache, so deep bundles trade cache speed for the other engines'
+  depth reach. (muJS/Duktape/XS have no public serialize API — QuickJS-only, which is also
+  the engine with the fetch()/Promise surface framework sites need.)
+- **SW5 DOM API surface (the real long pole).** Framework sites don't parse HTML, they CALL
+  APIs: createElement/appendChild/removeChild/createTextNode, innerHTML (parse + attach),
+  querySelector/querySelectorAll (O3), classList (O4), getAttribute/setAttribute coverage,
+  style property, localStorage (O6), addEventListener breadth. Until this exists, big bundles
+  compile and then die on line one. Work in API-sized increments, all four engines, suite-
+  tested per increment.
+- **SW6 Rendered-snapshot cache (the "proxy on device").** After a first successful Full-mode
+  render of a heavy page: serialize the finished render (layout blocks, links, images-by-
+  reference, scroll anchors) to disk and free all RAM. Revisits load the snapshot instantly.
+  This is Opera Mini's architecture with the server replaced by the device's own past work.
+  Invalidation: TTL + explicit reload + storage-pressure LRU. Images stay as URLs the normal
+  pipeline resolves on display.
+- **SW7 (stretch/defer): XS whole-VM snapshot** via its stock xsSnapshot API for background
+  tabs. Defer until SW1–SW6 land.
+- **SW8 (NEW, from the user's swap question) — DISK-BACKED DOM: "swap" for the layer we own.**
+  Why swap is impossible for engine heaps but possible here: transparency requires intercepting
+  memory ACCESSES (CPU page-fault trap) — C pointer dereferences inside the engines are
+  invisible to software, and PLUTO_MALLOC only sees allocations, never accesses; faking it
+  would mean rewriting every -> in Source/js (forbidden). BUT the DOM is OUR data structure
+  (document.c/dom.c, node ids, the JS bridge): we can page DOM subtrees to disk and materialize
+  them on demand — the walker loads the visible region; the bridge materializes a subtree when
+  a script touches a node ID; engines only ever see in-RAM nodes, so they never know. This is
+  genuine, legal "swap" for usually the single biggest RAM consumer on content-heavy pages.
+  Design notes: node-granularity paging keyed by node id, dirty-subtree write-back, page-level
+  LRU, budgeted materialization (bridge refuses politely under pressure via existing paths).
+  Sequencing: needs SW1 telemetry + a stable node-id story; lands after SW5 (API surface
+  defines what "touching a node" means).
+
+**Honest ceiling (unchanged, uniform):** with stock engines, single-script compile needs
+source + bytecode in RAM simultaneously — a hardware ceiling at the ~1MB-source class that
+applies to ANY site's monolithic bundle, no exceptions and no favorites. Within that class:
+most personal/framework sites become plausible after SW1–SW6. Beyond it: multi-megabyte
+commercial SPA bundles stay out (CPU + compile memory, physics). SW6 makes every successfully-
+rendered heavy page instant on revisit regardless of class. O-list continues in parallel;
+SW5 absorbs O3/O4/O6 where they overlap. Priority: SW0 then SW1 (the matrix defines success,
+telemetry de-risks everything).
+
+---
+
+## 0b. SESSION LESSON — LAB-BUILD STACK BUDGETS (2026-09-19, standing)
+
+Host/simulator lab builds compile with `-O0` + ASan/UBSan; their frames are several-fold
+larger than the thin `-O2` ARM frames the engine guards were tuned for. Result: QuickJS's
+`JS_SetMaxStackSize` probe and XS's `fxCStackLimit` guard both tripped on TRIVIAL scripts
+(`var a=6*7;` failed under UBSan -O0), and QuickJS's stack-overflow InternalError could not
+even stringify itself — it surfaced as an opaque "exception". Fixes, all device-safe (the
+device budgets are UNCHANGED — they are what protects the 61.8KB game-task stack):
+- `QJS_STACK_LIMIT_DFL`: host 64KB → 4MB (measured: suite parse needs 512KB; suite runtime
+  recursion + walker frames need ~2MB), device stays 40KB.
+- `XS_CSTACK_LIMIT_DFL`: host 64KB → 512KB, device stays 36KB.
+- `qjs_take_exception_text()` in jsbridge_quickjs.c: consume the secondary exception from a
+  failed JS_ToCString and label unprintable Errors — no more silent "exception".
+- Host rule of thumb: a seam/limit tuned for device frames will false-trip in lab builds.
+  When a host-only failure says "stack overflow" (or prints nothing at all), suspect the
+  budget, not the logic; measure with a `-D..._LIMIT=` ladder before touching code.
 
 ## 1. VERIFIED FACTS (from initial analysis)
 

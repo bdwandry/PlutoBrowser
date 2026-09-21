@@ -7,6 +7,7 @@
  * identically.
  */
 #include "dom.h"
+#include "css.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -15,15 +16,16 @@
 
 #include "pd_api.h"
 #include "core/logger.h"
+#include "../core/pluto_mem.h"
 
 PlaydateAPI *pluto_pd(void);
 void pluto_free(void *p);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p) pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p) pluto_mem_realloc((p), 0)
 
 #define MAX_NODES 6000
 
-#define PLUTO_REALLOC(p, n) pluto_pd()->system->realloc((p), (n))
+#define PLUTO_REALLOC(p, n) pluto_mem_realloc((p), (n))
 
 /* ── String arena: chunk list (same design as tokenizer.c) ────────────────
  * Pointers handed out by arena_dup must stay valid for the result's lifetime
@@ -87,6 +89,17 @@ static char *arena_dup(Arena *a, const char *s, size_t n)
     out[n] = '\0';
     a->tail->used += n + 1;
     return out;
+}
+
+/* ── SW8: public arena facade (core/pluto_page.c restores strings into the
+ * doc's own arena so dom_free_result's wholesale free stays exact) ── */
+char *dom_arena_dup(DomResult *dom, const char *s, int len)
+{
+    if (!dom || !dom->_arena || !s || len < 0)
+    {
+        return NULL;
+    }
+    return arena_dup((Arena *)dom->_arena, s, (size_t)len);
 }
 
 /* ── Tag rule tables (Lua parity) ───────────────────────────────────────── */
@@ -790,19 +803,49 @@ int dom_node_id(const DomResult *dom, DomNode *node)
     return node->nodeId;
 }
 
-DomNode *dom_node_by_id(const DomResult *dom, int id)
+/* First stub (pagedKey != 0) in the tree, iterative. */
+static DomNode *find_first_stub(DomNode *root)
 {
-    if (!dom || !dom->root || id <= 0)
+    if (!root)
     {
         return NULL;
     }
-    /* Iterative search (deep pages must not recurse). */
+    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0)
+    {
+        DomNode *n = stack[--top];
+        if (n->pagedKey)
+        {
+            return n;
+        }
+        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
+        {
+            return NULL;
+        }
+        for (int i = 0; i < n->childCount; i++)
+        {
+            stack[top++] = n->children[i];
+        }
+    }
+    return NULL;
+}
+
+/* RAM-only pass used by dom_node_by_id: finds the id without materializing
+ * any paged-out stubs (the common case stays zero-flash-cost). */
+static DomNode *find_id_ram_only(DomResult *dom, int id)
+{
     DomNode *stack[DOM_SEARCH_MAX_DEPTH];
     int top = 0;
     stack[top++] = dom->root;
     while (top > 0)
     {
         DomNode *n = stack[--top];
+        if (n->pagedKey)
+        {
+            continue; /* stub: skip (its restored children keep their ids) */
+        }
         if (n->nodeId == id)
         {
             return n;
@@ -815,6 +858,34 @@ DomNode *dom_node_by_id(const DomResult *dom, int id)
         {
             stack[top++] = n->children[i];
         }
+    }
+    return NULL;
+}
+
+/* SW8 touch point: when the fast RAM pass misses, the id may live inside a
+ * paged-out stub (JS held the id across a page-out). Materialize one stub
+ * per retry (materialize is O(stub)); bail out after a few so a corrupt
+ * store can't spin the loop forever. */
+DomNode *dom_node_by_id(const DomResult *dom, int id)
+{
+    if (!dom || !dom->root || id <= 0)
+    {
+        return NULL;
+    }
+    DomResult *m = (DomResult *)dom;
+    for (int pass = 0; pass < 8; pass++)
+    {
+        DomNode *hit = find_id_ram_only(m, id);
+        if (hit || pass == 7)
+        {
+            return hit;
+        }
+        DomNode *stub = find_first_stub(m->root);
+        if (!stub)
+        {
+            return NULL; /* genuinely absent */
+        }
+        dom_touch(m, stub);
     }
     return NULL;
 }
@@ -838,6 +909,28 @@ DomNode *dom_create_element(DomResult *dom, const char *tag)
         lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     }
     lower[n] = '\0';
+
+    /* Browsers make createElement("noscript") an inert stub (its children
+     * never render while scripting is on, which is always true here since
+     * scripts only run through the bridge). Keep one from becoming a live
+     * carrier for SPA warning markup. DOCTYPE guard: pre-HTML5 pages treat
+     * unknown/void-ish elements as open (classic noembed/noframes behavior) —
+     * noscript has no meaningful fallback content there either way. */
+    if (strcmp(lower, "noscript") == 0 && dom->root &&
+        dom->root->childCount > 0)
+    {
+        const DomNode *fc = dom->root->children[0];
+        if (fc && fc->kind == DOM_ELEMENT &&
+            fc->tag && strcmp(fc->tag, "html") == 0 &&
+            fc->childCount > 0 && fc->children[0] &&
+            fc->children[0]->kind == DOM_TEXT &&
+            fc->children[0]->text &&
+            strncmp(fc->children[0]->text, "<!DOCTYPE", 9) == 0)
+        {
+            return NULL; /* pre-HTML5 page: pre-H5 noscript = inert stub */
+        }
+        return NULL; /* standards page: inert stub (never rendered) */
+    }
 
     DomNode *el = node_new();
     if (!el)
@@ -1037,6 +1130,394 @@ DomNode *dom_next_element_sibling(const DomNode *node)
         }
     }
     return NULL;
+}
+
+int dom_insert_before(DomResult *dom, DomNode *parent, DomNode *child,
+                      const DomNode *ref)
+{
+    (void)dom;
+    if (!parent || !child || parent == child || child == ref)
+    {
+        return -1;
+    }
+    if (ref && ref->parent != parent)
+    {
+        return -1; /* ref must be a child of parent (DOM semantics) */
+    }
+    /* Same-node re-insert = move: remove from its current position first. */
+    if (child->parent == parent)
+    {
+        dom_remove_child(parent, child);
+    }
+    else if (child->parent)
+    {
+        dom_remove_child(child->parent, child);
+    }
+    int at = parent->childCount;
+    if (ref)
+    {
+        at = parent->childCount;
+        for (int i = 0; i < parent->childCount; i++)
+        {
+            if (parent->children[i] == ref)
+            {
+                at = i;
+                break;
+            }
+        }
+        if (at == parent->childCount)
+        {
+            return -1; /* not found after the remove — refuse (can't happen:
+                        * the ref check above ran pre-remove, but stay safe) */
+        }
+    }
+    if (children_reserve(parent, parent->childCount + 1) != 0)
+    {
+        return -1;
+    }
+    memmove(&parent->children[at + 1], &parent->children[at],
+            sizeof(DomNode *) * (size_t)(parent->childCount - at));
+    parent->children[at] = child;
+    parent->childCount++;
+    child->parent = parent;
+    return 0;
+}
+
+/* ── SW5: classList (O4) ─────────────────────────────────────────────────── */
+
+typedef struct
+{
+    char buf[512]; /* rewritten "a b c" — class lists beyond this drop */
+} ClassScratch;
+
+static int class_token_len(const char *p)
+{
+    int n = 0;
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' &&
+           p[n] != '\r' && p[n] != '\f')
+    {
+        n++;
+    }
+    return n;
+}
+
+int dom_class_has(const DomNode *el, const char *token)
+{
+    if (!el || el->kind != DOM_ELEMENT || !token || !token[0])
+    {
+        return 0;
+    }
+    const char *cls = dom_get_attr(el, "class");
+    if (!cls)
+    {
+        return 0;
+    }
+    const char *p = cls;
+    while (*p)
+    {
+        int n = class_token_len(p);
+        if (n > 0 && strlen(token) == (size_t)n && memcmp(p, token, (size_t)n) == 0)
+        {
+            return 1;
+        }
+        p += n;
+        while (*p && class_token_len(p) == 0)
+        {
+            p++;
+        }
+    }
+    return 0;
+}
+
+/* Rewrite the class attribute from a keep-filter over the current tokens.
+ * keep(p, n, ud) returns 1 to keep the token. mode 0 = plain rewrite
+ * (remove). Returns 0 ok, -1 alloc failure / oversized result. */
+static int class_rewrite(DomResult *dom, DomNode *el,
+                         int (*keep)(const char *p, int n, void *ud),
+                         void *ud)
+{
+    static ClassScratch cs; /* static: off the device game-task stack */
+    const char *cls = dom_get_attr(el, "class");
+    size_t off = 0;
+    cs.buf[0] = '\0';
+    if (cls)
+    {
+        const char *p = cls;
+        while (*p)
+        {
+            int n = class_token_len(p);
+            if (n > 0 && keep(p, n, ud))
+            {
+                if (off > 0)
+                {
+                    cs.buf[off++] = ' ';
+                }
+                if (off + (size_t)n >= sizeof(cs.buf))
+                {
+                    return -1; /* class list outgrew the budget: no change */
+                }
+                memcpy(cs.buf + off, p, (size_t)n);
+                off += (size_t)n;
+                cs.buf[off] = '\0';
+            }
+            p += n;
+            while (*p && class_token_len(p) == 0)
+            {
+                p++;
+            }
+        }
+    }
+    if (off == 0)
+    {
+        if (cls)
+        {
+            dom_remove_attr(el, "class");
+        }
+        return 0;
+    }
+    return dom_set_attr(dom, el, "class", cs.buf);
+}
+
+int dom_class_add(DomResult *dom, DomNode *el, const char *token)
+{
+    if (!dom || !el || el->kind != DOM_ELEMENT || !token || !token[0])
+    {
+        return -1;
+    }
+    if (class_token_len(token) != (int)strlen(token))
+    {
+        return -1; /* whitespace inside a token is invalid DOM */
+    }
+    if (dom_class_has(el, token))
+    {
+        return 0;
+    }
+    static ClassScratch cs; /* static: off the device game-task stack */
+    const char *cls = dom_get_attr(el, "class");
+    size_t off = 0;
+    cs.buf[0] = '\0';
+    if (cls && cls[0])
+    {
+        size_t cl = strlen(cls);
+        if (cl >= sizeof(cs.buf))
+        {
+            return -1;
+        }
+        memcpy(cs.buf, cls, cl + 1);
+        off = cl;
+    }
+    if (off + strlen(token) + 2 > sizeof(cs.buf))
+    {
+        return -1;
+    }
+    if (off > 0)
+    {
+        cs.buf[off++] = ' ';
+    }
+    memcpy(cs.buf + off, token, strlen(token) + 1);
+    return dom_set_attr(dom, el, "class", cs.buf);
+}
+
+static int keep_not_token(const char *p, int n, void *ud)
+{
+    const char *tok = (const char *)ud;
+    return !(strlen(tok) == (size_t)n && memcmp(p, tok, (size_t)n) == 0);
+}
+
+int dom_class_remove(DomResult *dom, DomNode *el, const char *token)
+{
+    if (!dom || !el || el->kind != DOM_ELEMENT || !token || !token[0])
+    {
+        return -1;
+    }
+    if (!dom_class_has(el, token))
+    {
+        return 0; /* removing an absent class is a no-op (DOM spec) */
+    }
+    return class_rewrite(dom, el, keep_not_token, (void *)token);
+}
+
+int dom_class_toggle(DomResult *dom, DomNode *el, const char *token)
+{
+    if (!dom || !el || el->kind != DOM_ELEMENT || !token || !token[0])
+    {
+        return -1;
+    }
+    if (dom_class_has(el, token))
+    {
+        return (dom_class_remove(dom, el, token) == 0) ? 0 : -1;
+    }
+    return (dom_class_add(dom, el, token) == 0) ? 1 : -1;
+}
+
+
+
+/* ── SW5: querySelector machinery (O3) ─────────────────────────────────────
+ * The parsed compounds point into the caller's scratch buffer, so the walk
+ * below is allocation-free: one bounded iterative DFS, elements only.
+ * Ancestor resolution for descendant compounds walks parent pointers
+ * (elements only, matching the walker's css_dom_ancestor adapter). */
+static int qs_compound_of(const DomNode *n, const char **tagLower,
+                          const char **classAttr, const char **idAttr)
+{
+    *tagLower = n->tag ? n->tag : "";
+    *classAttr = dom_get_attr(n, "class");
+    *idAttr = dom_get_attr(n, "id");
+    return 1;
+}
+
+static int qs_matches(const CssSimple *parts, int np, const DomNode *el)
+{
+    const char *tag = NULL;
+    const char *cls = NULL;
+    const char *id = NULL;
+    qs_compound_of(el, &tag, &cls, &id);
+    if (np == 1)
+    {
+        return css_compound_matches_attrs(&parts[0], tag, cls, id);
+    }
+    /* descendant: subject is the last compound; walk element ancestors
+     * nearest-first consuming compounds right-to-left (css_rule_matches
+     * semantics). */
+    if (!css_compound_matches_attrs(&parts[np - 1], tag, cls, id))
+    {
+        return 0;
+    }
+    int want = np - 2;
+    const DomNode *a = el->parent;
+    while (a && want >= 0)
+    {
+        if (a->kind == DOM_ELEMENT)
+        {
+            const char *atag = NULL;
+            const char *acls = NULL;
+            const char *aid = NULL;
+            qs_compound_of(a, &atag, &acls, &aid);
+            if (css_compound_matches_attrs(&parts[want], atag, acls, aid))
+            {
+                want--;
+            }
+        }
+        a = a->parent;
+    }
+    return want < 0;
+}
+
+typedef struct
+{
+    const CssSimple *parts;
+    int np;
+    int (*emit)(DomNode *el, void *ud);
+    void *ud;
+    int count;
+    DomNode *found; /* first match (qs_first mode) */
+    int stop; /* set by emit() < 0 (qs_first) */
+} QsCtx;
+
+static void qs_walk(QsCtx *q, DomNode *n)
+{
+    /* Bounded iterative DFS with an explicit stack (device stack rule). */
+    typedef struct
+    {
+        DomNode *node;
+        int nextChild;
+    } QsFrame;
+    QsFrame stack[DOM_SEARCH_MAX_DEPTH];
+    int top = 0;
+    stack[top].node = n;
+    stack[top].nextChild = 0;
+    top++;
+    while (top > 0 && !q->stop)
+    {
+        QsFrame *f = &stack[top - 1];
+        if (f->nextChild == 0 && f->node->kind == DOM_ELEMENT)
+        {
+            if (qs_matches(q->parts, q->np, f->node))
+            {
+                q->count++;
+                if (!q->found)
+                {
+                    q->found = f->node;
+                }
+                if (q->emit && q->emit(f->node, q->ud) < 0)
+                {
+                    q->stop = 1;
+                    break;
+                }
+                if (!q->emit)
+                {
+                    /* qs_first mode: found it, done. */
+                    q->stop = 1;
+                    break;
+                }
+            }
+        }
+        if (f->nextChild < f->node->childCount &&
+            top < DOM_SEARCH_MAX_DEPTH)
+        {
+            DomNode *c = f->node->children[f->nextChild];
+            f->nextChild++;
+            stack[top].node = c;
+            stack[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
+        }
+    }
+}
+
+int dom_query_selector_all(const DomResult *dom, const DomNode *scope,
+                           const char *sel, char *scratch, size_t scratchSize,
+                           int (*emit)(DomNode *el, void *ud), void *ud)
+{
+    if (!dom || !scope || !sel || !scratch || scratchSize == 0 || !emit)
+    {
+        return -1;
+    }
+    CssSimple parts[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts);
+    if (np <= 0)
+    {
+        return -1; /* unusable selector → null result, never an exception */
+    }
+    QsCtx q;
+    q.parts = parts;
+    q.np = np;
+    q.emit = emit;
+    q.ud = ud;
+    q.count = 0;
+    q.stop = 0;
+    q.found = NULL; /* MUST init: the walk only assigns when still NULL */
+    qs_walk(&q, (DomNode *)scope);
+    return q.count;
+}
+
+DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
+                                  const char *sel, char *scratch,
+                                  size_t scratchSize)
+{
+    if (!dom || !scope || !sel || !scratch || scratchSize == 0)
+    {
+        return NULL;
+    }
+    CssSimple parts[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts);
+    if (np <= 0)
+    {
+        return NULL;
+    }
+    QsCtx q;
+    q.parts = parts;
+    q.np = np;
+    q.emit = NULL; /* NULL emit = stop-at-first mode */
+    q.ud = NULL;
+    q.count = 0;
+    q.stop = 0;
+    q.found = NULL; /* MUST init: the walk only assigns when still NULL */
+    qs_walk(&q, (DomNode *)scope);
+    return q.count > 0 ? q.found : NULL;
 }
 
 /* Iterative free (explicit stack). The previous recursive version recursed

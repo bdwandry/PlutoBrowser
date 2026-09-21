@@ -1,0 +1,155 @@
+[01:45:11 #7] [jsbridge] boot engine: QuickJS
+[01:45:11 #8] [jsclick-autotest] engine forced: QuickJS
+[01:45:11 #9] KB new: entering
+[01:45:11 #10] KB new: allocated
+[01:45:11 #11] KB load: font...
+[01:45:11 #12] KB load: font ok h=36
+[01:45:11 #13] KB load: menu-space ok
+[01:45:11 #14] KB load: menu-ok ok
+[01:45:11 #15] KB load: menu-del ok
+[01:45:11 #16] KB load: menu-cancel ok
+[01:45:11 #17] KB new: font+images loaded
+[01:45:11 #18] DISPLAY: refresh rate set to 30 fps
+[01:45:11 #19] navigate_to: about:javascript
+[01:45:11 #20] state -> 1 (frame 1)
+[01:45:11 #21] updateFrame: first frame executed
+[01:45:11 #22] [jsbridge] page attach: QuickJS (engine=2)
+[01:45:11 #23] [js] timer #1 set timeout 50ms bridge=0xc35c82800
+[01:45:11 #24] [js] timer #1 cleared
+[01:45:11 #25] [js] timer #2 set timeout 50ms bridge=0xc35c82800
+[01:45:11 #26] [js] timer #3 set interval 400ms bridge=0xc35c82800
+[01:45:11 #27] [js] page: ran=1 errs=0
+[01:45:11 #28] [js] live page: listeners=1 ran=1 errs=0
+[01:45:11 #29] state -> 2 (frame 4)
+[01:45:11 #30] [js] timer #2 fire #1 timeout now=139 due=123 active=1 bridge=0xc35c82800
+[01:45:11 #31] state -> 1 (frame 6)
+[01:45:11 #32] render: rewalk start (live DOM mutation re-render)
+[01:45:11 #33] render: rewalk done blocks=67 links=1
+[01:45:11 #34] state -> 2 (frame 8)
+[01:45:11 #35] [js] timer #3 fire #1 interval now=506 due=473 active=1 bridge=0xc35c82800
+[01:45:12 #36] state -> 1 (frame 17)
+[01:45:12 #37] render: rewalk start (live DOM mutation re-render)
+[01:45:12 #38] render: rewalk done blocks=67 links=1
+[01:45:12 #39] state -> 2 (frame 19)
+[01:45:12 #40] [js] timer #3 fire #2 interval now=904 due=873 active=1 bridge=0xc35c82800
+[01:45:12 #41] state -> 1 (frame 29)
+[01:45:12 #42] render: rewalk start (live DOM mutation re-render)
+[01:45:12 #43] render: rewalk done blocks=67 links=1
+[01:45:12 #44] state -> 2 (frame 31)
+[01:45:12 #45] [jsclick-autotest] clicking Event demo link 1
+[01:45:12 #46] [jsclick-autotest] dispatch rc=1 (1=handler ran)
+[01:45:12 #47] state -> 1 (frame 39)
+[01:45:12 #48] render: rewalk start (live DOM mutation re-render)
+[01:45:12 #49] render: rewalk done blocks=67 links=1
+[01:45:12 #50] [js] timer #3 fire #3 interval now=1305 due=1273 active=1 bridge=0xc35c82800
+[01:45:12 #51] render: rewalk start (live DOM mutation re-render)
+[01:45:12 #52] render: rewalk done blocks=67 links=1
+[01:45:12 #53] [jsclick-autotest] PASS: re-render completed, 31 frames since page load
+[01:45:12 #54] [jstimers-autotest] armed (page live, engine attached)
+[01:45:12 #55] [css-autotest] PASS: display:none hidden (no leak), 1 centered, 1 inverted, bold applied (frame 30)
+[01:45:12 #56] state -> 2 (frame 43)
+[01:45:12 #57] [jstimers-autotest] PASS-A: one-shot setTimeout fired and re-rendered (frame 1)
+[01:45:13 #58] [js] timer #3 fire #4 interval now=1702 due=1673 active=1 bridge=0xc35c82800
+[01:45:13 #59] state -> 1 (frame 53)
+[01:45:13 #60] render: rewalk start (live DOM mutation re-render)
+[01:45:13 #61] render: rewalk done blocks=67 links=1
+[01:45:13 #62] state -> 2 (frame 55)
+[01:45:13 #63] [js] timer #3 fire #5 interval now=2099 due=2073 active=1 bridge=0xc35c82800
+[01:45:13 #64] [js] timer #3 cleared
+[01:45:13 #65] state -> 1 (frame 65)
+[01:45:13 #66] render: rewalk start (live DOM mutation re-render)
+[01:45:13 #67] render: rewalk done blocks=67 links=1
+[01:45:13 #68] [jstimers-autotest] PASS-B: setInterval fired repeatedly (5 beats + self-clear, frame 19)
+[01:45:13 #69] state -> 2 (frame 67)
+[01:45:21 #70] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B
+[01:45:31 #71] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B
+[01:45:41 #72] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B
+[01:45:51 #73] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:01 #74] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:11 #75] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:21 #76] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:31 #77] updateFrame: heartbeat frame=2400 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:41 #78] updateFrame: heartbeat frame=2700 fps=30 overlay=0 stackPeak=0B/61800B
+[01:46:51 #79] updateFrame: heartbeat frame=3000 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:01 #80] updateFrame: heartbeat frame=3300 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:11 #81] updateFrame: heartbeat frame=3600 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:20 #82] updateFrame: heartbeat frame=3900 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:30 #83] updateFrame: heartbeat frame=4200 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:40 #84] updateFrame: heartbeat frame=4500 fps=30 overlay=0 stackPeak=0B/61800B
+[01:47:50 #85] updateFrame: heartbeat frame=4800 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:00 #86] updateFrame: heartbeat frame=5100 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:10 #87] updateFrame: heartbeat frame=5400 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:20 #88] updateFrame: heartbeat frame=5700 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:30 #89] updateFrame: heartbeat frame=6000 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:40 #90] updateFrame: heartbeat frame=6300 fps=30 overlay=0 stackPeak=0B/61800B
+[01:48:50 #91] updateFrame: heartbeat frame=6600 fps=30 overlay=0 stackPeak=0B/61800B
+[01:49:00 #92] updateFrame: heartbeat frame=6900 fps=30 overlay=0 stackPeak=0B/61800B
+[01:49:10 #93] updateFrame: heartbeat frame=7200 fps=30 overlay=0 stackPeak=0B/61800B
+[01:49:20 #94] updateFrame: heartbeat frame=7500 fps=30 overlay=0 stackPeak=0B/61800B
+[01:49:30 #95] updateFrame: heartbeat frame=7800 fps=30 overlay=0 stackPeak=0B/61800B
+[01:49:41 #96] updateFrame: heartbeat frame=8100 fps=28 overlay=0 stackPeak=0B/61800B
+[01:49:51 #97] updateFrame: heartbeat frame=8400 fps=28 overlay=0 stackPeak=0B/61800B
+[01:50:02 #98] updateFrame: heartbeat frame=8700 fps=29 overlay=0 stackPeak=0B/61800B
+[01:50:12 #99] updateFrame: heartbeat frame=9000 fps=28 overlay=0 stackPeak=0B/61800B
+[01:50:23 #100] updateFrame: heartbeat frame=9300 fps=29 overlay=0 stackPeak=0B/61800B
+[01:50:34 #101] updateFrame: heartbeat frame=9600 fps=28 overlay=0 stackPeak=0B/61800B
+[01:50:44 #102] updateFrame: heartbeat frame=9900 fps=29 overlay=0 stackPeak=0B/61800B
+[01:50:55 #103] updateFrame: heartbeat frame=10200 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:06 #104] updateFrame: heartbeat frame=10500 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:16 #105] updateFrame: heartbeat frame=10800 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:27 #106] updateFrame: heartbeat frame=11100 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:38 #107] updateFrame: heartbeat frame=11400 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:48 #108] updateFrame: heartbeat frame=11700 fps=28 overlay=0 stackPeak=0B/61800B
+[01:51:59 #109] updateFrame: heartbeat frame=12000 fps=28 overlay=0 stackPeak=0B/61800B
+[01:52:10 #110] updateFrame: heartbeat frame=12300 fps=28 overlay=0 stackPeak=0B/61800B
+[01:52:21 #111] updateFrame: heartbeat frame=12600 fps=28 overlay=0 stackPeak=0B/61800B
+[01:52:31 #112] updateFrame: heartbeat frame=12900 fps=28 overlay=0 stackPeak=0B/61800B
+[01:52:42 #113] updateFrame: heartbeat frame=13200 fps=28 overlay=0 stackPeak=0B/61800B
+[01:52:53 #114] updateFrame: heartbeat frame=13500 fps=28 overlay=0 stackPeak=0B/61800B
+[01:53:04 #115] updateFrame: heartbeat frame=13800 fps=28 overlay=0 stackPeak=0B/61800B
+[01:53:14 #116] updateFrame: heartbeat frame=14100 fps=28 overlay=0 stackPeak=0B/61800B
+[01:53:25 #117] updateFrame: heartbeat frame=14400 fps=28 overlay=0 stackPeak=0B/61800B
+[01:53:36 #118] updateFrame: heartbeat frame=14700 fps=27 overlay=0 stackPeak=0B/61800B
+[01:53:46 #119] updateFrame: heartbeat frame=15000 fps=28 overlay=0 stackPeak=0B/61800B
+[01:53:57 #120] updateFrame: heartbeat frame=15300 fps=29 overlay=0 stackPeak=0B/61800B
+[01:54:08 #121] updateFrame: heartbeat frame=15600 fps=27 overlay=0 stackPeak=0B/61800B
+[01:54:18 #122] updateFrame: heartbeat frame=15900 fps=29 overlay=0 stackPeak=0B/61800B
+[01:54:29 #123] updateFrame: heartbeat frame=16200 fps=28 overlay=0 stackPeak=0B/61800B
+[01:54:39 #124] updateFrame: heartbeat frame=16500 fps=28 overlay=0 stackPeak=0B/61800B
+[01:54:50 #125] updateFrame: heartbeat frame=16800 fps=28 overlay=0 stackPeak=0B/61800B
+[01:55:01 #126] updateFrame: heartbeat frame=17100 fps=28 overlay=0 stackPeak=0B/61800B
+[01:55:11 #127] updateFrame: heartbeat frame=17400 fps=28 overlay=0 stackPeak=0B/61800B
+[01:55:22 #128] updateFrame: heartbeat frame=17700 fps=28 overlay=0 stackPeak=0B/61800B
+[01:55:33 #129] updateFrame: heartbeat frame=18000 fps=29 overlay=0 stackPeak=0B/61800B
+[01:55:43 #130] updateFrame: heartbeat frame=18300 fps=27 overlay=0 stackPeak=0B/61800B
+[01:55:54 #131] updateFrame: heartbeat frame=18600 fps=28 overlay=0 stackPeak=0B/61800B
+[01:56:05 #132] updateFrame: heartbeat frame=18900 fps=28 overlay=0 stackPeak=0B/61800B
+[01:56:15 #133] updateFrame: heartbeat frame=19200 fps=28 overlay=0 stackPeak=0B/61800B
+[01:56:26 #134] updateFrame: heartbeat frame=19500 fps=28 overlay=0 stackPeak=0B/61800B
+[01:56:37 #135] updateFrame: heartbeat frame=19800 fps=29 overlay=0 stackPeak=0B/61800B
+[01:56:48 #136] updateFrame: heartbeat frame=20100 fps=27 overlay=0 stackPeak=0B/61800B
+[01:56:58 #137] updateFrame: heartbeat frame=20400 fps=28 overlay=0 stackPeak=0B/61800B
+[01:57:09 #138] updateFrame: heartbeat frame=20700 fps=28 overlay=0 stackPeak=0B/61800B
+[01:57:20 #139] updateFrame: heartbeat frame=21000 fps=28 overlay=0 stackPeak=0B/61800B
+[01:57:31 #140] updateFrame: heartbeat frame=21300 fps=28 overlay=0 stackPeak=0B/61800B
+[01:57:41 #141] updateFrame: heartbeat frame=21600 fps=29 overlay=0 stackPeak=0B/61800B
+[01:57:52 #142] updateFrame: heartbeat frame=21900 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:02 #143] updateFrame: heartbeat frame=22200 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:12 #144] updateFrame: heartbeat frame=22500 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:22 #145] updateFrame: heartbeat frame=22800 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:32 #146] updateFrame: heartbeat frame=23100 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:42 #147] updateFrame: heartbeat frame=23400 fps=30 overlay=0 stackPeak=0B/61800B
+[01:58:52 #148] updateFrame: heartbeat frame=23700 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:02 #149] updateFrame: heartbeat frame=24000 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:12 #150] updateFrame: heartbeat frame=24300 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:22 #151] updateFrame: heartbeat frame=24600 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:32 #152] updateFrame: heartbeat frame=24900 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:42 #153] updateFrame: heartbeat frame=25200 fps=30 overlay=0 stackPeak=0B/61800B
+[01:59:52 #154] updateFrame: heartbeat frame=25500 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:02 #155] updateFrame: heartbeat frame=25800 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:12 #156] updateFrame: heartbeat frame=26100 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:22 #157] updateFrame: heartbeat frame=26400 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:32 #158] updateFrame: heartbeat frame=26700 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:42 #159] updateFrame: heartbeat frame=27000 fps=30 overlay=0 stackPeak=0B/61800B
+[02:00:52 #160] updateFrame: heartbeat frame=27300 fps=30 overlay=0 stackPeak=0B/61800B
+[02:01:02 #161] updateFrame: heartbeat frame=27600 fps=30 overlay=0 stackPeak=0B/61800B

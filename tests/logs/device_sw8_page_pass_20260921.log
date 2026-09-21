@@ -1,0 +1,42 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[22:16:11 #1] === PlutoBrowser boot ===
+[22:16:11 #2] eventHandler: kEventInit, osversion=30101
+[22:16:12 #3] STORAGE: init enter
+[22:16:12 #4] STORAGE: load enter
+[22:16:12 #5] STORAGE: file opened, parsing
+[22:16:12 #6] STORAGE: init exit
+[22:16:12 #7] [jsbridge] boot engine: muJS
+[22:16:12 #8] [page-autotest] boot: engine=0 mode=1 (RAW_HTML, snap bypass), navigating to acidtest
+[22:16:12 #9] KB new: entering
+[22:16:12 #10] KB new: allocated
+[22:16:12 #11] KB load: font...
+[22:16:12 #12] KB load: font ok h=36
+[22:16:12 #13] KB load: menu-space ok
+[22:16:12 #14] KB load: menu-ok ok
+[22:16:12 #15] KB load: menu-del ok
+[22:16:12 #16] KB load: menu-cancel ok
+[22:16:12 #17] KB new: font+images loaded
+[22:16:12 #18] DISPLAY: refresh rate set to 30 fps
+[22:16:12 #19] navigate_to: about:acidtest
+[22:16:12 #20] state -> 1 (frame 1)
+[22:16:12 #21] updateFrame: first frame executed
+[22:16:12 #22] [jsbridge] page attach: muJS (engine=0)
+[22:16:12 #23] [js] live page: listeners=0 ran=0 errs=0
+[22:16:12 #24] [snap] saved url=about:acidtest blocks=93 links=3 bytes=33616
+[22:16:12 #25] state -> 2 (frame 4)
+[22:16:13 #26] [page-autotest] budget=765475 (live+512K), floor=1KB (forced pressure)
+[22:16:13 #27] [page] paged out id=1 key=275c0049 bytes=9390
+[22:16:13 #28] [page-autotest] paged=1 stubs=1 (blocks before=93, live=223263)
+[22:16:13 #29] [page-autotest] live=223263 bytes after paging
+[22:16:14 #30] [page-autotest] triggering rewalk (materialization should be transparent)
+[22:16:14 #31] state -> 1 (frame 61)
+[22:16:14 #32] render: rewalk start (live DOM mutation re-render)
+[22:16:14 #33] [page] materialized key=275c0049 nodes=417 bytes=9390
+[22:16:14 #34] render: rewalk done blocks=93 links=3
+[22:16:14 #35] state -> 2 (frame 63)
+[22:16:15 #36] [page-autotest] PASS: rewalk materialized the paged DOM (stubs=0, blocks=93 == 93, live=286407)
+[22:16:22 #37] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=2232B/61800B heap=279KB peak=280KB bigAlloc=32KB refusals=0
+[22:16:32 #38] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=2232B/61800B heap=279KB peak=280KB bigAlloc=32KB refusals=0
+[22:16:42 #39] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=2232B/61800B heap=279KB peak=280KB bigAlloc=32KB refusals=0
+[22:16:45 #40] eventHandler: kEventTerminate, frames=998

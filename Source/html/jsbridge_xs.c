@@ -58,11 +58,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "../core/pluto_mem.h"
 
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
 #include "../core/logger.h"
 #include "../util/strbuf.h"
+#include "../html/dom.h"
 
 /* Stock engine API — the exact include set of the canonical host tool
  * (xs/tools/xst.c): xsAll.h (internals, pulls xsPlatform.h → our
@@ -73,8 +75,8 @@
 #include "../js/xs_moddable/includes/xs.h"
 
 extern PlaydateAPI *pluto_pd(void);
-#define JMalloc(n) pluto_pd()->system->realloc(NULL, (n))
-#define JFree(p) pluto_pd()->system->realloc((p), 0)
+#define JMalloc(n) pluto_mem_realloc(NULL, (n))
+#define JFree(p) pluto_mem_realloc((p), 0)
 
 /* ── machine sizing (Playdate-sized; slots ≈ 32B, chunks are bytes) ──── */
 #define XS_INIT_CHUNK (384u * 1024u)
@@ -110,7 +112,13 @@ extern PlaydateAPI *pluto_pd(void);
 #ifdef TARGET_PLAYDATE
 #define XS_CSTACK_LIMIT_DFL (36u * 1024u)
 #else
-#define XS_CSTACK_LIMIT_DFL (64u * 1024u)
+/* Host/sim lab builds (-O0 + sanitizers): instrumented engine frames are
+ * several-fold larger than thin -O2 ARM frames, so the 64KB budget tripped
+ * "[xs] abort: native stack overflow" on the first trivial script (same
+ * class as the QuickJS host budget fix). The host stack is 8MB; this is
+ * only the engine's own guard bound — the device budget above is the one
+ * that protects real hardware. */
+#define XS_CSTACK_LIMIT_DFL (512u * 1024u)
 #endif
 #ifndef XS_CSTACK_LIMIT
 #define XS_CSTACK_LIMIT XS_CSTACK_LIMIT_DFL
@@ -138,6 +146,17 @@ typedef struct
     /* Pinned listener functions; JsListener.ref holds the index.
      * xsRemember'd against GC; xsForget + release at close. */
     xsSlot fns[JSBRIDGE_LISTENERS_MAX];
+    /* Pinned timer callbacks; JsTimer.ref holds the tfn[] slot index.
+     * Same xsRemember/xsForget ownership contract as fns[]. */
+    xsSlot tfn[JSBRIDGE_TIMERS_MAX];
+    unsigned char tfnSet[JSBRIDGE_TIMERS_MAX]; /* slot holds a pin */
+    /* XHR + fetch pins (same ownership contract; fetch uses the same
+     * xfn[] slots — XS has no native Promise, so only XMLHttpRequest). */
+    xsSlot xfn[JSBRIDGE_XHR_MAX]; /* completion handlers / promise resolve */
+    xsSlot xobj[JSBRIDGE_XHR_MAX]; /* wrapper objects (this) */
+    unsigned char xfnSet[JSBRIDGE_XHR_MAX];
+    unsigned char xobjSet[JSBRIDGE_XHR_MAX];
+    xsSlot xhrProto; /* XMLHttpRequest prototype (rooted) */
 } XsState;
 
 /* ── host-provided platform functions (mxUseDefault* = 0) ───────────── */
@@ -250,9 +269,17 @@ static DomNode *arg_node(xsMachine *the, xsIntegerValue i)
     return (DomNode *)xsGetHostDataIf(xsArg(i));
 }
 
+/* Method/property definition helpers (defined with the prototype builder). */
+static void def_fn(xsMachine *the, xsSlot obj, const char *name,
+                   xsCallback fn, int length);
+static void def_val(xsMachine *the, xsSlot obj, const char *name,
+                    xsSlot value);
+
 /* Element prototype: built once at init (see xs_build_el_proto), accessors
  * + methods live there; instances inherit through the prototype chain. */
 static void xs_build_el_proto(JsBridge *b);
+static void xs_build_xhr_proto(JsBridge *b);
+static void xs_xmlhttprequest_new(xsMachine *the);
 
 /* ── accessors (this = element wrapper) ──────────────────────────────── */
 
@@ -401,10 +428,26 @@ static void xs_el_set_textContent(xsMachine *the)
     }
 }
 
-/* PARTIAL: treated as textContent (no markup parsing here) — parity. */
+/* SW5: REAL markup assignment through the router (was textContent). */
 static void xs_el_set_innerHTML(xsMachine *the)
 {
-    xs_el_set_textContent(the);
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        char *s = to_cstring(the, xsArg(0));
+        if (!s)
+        {
+            xsTypeError("out of memory");
+        }
+        int rc = jsbridge_el_set_inner_html(b, n, s, strlen(s));
+        JFree(s);
+        if (rc != 0)
+        {
+            xsTypeError("innerHTML assignment failed");
+        }
+    }
 }
 
 /* ── element methods ─────────────────────────────────────────────────── */
@@ -485,6 +528,487 @@ static void xs_el_removeChild(xsMachine *the)
     {
         xsTypeError("removeChild failed");
     }
+}
+
+/* ── SW5: inline style string reader/writer (shared with the style object
+ * accessors; same per-property semantics as the other engines) ────────── */
+static void xs_style_read_prop(const DomNode *n, const char *prop, char *out,
+                               size_t outsz)
+{
+    out[0] = '\0';
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    const char *st = dom_get_attr(n, "style");
+    if (!st)
+    {
+        return;
+    }
+    size_t plen = strlen(prop);
+    const char *p = st;
+    while (*p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        {
+            p++;
+        }
+        const char *seg = p;
+        while (*p && *p != ';')
+        {
+            p++;
+        }
+        const char *colon = memchr(seg, ':', (size_t)(p - seg));
+        if (colon && (size_t)(colon - seg) == plen &&
+            strncmp(seg, prop, plen) == 0)
+        {
+            const char *vs = colon + 1;
+            const char *ve = p;
+            while (vs < ve && (*vs == ' ' || *vs == '\t'))
+            {
+                vs++;
+            }
+            while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t'))
+            {
+                ve--;
+            }
+            size_t vn = (size_t)(ve - vs);
+            if (vn >= outsz)
+            {
+                vn = outsz - 1;
+            }
+            memcpy(out, vs, vn);
+            out[vn] = '\0';
+            return;
+        }
+        if (*p)
+        {
+            p++;
+        }
+    }
+}
+
+static void xs_style_write_prop(JsBridge *b, DomNode *n, const char *prop,
+                                const char *value)
+{
+    static char buf[512]; /* static: off the device game-task stack */
+    size_t off = 0;
+    size_t plen = strlen(prop);
+    buf[0] = '\0';
+    const char *st = dom_get_attr(n, "style");
+    const char *p = st;
+    while (st && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        {
+            p++;
+        }
+        const char *seg = p;
+        while (*p && *p != ';')
+        {
+            p++;
+        }
+        const char *colon = memchr(seg, ':', (size_t)(p - seg));
+        size_t segLen = (size_t)(p - seg);
+        if (!colon || (size_t)(colon - seg) != plen ||
+            strncmp(seg, prop, plen) != 0)
+        {
+            while (segLen > 0 && (seg[segLen - 1] == ' ' ||
+                                  seg[segLen - 1] == '\t'))
+            {
+                segLen--;
+            }
+            if (segLen && off + segLen + 2 < sizeof(buf))
+            {
+                if (off)
+                {
+                    buf[off++] = ';';
+                }
+                memcpy(buf + off, seg, segLen);
+                off += segLen;
+                buf[off] = '\0';
+            }
+        }
+        if (*p)
+        {
+            p++;
+        }
+    }
+    if (value && value[0])
+    {
+        int n1 = snprintf(buf + off, sizeof(buf) - off, "%s%s: %s",
+                          off ? ";" : "", prop, value);
+        if (n1 < 0 || (size_t)n1 >= sizeof(buf) - off)
+        {
+            return;
+        }
+    }
+    dom_set_attr(b->dom, n, "style", buf);
+}
+
+static const char *const XS_STYLE_PROPS[] = {
+    "display", "visibility", "text-align", "font-weight", "font-style",
+    "text-decoration", "color", "background"};
+
+/* Style accessors: one function per property via the prototype loop, the
+ * property name carried in a reserved own prop (XS host functions see only
+ * the machine state — the getter scans xsThis's hidden "st.prop" marker).
+ * Simpler + proven: one getter/setter PAIR per property, closed over by
+ * name through separate C functions generated by the table below. */
+
+#define XS_STYLE_GETTER(name, prop)                                        \
+    static void xs_style_get_##name(xsMachine *the)                        \
+    {                                                                      \
+        char val[128];                                                     \
+        xs_style_read_prop(this_node(the), prop, val, sizeof(val));         \
+        xsResult = xsString(val);                                          \
+    }
+#define XS_STYLE_SETTER(name, prop)                                        \
+    static void xs_style_set_##name(xsMachine *the)                        \
+    {                                                                      \
+        JsBridge *b = bridge_of(the);                                      \
+        BUDGET_OR_THROW(b);                                                \
+        DomNode *n = this_node(the);                                       \
+        if (n && n->kind == DOM_ELEMENT)                                   \
+        {                                                                  \
+            char *v = to_cstring(the, xsArg(0));                           \
+            if (!v)                                                        \
+            {                                                              \
+                xsTypeError("out of memory");                              \
+            }                                                              \
+            xs_style_write_prop(b, n, prop, v);                            \
+            JFree(v);                                                      \
+        }                                                                  \
+    }
+XS_STYLE_GETTER(display, "display")
+XS_STYLE_SETTER(display, "display")
+XS_STYLE_GETTER(visibility, "visibility")
+XS_STYLE_SETTER(visibility, "visibility")
+XS_STYLE_GETTER(textAlign, "text-align")
+XS_STYLE_SETTER(textAlign, "text-align")
+XS_STYLE_GETTER(fontWeight, "font-weight")
+XS_STYLE_SETTER(fontWeight, "font-weight")
+XS_STYLE_GETTER(fontStyle, "font-style")
+XS_STYLE_SETTER(fontStyle, "font-style")
+XS_STYLE_GETTER(textDecoration, "text-decoration")
+XS_STYLE_SETTER(textDecoration, "text-decoration")
+XS_STYLE_GETTER(color, "color")
+XS_STYLE_SETTER(color, "color")
+XS_STYLE_GETTER(background, "background")
+XS_STYLE_SETTER(background, "background")
+
+/* Fresh style host object for `node` (accessors over the walker vocab). */
+static void xs_push_style(JsBridge *b, DomNode *node)
+{
+    xsMachine *the = machine_of(b);
+    xsSlot obj = xsNewHostObject(NULL);
+    static const struct
+    {
+        const char *name;
+        xsCallback get;
+        xsCallback set;
+    } accs[] = {
+        {"display", xs_style_get_display, xs_style_set_display},
+        {"visibility", xs_style_get_visibility, xs_style_set_visibility},
+        {"textAlign", xs_style_get_textAlign, xs_style_set_textAlign},
+        {"fontWeight", xs_style_get_fontWeight, xs_style_set_fontWeight},
+        {"fontStyle", xs_style_get_fontStyle, xs_style_set_fontStyle},
+        {"textDecoration", xs_style_get_textDecoration,
+         xs_style_set_textDecoration},
+        {"color", xs_style_get_color, xs_style_set_color},
+        {"background", xs_style_get_background, xs_style_set_background},
+    };
+    for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
+    {
+        xsSlot getter = xsNewHostFunction(accs[i].get, 0);
+        xsDefine(obj, xsID(accs[i].name), getter, xsIsGetter);
+        xsSlot setter = xsNewHostFunction(accs[i].set, 1);
+        xsDefine(obj, xsID(accs[i].name), setter, xsIsSetter);
+    }
+    /* Host data = the element node: classList/style METHODS run with `this`
+     * = the object itself, so this_node(the) resolves through it. */
+    xsSetHostData(obj, node);
+    xsResult = obj;
+}
+
+/* ── SW5 (O4): classList host object (fresh per access). Methods mutate
+ * through the router; `length` is a live getter; `item(i)` the i-th token. */
+static void xs_cl_add(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    char *tok = to_cstring(the, xsArg(0));
+    if (!tok)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = jsbridge_el_class_add(b, n, tok);
+    JFree(tok);
+    if (rc != 0)
+    {
+        xsTypeError("classList.add failed");
+    }
+}
+
+static void xs_cl_remove(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    char *tok = to_cstring(the, xsArg(0));
+    if (!tok)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = jsbridge_el_class_remove(b, n, tok);
+    JFree(tok);
+    if (rc != 0)
+    {
+        xsTypeError("classList.remove failed");
+    }
+}
+
+static void xs_cl_toggle(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    char *tok = to_cstring(the, xsArg(0));
+    if (!tok)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = jsbridge_el_class_toggle(b, n, tok);
+    JFree(tok);
+    if (rc < 0)
+    {
+        xsTypeError("classList.toggle failed");
+    }
+    xsResult = xsBoolean(rc == 1);
+}
+
+static void xs_cl_contains(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    char *tok = to_cstring(the, xsArg(0));
+    if (!tok)
+    {
+        xsTypeError("out of memory");
+    }
+    xsResult = xsBoolean(jsbridge_el_class_has(n, tok));
+    JFree(tok);
+}
+
+static void xs_cl_item(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    int idx = (xsToInteger(xsArgc) > 0) ? (int)xsToNumber(xsArg(0)) : -1;
+    const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
+                                                    : NULL;
+    int k = 0;
+    const char *p = cls;
+    while (p && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               *p == '\f')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        int n2 = 0;
+        while (p[n2] && !strchr(" \t\n\r\f", p[n2]))
+        {
+            n2++;
+        }
+        if (k++ == idx)
+        {
+            char tok[64];
+            int cpy = n2 < (int)sizeof(tok) - 1 ? n2 : (int)sizeof(tok) - 1;
+            memcpy(tok, p, (size_t)cpy);
+            tok[cpy] = '\0';
+            xsResult = xsString(tok);
+            return;
+        }
+        p += n2;
+    }
+    xsResult = xsNull;
+}
+
+static void xs_cl_length(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
+                                                    : NULL;
+    int k = 0;
+    const char *p = cls;
+    while (p && *p)
+    {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+               *p == '\f')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        k++;
+        while (*p && !strchr(" \t\n\r\f", *p))
+        {
+            p++;
+        }
+    }
+    xsResult = xsInteger(k);
+}
+
+static void xs_push_classlist(JsBridge *b, DomNode *node)
+{
+    xsMachine *the = machine_of(b);
+    xsSlot obj = xsNewHostObject(NULL);
+    def_fn(the, obj, "add", xs_cl_add, 1);
+    def_fn(the, obj, "remove", xs_cl_remove, 1);
+    def_fn(the, obj, "toggle", xs_cl_toggle, 1);
+    def_fn(the, obj, "contains", xs_cl_contains, 1);
+    def_fn(the, obj, "item", xs_cl_item, 1);
+    {
+        xsSlot getter = xsNewHostFunction(xs_cl_length, 0);
+        xsDefine(obj, xsID("length"), getter, xsIsGetter);
+    }
+    xsSetHostData(obj, node); /* see xs_push_style: methods read `this` */
+    xsResult = obj;
+}
+
+/* ── SW5: element method additions ───────────────────────────────────── */
+static void xs_el_insertBefore(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *c = arg_node(the, 0);
+    /* arg_node is fxGetHostDataIf-based: undefined/null/any primitive
+     * yields NULL, which dom_insert_before treats as append-at-end. */
+    DomNode *ref = (xsToInteger(xsArgc) > 1) ? arg_node(the, 1) : NULL;
+    if (!n || !c || dom_insert_before(b->dom, n, c, ref) != 0)
+    {
+        xsTypeError("insertBefore failed");
+    }
+}
+
+/* querySelector emit: XS pushes wrappers into the array slot carried in
+ * the user data (array + running index). */
+typedef struct
+{
+    JsBridge *b;
+    xsMachine *m; /* the xsSetAt macro below needs a local named `the` */
+    xsSlot arr;
+    int k;
+} XsQsEmit;
+
+static int qs_emit_xs(void *elp, void *ud)
+{
+    XsQsEmit *e = (XsQsEmit *)ud;
+    xsSlot v = xs_push_element(e->b, (DomNode *)elp);
+    xsMachine *the = e->m;
+    xsSetAt(e->arr, xsInteger(e->k++), v);
+    return 0;
+}
+
+static void xs_el_querySelectorAll(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char *sel = to_cstring(the, xsArg(0));
+    if (!sel)
+    {
+        xsTypeError("out of memory");
+    }
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    xsResult = xsNewArray(0);
+    XsQsEmit e = {b, the, xsResult, 0};
+    jsbridge_el_query_selector_all(b, n, sel, scratch, sizeof(scratch),
+                                   qs_emit_xs, &e);
+    JFree(sel);
+}
+
+static void xs_el_querySelector(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char *sel = to_cstring(the, xsArg(0));
+    if (!sel)
+    {
+        xsTypeError("out of memory");
+    }
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    DomNode *hit = (DomNode *)jsbridge_el_query_selector_first(
+        b, n, sel, scratch, sizeof(scratch));
+    JFree(sel);
+    xsResult = xs_push_element(b, hit);
+}
+
+/* SW5 sim finding: the document object is a plain host object (host data
+ * NULL), so the ELEMENT querySelector fns read this_node→NULL and return
+ * null/empty at document level. Dedicated document-level fns scope to the
+ * root — same pattern as the other bridges. */
+static void xs_document_querySelector(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    char *sel = to_cstring(the, xsArg(0));
+    if (!sel)
+    {
+        xsTypeError("out of memory");
+    }
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    DomNode *hit = (DomNode *)jsbridge_el_query_selector_first(
+        b, b->dom ? b->dom->root : NULL, sel, scratch, sizeof(scratch));
+    JFree(sel);
+    xsResult = xs_push_element(b, hit);
+}
+
+static void xs_document_querySelectorAll(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    char *sel = to_cstring(the, xsArg(0));
+    if (!sel)
+    {
+        xsTypeError("out of memory");
+    }
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    xsResult = xsNewArray(0);
+    XsQsEmit e = {b, the, xsResult, 0};
+    jsbridge_el_query_selector_all(b, b->dom ? b->dom->root : NULL, sel,
+                                   scratch, sizeof(scratch), qs_emit_xs, &e);
+    JFree(sel);
+}
+
+/* ── SW5 accessors: navigation + classList/style object getters ──────── */
+static void xs_el_get_firstElementChild(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xs_push_element(bridge_of(the),
+                               n ? dom_first_element_child(n) : NULL);
+}
+
+static void xs_el_get_nextElementSibling(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xs_push_element(bridge_of(the),
+                               n ? dom_next_element_sibling(n) : NULL);
+}
+
+static void xs_el_get_classList(xsMachine *the)
+{
+    xs_push_classlist(bridge_of(the), this_node(the));
+}
+
+static void xs_el_get_style(xsMachine *the)
+{
+    xs_push_style(bridge_of(the), this_node(the));
 }
 
 static void xs_el_addEventListener(xsMachine *the)
@@ -881,6 +1405,10 @@ static void xs_build_el_proto(JsBridge *b)
         {"childElementCount", xs_el_get_childElementCount, NULL},
         {"children", xs_el_get_children, NULL},
         {"nodeType", xs_el_get_nodeType, NULL},
+        {"firstElementChild", xs_el_get_firstElementChild, NULL},
+        {"nextElementSibling", xs_el_get_nextElementSibling, NULL},
+        {"classList", xs_el_get_classList, NULL},
+        {"style", xs_el_get_style, NULL},
     };
     static const struct
     {
@@ -893,6 +1421,9 @@ static void xs_build_el_proto(JsBridge *b)
         {"removeAttribute", xs_el_removeAttribute, 1},
         {"appendChild", xs_el_appendChild, 1},
         {"removeChild", xs_el_removeChild, 1},
+        {"insertBefore", xs_el_insertBefore, 2},
+        {"querySelector", xs_el_querySelector, 1},
+        {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"addEventListener", xs_el_addEventListener, 2},
         {"getElementsByTagName", xs_el_getElementsByTagName, 1},
     };
@@ -918,6 +1449,91 @@ static void xs_build_el_proto(JsBridge *b)
     }
 
     xsRemember(st->elProto); /* root for the machine's lifetime */
+}
+
+/* ── timers (setTimeout / setInterval): router table + engine refs ──────── */
+/* XS host functions read args via xsArg(i) and return via xsResult.
+ * Registration mirrors the listener path: the callback is stored +
+ * xsRemember'd (GC-pinned); JsTimer.ref = tfn[] slot index. */
+static void xs_timer_setup(xsMachine *the, JsBridge *b, XsState *st,
+                           JsTimerKind kind)
+{
+    xsSlot fn = xsArg(0);
+    if (!fxIsCallable(the, &fn))
+    {
+        xsTypeError("timer callback must be a function");
+    }
+    if (b->timerCount >= JSBRIDGE_TIMERS_MAX)
+    {
+        xsTypeError("too many timers");
+    }
+    int slot = -1;
+    /* Slot 0 is RESERVED: JsTimer.ref == NULL is the router's refusal
+     * sentinel, and slot 0 would encode as (void*)0 — so the very first
+     * timer would be rejected as "too many timers". Scan from 1. */
+    for (int i = 1; i < JSBRIDGE_TIMERS_MAX; i++)
+    {
+        if (!st->tfnSet[i])
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+    {
+        xsTypeError("too many timers");
+    }
+    int delay = 0;
+    if (xsToInteger(xsArgc) > 1)
+    {
+        delay = (int)xsToNumber(xsArg(1));
+    }
+    if (delay < 0)
+    {
+        delay = 0;
+    }
+    int id = jsbridge_timer_start(b, kind, (void *)(intptr_t)slot,
+                                  (unsigned)delay);
+    if (id == 0)
+    {
+        xsTypeError("too many timers");
+    }
+    st->tfn[slot] = fn;
+    st->tfnSet[slot] = 1;
+    xsRemember(st->tfn[slot]); /* pin against GC */
+    xsResult = xsInteger(id);
+}
+
+static void xs_setTimeout(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xs_timer_setup(the, b, st, JS_TIMER_TIMEOUT);
+}
+
+static void xs_setInterval(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xs_timer_setup(the, b, st, JS_TIMER_INTERVAL);
+}
+
+static void xs_clear_common(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    int id = (xsToInteger(xsArgc) > 0) ? (int)xsToNumber(xsArg(0)) : 0;
+    int cleared = jsbridge_timer_clear(b, id);
+    xsResult = xsInteger(cleared);
+}
+
+static void xs_clearTimeout(xsMachine *the)
+{
+    xs_clear_common(the);
+}
+
+static void xs_clearInterval(xsMachine *the)
+{
+    xs_clear_common(the);
 }
 
 static void xs_build_globals(JsBridge *b)
@@ -961,6 +1577,8 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, doc, "getElementById", xs_document_getElementById, 1);
         def_fn(the, doc, "createElement", xs_document_createElement, 1);
         def_fn(the, doc, "createTextNode", xs_document_createTextNode, 1);
+        def_fn(the, doc, "querySelector", xs_document_querySelector, 1);
+        def_fn(the, doc, "querySelectorAll", xs_document_querySelectorAll, 1);
         def_fn(the, doc, "write", xs_document_write, 0);
         def_fn(the, doc, "writeln", xs_document_writeln, 0);
         def_fn(the, doc, "addEventListener", xs_doc_addEventListener, 2);
@@ -980,24 +1598,26 @@ static void xs_build_globals(JsBridge *b)
     def_fn(the, glob, "alert", xs_alert, 0);
     def_fn(the, glob, "confirm", xs_noop, 0);
     def_fn(the, glob, "prompt", xs_noop, 0);
-    def_fn(the, glob, "setTimeout", xs_noop, 0);
-    def_fn(the, glob, "clearTimeout", xs_noop, 0);
-    def_fn(the, glob, "setInterval", xs_noop, 0);
-    def_fn(the, glob, "clearInterval", xs_noop, 0);
-    def_fn(the, glob, "requestAnimationFrame", xs_noop, 0);
+    def_fn(the, glob, "setTimeout", xs_setTimeout, 0);
+    def_fn(the, glob, "clearTimeout", xs_clearTimeout, 0);
+    def_fn(the, glob, "setInterval", xs_setInterval, 0);
+    def_fn(the, glob, "clearInterval", xs_clearInterval, 0);
+    def_fn(the, glob, "requestAnimationFrame", xs_setTimeout, 0);
 }
 
-/* ── microtask drain (fxRunLoop parity, tool-free) ───────────────────── */
+/* ── microtask drain (fxRunLoop parity, tool-free) ─────────────────────
+ * Jobs live in the reserved mxPendingJobs slot (fixed offset from
+ * stackTop, addressable whenever the machine is quiescent — both drain
+ * call sites are). fxRunPromiseJobs moves the chain to mxRunningJobs;
+ * jobs queued *during* a job append to mxPendingJobs again, so loop
+ * until the chain is empty. fxEndJob = post-drain cleanup.
+ */
 static void xs_drain_jobs(xsMachine *the)
 {
     fxEndJob(the);
-    while (the->promiseJobs)
+    while (mxPendingJobs.value.reference->next)
     {
-        while (the->promiseJobs)
-        {
-            the->promiseJobs = 0;
-            fxRunPromiseJobs(the);
-        }
+        fxRunPromiseJobs(the);
         fxEndJob(the);
     }
 }
@@ -1037,6 +1657,20 @@ static int xs_init(JsBridge *b, const char *baseUrl)
     {
         xs_build_el_proto(b);
         xs_build_globals(b);
+        xs_build_xhr_proto(b);
+        /* XMLHttpRequest constructor global (xsGlobal pattern, line 1030).
+         * SW5 sim finding: xsNewHostFunction does NOT set the constructor
+         * flag, so `new XMLHttpRequest()` threw XS_TYPE_ERROR ("new: not a
+         * constructor") — the suite's only unguarded `new`. Use
+         * xsNewHostConstructor so both call forms work (needs `the` from the
+         * xsBeginHost bracket; prototype pins the instance shape). */
+        xsBeginHost(m);
+        {
+            xsSlot xglob = xsGlobal;
+            xsDefine(xglob, xsID("XMLHttpRequest"),
+                     xsNewHostConstructor(xs_xmlhttprequest_new, 0, st->xhrProto), xsDefault);
+        }
+        xsEndHost(m);
     }
     xsEndMetering(m);
     xsEndHostExit(m);
@@ -1070,7 +1704,7 @@ static void xs_run_script(JsBridge *b, const char *src, size_t len,
     {
         return;
     }
-    if (len > JSBRIDGE_MAX_SCRIPT_BYTES)
+    if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
     {
         xs_fail_script(b, index, "script too large");
         return;
@@ -1084,16 +1718,23 @@ static void xs_run_script(JsBridge *b, const char *src, size_t len,
 
     b->ran++;
 
+    /* SW5 ES5 prefix + page source in ONE buffer (prefix is deterministic
+     * per build and NOT part of the compile gate input). */
+    const char *prefix = NULL;
+    size_t plen = jsbridge_sw5_prefix(&prefix);
+
     /* Copy + NUL-terminate (span is followed by '</script>' in the page
      * buffer; the lexer stops at NUL like the other bridges' copy). */
-    char *buf = (char *)JMalloc(len + 1);
+    char *buf = (char *)JMalloc(plen + len + 1);
     if (!buf)
     {
         b->errs++;
         return;
     }
-    memcpy(buf, src, len);
-    buf[len] = '\0';
+    memcpy(buf, prefix, plen);
+    memcpy(buf + plen, src, len);
+    buf[plen + len] = '\0';
+    len += plen;
 
     xsMachine *m = st->machine;
     /* Nesting mirrors the stock tool host (xst.c): Metering bracket
@@ -1251,6 +1892,78 @@ static int xs_dispatch_click(JsBridge *b, const void *anchorNode)
     return fired ? JSB_CLICK_NAVIGATE : JSB_CLICK_NONE;
 }
 
+/* Timer vtable: release one pinned callback (fnRef = tfn[] slot). */
+static void xs_clear_timer_ref(JsBridge *b, void *fnRef)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !fnRef)
+    {
+        return;
+    }
+    int slot = (int)(intptr_t)fnRef;
+    if (slot < 0 || slot >= JSBRIDGE_TIMERS_MAX || !st->tfnSet[slot])
+    {
+        return;
+    }
+    xsBeginHostExit(st->machine);
+    xsForget(st->tfn[slot]);
+    xsEndHostExit(st->machine);
+    st->tfnSet[slot] = 0;
+}
+
+/* Invoke one pinned callback. Returns 0 ok, 1 contained error, -1 abort. */
+static int xs_run_timer_ref(JsBridge *b, void *fnRef)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !fnRef)
+    {
+        return 1;
+    }
+    int slot = (int)(intptr_t)fnRef;
+    if (slot < 0 || slot >= JSBRIDGE_TIMERS_MAX || !st->tfnSet[slot])
+    {
+        return 1;
+    }
+    xsMachine *m = st->machine;
+    b->inClick = 1; /* reuse the dispatch re-entrancy guard */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
+            xsVars(1);
+            xsTry
+            {
+                xsVar(0) = st->tfn[slot];
+                xsCall0_noResult(xsVar(0), xsID("call"));
+            }
+            xsCatch
+            {
+                b->errs++;
+                bridge_take_error_text(b, "timer callback exception");
+                logger_log("[js] timer handler failed");
+            }
+        }
+        xsEndHost(m);
+    }
+    xsEndMetering(m);
+    xsEndHostExit(m);
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (m->exitStatus != xsNormalExit)
+    {
+        b->errs++;
+        bridge_take_error_text(b, "engine abort in timer callback");
+        logger_log("[js] timer dispatch aborted engine — engine reset");
+        xsDeleteMachine(m);
+        st->machine = NULL;
+        return -1;
+    }
+    return 0;
+}
+
 static void xs_close(JsBridge *b)
 {
     XsState *st = (XsState *)b->implState;
@@ -1269,6 +1982,14 @@ static void xs_close(JsBridge *b)
                 xsForget(st->fns[i]);
             }
             xsForget(st->elProto);
+            for (int i = 0; i < JSBRIDGE_TIMERS_MAX; i++)
+            {
+                if (st->tfnSet[i])
+                {
+                    xsForget(st->tfn[i]);
+                    st->tfnSet[i] = 0;
+                }
+            }
         }
         xsEndHostExit(m);
         xsDeleteMachine(m); /* frees wrappers, scripts, pinned slots */
@@ -1278,5 +1999,252 @@ static void xs_close(JsBridge *b)
     b->implState = NULL;
 }
 
+
+/* ── XMLHttpRequest (async HTTP → JS callbacks) ────────────────────────────
+ * Same thin-glue contract as the other bridges (router owns everything):
+ * wrapper = host instance of a rooted prototype (host data = public request
+ * id); live state reads are prototype accessors over the router table;
+ * onload/onerror/onreadystatechange are pinned at send into xfn[]/xobj[]
+ * (xsRemember'd; JsHttpRequest.fnRef = xfn slot, objRef = xobj slot — both
+ * indexes, NO +1: slot 0 of the PINS is usable because the router's NULL
+ * rule applies to the ref POINTER, and slots here are small ints; encode
+ * slot+1 anyway to stay uniform with the other engines). Caps + budgets
+ * live in the router (jsbridge.c). No native Promise in XS → no fetch(). */
+static void xs_xhr_open(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const char *method = xsToString(xsArg(0));
+    const char *url = xsToString(xsArg(1));
+    int id = jsbridge_xhr_open(b, method, url);
+    if (id == 0)
+    {
+        xsTypeError("%s", b->lastError[0] ? b->lastError : "xhr open failed");
+    }
+    xsSetHostData(xsThis, (void *)(intptr_t)id);
+    xsResult = xsUndefined;
+}
+
+static int xs_xhr_id(xsMachine *the)
+{
+    return (int)(intptr_t)xsGetHostDataIf(xsThis);
+}
+
+static void xs_xhr_send(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    int id = xs_xhr_id(the);
+    if (id <= 0)
+    {
+        xsTypeError("xhr: send before open");
+    }
+    int fslot = -1, oslot = -1;
+    for (int i = 0; i < JSBRIDGE_XHR_MAX; i++)
+    {
+        if (!st->xfnSet[i] && fslot < 0)
+            fslot = i;
+        if (!st->xobjSet[i] && oslot < 0)
+            oslot = i;
+    }
+    if (fslot < 0 || oslot < 0)
+    {
+        xsTypeError("xhr: pin slots full");
+    }
+    /* Completion handler: onload → onerror → onreadystatechange. */
+    static const char *const names[] = {"onload", "onerror",
+                                        "onreadystatechange"};
+    xsSlot fn;
+    int found = 0;
+    for (int i = 0; i < 3 && !found; i++)
+    {
+        xsSlot v = xsGet(xsThis, xsID(names[i]));
+        if (fxIsCallable(the, &v))
+        {
+            fn = v;
+            found = 1;
+        }
+    }
+    if (!found)
+    {
+        xsTypeError("xhr: no onload/onerror/onreadystatechange handler");
+    }
+    st->xfn[fslot] = fn;
+    st->xfnSet[fslot] = 1;
+    xsRemember(st->xfn[fslot]);
+    st->xobj[oslot] = xsThis;
+    st->xobjSet[oslot] = 1;
+    xsRemember(st->xobj[oslot]);
+    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
+                      (void *)(intptr_t)(oslot + 1));
+    xsResult = xsUndefined;
+}
+
+static void xs_xhr_abort(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    jsbridge_xhr_abort(b, xs_xhr_id(the));
+    xsResult = xsUndefined;
+}
+
+static void xs_xhr_get_readyState(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    xsResult = xsInteger(r ? r->state : 0);
+}
+
+static void xs_xhr_get_status(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    xsResult = xsInteger((r && r->state >= JS_XHR_DONE) ? r->status : 0);
+}
+
+static void xs_xhr_get_responseText(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    xsResult = xsString((r && r->body) ? r->body : "");
+}
+
+static void xs_xhr_get_responseURL(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    xsResult = xsString((r && r->url[0]) ? r->url : "");
+}
+
+static void xs_build_xhr_proto(JsBridge *b)
+{
+    xsMachine *the = machine_of(b);
+    XsState *st = state_of(b);
+    st->xhrProto = xsNewHostObject(NULL);
+    def_fn(the, st->xhrProto, "open", xs_xhr_open, 2);
+    def_fn(the, st->xhrProto, "send", xs_xhr_send, 0);
+    def_fn(the, st->xhrProto, "abort", xs_xhr_abort, 0);
+    struct
+    {
+        const char *name;
+        xsCallback get;
+    } accs[] = {
+        {"readyState", xs_xhr_get_readyState},
+        {"status", xs_xhr_get_status},
+        {"responseText", xs_xhr_get_responseText},
+        {"response", xs_xhr_get_responseText},
+        {"responseURL", xs_xhr_get_responseURL},
+    };
+    for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
+    {
+        xsSlot getter = xsNewHostFunction(accs[i].get, 0);
+        xsDefine(st->xhrProto, xsID(accs[i].name), getter, xsIsGetter);
+    }
+    xsRemember(st->xhrProto);
+}
+
+/* Constructor global: new XMLHttpRequest() / XHR() → fresh wrapper. */
+static void xs_xmlhttprequest_new(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xsSlot obj = xsNewHostInstance(st->xhrProto);
+    xsSetHostData(obj, (void *)(intptr_t)0);
+    xsResult = obj;
+}
+
+/* XHR vtable: release the pinned completion + wrapper (slot inert). */
+static void xs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine)
+    {
+        return;
+    }
+    int fslot = (int)(intptr_t)fnRef - 1;
+    int oslot = (int)(intptr_t)objRef - 1;
+    xsBeginHostExit(st->machine);
+    if (fslot >= 0 && fslot < JSBRIDGE_XHR_MAX && st->xfnSet[fslot])
+    {
+        xsForget(st->xfn[fslot]);
+        st->xfnSet[fslot] = 0;
+    }
+    if (oslot >= 0 && oslot < JSBRIDGE_XHR_MAX && st->xobjSet[oslot])
+    {
+        xsForget(st->xobj[oslot]);
+        st->xobjSet[oslot] = 0;
+    }
+    xsEndHostExit(st->machine);
+}
+
+/* Invoke the pinned completion: fn.call(this, responseText) — the same
+ * bracket pattern as xs_run_timer_ref (metering + contained exception +
+ * abort → engine reset). */
+static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
+                          const JsHttpRequest *r)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !fnRef)
+    {
+        return 1;
+    }
+    int fslot = (int)(intptr_t)fnRef - 1;
+    int oslot = (int)(intptr_t)objRef - 1;
+    if (fslot < 0 || fslot >= JSBRIDGE_XHR_MAX || !st->xfnSet[fslot])
+    {
+        return 1;
+    }
+    xsMachine *m = st->machine;
+    b->inClick = 1; /* reuse the dispatch re-entrancy guard */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
+            xsVars(3);
+            xsTry
+            {
+                xsVar(0) = st->xfn[fslot];
+                xsVar(1) = (oslot >= 0 && oslot < JSBRIDGE_XHR_MAX &&
+                            st->xobjSet[oslot])
+                               ? st->xobj[oslot]
+                               : xsNull;
+                xsVar(2) = xsString((r && r->body) ? r->body : "");
+                xsCall2_noResult(xsVar(0), xsID("call"), xsVar(1), xsVar(2));
+            }
+            xsCatch
+            {
+                if (!b->lastError[0])
+                {
+                    bridge_take_error_text(b, xsToString(xsException));
+                }
+            }
+        }
+        xsEndHost(m);
+    }
+    xsEndMetering(m);
+    xsEndHostExit(m);
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (m->exitStatus != xsNormalExit)
+    {
+        b->errs++;
+        bridge_take_error_text(b, "engine abort in xhr callback");
+        logger_log("[js] xhr dispatch aborted engine — engine reset");
+        xsDeleteMachine(m);
+        st->machine = NULL;
+        return -1;
+    }
+    return 0;
+}
+
 const JsEngineImpl js_engine_xs = {
-    xs_init, xs_run_script, xs_dispatch_click, xs_close, "XS (Moddable)"};
+    xs_init,
+    xs_run_script,
+    xs_dispatch_click,
+    xs_clear_timer_ref,
+    xs_run_timer_ref,
+    xs_run_xhr_ref,
+    xs_clear_xhr_refs,
+    xs_close,
+    "XS (Moddable)"};

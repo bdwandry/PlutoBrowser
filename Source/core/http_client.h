@@ -92,4 +92,10 @@ typedef struct
  * (currently 5: home, blank, acidtest, javascript, jsext). */
 int http_test_pages(const HttpTestPage **entries);
 
+/* Raw HTML body of an internal about: page (NULL when unknown). Single
+ * source of truth with INTERNAL_PAGES — the JS XMLHttpRequest layer
+ * answers about: requests from here without touching the network.
+ * Returns the byte length (0 with *bodyOut NULL when not found). */
+size_t http_internal_page_body(const char *url, const char **bodyOut);
+
 #endif /* PLUTO_HTTP_CLIENT_H */

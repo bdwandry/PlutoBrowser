@@ -1,0 +1,144 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[14:58:21 #1] === PlutoBrowser boot ===
+[14:58:21 #2] eventHandler: kEventInit, osversion=30101
+[14:58:21 #3] STORAGE: init enter
+[14:58:21 #4] STORAGE: load enter
+[14:58:21 #5] STORAGE: file opened, parsing
+[14:58:21 #6] STORAGE: init exit
+[14:58:21 #7] [jsbridge] boot engine: XS (Moddable)
+[14:58:21 #8] KB new: entering
+[14:58:21 #9] KB new: allocated
+[14:58:21 #10] KB load: font...
+[14:58:21 #11] KB load: font ok h=36
+[14:58:21 #12] KB load: menu-space ok
+[14:58:21 #13] KB load: menu-ok ok
+[14:58:21 #14] KB load: menu-del ok
+[14:58:21 #15] KB load: menu-cancel ok
+[14:58:21 #16] KB new: font+images loaded
+[14:58:21 #17] DISPLAY: refresh rate set to 30 fps
+[14:58:21 #18] navigate_to: about:javascript
+[14:58:21 #19] state -> 1 (frame 1)
+[14:58:21 #20] updateFrame: first frame executed
+[14:58:21 #21] [jsbridge] page attach: XS (Moddable) (engine=3)
+[14:58:21 #22] [js] [sw-t] variables + arithmetic → true
+[14:58:21 #23] [js] [sw-t] strings + concatenation → true
+[14:58:21 #24] [js] [sw-t] typeof → true
+[14:58:21 #25] [js] [sw-t] comparison + ternary → true
+[14:58:21 #26] [js] [sw-t] conditionals (if/else) → true
+[14:58:21 #27] [js] [sw-t] loops (for/while/break/continue) → true
+[14:58:21 #28] [js] [sw-t] functions + closures → true
+[14:58:21 #29] [js] [sw-t] recursion → true
+[14:58:21 #30] [js] [sw-t] arrays + methods → true
+[14:58:21 #31] [js] [sw-t] object literals + properties → true
+[14:58:21 #32] [js] [sw-t] for-in over object → true
+[14:58:21 #33] [js] [sw-t] try/catch/throw → true
+[14:58:21 #34] [js] [sw-t] JSON parse/stringify → true
+[14:58:21 #35] [js] [sw-t] RegExp exec → true
+[14:58:21 #36] [js] [sw-t] string methods → true
+[14:58:21 #37] [js] [sw-t] number methods + parsing → true
+[14:58:21 #38] [js] [sw-t] Math object → true
+[14:58:21 #39] [js] [sw-t] type conversions → true
+[14:58:21 #40] [js] [sw-t] Array.isArray (ES5) → true
+[14:58:21 #41] [js] [sw-t] Object.keys (ES5) → true
+[14:58:21 #42] [js] [sw-t] array forEach/map (ES5) → true
+[14:58:21 #43] [js] [sw-t] string trim (ES5) → true
+[14:58:21 #44] [js] [sw-t] Date object → true
+[14:58:21 #45] [js] [sw-t] document.getElementById → true
+[14:58:21 #46] [js] [sw-t] textContent read → true
+[14:58:21 #47] [js] [sw-t] textContent write + readback → true
+[14:58:21 #48] [js] [sw-t] setAttribute/getAttribute → true
+[14:58:21 #49] [js] [sw-t] createElement + appendChild → true
+[14:58:21 #50] [js] [sw-t] createTextNode + appendChild → true
+[14:58:21 #51] [js] [sw-t] removeChild → true
+[14:58:21 #52] [js] [sw-t] getElementsByTagName (element) → true
+[14:58:21 #53] [js] [sw-t] parentNode → true
+[14:58:21 #54] [js] [sw-t] childElementCount/children → true
+[14:58:21 #55] [js] [sw-t] location.href (read) → true
+[14:58:21 #56] [js] [sw-t] navigator.userAgent → true
+[14:58:21 #57] [js] [sw-t] document.title → true
+[14:58:21 #58] [js] timer #1 set timeout 50ms bridge=0x86861b000
+[14:58:21 #59] [js] timer #1 cleared
+[14:58:21 #60] [js] [sw-t] setTimeout returns an id → true
+[14:58:21 #61] [js] [sw-t] clearTimeout(null-ish) is safe → true
+[14:58:21 #62] [js] [sw-t] CSS: styled elements present in DOM → true
+[14:58:21 #63] [js] timer #2 set timeout 50ms bridge=0x86861b000
+[14:58:21 #64] [js] timer #3 set interval 400ms bridge=0x86861b000
+[14:58:21 #65] [js] [sw-t] querySelector (descendant) → true
+[14:58:21 #66] [js] [sw-t] querySelector (id selector) → true
+[14:58:21 #67] [js] [sw-t] querySelector no-match returns null → true
+[14:58:21 #68] [js] [sw-t] querySelectorAll returns all matches → true
+[14:58:21 #69] [js] [sw-t] querySelectorAll scoped to element → true
+[14:58:21 #70] [js] [sw-t] insertBefore inserts before first child → true
+[14:58:21 #71] [js] [sw-t] firstElementChild/nextElementSibling → true
+[14:58:21 #72] [js] [sw-t] classList add/contains/remove → true
+[14:58:21 #73] [js] [sw-t] classList toggle → true
+[14:58:21 #74] [js] [sw-t] classList item → true
+[14:58:21 #75] [js] [sw-t] style write + readback → true
+[14:58:21 #76] [js] [sw-t] style preserves other properties → true
+[14:58:21 #77] [js] [sw-t] Set: add/has/size → true
+[14:58:21 #78] [js] [sw-t] Map: set/get/has/delete → true
+[14:58:21 #79] [js] [sw-t] Image: construct → true
+[14:58:21 #80] [js] [sw-t] XMLHttpRequest exists → true
+[14:58:21 #81] [js] xhr #1 open about:jsext
+[14:58:21 #82] [js] xhr #1 local ok (2392 bytes)
+[14:58:21 #83] [js] [sw-suite] 55 passed, 3 partial, 0 missing
+[14:58:21 #84] [js] page: ran=1 errs=0
+[14:58:21 #85] [js] live page: listeners=1 ran=1 errs=0
+[14:58:21 #86] render: rewalk start (live DOM mutation re-render)
+[14:58:21 #87] render: rewalk done blocks=88 links=1
+[14:58:21 #88] [js] timer #2 fire #1 timeout now=428 due=411 active=1 bridge=0x86861b000
+[14:58:21 #89] render: rewalk start (live DOM mutation re-render)
+[14:58:21 #90] render: rewalk done blocks=88 links=1
+[14:58:21 #91] state -> 2 (frame 9)
+[14:58:21 #92] [js] timer #3 fire #1 interval now=792 due=761 active=1 bridge=0x86861b000
+[14:58:21 #93] state -> 1 (frame 18)
+[14:58:21 #94] render: rewalk start (live DOM mutation re-render)
+[14:58:21 #95] render: rewalk done blocks=88 links=1
+[14:58:21 #96] state -> 2 (frame 20)
+[14:58:22 #97] [js] timer #3 fire #2 interval now=1191 due=1161 active=1 bridge=0x86861b000
+[14:58:22 #98] state -> 1 (frame 30)
+[14:58:22 #99] render: rewalk start (live DOM mutation re-render)
+[14:58:22 #100] render: rewalk done blocks=88 links=1
+[14:58:22 #101] state -> 2 (frame 32)
+[14:58:22 #102] [js] timer #3 fire #3 interval now=1589 due=1561 active=1 bridge=0x86861b000
+[14:58:22 #103] state -> 1 (frame 42)
+[14:58:22 #104] render: rewalk start (live DOM mutation re-render)
+[14:58:22 #105] render: rewalk done blocks=88 links=1
+[14:58:22 #106] state -> 2 (frame 44)
+[14:58:22 #107] [js] timer #3 fire #4 interval now=1988 due=1961 active=1 bridge=0x86861b000
+[14:58:22 #108] state -> 1 (frame 54)
+[14:58:22 #109] render: rewalk start (live DOM mutation re-render)
+[14:58:22 #110] render: rewalk done blocks=88 links=1
+[14:58:22 #111] state -> 2 (frame 56)
+[14:58:23 #112] [js] timer #3 fire #5 interval now=2387 due=2361 active=1 bridge=0x86861b000
+[14:58:23 #113] [js] timer #3 cleared
+[14:58:23 #114] state -> 1 (frame 66)
+[14:58:23 #115] render: rewalk start (live DOM mutation re-render)
+[14:58:23 #116] render: rewalk done blocks=88 links=1
+[14:58:23 #117] state -> 2 (frame 68)
+[14:58:31 #118] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:58:40 #119] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:58:50 #120] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:00 #121] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:10 #122] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:20 #123] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:30 #124] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:40 #125] updateFrame: heartbeat frame=2400 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[14:59:50 #126] updateFrame: heartbeat frame=2700 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:00 #127] updateFrame: heartbeat frame=3000 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:10 #128] updateFrame: heartbeat frame=3300 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:20 #129] updateFrame: heartbeat frame=3600 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:30 #130] updateFrame: heartbeat frame=3900 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:40 #131] updateFrame: heartbeat frame=4200 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:00:50 #132] updateFrame: heartbeat frame=4500 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:00 #133] updateFrame: heartbeat frame=4800 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:10 #134] updateFrame: heartbeat frame=5100 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:20 #135] updateFrame: heartbeat frame=5400 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:30 #136] updateFrame: heartbeat frame=5700 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:40 #137] updateFrame: heartbeat frame=6000 fps=30 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:01:50 #138] updateFrame: heartbeat frame=6300 fps=28 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:02:01 #139] updateFrame: heartbeat frame=6600 fps=28 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:02:11 #140] updateFrame: heartbeat frame=6900 fps=29 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:02:22 #141] updateFrame: heartbeat frame=7200 fps=28 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0
+[15:02:33 #142] updateFrame: heartbeat frame=7500 fps=28 overlay=0 stackPeak=0B/61800B heap=1510KB peak=1514KB bigAlloc=384KB refusals=0

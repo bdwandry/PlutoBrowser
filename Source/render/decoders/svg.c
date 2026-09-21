@@ -15,11 +15,12 @@
 #include "pd_api.h"
 #include "render/decoders/svg.h"
 #include "util/strbuf.h"
+#include "../core/pluto_mem.h"
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
-#define PLUTO_MALLOC(n) pluto_pd()->system->realloc(NULL, (n))
-#define PLUTO_FREE(p)   pluto_pd()->system->realloc((p), 0)
+#define PLUTO_MALLOC(n) pluto_mem_realloc(NULL, (n))
+#define PLUTO_FREE(p)   pluto_mem_realloc((p), 0)
 
 /* ── Attribute map (bounded, static — Lua tables are unbounded) ───────────── */
 #define SVG_MAX_ATTRS 32
