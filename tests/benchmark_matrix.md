@@ -5,7 +5,7 @@ Every SW-track stage (SW1–SW8) must raise this matrix's pass rate to ship. Pro
 reported as **N/20** — never as a site-specific claim.
 
 **Method (automated):** `PLUTO_FIELDTEST_AUTOTEST` sim-only seam (main.c) reads
-`fieldtest_urls.txt` at boot, forces Full JS mode (`jsEnabled=2`), navigates each site
+`tests/fieldtest_urls.txt` at boot, forces Full JS mode (`jsEnabled=2`), navigates each site
 (15s each, one retry on a transient network-error page), then scans the ENTIRE rendered
 document — blocks **and** table cells — case-insensitively for the site's criterion keyword.
 No criterion = PASS if any text renders (for classes whose content changes every visit).
