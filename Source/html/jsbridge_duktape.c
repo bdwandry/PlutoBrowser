@@ -1381,7 +1381,11 @@ static void duktape_run_script(JsBridge *b, const char *src, size_t len,
     if (duk_pcompile(ctx, 0) != DUK_EXEC_SUCCESS)
     {
         b->errs++;
-        logger_log("[js] script %d failed to compile", index);
+        /* Error text included: distinguishes OOM ("out of memory"/
+         * "internal error") from RangeError (recursion/limits) from real
+         * syntax errors — decisive for device flip-crash diagnosis. */
+        logger_log("[js] script %d failed to compile: %s", index,
+                   duk_safe_to_string(ctx, -1));
         if (!b->lastError[0])
         {
             bridge_take_error_text(b, duk_safe_to_string(ctx, -1));

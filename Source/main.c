@@ -165,6 +165,8 @@ static int progressCurrent = 0;
 static int progressTotal = 0;
 static int isRendering = 0;
 static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
+static int pendingFlipUnload = 0;             /* settings flip: unload old page
+                                               * before the deferred reload */
 static char pendingNavUrl[640] = "";
 static int navigatingHistory = 0;             /* Lua navigatingHistory */
 static int mouseX = 200, mouseY = 100;        /* HTML-mode virtual cursor */
@@ -300,6 +302,9 @@ static void view_menu_callback(void *ud);
 static void meta_refresh_cb(void *ud);
 #if defined(PLUTO_NAV_AUTOTEST)
 static void nav_autotest_tick(void);
+#if defined(PLUTO_ENGINE_FLIP_TEST)
+static void engine_flip_test_tick(void);
+#endif
 #endif
 
 static void go_home(void)
@@ -470,6 +475,10 @@ static void page_swap_doc(RenderTask *rt)
         }
         document_free(currentDoc);
         free(currentDoc);
+        /* Page boundary: re-base the funnel's live counter to the tracked
+         * truth — drift across this page's engine churn would otherwise
+         * shrink the next page's usable budget (device flip-crash, 2026-09-22). */
+        pluto_mem_resync_live();
     }
     currentDoc = rt->doc;
     rt->doc = NULL;
@@ -2105,6 +2114,7 @@ static void navigate_to(const char *urlString)
                 }
                 document_free(currentDoc);
                 free(currentDoc);
+                pluto_mem_resync_live(); /* page-boundary counter re-base */
             }
             currentDoc = snap;
             g_pageJs = NULL;
@@ -2678,13 +2688,97 @@ static void settings_on_change(void)
     }
     /* User request: saving from a website RELOADS the current page (fresh
      * fetch + re-render with the new settings) instead of re-rendering in
-     * place. No page open -> nothing to reload. */
+     * place. No page open -> nothing to reload.
+     *
+     * 2026-09-22 DEVICE CRASH FIX part 2 (user repro: flip the engine via
+     * Settings on about:jsext): the synchronous navigate_to here ran the
+     * WHOLE reload inside the settings-save call chain — the OS watchdog
+     * logged "Run loop stalled for more than 10 seconds" (frame never
+     * ended from the flip to the failing script compile 10s later) and
+     * "stack overflow in task gameTask": parse + engine attach + script
+     * compiles all nested under the menu-event stack blew the 64KB game
+     * task stack. Direct boot never nests like this — its load is chunked
+     * across frames at frame-loop stack depth. So DEFER the reload to the
+     * frame loop via the pendingNavUrl mechanism (same as go_home and every
+     * other menu action); pendingFlipUnload makes the frame loop unload the
+     * old page first, preserving the part-1 memory fix. */
     if (currentUrlObj && currentUrlObj->normalized[0] &&
         strcmp(currentUrlObj->normalized, "about:home") != 0)
     {
-        navigate_to(currentUrlObj->normalized);
+        pendingFlipUnload = 1;
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 currentUrlObj->normalized);
+        logger_log("[settings] reload deferred to frame loop (flip unload armed)");
     }
 }
+
+#if defined(PLUTO_ENGINE_FLIP_TEST)
+/* TEMPORARY (device verification of the 2026-09-22 crash fix): replays the
+ * user's exact repro autonomously — about:jsext loads on the boot-forced
+ * engine, then the engine is flipped through the REAL settings path
+ * (storage_set_setting_int + storage_save + settings_on_change), the same
+ * code the Settings panel's save button runs, with ~30s settle per engine
+ * so each suite run completes before the next flip. Build:
+ *   make device DEVICEDEFS="-DPLUTO_JSEXT_AUTOTEST
+ *                           -DPLUTO_JSEXT_AUTOTEST_ENGINE=0
+ *                           -DPLUTO_ENGINE_FLIP_TEST"
+ * Expected log: three full [jsext-test] summaries (engine 0 run + a fresh
+ * run per flip), [settings] old-page unload lines before each flip, and NO
+ * refusals cascade / error-page / stack-overflow lines. */
+static void engine_flip_test_tick(void)
+{
+    static int phase = 0;          /* 0=arming, 1..3 = waiting to flip */
+    static unsigned frames = 0;
+    static const int kFlipTo[3] = {1, 2, 3}; /* Duktape, QuickJS, XS */
+    if (phase > 3)
+    {
+        return;
+    }
+    if (phase == 0)
+    {
+        phase = 1; /* initial nav was queued by the JSEXT_AUTOTEST block */
+        frames = 0;
+        return;
+    }
+    if (currentState != STATE_PAGE || isRendering)
+    {
+        frames++;
+        if (frames % 300 == 0)
+        {
+            logger_log("[flip-test] stalled: state=%d rendering=%d phase=%d",
+                       (int)currentState, (int)isRendering, phase);
+        }
+        return; /* settle only counts while a page is actually up */
+    }
+    frames++;
+    if (frames % 150 == 0)
+    {
+        /* Memory trace during the new engine's growth: the resync should
+         * keep live ~= real usage; a climb into the budget here would be a
+         * genuine wall, not a phantom. */
+        logger_log("[flip-test] phase=%d settle t=%ds live=%luKB refusals=%lu",
+                   phase, frames / 30, pluto_mem_live() / 1024,
+                   pluto_mem_refusals());
+    }
+    if (frames < 30u * 30u)
+    {
+        return;
+    }
+    frames = 0;
+    int eng = kFlipTo[phase - 1];
+    logger_log("[flip-test] settings-path flip to engine %d (live=%luKB)",
+               eng, pluto_mem_live() / 1024);
+    storage_set_setting_int("jsEngine", eng);
+    storage_save();
+    settings_on_change(); /* the exact user path, minus the UI */
+    phase++;
+    if (phase > 3)
+    {
+        logger_log("[flip-test] all flips issued; final run in flight");
+    }
+}
+#endif
 
 
 
@@ -2733,6 +2827,38 @@ static int updateFrame(void *userdata)
         char dest[640];
         snprintf(dest, sizeof(dest), "%s", pendingNavUrl);
         pendingNavUrl[0] = '\0';
+        /* Settings engine flip: fully unload the OLD page before the reload
+         * so the new engine starts with the whole budget (part-1 fix), now
+         * at frame-loop stack depth (part-2 fix). */
+        if (pendingFlipUnload)
+        {
+            pendingFlipUnload = 0;
+            tasks_cancel_all();
+            jsext_abort_active();
+            isRendering = 0;
+            layout_clear();
+            if (currentDoc)
+            {
+                if (currentDoc->_jsbridge)
+                {
+                    js_doc_close(currentDoc->_jsbridge);
+                }
+                logger_log("[mem] after engine close:");
+                pluto_mem_dump_live(logger_log);
+                document_free(currentDoc);
+                free(currentDoc);
+                currentDoc = NULL;
+            }
+            g_pageJs = NULL;
+            pluto_mem_resync_live(); /* page boundary: counter = tracked truth
+                                      * (drift made the SW3a gate refuse the
+                                      * fresh engine's allocations) */
+            logger_log("[settings] old page fully unloaded before reload "
+                       "(live=%luKB, counter resynced)",
+                       pluto_mem_live() / 1024);
+            logger_log("[mem] after full unload:");
+            pluto_mem_dump_live(logger_log);
+        }
         navigate_to(dest);
     }
 
@@ -2766,6 +2892,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_HOME_TEST_AUTOTEST)
     home_test_autotest_tick();
+#endif
+
+#if defined(PLUTO_ENGINE_FLIP_TEST)
+    engine_flip_test_tick();
 #endif
 
     /* ── crank velocity physics (Lua parity) ── */

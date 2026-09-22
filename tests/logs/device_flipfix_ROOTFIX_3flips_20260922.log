@@ -1,0 +1,302 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[20:36:23 #1] === PlutoBrowser boot ===
+[20:36:23 #2] eventHandler: kEventInit, osversion=30101
+[20:36:23 #3] STORAGE: init enter
+[20:36:23 #4] STORAGE: load enter
+[20:36:23 #5] STORAGE: file opened, parsing
+[20:36:23 #6] STORAGE: init exit
+[20:36:23 #7] [jsbridge] boot engine: Duktape
+[20:36:23 #8] [jsext-autotest] engine forced: 0
+[20:36:23 #9] [jsext-autotest] armed (jsEnabled=2)
+[20:36:23 #10] KB new: entering
+[20:36:23 #11] KB new: allocated
+[20:36:23 #12] KB load: font...
+[20:36:23 #13] KB load: font ok h=36
+[20:36:23 #14] KB load: menu-space ok
+[20:36:23 #15] KB load: menu-ok ok
+[20:36:23 #16] KB load: menu-del ok
+[20:36:23 #17] KB load: menu-cancel ok
+[20:36:23 #18] KB new: font+images loaded
+[20:36:23 #19] DISPLAY: refresh rate set to 30 fps
+[20:36:23 #20] navigate_to: about:jsext
+[20:36:23 #21] state -> 1 (frame 1)
+[20:36:23 #22] updateFrame: first frame executed
+[20:36:23 #23] [jsext] 14 external script(s) on page
+[20:36:23 #24] [jsext] local ok jsext-order.js (30 bytes)
+[20:36:23 #25] [jsext] local miss: jsext-missing.js
+[20:36:23 #26] [jsext] local ok jsext-dup.js (50 bytes)
+[20:36:24 #27] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[20:36:24 #28] [jsext] local ok jsext-big.js (59976 bytes)
+[20:36:24 #29] [jsext] local ok jsext-big2.js (59976 bytes)
+[20:36:24 #30] [jsext] local ok jsext-big3.js (59976 bytes)
+[20:36:24 #31] [jsext] local ok jsext-big4.js (59976 bytes)
+[20:36:24 #32] [jsext] local ok jsext-big5.js (59976 bytes)
+[20:36:24 #33] [jsext] local ok jsext-big6.js (59976 bytes)
+[20:36:24 #34] [jsext] local ok jsext-big7.js (59976 bytes)
+[20:36:24 #35] [jsext] local ok jsext-big8.js (59976 bytes)
+[20:36:24 #36] [jsext] local page budget exhausted: skip jsext-big9.js
+[20:36:24 #37] [jsext] local ok jsext-write.js (46 bytes)
+[20:36:24 #38] [jsbridge] page attach: muJS (engine=0)
+[20:36:24 #39] [js] ext skip (not fetched): (unresolved)
+[20:36:25 #40] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[20:36:25 #41] [js] data: script ran (19 bytes)
+[20:36:31 #42] [js] ext skip (not fetched): (unresolved)
+[20:36:31 #43] [js] [jsext-t] [PASS] external defined global (order+engine)
+[20:36:31 #44] [js] [jsext-t] [PASS] inline-after-external saw ext state
+[20:36:31 #45] [js] [jsext-t] [PASS] dup: downloaded once, executed twice
+[20:36:31 #46] [js] [jsext-t] [PASS] over-cap file executed (disk-resident)
+[20:36:31 #47] [js] [jsext-t] [PASS] over-budget file refused (no execution)
+[20:36:31 #48] [js] [jsext-t] [PASS] big files did not break the engine
+[20:36:31 #49] [js] [jsext-t] [PASS] 72KB file ran from disk (SW2b)
+[20:36:31 #50] [js] [jsext-t] [PASS] data:-URL script executed (SW2d)
+[20:36:31 #51] [js] [jsext-test] summary: 8 passed, 0 failed
+[20:36:31 #52] [js] page: ran=16 errs=0
+[20:36:31 #53] [js] live page: listeners=0 ran=16 errs=0
+[20:36:31 #54] state -> 2 (frame 4)
+[20:36:36 #55] [flip-test] phase=1 settle t=5s live=4942KB refusals=0
+[20:36:41 #56] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=2576B/61800B heap=4942KB peak=4977KB bigAlloc=72KB refusals=0
+[20:36:41 #57] [flip-test] phase=1 settle t=10s live=4942KB refusals=0
+[20:36:46 #58] [flip-test] phase=1 settle t=15s live=4942KB refusals=0
+[20:36:51 #59] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=2576B/61800B heap=4942KB peak=4977KB bigAlloc=72KB refusals=0
+[20:36:51 #60] [flip-test] phase=1 settle t=20s live=4942KB refusals=0
+[20:36:56 #61] [flip-test] phase=1 settle t=25s live=4942KB refusals=0
+[20:37:01 #62] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=2576B/61800B heap=4942KB peak=4977KB bigAlloc=72KB refusals=0
+[20:37:01 #63] [flip-test] phase=1 settle t=30s live=4942KB refusals=0
+[20:37:01 #64] [flip-test] settings-path flip to engine 1 (live=4942KB)
+[20:37:01 #65] STORAGE: save open
+[20:37:01 #66] STORAGE: save writing (bm=10 hist=0)
+[20:37:01 #67] STORAGE: save close
+[20:37:01 #68] STORAGE: save exit
+[20:37:01 #69] DISPLAY: refresh rate set to 30 fps
+[20:37:01 #70] [jsbridge] engine selected: Duktape
+[20:37:01 #71] [settings] reload deferred to frame loop (flip unload armed)
+[20:37:01 #72] [js] close[muJS]: ran=16 errs=0 listeners=0 timers=0 budgetLeft=1508
+[20:37:01 #73] [mem] after engine close:
+[20:37:01 #74] [mem] live-tracked: 258 blocks, 602KB
+[20:37:01 #75] [mem]   block 0: 64KB
+[20:37:01 #76] [mem]   block 1: 64KB
+[20:37:01 #77] [mem]   block 2: 64KB
+[20:37:01 #78] [mem]   block 3: 64KB
+[20:37:01 #79] [mem]   block 4: 64KB
+[20:37:01 #80] [mem]   block 5: 64KB
+[20:37:01 #81] [mem]   block 6: 64KB
+[20:37:01 #82] [mem]   block 7: 64KB
+[20:37:01 #83] [settings] old page fully unloaded before reload (live=41KB, resynced from phantom 4273KB-class drift)
+[20:37:01 #84] [mem] after full unload:
+[20:37:01 #85] [mem] live-tracked: 204 blocks, 41KB
+[20:37:01 #86] [mem]   block 0: 4KB
+[20:37:01 #87] [mem]   block 1: 4KB
+[20:37:01 #88] [mem]   block 2: 4KB
+[20:37:01 #89] [mem]   block 3: 2KB
+[20:37:01 #90] [mem]   block 4: 2KB
+[20:37:01 #91] [mem]   block 5: 0KB
+[20:37:01 #92] [mem]   block 6: 0KB
+[20:37:01 #93] [mem]   block 7: 0KB
+[20:37:01 #94] navigate_to: about:jsext
+[20:37:01 #95] state -> 1 (frame 902)
+[20:37:01 #96] [jsext] 14 external script(s) on page
+[20:37:01 #97] [jsext] local ok jsext-order.js (30 bytes)
+[20:37:01 #98] [jsext] local miss: jsext-missing.js
+[20:37:01 #99] [jsext] local ok jsext-dup.js (50 bytes)
+[20:37:01 #100] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[20:37:01 #101] [jsext] local ok jsext-big.js (59976 bytes)
+[20:37:01 #102] [jsext] local ok jsext-big2.js (59976 bytes)
+[20:37:01 #103] [jsext] local ok jsext-big3.js (59976 bytes)
+[20:37:01 #104] [jsext] local ok jsext-big4.js (59976 bytes)
+[20:37:01 #105] [jsext] local ok jsext-big5.js (59976 bytes)
+[20:37:01 #106] [jsext] local ok jsext-big6.js (59976 bytes)
+[20:37:01 #107] [jsext] local ok jsext-big7.js (59976 bytes)
+[20:37:01 #108] [jsext] local ok jsext-big8.js (59976 bytes)
+[20:37:01 #109] [jsext] local page budget exhausted: skip jsext-big9.js
+[20:37:01 #110] [jsext] local ok jsext-write.js (46 bytes)
+[20:37:01 #111] [jsbridge] page attach: Duktape (engine=1)
+[20:37:01 #112] [js] ext skip (not fetched): (unresolved)
+[20:37:03 #113] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[20:37:03 #114] [js] data: script ran (19 bytes)
+[20:37:09 #115] [js] ext skip (not fetched): (unresolved)
+[20:37:09 #116] [js] [jsext-t] [PASS] external defined global (order+engine)
+[20:37:09 #117] [js] [jsext-t] [PASS] inline-after-external saw ext state
+[20:37:09 #118] [js] [jsext-t] [PASS] dup: downloaded once, executed twice
+[20:37:09 #119] [js] [jsext-t] [PASS] over-cap file executed (disk-resident)
+[20:37:09 #120] [js] [jsext-t] [PASS] over-budget file refused (no execution)
+[20:37:09 #121] [js] [jsext-t] [PASS] big files did not break the engine
+[20:37:09 #122] [js] [jsext-t] [PASS] 72KB file ran from disk (SW2b)
+[20:37:09 #123] [js] [jsext-t] [PASS] data:-URL script executed (SW2d)
+[20:37:09 #124] [js] [jsext-test] summary: 8 passed, 0 failed
+[20:37:09 #125] [js] page: ran=16 errs=0
+[20:37:09 #126] [js] live page: listeners=0 ran=16 errs=0
+[20:37:09 #127] state -> 2 (frame 906)
+[20:37:14 #128] [flip-test] phase=2 settle t=5s live=3663KB refusals=0
+[20:37:19 #129] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=2576B/61800B heap=3663KB peak=4977KB bigAlloc=72KB refusals=0
+[20:37:19 #130] [flip-test] phase=2 settle t=10s live=3663KB refusals=0
+[20:37:24 #131] [flip-test] phase=2 settle t=15s live=3663KB refusals=0
+[20:37:29 #132] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=2576B/61800B heap=3663KB peak=4977KB bigAlloc=72KB refusals=0
+[20:37:29 #133] [flip-test] phase=2 settle t=20s live=3663KB refusals=0
+[20:37:34 #134] [flip-test] phase=2 settle t=25s live=3663KB refusals=0
+[20:37:39 #135] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=2576B/61800B heap=3663KB peak=4977KB bigAlloc=72KB refusals=0
+[20:37:39 #136] [flip-test] phase=2 settle t=30s live=3663KB refusals=0
+[20:37:39 #137] [flip-test] settings-path flip to engine 2 (live=3663KB)
+[20:37:39 #138] STORAGE: save open
+[20:37:39 #139] STORAGE: save writing (bm=10 hist=0)
+[20:37:39 #140] STORAGE: save close
+[20:37:39 #141] STORAGE: save exit
+[20:37:39 #142] DISPLAY: refresh rate set to 30 fps
+[20:37:39 #143] [jsbridge] engine selected: QuickJS
+[20:37:39 #144] [settings] reload deferred to frame loop (flip unload armed)
+[20:37:39 #145] [js] close[Duktape]: ran=16 errs=0 listeners=0 timers=0 budgetLeft=1508
+[20:37:39 #146] [mem] after engine close:
+[20:37:39 #147] [mem] live-tracked: 523 blocks, 642KB
+[20:37:39 #148] [mem]   block 0: 64KB
+[20:37:39 #149] [mem]   block 1: 64KB
+[20:37:39 #150] [mem]   block 2: 64KB
+[20:37:39 #151] [mem]   block 3: 64KB
+[20:37:39 #152] [mem]   block 4: 64KB
+[20:37:39 #153] [mem]   block 5: 64KB
+[20:37:39 #154] [mem]   block 6: 64KB
+[20:37:39 #155] [mem]   block 7: 64KB
+[20:37:39 #156] [settings] old page fully unloaded before reload (live=86KB, resynced from phantom 4273KB-class drift)
+[20:37:39 #157] [mem] after full unload:
+[20:37:39 #158] [mem] live-tracked: 466 blocks, 86KB
+[20:37:39 #159] [mem]   block 0: 8KB
+[20:37:39 #160] [mem]   block 1: 4KB
+[20:37:39 #161] [mem]   block 2: 4KB
+[20:37:39 #162] [mem]   block 3: 4KB
+[20:37:39 #163] [mem]   block 4: 2KB
+[20:37:39 #164] [mem]   block 5: 2KB
+[20:37:39 #165] [mem]   block 6: 2KB
+[20:37:39 #166] [mem]   block 7: 2KB
+[20:37:39 #167] navigate_to: about:jsext
+[20:37:39 #168] state -> 1 (frame 1802)
+[20:37:39 #169] [jsext] 14 external script(s) on page
+[20:37:39 #170] [jsext] local ok jsext-order.js (30 bytes)
+[20:37:39 #171] [jsext] local miss: jsext-missing.js
+[20:37:39 #172] [jsext] local ok jsext-dup.js (50 bytes)
+[20:37:39 #173] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[20:37:39 #174] [jsext] local ok jsext-big.js (59976 bytes)
+[20:37:39 #175] [jsext] local ok jsext-big2.js (59976 bytes)
+[20:37:39 #176] [jsext] local ok jsext-big3.js (59976 bytes)
+[20:37:39 #177] [jsext] local ok jsext-big4.js (59976 bytes)
+[20:37:39 #178] [jsext] local ok jsext-big5.js (59976 bytes)
+[20:37:39 #179] [jsext] local ok jsext-big6.js (59976 bytes)
+[20:37:39 #180] [jsext] local ok jsext-big7.js (59976 bytes)
+[20:37:39 #181] [jsext] local ok jsext-big8.js (59976 bytes)
+[20:37:39 #182] [jsext] local page budget exhausted: skip jsext-big9.js
+[20:37:39 #183] [jsext] local ok jsext-write.js (46 bytes)
+[20:37:40 #184] [jsbridge] page attach: QuickJS (engine=2)
+[20:37:40 #185] [js] ext skip (not fetched): (unresolved)
+[20:37:40 #186] [js] bc hit ba828553 (script 6, 24335 bytes)
+[20:37:40 #187] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[20:37:40 #188] [js] data: script ran (19 bytes)
+[20:37:40 #189] [js] bc hit a65f5bcb (script 8, 20638 bytes)
+[20:37:40 #190] [js] bc hit a65f5bcb (script 9, 20638 bytes)
+[20:37:40 #191] [js] bc hit a65f5bcb (script 10, 20638 bytes)
+[20:37:40 #192] [js] bc hit a65f5bcb (script 11, 20638 bytes)
+[20:37:40 #193] [js] bc hit a65f5bcb (script 12, 20638 bytes)
+[20:37:40 #194] [js] bc hit a65f5bcb (script 13, 20638 bytes)
+[20:37:40 #195] [js] bc hit a65f5bcb (script 14, 20638 bytes)
+[20:37:40 #196] [js] bc hit a65f5bcb (script 15, 20638 bytes)
+[20:37:40 #197] [js] ext skip (not fetched): (unresolved)
+[20:37:40 #198] [js] [jsext-t] [PASS] external defined global (order+engine)
+[20:37:40 #199] [js] [jsext-t] [PASS] inline-after-external saw ext state
+[20:37:40 #200] [js] [jsext-t] [PASS] dup: downloaded once, executed twice
+[20:37:40 #201] [js] [jsext-t] [PASS] over-cap file executed (disk-resident)
+[20:37:40 #202] [js] [jsext-t] [PASS] over-budget file refused (no execution)
+[20:37:40 #203] [js] [jsext-t] [PASS] big files did not break the engine
+[20:37:40 #204] [js] [jsext-t] [PASS] 72KB file ran from disk (SW2b)
+[20:37:40 #205] [js] [jsext-t] [PASS] data:-URL script executed (SW2d)
+[20:37:40 #206] [js] [jsext-test] summary: 8 passed, 0 failed
+[20:37:41 #207] [js] page: ran=16 errs=0
+[20:37:41 #208] [js] live page: listeners=0 ran=16 errs=0
+[20:37:41 #209] state -> 2 (frame 1806)
+[20:37:45 #210] [flip-test] phase=3 settle t=5s live=927KB refusals=0
+[20:37:50 #211] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=2576B/61800B heap=927KB peak=4977KB bigAlloc=72KB refusals=0
+[20:37:50 #212] [flip-test] phase=3 settle t=10s live=927KB refusals=0
+[20:37:55 #213] [flip-test] phase=3 settle t=15s live=927KB refusals=0
+[20:38:00 #214] updateFrame: heartbeat frame=2400 fps=30 overlay=0 stackPeak=2576B/61800B heap=927KB peak=4977KB bigAlloc=72KB refusals=0
+[20:38:00 #215] [flip-test] phase=3 settle t=20s live=927KB refusals=0
+[20:38:05 #216] SETTINGS: open label7='Javascript Execution' staged7='Full'
+[20:38:05 #217] SETTINGS: open label8='Javascript Engine' staged8='QuickJS'
+[20:38:05 #218] main: menu Settings (state=6)
+[20:38:05 #219] state -> 6 (frame 2494)
+[20:38:12 #220] updateFrame: heartbeat frame=2700 fps=30 overlay=0 stackPeak=2576B/61800B heap=927KB peak=4977KB bigAlloc=72KB refusals=0
+[20:38:12 #221] [flip-test] stalled: state=6 rendering=0 phase=3
+[20:38:13 #222] state -> 2 (frame 2727)
+[20:38:13 #223] [flip-test] settings-path flip to engine 3 (live=927KB)
+[20:38:13 #224] STORAGE: save open
+[20:38:13 #225] STORAGE: save writing (bm=10 hist=0)
+[20:38:13 #226] STORAGE: save close
+[20:38:13 #227] STORAGE: save exit
+[20:38:13 #228] DISPLAY: refresh rate set to 30 fps
+[20:38:13 #229] [jsbridge] engine selected: XS (Moddable)
+[20:38:13 #230] [settings] reload deferred to frame loop (flip unload armed)
+[20:38:13 #231] [flip-test] all flips issued; final run in flight
+[20:38:13 #232] [js] close[QuickJS]: ran=16 errs=0 listeners=0 timers=0 budgetLeft=1508
+[20:38:13 #233] [mem] after engine close:
+[20:38:13 #234] [mem] live-tracked: 586 blocks, 674KB
+[20:38:13 #235] [mem]   block 0: 64KB
+[20:38:13 #236] [mem]   block 1: 64KB
+[20:38:13 #237] [mem]   block 2: 64KB
+[20:38:13 #238] [mem]   block 3: 64KB
+[20:38:13 #239] [mem]   block 4: 64KB
+[20:38:13 #240] [mem]   block 5: 64KB
+[20:38:13 #241] [mem]   block 6: 64KB
+[20:38:13 #242] [mem]   block 7: 64KB
+[20:38:13 #243] [settings] old page fully unloaded before reload (live=109KB, resynced from phantom 4273KB-class drift)
+[20:38:13 #244] [mem] after full unload:
+[20:38:13 #245] [mem] live-tracked: 500 blocks, 109KB
+[20:38:13 #246] [mem]   block 0: 8KB
+[20:38:13 #247] [mem]   block 1: 4KB
+[20:38:13 #248] [mem]   block 2: 4KB
+[20:38:13 #249] [mem]   block 3: 4KB
+[20:38:13 #250] [mem]   block 4: 4KB
+[20:38:13 #251] [mem]   block 5: 2KB
+[20:38:13 #252] [mem]   block 6: 2KB
+[20:38:13 #253] [mem]   block 7: 2KB
+[20:38:13 #254] navigate_to: about:jsext
+[20:38:13 #255] state -> 1 (frame 2729)
+[20:38:13 #256] [jsext] 14 external script(s) on page
+[20:38:13 #257] [jsext] local ok jsext-order.js (30 bytes)
+[20:38:13 #258] [jsext] local miss: jsext-missing.js
+[20:38:13 #259] [jsext] local ok jsext-dup.js (50 bytes)
+[20:38:14 #260] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[20:38:14 #261] [jsext] local ok jsext-big.js (59976 bytes)
+[20:38:14 #262] [jsext] local ok jsext-big2.js (59976 bytes)
+[20:38:14 #263] [jsext] local ok jsext-big3.js (59976 bytes)
+[20:38:14 #264] [jsext] local ok jsext-big4.js (59976 bytes)
+[20:38:14 #265] [jsext] local ok jsext-big5.js (59976 bytes)
+[20:38:14 #266] [jsext] local ok jsext-big6.js (59976 bytes)
+[20:38:14 #267] [jsext] local ok jsext-big7.js (59976 bytes)
+[20:38:14 #268] [jsext] local ok jsext-big8.js (59976 bytes)
+[20:38:14 #269] [jsext] local page budget exhausted: skip jsext-big9.js
+[20:38:14 #270] [jsext] local ok jsext-write.js (46 bytes)
+[20:38:14 #271] [jsbridge] page attach: XS (Moddable) (engine=3)
+[20:38:14 #272] [js] ext skip (not fetched): (unresolved)
+[20:38:14 #273] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[20:38:14 #274] [js] data: script ran (19 bytes)
+[20:38:17 #275] [js] ext skip (not fetched): (unresolved)
+[20:38:17 #276] [js] [jsext-t] [PASS] external defined global (order+engine)
+[20:38:17 #277] [js] [jsext-t] [PASS] inline-after-external saw ext state
+[20:38:17 #278] [js] [jsext-t] [PASS] dup: downloaded once, executed twice
+[20:38:17 #279] [js] [jsext-t] [PASS] over-cap file executed (disk-resident)
+[20:38:17 #280] [js] [jsext-t] [PASS] over-budget file refused (no execution)
+[20:38:17 #281] [js] [jsext-t] [PASS] big files did not break the engine
+[20:38:17 #282] [js] [jsext-t] [PASS] 72KB file ran from disk (SW2b)
+[20:38:17 #283] [js] [jsext-t] [PASS] data:-URL script executed (SW2d)
+[20:38:17 #284] [js] [jsext-test] summary: 8 passed, 0 failed
+[20:38:17 #285] [js] page: ran=16 errs=0
+[20:38:17 #286] [js] live page: listeners=0 ran=16 errs=0
+[20:38:17 #287] state -> 2 (frame 2733)
+[20:38:26 #288] updateFrame: heartbeat frame=3000 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:38:36 #289] updateFrame: heartbeat frame=3300 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:38:45 #290] updateFrame: heartbeat frame=3600 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:38:55 #291] updateFrame: heartbeat frame=3900 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:05 #292] updateFrame: heartbeat frame=4200 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:15 #293] updateFrame: heartbeat frame=4500 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:25 #294] updateFrame: heartbeat frame=4800 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:35 #295] updateFrame: heartbeat frame=5100 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:45 #296] updateFrame: heartbeat frame=5400 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:39:55 #297] updateFrame: heartbeat frame=5700 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:40:05 #298] updateFrame: heartbeat frame=6000 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:40:15 #299] updateFrame: heartbeat frame=6300 fps=30 overlay=0 stackPeak=2576B/61800B heap=1437KB peak=4977KB bigAlloc=384KB refusals=0
+[20:40:17 #300] eventHandler: kEventTerminate, frames=6370

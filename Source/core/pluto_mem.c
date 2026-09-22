@@ -186,6 +186,29 @@ void *pluto_mem_calloc(size_t n, size_t sz)
     return p;
 }
 
+/* 2026-09-22 DEVICE FLIP-CRASH ROOT FIX: the live counter drifts upward
+ * across engine churn — frees of blocks the track table dropped (collision /
+ * table pressure) cannot subtract, since portable realloc carries no size.
+ * At a PAGE BOUNDARY the tracked table IS the truth (every long-lived block
+ * is tracked; the drift residue belongs to blocks already freed), so snap
+ * the counter back to the tracked sum. Without this, the SW3a gate computes
+ * headroom from a phantom number and refuses a fresh engine's allocations
+ * after an engine flip (device: "alloc failed" -> DoubleError -> stack
+ * overflow in task gameTask -> watchdog). Direct boot never crossed a page
+ * boundary with big drift, which is why it always survived. */
+void pluto_mem_resync_live(void)
+{
+    unsigned long sum = 0;
+    for (int i = 0; i < MEMTRACK_SLOTS; i++)
+    {
+        if (track[i].ptr)
+        {
+            sum += track[i].size;
+        }
+    }
+    mem_live = sum;
+}
+
 unsigned long pluto_mem_live(void) { return mem_live; }
 unsigned long pluto_mem_peak(void) { return mem_peak; }
 unsigned long pluto_mem_peak_alloc(void) { return mem_peak_alloc; }
@@ -204,4 +227,50 @@ unsigned long pluto_mem_headroom_bytes(void)
 void pluto_mem_peak_reset(void)
 {
     mem_peak = mem_live;
+}
+
+/* TEMPORARY (2026-09-22 device flip-crash diagnosis): dump the largest live
+ * tracked blocks so the log shows WHO still holds memory after a page
+ * unload. Fidelity note: the track table drops entries under pressure, so
+ * this is a sample of the big blocks, not a census — exactly what we need
+ * to spot a multi-MB survivor. */
+void pluto_mem_dump_live(void (*logfn)(const char *fmt, ...))
+{
+    int count = 0;
+    unsigned long total = 0;
+    MemTrack top[8];
+    for (int i = 0; i < 8; i++)
+    {
+        top[i].ptr = NULL;
+        top[i].size = 0;
+    }
+    for (int i = 0; i < MEMTRACK_SLOTS; i++)
+    {
+        if (!track[i].ptr)
+        {
+            continue;
+        }
+        count++;
+        total += track[i].size;
+        for (int k = 0; k < 8; k++)
+        {
+            if (track[i].size > top[k].size)
+            {
+                for (int m = 7; m > k; m--)
+                {
+                    top[m] = top[m - 1];
+                }
+                top[k] = track[i];
+                break;
+            }
+        }
+    }
+    logfn("[mem] live-tracked: %d blocks, %luKB", count, total / 1024);
+    for (int k = 0; k < 8; k++)
+    {
+        if (top[k].ptr)
+        {
+            logfn("[mem]   block %d: %luKB", k, top[k].size / 1024);
+        }
+    }
 }
