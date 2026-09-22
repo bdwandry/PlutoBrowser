@@ -507,6 +507,7 @@ static const char JSEXTTEST_HTML[] =
     "  var r;\n"
     "  try { r = fn(); } catch (e) { r = 'threw: ' + e; }\n"
     "  if (r === true) { pass = pass + 1; } else { fail = fail + 1; }\n"
+    "  console.log('[jsext-t] [' + (r === true ? 'PASS' : 'FAIL') + '] ' + name + (r === true ? '' : ' :: ' + r));\n"
     "  var p = document.createElement('p');\n"
     "  p.textContent = '[' + (r === true ? 'PASS' : 'FAIL') + '] ' + name +\n"
     "    (r === true ? '' : ' :: ' + r);\n"

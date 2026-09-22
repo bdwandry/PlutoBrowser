@@ -157,6 +157,7 @@ static const char JSEXT_PAGE[] =
     "  var r;"
     "  try { r = fn(); } catch (e) { r = 'threw: ' + e; }"
     "  if (r === true) { pass = pass + 1; } else { fail = fail + 1; }"
+    "  console.log('[jsext-t] [' + (r === true ? 'PASS' : 'FAIL') + '] ' + name + (r === true ? '' : ' :: ' + r));"
     "  var p = document.createElement('p');"
     "  p.textContent = '[' + (r === true ? 'PASS' : 'FAIL') + '] ' + name +"
     "    (r === true ? '' : ' :: ' + r);"
