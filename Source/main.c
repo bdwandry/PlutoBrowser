@@ -1086,7 +1086,7 @@ static void js_click_autotest_tick(void)
 #endif
 
 #if defined(PLUTO_FIELDTEST_AUTOTEST)
-/* SW0 BENCHMARK MATRIX (SIMULATOR-ONLY): reads fieldtest_urls.txt from the
+/* SW0 BENCHMARK MATRIX (SIMULATOR-ONLY): reads tests/fieldtest_urls.txt from the
  * project root — one site per line: "<engine 0|1|2> <url> [| <criterion>]".
  * The criterion is a keyword that MUST appear in the rendered document text
  * (case-insensitive; scanned across blocks AND table cells). PASS/FAIL is
@@ -1264,7 +1264,7 @@ static int fieldtest_any_text(void)
 }
 static void fieldtest_load_list(void)
 {
-    FILE *f = fopen("/Users/bwandrych/Desktop/PlutoBrowser/fieldtest_urls.txt", "r");
+    FILE *f = fopen("/Users/bwandrych/Desktop/PlutoBrowser/tests/fieldtest_urls.txt", "r");
     if (!f)
     {
         logger_log("[fieldtest] no fieldtest_urls.txt — seam idle");
@@ -4058,14 +4058,14 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         logger_log("[jsext-autotest] armed (jsEnabled=2)"); /* device-build marker */
         pendingNavUrlSet = 1;
 #ifdef PLUTO_JSEXT_AUTOTEST_URL
-/* The target URL lives in jsext_autotest_url.h (generated at the project
- * root before a seam build) — a -D value containing "//" is parsed as a
+/* The target URL lives in tests/jsext_autotest_url.h (generated into tests/
+ * before a seam build) — a -D value containing "//" is parsed as a
  * comment by the preprocessor, and shell/make quoting is too fragile:
  *   printf '#define PLUTO_JSEXT_AUTOTEST_URL_STR "%s"\n' \
- *     "http://127.0.0.1:8099/page.html" > jsext_autotest_url.h
+ *     "http://127.0.0.1:8099/page.html" > tests/jsext_autotest_url.h
  *   make SIMDEFS="-DPLUTO_JSEXT_AUTOTEST -DPLUTO_JSEXT_AUTOTEST_URL=1"
  */
-#include "jsext_autotest_url.h"
+#include "../tests/jsext_autotest_url.h"
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
                  PLUTO_JSEXT_AUTOTEST_URL_STR);
 #else

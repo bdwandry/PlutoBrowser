@@ -12,7 +12,7 @@
  *   8  gzip member lying about ISIZE — refused (strict accounting)
  *
  * Fixtures: raw deflate payloads produced by Python zlib (deflate raw) at
- * build time are injected below as string literals (see /tmp/build_gz.sh).
+ * build time are injected below as string literals (see tests/build_gz.sh).
  */
 #include <stdio.h>
 #include <stdlib.h>
