@@ -4054,6 +4054,14 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         jsbridge_set_engine(PLUTO_JSEXT_AUTOTEST_ENGINE);
         logger_log("[jsext-autotest] engine forced: %d", (int)PLUTO_JSEXT_AUTOTEST_ENGINE);
 #endif
+        /* SW3 re-tune: the raised 512KB RAM-budget default flipped the
+         * suite's over-budget probe (jsext-big9, 56KB) from REFUSED to
+         * EXECUTED — the remaining budget at that point was ~390KB. Pin the
+         * budget the suite page was sized for (160KB), exactly like the
+         * jsext host suite pins it (tests/jsext_host_test.c). SW2b design
+         * is untouched: files over the 64KB spill threshold are disk-
+         * resident and bypass this budget (huge.js still runs). */
+        jsext_set_page_budget(160 * 1024);
         storage_set_setting_int("jsEnabled", 2);
         logger_log("[jsext-autotest] armed (jsEnabled=2)"); /* device-build marker */
         pendingNavUrlSet = 1;

@@ -1,0 +1,49 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[16:48:52 #1] === PlutoBrowser boot ===
+[16:48:52 #2] eventHandler: kEventInit, osversion=30101
+[16:48:52 #3] STORAGE: init enter
+[16:48:52 #4] STORAGE: load enter
+[16:48:52 #5] STORAGE: file opened, parsing
+[16:48:52 #6] STORAGE: init exit
+[16:48:52 #7] [jsbridge] boot engine: XS (Moddable)
+[16:48:52 #8] [jsext-autotest] engine forced: 0
+[16:48:52 #9] [jsext-autotest] armed (jsEnabled=2)
+[16:48:52 #10] KB new: entering
+[16:48:52 #11] KB new: allocated
+[16:48:52 #12] KB load: font...
+[16:48:52 #13] KB load: font ok h=36
+[16:48:52 #14] KB load: menu-space ok
+[16:48:52 #15] KB load: menu-ok ok
+[16:48:52 #16] KB load: menu-del ok
+[16:48:52 #17] KB load: menu-cancel ok
+[16:48:52 #18] KB new: font+images loaded
+[16:48:52 #19] DISPLAY: refresh rate set to 30 fps
+[16:48:52 #20] navigate_to: about:jsext
+[16:48:52 #21] state -> 1 (frame 1)
+[16:48:52 #22] updateFrame: first frame executed
+[16:48:53 #23] [jsext] 14 external script(s) on page
+[16:48:53 #24] [jsext] local ok jsext-order.js (30 bytes)
+[16:48:53 #25] [jsext] local miss: jsext-missing.js
+[16:48:53 #26] [jsext] local ok jsext-dup.js (50 bytes)
+[16:48:53 #27] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[16:48:53 #28] [jsext] local ok jsext-big.js (16800 bytes)
+[16:48:53 #29] [jsext] local ok jsext-big2.js (16800 bytes)
+[16:48:53 #30] [jsext] local ok jsext-big3.js (16800 bytes)
+[16:48:53 #31] [jsext] local ok jsext-big4.js (16800 bytes)
+[16:48:53 #32] [jsext] local ok jsext-big5.js (16800 bytes)
+[16:48:53 #33] [jsext] local ok jsext-big6.js (16800 bytes)
+[16:48:53 #34] [jsext] local ok jsext-big7.js (16800 bytes)
+[16:48:53 #35] [jsext] local ok jsext-big8.js (16800 bytes)
+[16:48:53 #36] [jsext] local ok jsext-big9.js (56019 bytes)
+[16:48:53 #37] [jsext] local ok jsext-write.js (46 bytes)
+[16:48:53 #38] [jsbridge] page attach: muJS (engine=0)
+[16:48:53 #39] [js] ext skip (not fetched): (unresolved)
+[16:48:53 #40] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[16:48:53 #41] [js] data: script ran (19 bytes)
+[16:48:53 #42] [js] [jsext-test] summary: 7 passed, 1 failed
+[16:48:53 #43] [js] page: ran=17 errs=0
+[16:48:53 #44] [js] live page: listeners=0 ran=17 errs=0
+[16:48:53 #45] state -> 2 (frame 5)
+[16:49:02 #46] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=0B/61800B heap=4084KB peak=4133KB bigAlloc=72KB refusals=0
+[16:49:12 #47] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=0B/61800B heap=4084KB peak=4133KB bigAlloc=72KB refusals=0

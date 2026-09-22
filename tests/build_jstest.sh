@@ -1,7 +1,7 @@
 #!/bin/bash
 SDK=/Users/bwandrych/Developer/PlaydateSDK
 SRCS="tests/jsbridge_host_test.c
-Source/core/pluto_snap.c Source/core/pluto_spill.c Source/core/pluto_mem.c Source/core/logger.c
+Source/core/pluto_snap.c Source/core/pluto_spill.c Source/core/pluto_page.c Source/core/pluto_mem.c Source/core/logger.c
 Source/html/document.c Source/html/dom.c Source/html/entities.c Source/html/tokenizer.c Source/html/readability.c Source/html/css.c
 Source/core/url.c Source/core/constants.c Source/core/encoding.c Source/core/cookie_jar.c Source/core/storage.c
 Source/util/strbuf.c Source/util/strutil.c Source/util/json.c Source/util/pdtimer.c
