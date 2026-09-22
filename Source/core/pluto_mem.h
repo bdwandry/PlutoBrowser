@@ -50,6 +50,14 @@ unsigned long pluto_mem_budget(void);
  * the legacy pure-RAM behavior in host tests. */
 unsigned long pluto_mem_headroom_bytes(void);
 
+/* Re-base the live counter to the tracked-table sum (page-boundary sync).
+ * See pluto_mem.c for the drift explanation. */
+void pluto_mem_resync_live(void);
+
+/* TEMPORARY (diagnostics): dump largest live tracked blocks via a logger
+ * callback (avoids a core→logger dependency in pluto_mem.c). */
+void pluto_mem_dump_live(void (*logfn)(const char *fmt, ...));
+
 /* Count of allocations refused by the budget (diagnostic). */
 unsigned long pluto_mem_refusals(void);
 
