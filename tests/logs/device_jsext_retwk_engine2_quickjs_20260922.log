@@ -1,0 +1,69 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[18:07:48 #1] === PlutoBrowser boot ===
+[18:07:48 #2] eventHandler: kEventInit, osversion=30101
+[18:07:48 #3] STORAGE: init enter
+[18:07:48 #4] STORAGE: load enter
+[18:07:48 #5] STORAGE: file opened, parsing
+[18:07:48 #6] STORAGE: init exit
+[18:07:48 #7] [jsbridge] boot engine: QuickJS
+[18:07:48 #8] [jsext-autotest] engine forced: 2
+[18:07:48 #9] [jsext-autotest] armed (jsEnabled=2)
+[18:07:48 #10] KB new: entering
+[18:07:48 #11] KB new: allocated
+[18:07:48 #12] KB load: font...
+[18:07:48 #13] KB load: font ok h=36
+[18:07:48 #14] KB load: menu-space ok
+[18:07:48 #15] KB load: menu-ok ok
+[18:07:48 #16] KB load: menu-del ok
+[18:07:48 #17] KB load: menu-cancel ok
+[18:07:48 #18] KB new: font+images loaded
+[18:07:48 #19] DISPLAY: refresh rate set to 30 fps
+[18:07:48 #20] navigate_to: about:jsext
+[18:07:48 #21] state -> 1 (frame 1)
+[18:07:48 #22] updateFrame: first frame executed
+[18:07:49 #23] [jsext] 14 external script(s) on page
+[18:07:49 #24] [jsext] local ok jsext-order.js (30 bytes)
+[18:07:49 #25] [jsext] local miss: jsext-missing.js
+[18:07:49 #26] [jsext] local ok jsext-dup.js (50 bytes)
+[18:07:49 #27] [jsext] local ok jsext-huge.js (72819 bytes, disk-resident)
+[18:07:49 #28] [jsext] local ok jsext-big.js (59976 bytes)
+[18:07:49 #29] [jsext] local ok jsext-big2.js (59976 bytes)
+[18:07:49 #30] [jsext] local ok jsext-big3.js (59976 bytes)
+[18:07:49 #31] [jsext] local ok jsext-big4.js (59976 bytes)
+[18:07:49 #32] [jsext] local ok jsext-big5.js (59976 bytes)
+[18:07:49 #33] [jsext] local ok jsext-big6.js (59976 bytes)
+[18:07:49 #34] [jsext] local ok jsext-big7.js (59976 bytes)
+[18:07:49 #35] [jsext] local ok jsext-big8.js (59976 bytes)
+[18:07:49 #36] [jsext] local page budget exhausted: skip jsext-big9.js
+[18:07:49 #37] [jsext] local ok jsext-write.js (46 bytes)
+[18:07:49 #38] [jsbridge] page attach: QuickJS (engine=2)
+[18:07:49 #39] [js] ext skip (not fetched): (unresolved)
+[18:07:49 #40] [js] bc hit ba828553 (script 6, 24335 bytes)
+[18:07:49 #41] [js] ext ran from disk: jsext-huge.js (72819 bytes)
+[18:07:49 #42] [js] data: script ran (19 bytes)
+[18:07:50 #43] [js] bc a65f5bcb serializing (script 8, 59976 src)
+[18:07:50 #44] [js] bc store a65f5bcb (script 8: 59976 src -> 20638 bc)
+[18:07:50 #45] [js] bc hit a65f5bcb (script 9, 20638 bytes)
+[18:07:50 #46] [js] bc hit a65f5bcb (script 10, 20638 bytes)
+[18:07:50 #47] [js] bc hit a65f5bcb (script 11, 20638 bytes)
+[18:07:50 #48] [js] bc hit a65f5bcb (script 12, 20638 bytes)
+[18:07:50 #49] [js] bc hit a65f5bcb (script 13, 20638 bytes)
+[18:07:50 #50] [js] bc hit a65f5bcb (script 14, 20638 bytes)
+[18:07:50 #51] [js] bc hit a65f5bcb (script 15, 20638 bytes)
+[18:07:50 #52] [js] ext skip (not fetched): (unresolved)
+[18:07:50 #53] [js] [jsext-t] [PASS] external defined global (order+engine)
+[18:07:50 #54] [js] [jsext-t] [PASS] inline-after-external saw ext state
+[18:07:50 #55] [js] [jsext-t] [PASS] dup: downloaded once, executed twice
+[18:07:50 #56] [js] [jsext-t] [PASS] over-cap file executed (disk-resident)
+[18:07:50 #57] [js] [jsext-t] [PASS] over-budget file refused (no execution)
+[18:07:50 #58] [js] [jsext-t] [PASS] big files did not break the engine
+[18:07:50 #59] [js] [jsext-t] [PASS] 72KB file ran from disk (SW2b)
+[18:07:50 #60] [js] [jsext-t] [PASS] data:-URL script executed (SW2d)
+[18:07:50 #61] [js] [jsext-test] summary: 8 passed, 0 failed
+[18:07:50 #62] [js] page: ran=16 errs=0
+[18:07:50 #63] [js] live page: listeners=0 ran=16 errs=0
+[18:07:50 #64] state -> 2 (frame 4)
+[18:08:00 #65] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=2568B/61800B heap=871KB peak=976KB bigAlloc=71KB refusals=0
+[18:08:10 #66] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=2568B/61800B heap=871KB peak=976KB bigAlloc=71KB refusals=0
+[18:08:15 #67] eventHandler: kEventTerminate, frames=750

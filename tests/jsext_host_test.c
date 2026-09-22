@@ -15,7 +15,8 @@
  *      slots in page order.
  *   10. A file over the per-script byte cap (64KB) is refused before
  *      execution (its marker global never appears).
- *   11. The per-page budget (160KB) refuses a further file once the
+ *   11. The per-page budget (SW3 default: 512KB RAM residency) refuses a
+ *       further file once the
  *      delivered bytes would exceed it.
  *
  * jsext.c's network entry points (http_get/http_cancel) are stubbed here —
@@ -222,10 +223,11 @@ int main(void)
     CHECK(strcmp(ext[1].url, "jsext-missing.js") == 0,
           "collect: about: base keeps the raw relative src for local fill");
 
-    /* SW3: pin the CLASSIC 160KB page budget for the refusal fixture below
-     * (the production default rose to 512KB, under which everything fits).
-     * Must be set BEFORE local_fill — it reads the effective budget. */
-    jsext_set_page_budget(160 * 1024);
+    /* NO budget pin (2026-09-22 two-worlds lesson): the suite fixtures are
+     * sized against the PRODUCT DEFAULT (JSBRIDGE_EXT_PAGE_BUDGET, 512KB)
+     * so this suite, the sim seam, and a real user navigating to
+     * about:jsext all exercise the identical gate. See the SW3 RE-TUNE
+     * note in jsext.c. */
     CHECK(jsext_local_fill(arena, ext, extCount) == extCount,
           "local fill: ran over the whole table");
     for (int i = 0; i < extCount; i++)
@@ -242,11 +244,11 @@ int main(void)
     CHECK(ext[3].url[0] != '\0' && !ext[3].body && ext[3].spill >= 0 &&
               ext[3].len == 72819,
           "local fill: 72KB huge.js accepted as disk-resident (SW2b)");
-    CHECK(ext[4].body && ext[4].len == 16800 &&
-              ext[11].body && ext[11].len == 16800,
-          "local fill: all eight 16KB files accepted (first + last checked)");
+    CHECK(ext[4].body && ext[4].len == 59976 &&
+              ext[11].body && ext[11].len == 59976,
+          "local fill: all eight ~60KB files accepted (first + last checked)");
     CHECK(ext[12].url[0] == '\0' && !ext[12].body,
-          "local fill: 56KB big9 refused by the remaining page budget");
+          "local fill: 56KB big9 refused by the remaining page budget (512KB default)");
     CHECK(ext[13].body && strstr(ext[13].body, "document.write"),
           "local fill: write.js served (last accepted file)");
 

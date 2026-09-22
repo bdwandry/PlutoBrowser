@@ -601,12 +601,19 @@ static const char JSEXT_DUP_JS[] =
     "window.__extCount = (window.__extCount || 0) + 1;\n";
 
 /* Padding generator: one 56-byte ES5 line (var redeclaration is legal).
- *   PAD300 = exactly 300 lines = 16,800 bytes — comfortably under the 64KB
- *   per-script cap AND compilable within muJS's 256KB per-script allocation
- *   budget (31KB sources are NOT — their compile tree exceeds it; 16.8KB
- *   ≈ 134KB of tree fits). Eight such files (~134.5KB with the tiny scripts)
- *   fit the 160KB page budget; the 56KB probe trips the DELIVERED-BYTES
- *   budget refusal. PAD1000 = 56,000 bytes. */
+ *   PAD1000 = 56,000 bytes; PAD1071 = 1,071 lines = 59,976 bytes (still under
+ *   the 64KB spill threshold → RAM-resident path).
+ *
+ * SW3 RE-TUNE (2026-09-22): the suite previously sized its fixtures against
+ * the PRE-SW3 160KB page budget and relied on a test-only budget pin. That
+ * split the world: seam runs passed while a REAL user navigating to
+ * about:jsext under the SW3 default (JSBRIDGE_EXT_PAGE_BUDGET = 512KB) saw
+ * the over-budget refusal test FAIL (56KB probe fit into ~390KB remaining).
+ * Fixtures are now sized against the PRODUCT DEFAULT — no pin, one world:
+ *   8 × 59,976B bigs + tiny scripts ≈ 479,934B of 524,288B consumed
+ *   → ~44,354B remaining at the 56,019B probe → REFUSED (product default).
+ * The RAM↔disk interleave is untouched: files over the 64KB threshold are
+ * disk-resident and budget-exempt (huge.js still runs on every engine). */
 #define JSEXT_PAD_LINE \
     "var pad='abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH';\n"
 #define JSEXT_PAD10 \
@@ -617,14 +624,18 @@ static const char JSEXT_DUP_JS[] =
 #define JSEXT_PAD300 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100
 #define JSEXT_PAD1000 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100 \
     JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100 JSEXT_PAD100
+#define JSEXT_PAD1071 JSEXT_PAD1000 JSEXT_PAD10 JSEXT_PAD10 JSEXT_PAD10 \
+    JSEXT_PAD10 JSEXT_PAD10 JSEXT_PAD10 JSEXT_PAD10 JSEXT_PAD_LINE
 
-/* Tests 11a–11h: 16,800 bytes each, cap-legal AND engine-runnable; with the
- * tiny scripts they total ~134.5KB of the 160KB page budget. */
-static const char JSEXT_BIG_A[] = JSEXT_PAD300;
-static const char JSEXT_BIG_B[] = JSEXT_PAD300;
+/* Tests 11a–11h: 59,976 bytes each — cap-legal (< 64KB threshold, RAM path)
+ * AND engine-runnable; together with the tiny scripts they consume ~480KB
+ * of the 512KB SW3 DEFAULT page budget (no test pin — see above). */
+static const char JSEXT_BIG_A[] = JSEXT_PAD1071;
+static const char JSEXT_BIG_B[] = JSEXT_PAD1071;
 
-/* Test 11i probe: 56,046 bytes — cap-legal, but the page's remaining
- * budget (~25KB) can't cover it → budget refusal, observable in-page. */
+/* Test 11i probe: 56,019 bytes — cap-legal, but the page's remaining
+ * budget (~44KB of the 512KB default) can't cover it → budget refusal,
+ * observable in-page and in pluto.log. */
 static const char JSEXT_BIG_C[] = JSEXT_PAD1000 "window.__big3 = 1;\n";
 
 /* Test 10: 72,821 bytes — SW2b: now ACCEPTED (the old per-script download
