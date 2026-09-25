@@ -387,34 +387,52 @@ static void process_next(void)
     /* Don't download images while the main page is loading. */
     if (http_is_loading()) return;
 
-    char url[IMGDEC_URL_MAX];
-    snprintf(url, IMGDEC_URL_MAX, "%s", g_queue[0]);
-    for (int i = 1; i < g_queueCount; i++)
-        memcpy(g_queue[i - 1], g_queue[i], IMGDEC_URL_MAX);
-    g_queueCount--;
-
-    if (cache_find(url))
+    /* The cache-hit skip is a LOOP, not self-recursion: the recursive form
+     * burned one ~552B gameTask frame per consecutive cached entry (queue
+     * cap 64 ⇒ ~35KB in one timer tick) — measured device stack overflow
+     * 2026-09-24 19:37, right after image downloads first started working
+     * on hardware (spill-reassembly fix). The timer path runs this with an
+     * XS timer fire nested in the same pdtimer_update pass, so those frames
+     * stacked on top of a live JS callback chain. Identical semantics: pop
+     * entries until an uncached URL is found (then download it) or the
+     * queue drains. */
+    while (g_queueCount > 0 && !g_isDownloading && !g_isDecoding &&
+           !http_is_loading())
     {
-        /* Present (bitmap or Lua-parity `false`) → drop the queue entry.
-         * A failed URL keeps its negative entry, exactly like the reference,
-         * so an in-view per-frame enqueue() cannot loop forever on a host
-         * that always errors (seen live: api.flattr.com → 177 retries).
-         * Eviction modes delete the entry outright (imgdec_evict), which is
-         * what makes a later re-fetch legal. */
-        process_next();
-        return;
-    }
+        char url[IMGDEC_URL_MAX];
+        snprintf(url, IMGDEC_URL_MAX, "%s", g_queue[0]);
+        for (int i = 1; i < g_queueCount; i++)
+            memcpy(g_queue[i - 1], g_queue[i], IMGDEC_URL_MAX);
+        g_queueCount--;
 
-    snprintf(g_currentUrl, IMGDEC_URL_MAX, "%s", url);
-    g_isDownloading = 1;
-    HttpCallbacks cb;
-    memset(&cb, 0, sizeof(cb));
-    cb.onSuccess = http_on_success;
-    cb.onError = http_on_error;
-    if (!http_get(url, &cb))
-    {
-        /* Immediate failure: onError already fired (cache + timer scheduled). */
-        g_isDownloading = 0;
+        if (cache_find(url))
+        {
+            /* Present (bitmap or Lua-parity `false`) → drop the entry and
+             * keep popping. A failed URL keeps its negative entry, exactly
+             * like the reference, so an in-view per-frame enqueue() cannot
+             * loop forever on a host that always errors (seen live:
+             * api.flattr.com → 177 retries). Eviction modes delete the
+             * entry outright (imgdec_evict), which is what makes a later
+             * re-fetch legal. */
+            continue;
+        }
+
+        snprintf(g_currentUrl, IMGDEC_URL_MAX, "%s", url);
+        g_isDownloading = 1;
+        HttpCallbacks cb;
+        memset(&cb, 0, sizeof(cb));
+        cb.onSuccess = http_on_success;
+        cb.onError = http_on_error;
+        if (!http_get(url, &cb))
+        {
+            /* Immediate failure: onError already fired (cache + timer
+             * scheduled). Return, exactly like the recursive original, so
+             * the next URL is attempted on the timer's 16ms pacing rather
+             * than hammered in this same tick. */
+            g_isDownloading = 0;
+            return;
+        }
+        break; /* download started — callbacks own the next step */
     }
 }
 static void process_next_timer(void *userdata)

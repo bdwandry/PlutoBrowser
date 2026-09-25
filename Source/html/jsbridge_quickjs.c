@@ -163,6 +163,7 @@ static JsBridge *bridge_of(JSContext *ctx)
  * leave the bridge error state populated. */
 static void qjs_take_exception_text(JsBridge *b, JSContext *ctx)
 {
+    logger_log("[js] qjs: exc-text begin");
     JSValue exc = JS_GetException(ctx);
     const char *msg = NULL;
     int owned = 0;
@@ -171,6 +172,7 @@ static void qjs_take_exception_text(JsBridge *b, JSContext *ctx)
         msg = JS_ToCString(ctx, exc);
         owned = (msg != NULL);
     }
+    logger_log("[js] qjs: exc-text cstring owned=%d", owned);
     if (!msg)
     {
         JSValue sec = JS_GetException(ctx);
@@ -179,11 +181,13 @@ static void qjs_take_exception_text(JsBridge *b, JSContext *ctx)
                                    : "exception";
     }
     bridge_take_error_text(b, msg);
+    logger_log("[js] qjs: exc-text stored");
     if (owned)
     {
         JS_FreeCString(ctx, msg);
     }
     JS_FreeValue(ctx, exc);
+    logger_log("[js] qjs: exc-text done");
 }
 
 #define BUDGET_OR_THROW(b)                                                    \
@@ -2044,7 +2048,9 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
             pluto_qjs_free(st->ctx, w);
         }
     }
+    logger_log("[js] qjs: eval begin (script %d)", index);
     JSValue result = JS_EvalFunction(st->ctx, compiled);
+    logger_log("[js] qjs: eval returned (script %d)", index);
     if (JS_IsException(result))
     {
         b->errs++;
@@ -2055,7 +2061,9 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
     {
         JS_FreeValue(st->ctx, result);
     }
+    logger_log("[js] qjs: GC begin (script %d)", index);
     JS_RunGC(st->rt); /* per-script sweep, mirrors the other bridges */
+    logger_log("[js] qjs: GC done (script %d)", index);
 }
 
 static int quickjs_dispatch_click(JsBridge *b, const void *anchorNode)

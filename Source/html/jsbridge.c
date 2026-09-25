@@ -431,24 +431,62 @@ unsigned long jsbridge_source_key(const char *src, size_t len,
     return h;
 }
 
-/* ── document.write output → live DOM (deep copy across arenas) ─────────── */
+/* ── document.write output → live DOM (deep copy across arenas) ─────────
+ * Iterative copy (explicit frame stack, heap-allocated). The previous
+ * recursion consumed one C frame per markup nesting level — document.write
+ * output is untrusted page content and can nest arbitrarily deep, so this
+ * ran on the device's 61.8KB game-task stack. `depth` now bounds the COPY
+ * tree height (runaway markup guard, same 24-level contract); the frame
+ * stack grows on the heap beyond it.
+ * Returns 0 ok, -1 on any failure (guard exceeded / alloc failure). */
 static int adopt_nodes(JsBridge *b, DomNode *dstParent, const DomNode *src,
                        int depth)
 {
+    typedef struct
+    {
+        DomNode *dst;        /* node under which the level's children are adopted */
+        const DomNode *src;  /* source node whose children are being copied */
+        int nextChild;
+        int depth;
+    } AdoptFrame;
     if (depth > 24)
     {
-        return -1; /* runaway markup guard */
+        return -1; /* runaway markup guard (top-level contract preserved) */
     }
-    for (int i = 0; i < src->childCount; i++)
+    if (!b || !dstParent || !src)
     {
-        const DomNode *c = src->children[i];
+        return -1;
+    }
+    int cap = 16;
+    int top = 0;
+    AdoptFrame *st = (AdoptFrame *)JMalloc(sizeof(AdoptFrame) * (size_t)cap);
+    if (!st)
+    {
+        return -1;
+    }
+    st[top].dst = dstParent;
+    st[top].src = src;
+    st[top].nextChild = 0;
+    st[top].depth = depth;
+    top++;
+    int rc = 0;
+    while (top > 0 && rc == 0)
+    {
+        AdoptFrame *f = &st[top - 1];
+        if (f->nextChild >= f->src->childCount)
+        {
+            top--;
+            continue;
+        }
+        const DomNode *c = f->src->children[f->nextChild++];
         DomNode *copy = NULL;
         if (c->kind == DOM_ELEMENT)
         {
             copy = dom_create_element(b->dom, c->tag);
             if (!copy)
             {
-                return -1;
+                rc = -1;
+                break;
             }
             for (int a = 0; a < c->attrCount; a++)
             {
@@ -456,7 +494,8 @@ static int adopt_nodes(JsBridge *b, DomNode *dstParent, const DomNode *src,
                 if (dom_set_attr(b->dom, copy, c->attrs[a].key,
                                  v ? v : "") != 0)
                 {
-                    return -1;
+                    rc = -1;
+                    break;
                 }
             }
         }
@@ -465,19 +504,48 @@ static int adopt_nodes(JsBridge *b, DomNode *dstParent, const DomNode *src,
             copy = dom_create_text(b->dom, c->text ? c->text : "");
             if (!copy)
             {
-                return -1;
+                rc = -1;
+                break;
             }
         }
-        if (dom_append_child(b->dom, dstParent, copy) != 0)
+        if (rc == 0 && dom_append_child(b->dom, f->dst, copy) != 0)
         {
-            return -1;
+            rc = -1;
+            break;
         }
-        if (c->childCount > 0 && adopt_nodes(b, copy, c, depth + 1) != 0)
+        if (rc == 0 && c->childCount > 0)
         {
-            return -1;
+            int d = f->depth + 1;
+            if (d > 24)
+            {
+                rc = -1; /* runaway markup guard (per-subtree, same contract) */
+                break;
+            }
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                AdoptFrame *grown = (AdoptFrame *)JMalloc(
+                    sizeof(AdoptFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    rc = -1;
+                    break;
+                }
+                memcpy(grown, st, sizeof(AdoptFrame) * (size_t)top);
+                JFree(st);
+                st = grown;
+                cap = ncap;
+                f = &st[top - 1]; /* the buffer may have moved */
+            }
+            st[top].dst = copy;
+            st[top].src = c;
+            st[top].nextChild = 0;
+            st[top].depth = d;
+            top++;
         }
     }
-    return 0;
+    JFree(st);
+    return rc;
 }
 
 void js_doc_flush_output(JsBridge *b)

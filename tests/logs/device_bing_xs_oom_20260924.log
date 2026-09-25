@@ -1,0 +1,182 @@
+=== PlutoBrowser crash log ===
+gamePath: com.bryanwandrych.plutobrowser
+[02:13:13 #1] === PlutoBrowser boot ===
+[02:13:13 #2] eventHandler: kEventInit, osversion=30101
+[02:13:13 #3] STORAGE: init enter
+[02:13:13 #4] STORAGE: load enter
+[02:13:13 #5] STORAGE: file opened, parsing
+[02:13:13 #6] STORAGE: init exit
+[02:13:13 #7] [jsbridge] boot engine: XS (Moddable)
+[02:13:13 #8] KB new: entering
+[02:13:13 #9] KB new: allocated
+[02:13:13 #10] KB load: font...
+[02:13:13 #11] KB load: font ok h=36
+[02:13:13 #12] KB load: menu-space ok
+[02:13:14 #13] KB load: menu-ok ok
+[02:13:14 #14] KB load: menu-del ok
+[02:13:14 #15] KB load: menu-cancel ok
+[02:13:14 #16] KB new: font+images loaded
+[02:13:14 #17] DISPLAY: refresh rate set to 30 fps
+[02:13:14 #18] updateFrame: first frame executed
+[02:13:17 #19] main: B-release opened address bar (keyboard)
+[02:13:23 #20] updateFrame: heartbeat frame=300 fps=30 overlay=0 stackPeak=824B/61800B heap=20KB peak=20KB bigAlloc=0KB refusals=0
+[02:13:30 #21] AddressBar submit: https://html.duckduckgo.com/html/?q=bing
+[02:13:30 #22] navigate_to: https://html.duckduckgo.com/html/?q=bing
+[02:13:30 #23] state -> 1 (frame 508)
+[02:13:33 #24] updateFrame: heartbeat frame=600 fps=30 overlay=0 stackPeak=824B/61800B heap=23KB peak=23KB bigAlloc=1KB refusals=0
+[02:13:35 #25] [http] gzip body (compressed -1 bytes)
+[02:13:36 #26] [jsbridge] page attach: XS (Moddable) (engine=3)
+[02:13:36 #27] [js] live page: listeners=0 ran=0 errs=0
+[02:13:36 #28] [snap] saved url=https://html.duckduckgo.com/html/?q=bing blocks=57 links=42 bytes=44972
+[02:13:36 #29] [snap] lru sweep: removed 1
+[02:13:36 #30] STORAGE: save open
+[02:13:36 #31] STORAGE: save writing (bm=10 hist=7)
+[02:13:36 #32] STORAGE: save close
+[02:13:36 #33] STORAGE: save exit
+[02:13:36 #34] state -> 2 (frame 662)
+[02:13:42 #35] [http] spill: streaming body to disk
+[02:13:42 #36] IMGDEC ok https://external-content.duckduckgo.com/ip3/www.bing.com.ico kind=1 32x32 (531 bytes)
+[02:13:44 #37] updateFrame: heartbeat frame=900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:13:54 #38] updateFrame: heartbeat frame=1200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:04 #39] updateFrame: heartbeat frame=1500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:14 #40] updateFrame: heartbeat frame=1800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:24 #41] updateFrame: heartbeat frame=2100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:34 #42] updateFrame: heartbeat frame=2400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:44 #43] updateFrame: heartbeat frame=2700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:14:53 #44] updateFrame: heartbeat frame=3000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:03 #45] updateFrame: heartbeat frame=3300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:13 #46] updateFrame: heartbeat frame=3600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:23 #47] updateFrame: heartbeat frame=3900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:33 #48] updateFrame: heartbeat frame=4200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:43 #49] updateFrame: heartbeat frame=4500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:15:53 #50] updateFrame: heartbeat frame=4800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:03 #51] updateFrame: heartbeat frame=5100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:13 #52] updateFrame: heartbeat frame=5400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:23 #53] updateFrame: heartbeat frame=5700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:32 #54] updateFrame: heartbeat frame=6000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:42 #55] updateFrame: heartbeat frame=6300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:16:52 #56] updateFrame: heartbeat frame=6600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:02 #57] updateFrame: heartbeat frame=6900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:12 #58] updateFrame: heartbeat frame=7200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:22 #59] updateFrame: heartbeat frame=7500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:32 #60] updateFrame: heartbeat frame=7800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:42 #61] updateFrame: heartbeat frame=8100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:17:52 #62] updateFrame: heartbeat frame=8400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:02 #63] updateFrame: heartbeat frame=8700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:12 #64] updateFrame: heartbeat frame=9000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:21 #65] updateFrame: heartbeat frame=9300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:31 #66] updateFrame: heartbeat frame=9600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:41 #67] updateFrame: heartbeat frame=9900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:18:51 #68] updateFrame: heartbeat frame=10200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:01 #69] updateFrame: heartbeat frame=10500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:11 #70] updateFrame: heartbeat frame=10800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:21 #71] updateFrame: heartbeat frame=11100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:31 #72] updateFrame: heartbeat frame=11400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:41 #73] updateFrame: heartbeat frame=11700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:19:51 #74] updateFrame: heartbeat frame=12000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:00 #75] updateFrame: heartbeat frame=12300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:10 #76] updateFrame: heartbeat frame=12600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:20 #77] updateFrame: heartbeat frame=12900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:30 #78] updateFrame: heartbeat frame=13200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:40 #79] updateFrame: heartbeat frame=13500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:20:50 #80] updateFrame: heartbeat frame=13800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:00 #81] updateFrame: heartbeat frame=14100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:10 #82] updateFrame: heartbeat frame=14400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:20 #83] updateFrame: heartbeat frame=14700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:30 #84] updateFrame: heartbeat frame=15000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:39 #85] updateFrame: heartbeat frame=15300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:49 #86] updateFrame: heartbeat frame=15600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:21:59 #87] updateFrame: heartbeat frame=15900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:09 #88] updateFrame: heartbeat frame=16200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:19 #89] updateFrame: heartbeat frame=16500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:29 #90] updateFrame: heartbeat frame=16800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:39 #91] updateFrame: heartbeat frame=17100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:49 #92] updateFrame: heartbeat frame=17400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:22:59 #93] updateFrame: heartbeat frame=17700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:09 #94] updateFrame: heartbeat frame=18000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:18 #95] updateFrame: heartbeat frame=18300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:28 #96] updateFrame: heartbeat frame=18600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:38 #97] updateFrame: heartbeat frame=18900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:48 #98] updateFrame: heartbeat frame=19200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:23:58 #99] updateFrame: heartbeat frame=19500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:08 #100] updateFrame: heartbeat frame=19800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:18 #101] updateFrame: heartbeat frame=20100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:28 #102] updateFrame: heartbeat frame=20400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:38 #103] updateFrame: heartbeat frame=20700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:48 #104] updateFrame: heartbeat frame=21000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:24:57 #105] updateFrame: heartbeat frame=21300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:07 #106] updateFrame: heartbeat frame=21600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:17 #107] updateFrame: heartbeat frame=21900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:27 #108] updateFrame: heartbeat frame=22200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:37 #109] updateFrame: heartbeat frame=22500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:47 #110] updateFrame: heartbeat frame=22800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:25:57 #111] updateFrame: heartbeat frame=23100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:07 #112] updateFrame: heartbeat frame=23400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:17 #113] updateFrame: heartbeat frame=23700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:27 #114] updateFrame: heartbeat frame=24000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:36 #115] updateFrame: heartbeat frame=24300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:46 #116] updateFrame: heartbeat frame=24600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:26:56 #117] updateFrame: heartbeat frame=24900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:06 #118] updateFrame: heartbeat frame=25200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:16 #119] updateFrame: heartbeat frame=25500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:26 #120] updateFrame: heartbeat frame=25800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:36 #121] updateFrame: heartbeat frame=26100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:46 #122] updateFrame: heartbeat frame=26400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:27:56 #123] updateFrame: heartbeat frame=26700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:06 #124] updateFrame: heartbeat frame=27000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:15 #125] updateFrame: heartbeat frame=27300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:25 #126] updateFrame: heartbeat frame=27600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:35 #127] updateFrame: heartbeat frame=27900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:45 #128] updateFrame: heartbeat frame=28200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:28:55 #129] updateFrame: heartbeat frame=28500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:05 #130] updateFrame: heartbeat frame=28800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:15 #131] updateFrame: heartbeat frame=29100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:25 #132] updateFrame: heartbeat frame=29400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:35 #133] updateFrame: heartbeat frame=29700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:45 #134] updateFrame: heartbeat frame=30000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:29:54 #135] updateFrame: heartbeat frame=30300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:04 #136] updateFrame: heartbeat frame=30600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:14 #137] updateFrame: heartbeat frame=30900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:24 #138] updateFrame: heartbeat frame=31200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:34 #139] updateFrame: heartbeat frame=31500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:44 #140] updateFrame: heartbeat frame=31800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:30:54 #141] updateFrame: heartbeat frame=32100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:04 #142] updateFrame: heartbeat frame=32400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:14 #143] updateFrame: heartbeat frame=32700 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:24 #144] updateFrame: heartbeat frame=33000 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:33 #145] updateFrame: heartbeat frame=33300 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:43 #146] updateFrame: heartbeat frame=33600 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:31:53 #147] updateFrame: heartbeat frame=33900 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:03 #148] updateFrame: heartbeat frame=34200 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:13 #149] updateFrame: heartbeat frame=34500 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:23 #150] updateFrame: heartbeat frame=34800 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:33 #151] updateFrame: heartbeat frame=35100 fps=30 overlay=0 stackPeak=2248B/61800B heap=1009KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:40 #152] navigate_to: https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.bing.com%2F&rut=1bfad333c090c84b5a2d301e1b3dce3198a70a4110fa2617a0f845883cf5a065
+[02:32:40 #153] state -> 1 (frame 35311)
+[02:32:43 #154] updateFrame: heartbeat frame=35400 fps=30 overlay=0 stackPeak=2248B/61800B heap=1011KB peak=1034KB bigAlloc=384KB refusals=0
+[02:32:47 #155] [http] gzip body (compressed -1 bytes)
+[02:32:48 #156] [jsext] 3 external script(s) on page
+[02:32:54 #157] updateFrame: heartbeat frame=35700 fps=30 overlay=0 stackPeak=2248B/61800B heap=2017KB peak=2017KB bigAlloc=384KB refusals=0
+[02:32:56 #158] [http] gzip body (compressed 14457 bytes)
+[02:32:56 #159] [jsext] ok https://www.bing.com/rp/zFuAKF-9bXFe6ayl-R5XG9BTJMw.gz.js (35213 bytes, ram-resident, 489075 budget left)
+[02:33:04 #160] updateFrame: heartbeat frame=36000 fps=30 overlay=0 stackPeak=2248B/61800B heap=2084KB peak=2116KB bigAlloc=384KB refusals=0
+[02:33:04 #161] [http] gzip body (compressed 731 bytes)
+[02:33:04 #162] [jsext] ok https://www.bing.com/rp/kLyHsHafz7zx7zLLq_5jFvjg8iA.gz.js (1640 bytes, ram-resident, 487435 budget left)
+[02:33:13 #163] [http] gzip body (compressed 198 bytes)
+[02:33:13 #164] [jsext] ok https://www.bing.com/rp/FzmuQ-jeY8oPLmj4UaGZ0xPR6kQ.gz.js (272 bytes, ram-resident, 487163 budget left)
+[02:33:13 #165] [jsext] prefetch done: 3 file(s), 37125 bytes
+[02:33:13 #166] [jsbridge] page attach: XS (Moddable) (engine=3)
+[02:33:14 #167] [js] script 2 failed: get _w: undefined variable
+[02:33:16 #168] [js] script 6 failed: cannot coerce undefined to object
+[02:33:16 #169] [js] script 7 failed: cannot coerce undefined to object
+[02:33:16 #170] [js] script 8 failed: call: not a function
+[02:33:17 #171] [js] script 13 failed: cannot coerce undefined to object
+[02:33:17 #172] [js] script 15 failed: get Feedback: undefined variable
+[02:33:17 #173] [xs] abort: memory full
+[02:33:17 #174] [js] script 16 aborted engine (memory full) — engine reset
+[02:33:17 #175] [js] close[XS (Moddable)]: ran=16 errs=7 listeners=0 timers=0 budgetLeft=1525 last=get _w: undefined variable
+[02:33:18 #176] state -> 3 (frame 36285)
+[02:33:18 #177] updateFrame: heartbeat frame=36300 fps=3 overlay=0 stackPeak=2248B/61800B heap=6561KB peak=6653KB bigAlloc=384KB refusals=2
+[02:33:24 #178] navigate_to: https://www.bing.com/
+[02:33:24 #179] state -> 1 (frame 36477)
+[02:33:27 #180] eventHandler: kEventTerminate, frames=36531

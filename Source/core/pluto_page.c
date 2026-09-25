@@ -243,59 +243,129 @@ static unsigned long page_key(const char *baseUrl, int rootId)
     return h ? h : 1;
 }
 
-/* ── serialize ───────────────────────────────────────────────────────────── */
+/* ── serialize ─────────────────────────────────────────────────────────────
+ * Iterative pre-order writer (explicit frame stack, heap-allocated). The
+ * recursive version consumed one C frame per DOM depth; paging runs under
+ * memory pressure when trees are at their biggest, so depth unbounded by a
+ * frame chain is exactly the safety property SW8 needs. The wire format is
+ * UNCHANGED (same field order: kind, id, tag/attrs/text, childCount, then
+ * each child) — snapshots paged out by an older build still load. */
 
-static void w_node(PWriter *w, const DomNode *n)
+typedef struct
 {
-    if (w->err || !n)
+    const DomNode *node;
+    int nextChild;
+} PageWFrame;
+
+static void w_node(PWriter *w, const DomNode *root)
+{
+    if (w->err || !root)
     {
         return;
     }
-    pw_u16(w, (unsigned)(n->kind == DOM_TEXT ? 1 : 0));
-    pw_i32(w, n->nodeId);
-    if (n->kind == DOM_ELEMENT)
+    int cap = 64;
+    int top = 0;
+    PageWFrame *st = (PageWFrame *)PLUTO_MALLOC(sizeof(PageWFrame) * (size_t)cap);
+    if (!st)
     {
-        pw_str(w, n->tag ? n->tag : "");
-        int attrCount = n->attrCount;
-        if (attrCount > PAGE_MAX_ATTRS)
+        w->err = 1;
+        return;
+    }
+    st[top].node = root;
+    st[top].nextChild = 0;
+    top++;
+    while (top > 0 && !w->err)
+    {
+        PageWFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (f->nextChild == 0)
         {
-            attrCount = PAGE_MAX_ATTRS;
-        }
-        pw_u16(w, (unsigned)attrCount);
-        for (int i = 0; i < attrCount; i++)
-        {
-            pw_str(w, n->attrs[i].key);
-            /* value may be the PLUTO_TOK_ATTR_TRUE sentinel (boolean attr):
-             * encode a flag + string so strlen never dereferences it */
-            if (n->attrs[i].value == PLUTO_TOK_ATTR_TRUE)
+            /* first visit: emit the node header + own payload */
+            pw_u16(w, (unsigned)(n->kind == DOM_TEXT ? 1 : 0));
+            pw_i32(w, n->nodeId);
+            if (n->kind == DOM_ELEMENT)
             {
-                pw_u16(w, 1);
-                pw_str(w, "");
+                pw_str(w, n->tag ? n->tag : "");
+                int attrCount = n->attrCount;
+                if (attrCount > PAGE_MAX_ATTRS)
+                {
+                    attrCount = PAGE_MAX_ATTRS;
+                }
+                pw_u16(w, (unsigned)attrCount);
+                for (int i = 0; i < attrCount; i++)
+                {
+                    pw_str(w, n->attrs[i].key);
+                    /* value may be the PLUTO_TOK_ATTR_TRUE sentinel (boolean
+                     * attr): encode a flag + string so strlen never
+                     * dereferences it */
+                    if (n->attrs[i].value == PLUTO_TOK_ATTR_TRUE)
+                    {
+                        pw_u16(w, 1);
+                        pw_str(w, "");
+                    }
+                    else
+                    {
+                        pw_u16(w, 0);
+                        pw_str(w, n->attrs[i].value);
+                    }
+                }
             }
             else
             {
-                pw_u16(w, 0);
-                pw_str(w, n->attrs[i].value);
+                pw_str(w, n->text ? n->text : "");
             }
+            pw_u16(w, (unsigned)n->childCount);
+        }
+        if (f->nextChild < n->childCount)
+        {
+            const DomNode *c = n->children[f->nextChild++];
+            if (!c)
+            {
+                continue; /* defensive: builder never stores NULL children */
+            }
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                PageWFrame *grown = (PageWFrame *)PLUTO_REALLOC(
+                    st, sizeof(PageWFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    w->err = 1;
+                    break;
+                }
+                st = grown;
+                cap = ncap;
+                f = &st[top - 1]; /* realloc may have moved the array */
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
         }
     }
-    else
-    {
-        pw_str(w, n->text ? n->text : "");
-    }
-    pw_u16(w, (unsigned)n->childCount);
-    for (int i = 0; i < n->childCount; i++)
-    {
-        w_node(w, n->children[i]);
-    }
+    PLUTO_FREE(st);
 }
 
-/* ── restore (into the doc's arena) ──────────────────────────────────────── */
+/* ── restore (into the doc's arena) ───────────────────────────────────────
+ * Iterative reader (explicit frame stack, heap-allocated). The recursive
+ * version consumed one C frame per stored DOM depth — the restore path
+ * runs on the game-task stack mid-render, exactly where the overflow
+ * class this project keeps hitting bites. The wire format is UNCHANGED
+ * (identical field order to w_node), so pages paged out by an older
+ * build still materialize. Returns the restored ROOT node (children
+ * linked, parent pointers set), NULL on any error (r->err set).
+ */
 
-static DomNode *r_node(PReader *r, DomResult *dom, DomNode *parent, int depth,
-                       int *count)
+/* Decode one node's own payload (kind/id, tag+attrs or text, childCount)
+ * from the stream. The children array is allocated but LEFT EMPTY; the
+ * driving loop links children as it decodes them. Returns NULL on error. */
+static DomNode *r_node_head(PReader *r, DomResult *dom, DomNode *parent,
+                            int *count)
 {
-    if (r->err || depth > PAGE_MAX_DEPTH || *count >= PAGE_MAX_NODES)
+    if (r->err || *count >= PAGE_MAX_NODES)
     {
         r->err = 1;
         return NULL;
@@ -431,43 +501,136 @@ static DomNode *r_node(PReader *r, DomResult *dom, DomNode *parent, int depth,
             dom_page_free_subtree_impl(n);
             return NULL;
         }
-        for (unsigned i = 0; i < childCount; i++)
-        {
-            DomNode *c = r_node(r, dom, n, depth + 1, count);
-            if (!c)
-            {
-                n->childCount = (int)i; /* what got linked so far */
-                dom_page_free_subtree_impl(n);
-                return NULL;
-            }
-            n->children[i] = c;
-            n->childCount = (int)i + 1;
-        }
+        /* childCap carries the DECLARED count while decoding (childCount
+         * counts what has been linked so far); the driving loop fills the
+         * array up to childCap. Fully decoded ⇒ childCount == childCap. */
+        n->childCap = (int)childCount;
     }
     return n;
 }
 
-/* Free a partially-built subtree (heap structs + arrays; strings live in
- * the doc arena and die with it). Mirrors free_node_recursive ownership. */
-static void dom_page_free_subtree_impl(DomNode *n)
+static DomNode *r_node(PReader *r, DomResult *dom, DomNode *parent, int depth,
+                       int *count)
 {
-    if (!n)
+    typedef struct
+    {
+        DomNode *node; /* node whose children are being decoded */
+        int nextChild; /* children linked so far */
+        int depth;
+    } PageRFrame;
+    if (r->err || depth > PAGE_MAX_DEPTH || *count >= PAGE_MAX_NODES)
+    {
+        r->err = 1;
+        return NULL;
+    }
+    int cap = 64;
+    int top = 0;
+    PageRFrame *st = (PageRFrame *)PLUTO_MALLOC(sizeof(PageRFrame) * (size_t)cap);
+    if (!st)
+    {
+        r->err = 1;
+        return NULL;
+    }
+    DomNode *root = r_node_head(r, dom, parent, count);
+    if (!root)
+    {
+        PLUTO_FREE(st);
+        return NULL;
+    }
+    st[top].node = root;
+    st[top].nextChild = 0;
+    st[top].depth = depth;
+    top++;
+    while (top > 0 && !r->err)
+    {
+        PageRFrame *f = &st[top - 1];
+        if (f->nextChild >= f->node->childCap)
+        {
+            top--; /* all declared children linked */
+            continue;
+        }
+        int childDepth = f->depth + 1;
+        if (childDepth > PAGE_MAX_DEPTH || *count >= PAGE_MAX_NODES)
+        {
+            r->err = 1;
+            break;
+        }
+        DomNode *c = r_node_head(r, dom, f->node, count);
+        if (!c)
+        {
+            break; /* r->err set by r_node_head */
+        }
+        f->node->children[f->nextChild] = c;
+        f->node->childCount = f->nextChild + 1;
+        f->nextChild++; /* advance the parent's cursor in BOTH branches */
+        if (c->childCap > 0)
+        {
+            /* c itself declared children: descend (depth-first, wire order) */
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                PageRFrame *grown = (PageRFrame *)PLUTO_REALLOC(
+                    st, sizeof(PageRFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    r->err = 1;
+                    break;
+                }
+                st = grown;
+                cap = ncap;
+                f = &st[top - 1]; /* realloc may have moved the array */
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            st[top].depth = childDepth;
+            top++;
+        }
+    }
+    PLUTO_FREE(st);
+    if (r->err)
+    {
+        dom_page_free_subtree_impl(root);
+        return NULL;
+    }
+    return root;
+}
+
+/* Free a partially-built subtree (heap structs + arrays; strings live in
+ * the doc arena and die with it). Mirrors free_node_recursive ownership.
+ * Iterative (explicit stack, heap-allocated): the recursive version spent
+ * one C frame per depth on the game-task stack — teardown of a deep tree
+ * overflowed it. Frees children first (post-order) so arrays are read
+ * before the node struct goes away. */
+static void dom_page_free_subtree_impl(DomNode *root)
+{
+    if (!root)
     {
         return;
     }
-    for (int i = 0; i < n->childCount; i++)
+    DomNode *stack[64];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0)
     {
-        dom_page_free_subtree_impl(n->children[i]);
+        DomNode *n = stack[--top];
+        for (int i = 0; i < n->childCount; i++)
+        {
+            if (n->children && n->children[i] &&
+                top < (int)(sizeof(stack) / sizeof(stack[0])))
+            {
+                stack[top++] = n->children[i];
+            }
+        }
+        if (n->children)
+        {
+            PLUTO_FREE(n->children);
+        }
+        if (n->attrs)
+        {
+            PLUTO_FREE(n->attrs);
+        }
+        PLUTO_FREE(n);
     }
-    if (n->children)
-    {
-        PLUTO_FREE(n->children);
-    }
-    if (n->attrs)
-    {
-        PLUTO_FREE(n->attrs);
-    }
-    PLUTO_FREE(n);
 }
 
 void dom_page_free_subtree(DomNode *n)
@@ -661,27 +824,79 @@ int dom_is_paged(const DomNode *node)
 
 /* Subtree RAM size: nodes + attr arrays + child arrays. Strings (tag/text/
  * attr values) are excluded — they live in the doc arena, which dies with
- * the document regardless. Includes stub shells (72B each, near-zero). */
-static long subtree_bytes(const DomNode *n)
+ * the document regardless. Includes stub shells (72B each, near-zero).
+ * Iterative (explicit stack, heap-allocated): the recursive version spent
+ * one C frame per depth inside the pressure policy's hot loop. */
+typedef struct
 {
-    if (!n)
+    const DomNode *node;
+    int nextChild;
+} SbFrame;
+
+static long subtree_bytes(const DomNode *root)
+{
+    if (!root)
     {
         return 0;
     }
-    long b = (long)sizeof(DomNode);
-    if (n->attrs)
+    int cap = 64;
+    int top = 0;
+    SbFrame *st = (SbFrame *)PLUTO_MALLOC(sizeof(SbFrame) * (size_t)cap);
+    if (!st)
     {
-        b += (long)n->attrCount * (long)sizeof(DomAttr);
+        return 0; /* allocator out: report 0 (policy treats it as small) */
     }
-    if (n->children)
+    st[top].node = root;
+    st[top].nextChild = 0;
+    top++;
+    long total = 0;
+    while (top > 0)
     {
-        b += (long)n->childCap * (long)sizeof(DomNode *);
+        SbFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (f->nextChild == 0)
+        {
+            total += (long)sizeof(DomNode);
+            if (n->attrs)
+            {
+                total += (long)n->attrCount * (long)sizeof(DomAttr);
+            }
+            if (n->children)
+            {
+                total += (long)n->childCap * (long)sizeof(DomNode *);
+            }
+        }
+        if (f->nextChild < n->childCount)
+        {
+            const DomNode *c = n->children[f->nextChild++];
+            if (!c)
+            {
+                continue;
+            }
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                SbFrame *grown = (SbFrame *)PLUTO_REALLOC(
+                    st, sizeof(SbFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    PLUTO_FREE(st);
+                    return total;
+                }
+                st = grown;
+                cap = ncap;
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
+        }
     }
-    for (int i = 0; i < n->childCount; i++)
-    {
-        b += subtree_bytes(n->children[i]);
-    }
-    return b;
+    PLUTO_FREE(st);
+    return total;
 }
 
 /* Deepest-first: the largest child subtree of `root` that clears the floor

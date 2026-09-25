@@ -33,22 +33,76 @@ static JsonValue *value_new(JsonType t)
 
 void json_free(JsonValue *v)
 {
+    /* Iterative post-order free (explicit stack, heap-allocated). The
+     * recursive version spent one C frame per nesting level; a hostile or
+     * deeply-nested payload (a fetched JSON response is untrusted page
+     * data) could overflow the device's small game-task stack. Frees each
+     * node after its children, same ownership as before. */
+    typedef struct
+    {
+        JsonValue *v;
+        int nextChild;
+    } JsonFrame;
     if (!v)
     {
         return;
     }
-    free(v->string);
-    for (size_t i = 0; i < v->count; i++)
+    int cap = 32;
+    int top = 0;
+    JsonFrame *st = (JsonFrame *)malloc(sizeof(JsonFrame) * (size_t)cap);
+    if (!st)
     {
-        json_free(v->items[i]);
-        if (v->keys)
+        return; /* nothing we can do; allocator is out */
+    }
+    st[top].v = v;
+    st[top].nextChild = 0;
+    top++;
+    while (top > 0)
+    {
+        JsonFrame *f = &st[top - 1];
+        JsonValue *n = f->v;
+        if (f->nextChild < (int)n->count)
         {
-            free(v->keys[i]);
+            JsonValue *c = n->items[f->nextChild++];
+            if (!c)
+            {
+                continue;
+            }
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                JsonFrame *grown = (JsonFrame *)realloc(st, sizeof(JsonFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    free(st);
+                    return;
+                }
+                st = grown;
+                cap = ncap;
+                f = &st[top - 1]; /* realloc may have moved the array */
+            }
+            st[top].v = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            /* children done: free this node's own storage */
+            free(n->string);
+            if (n->keys)
+            {
+                for (size_t i = 0; i < n->count; i++)
+                {
+                    free(n->keys[i]);
+                }
+            }
+            free(n->items);
+            free(n->keys);
+            free(n);
+            top--;
         }
     }
-    free(v->items);
-    free(v->keys);
-    free(v);
+    free(st);
 }
 
 static void skip_ws(Parser *ps)
@@ -351,185 +405,277 @@ static int container_add(JsonValue *v, char *key, JsonValue *item)
     return 1;
 }
 
-static JsonValue *parse_object(Parser *ps)
-{
-    ps->p++; /* '{' */
-    JsonValue *v = value_new(JSON_OBJECT);
-    if (!v)
-    {
-        return NULL;
-    }
-    skip_ws(ps);
-    if (ps->p < ps->end && *ps->p == '}')
-    {
-        ps->p++;
-        return v;
-    }
-    for (;;)
-    {
-        skip_ws(ps);
-        char *key = parse_string_raw(ps);
-        if (!key)
-        {
-            json_free(v);
-            return NULL;
-        }
-        skip_ws(ps);
-        if (ps->p >= ps->end || *ps->p != ':')
-        {
-            free(key);
-            json_free(v);
-            return NULL;
-        }
-        ps->p++;
-        skip_ws(ps);
-        JsonValue *item = parse_value(ps);
-        if (!item)
-        {
-            free(key);
-            json_free(v);
-            return NULL;
-        }
-        if (!container_add(v, key, item))
-        {
-            free(key);
-            json_free(item);
-            json_free(v);
-            return NULL;
-        }
-        skip_ws(ps);
-        if (ps->p < ps->end && *ps->p == ',')
-        {
-            ps->p++;
-            continue;
-        }
-        if (ps->p < ps->end && *ps->p == '}')
-        {
-            ps->p++;
-            return v;
-        }
-        json_free(v);
-        return NULL;
-    }
-}
-
-static JsonValue *parse_array(Parser *ps)
-{
-    ps->p++; /* '[' */
-    JsonValue *v = value_new(JSON_ARRAY);
-    if (!v)
-    {
-        return NULL;
-    }
-    skip_ws(ps);
-    if (ps->p < ps->end && *ps->p == ']')
-    {
-        ps->p++;
-        return v;
-    }
-    for (;;)
-    {
-        skip_ws(ps);
-        JsonValue *item = parse_value(ps);
-        if (!item)
-        {
-            json_free(v);
-            return NULL;
-        }
-        if (!container_add(v, NULL, item))
-        {
-            json_free(item);
-            json_free(v);
-            return NULL;
-        }
-        skip_ws(ps);
-        if (ps->p < ps->end && *ps->p == ',')
-        {
-            ps->p++;
-            continue;
-        }
-        if (ps->p < ps->end && *ps->p == ']')
-        {
-            ps->p++;
-            return v;
-        }
-        json_free(v);
-        return NULL;
-    }
-}
+/* ── Parser (iterative) ────────────────────────────────────────────────────
+ * The recursive-descent trio (parse_value / parse_object / parse_array)
+ * became ONE loop over an explicit frame stack: each frame is a container
+ * (object or array) being filled. Behavior is identical — including the
+ * strict rejection of `[1,]` / `{"a":1,}` (a ',' is followed by a real
+ * member, never a close token) and JSON_MAX_DEPTH enforcement per value.
+ *
+ * Loop states, folded into two steps per iteration:
+ *   1. ATTACH: a produced value joins the top frame's container (or the
+ *      empty stack means it is the root — done).
+ *   2. ADVANCE: the top frame consumes ',' / close / (objects) the next
+ *      key + ':'. A container value pushes a new frame.
+ * A heap-grown frame stack replaces the C recursion; depth is still capped
+ * by JSON_MAX_DEPTH, so the fixed-bound contract in json.h holds.
+ */
 
 static JsonValue *parse_value(Parser *ps)
 {
-    skip_ws(ps);
-    if (ps->p >= ps->end)
+    typedef struct
+    {
+        JsonValue *container; /* object/array being filled (owned here) */
+        char *key;            /* object: key awaiting its value (owned) */
+    } PFrame;
+
+    PFrame *st = (PFrame *)malloc(sizeof(PFrame) * 16);
+    int cap = 16;
+    int top = 0;
+    JsonValue *delivered = NULL; /* value produced, awaiting attach */
+    JsonValue *root = NULL;
+
+    if (!st)
     {
         return NULL;
     }
-    if (++ps->depth > JSON_MAX_DEPTH)
+
+    for (;;)
     {
-        ps->depth--;
-        return NULL;
-    }
-    JsonValue *v = NULL;
-    char c = *ps->p;
-    if (c == '"')
-    {
-        char *s = parse_string_raw(ps);
-        if (s)
+        /* ── 1. Attach a produced value ── */
+        if (delivered)
         {
-            v = value_new(JSON_STRING);
-            if (v)
+            if (top == 0)
             {
-                v->string = s;
+                root = delivered; /* the single top-level value: done */
+                delivered = NULL;
+                break;
+            }
+            PFrame *f = &st[top - 1];
+            if (f->container->type == JSON_OBJECT)
+            {
+                if (!container_add(f->container, f->key, delivered))
+                {
+                    free(f->key);
+                    f->key = NULL;
+                    json_free(delivered);
+                    delivered = NULL;
+                    goto fail;
+                }
+                f->key = NULL; /* ownership moved into the container */
             }
             else
             {
-                free(s);
+                if (!container_add(f->container, NULL, delivered))
+                {
+                    json_free(delivered);
+                    delivered = NULL;
+                    goto fail;
+                }
             }
+            delivered = NULL;
+            /* fall through: the container now decides ',' or close */
         }
-    }
-    else if (c == '{')
-    {
-        v = parse_object(ps);
-    }
-    else if (c == '[')
-    {
-        v = parse_array(ps);
-    }
-    else if (c == 't')
-    {
-        if (ps->end - ps->p >= 4 && strncmp(ps->p, "true", 4) == 0)
+
+        /* ── 2. Advance the top container ── */
+        if (top > 0)
         {
-            ps->p += 4;
-            v = value_new(JSON_BOOL);
-            if (v)
+            PFrame *f = &st[top - 1];
+            skip_ws(ps);
+            if (ps->p >= ps->end)
             {
-                v->boolean = 1;
+                goto fail; /* truncated member list */
+            }
+            int afterComma = 0;
+            if (*ps->p == ',')
+            {
+                ps->p++;
+                afterComma = 1;
+                skip_ws(ps);
+                if (ps->p >= ps->end)
+                {
+                    goto fail;
+                }
+            }
+            if (f->container->type == JSON_OBJECT)
+            {
+                if (!afterComma && *ps->p == '}')
+                {
+                    ps->p++;
+                    ps->depth--;
+                    delivered = f->container; /* container complete → pop */
+                    top--;
+                    continue;
+                }
+                /* JSON requires ',' between members: once the object holds
+                 * at least one member, the next token must be ',' (consumed
+                 * above) or '}' (handled). A bare '"' without a comma is
+                 * the {"a":1 "b":2} error the old recursive parser
+                 * rejected. */
+                if (f->container->count > 0 && !afterComma)
+                {
+                    goto fail;
+                }
+                /* member: "key" : value (a bare '}' after ',' is invalid,
+                 * same as the recursive parser's string-raw failure). */
+                if (*ps->p != '"')
+                {
+                    goto fail;
+                }
+                char *key = parse_string_raw(ps);
+                if (!key)
+                {
+                    goto fail;
+                }
+                skip_ws(ps);
+                if (ps->p >= ps->end || *ps->p != ':')
+                {
+                    free(key);
+                    goto fail;
+                }
+                ps->p++;
+                f->key = key;
+                /* fall through: parse the value */
+            }
+            else
+            {
+                if (!afterComma && *ps->p == ']')
+                {
+                    ps->p++;
+                    ps->depth--;
+                    delivered = f->container;
+                    top--;
+                    continue;
+                }
+                /* JSON requires ',' between elements (see object branch). */
+                if (f->container->count > 0 && !afterComma)
+                {
+                    goto fail;
+                }
+                /* fall through: parse the value */
             }
         }
-    }
-    else if (c == 'f')
-    {
-        if (ps->end - ps->p >= 5 && strncmp(ps->p, "false", 5) == 0)
+
+        /* ── 3. Parse one value at the cursor ── */
+        skip_ws(ps);
+        if (ps->p >= ps->end)
         {
-            ps->p += 5;
-            v = value_new(JSON_BOOL);
+            goto fail;
         }
-    }
-    else if (c == 'n')
-    {
-        if (ps->end - ps->p >= 4 && strncmp(ps->p, "null", 4) == 0)
+        if (++ps->depth > JSON_MAX_DEPTH)
         {
-            ps->p += 4;
-            v = value_new(JSON_NULL);
+            ps->depth--;
+            goto fail;
         }
+        char c = *ps->p;
+        JsonValue *v = NULL;
+        int isContainer = 0;
+        if (c == '"')
+        {
+            char *s = parse_string_raw(ps);
+            if (s)
+            {
+                v = value_new(JSON_STRING);
+                if (v)
+                {
+                    v->string = s;
+                }
+                else
+                {
+                    free(s);
+                }
+            }
+        }
+        else if (c == '{')
+        {
+            ps->p++;
+            v = value_new(JSON_OBJECT);
+            isContainer = 1;
+        }
+        else if (c == '[')
+        {
+            ps->p++;
+            v = value_new(JSON_ARRAY);
+            isContainer = 1;
+        }
+        else if (c == 't')
+        {
+            if (ps->end - ps->p >= 4 && strncmp(ps->p, "true", 4) == 0)
+            {
+                ps->p += 4;
+                v = value_new(JSON_BOOL);
+                if (v)
+                {
+                    v->boolean = 1;
+                }
+            }
+        }
+        else if (c == 'f')
+        {
+            if (ps->end - ps->p >= 5 && strncmp(ps->p, "false", 5) == 0)
+            {
+                ps->p += 5;
+                v = value_new(JSON_BOOL);
+            }
+        }
+        else if (c == 'n')
+        {
+            if (ps->end - ps->p >= 4 && strncmp(ps->p, "null", 4) == 0)
+            {
+                ps->p += 4;
+                v = value_new(JSON_NULL);
+            }
+        }
+        else
+        {
+            v = parse_number(ps);
+        }
+
+        if (!v)
+        {
+            goto fail;
+        }
+
+        if (isContainer)
+        {
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                PFrame *grown = (PFrame *)realloc(st, sizeof(PFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    json_free(v);
+                    goto fail;
+                }
+                st = grown;
+                cap = ncap;
+            }
+            st[top].container = v;
+            st[top].key = NULL;
+            top++;
+            continue; /* empty-member check runs at step 2 */
+        }
+        delivered = v; /* scalar: attach at step 1 next iteration */
     }
-    else
+
+    free(st);
+    return root;
+
+fail:
+    if (delivered)
     {
-        v = parse_number(ps);
+        json_free(delivered);
     }
-    ps->depth--;
-    return v;
+    for (int i = 0; i < top; i++)
+    {
+        if (st[i].key)
+        {
+            free(st[i].key);
+        }
+        json_free(st[i].container);
+    }
+    free(st);
+    return NULL;
 }
 
 JsonValue *json_decode(const char *text)
