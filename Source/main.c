@@ -1580,6 +1580,16 @@ static void css_autotest_tick(void)
  * the nav). PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
+#ifdef PLUTO_NAV_AUTOTEST_ENGINE
+/* Optional engine force for the run: 0=muJS 1=Duktape 2=QuickJS 3=XS
+ * (Moddable). Storage AND the live router are set before navigation; the
+ * [jsbridge] page attach / [js] close[<name>] lines prove which engine
+ * binaries ran the page. Mirrors the other *_AUTOTEST_ENGINE seams. */
+#define NAV_AUTOTEST_ENGINE_VAL PLUTO_NAV_AUTOTEST_ENGINE
+#endif
+#ifndef NAV_AUTOTEST_ENGINE_VAL
+#define NAV_AUTOTEST_ENGINE_VAL (-1)
+#endif
 static void nav_autotest_tick(void)
 {
     if (g_navTestPhase == 3 || isRendering)
@@ -1596,6 +1606,23 @@ static void nav_autotest_tick(void)
         if (currentState != STATE_HOME)
         {
             return;
+        }
+        if (NAV_AUTOTEST_ENGINE_VAL >= 0)
+        {
+            static int navEngineApplied = 0;
+            if (!navEngineApplied)
+            {
+                storage_set_setting_int("jsEngine", NAV_AUTOTEST_ENGINE_VAL);
+                jsbridge_set_engine(NAV_AUTOTEST_ENGINE_VAL);
+                if (storage_setting_int("jsEnabled") != 2)
+                {
+                    storage_set_setting_int("jsEnabled", 2); /* JS Full */
+                    logger_log("[nav-autotest] jsEnabled bumped to 2 (Full)");
+                }
+                logger_log("[nav-autotest] engine forced: %d",
+                           (int)NAV_AUTOTEST_ENGINE_VAL);
+                navEngineApplied = 1;
+            }
         }
         /* The Google speed-dial card is bookmark #2 (index 2): Storage
          * order is Bitmap Gallery(1), Google(2), ... Steer with crank. */

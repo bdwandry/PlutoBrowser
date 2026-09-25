@@ -1679,6 +1679,7 @@ static int xs_init(JsBridge *b, const char *baseUrl)
         /* aborted during setup (OOM/stack/meter): contained init failure */
         logger_log("[xs] init aborted (%s)", fxAbortString(m->exitStatus));
         xsDeleteMachine(m);
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
         JFree(st);
         b->implState = NULL;
         return -1;
@@ -1818,6 +1819,16 @@ static void xs_run_script(JsBridge *b, const char *src, size_t len,
                    index, why);
         st->machine = NULL;
         xsDeleteMachine(m);
+        /* xsDeleteMachine's stock fxDeleteMachine frees whole heap chunks
+         * through c_free, but funnel size-tracking can drop those entries
+         * (table pressure, 8-probe cap) and grow-shrinks subtract nothing
+         * when the old entry was lost — the dead machine's bytes then stay
+         * as phantom "live" weight. Left alone, the SW3a gate refuses the
+         * parser/walker's arena chunks (device 2026-09-24: bing.com →
+         * "[xs] abort: memory full" → phantom ~6.5MB live > 6.5MB budget →
+         * refusals → w->error → spurious "Parse Error" page). Re-base the
+         * counter to the tracked table's sum. */
+        pluto_mem_resync_live();
     }
 }
 
@@ -1882,6 +1893,7 @@ static int xs_dispatch_click(JsBridge *b, const void *anchorNode)
             logger_log("[js] click dispatch aborted engine — engine reset");
             st->machine = NULL;
             xsDeleteMachine(m);
+            pluto_mem_resync_live(); /* counter re-base (see run_script) */
             return fired ? JSB_CLICK_NAVIGATE : JSB_CLICK_NONE;
         }
         if (b->preventDef)
@@ -1959,6 +1971,7 @@ static int xs_run_timer_ref(JsBridge *b, void *fnRef)
         logger_log("[js] timer dispatch aborted engine — engine reset");
         xsDeleteMachine(m);
         st->machine = NULL;
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
         return -1;
     }
     return 0;
@@ -1994,6 +2007,7 @@ static void xs_close(JsBridge *b)
         xsEndHostExit(m);
         xsDeleteMachine(m); /* frees wrappers, scripts, pinned slots */
         st->machine = NULL;
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
     }
     JFree(st);
     b->implState = NULL;
@@ -2233,6 +2247,7 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
         logger_log("[js] xhr dispatch aborted engine — engine reset");
         xsDeleteMachine(m);
         st->machine = NULL;
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
         return -1;
     }
     return 0;

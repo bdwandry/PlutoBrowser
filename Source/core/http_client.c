@@ -1997,7 +1997,14 @@ void http_update(void)
                     {
                         want = READ_CHUNK;
                     }
-                    long got = pluto_spill_read(sp, (long)done,
+                    /* Spill offsets are FILE-relative: the first spilled
+                     * byte lives at 0, NOT at ramBody. done indexes the
+                     * combined [ram|disk] delivery buffer, so the file
+                     * offset is done - ramBody (SW2b fix: the old code
+                     * passed `done`, skipping the first ramBody spilled
+                     * bytes and reading past EOF — truncating every
+                     * non-gzip body, i.e. all images). */
+                    long got = pluto_spill_read(sp, (long)(done - ramBody),
                                                 body + done, want);
                     if (got <= 0)
                     {

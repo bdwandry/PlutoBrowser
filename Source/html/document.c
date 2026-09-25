@@ -538,33 +538,83 @@ DocBoxSpacing doc_parse_box_spacing(const DocStyleEntry *attrs, int attrCount)
     return out;
 }
 
-/* ── concatNodeText ─────────────────────────────────────────────────────────── */
-
-static size_t concat_rec(const DomNode *n, char *buf, size_t cap, size_t off)
+/* ── concatNodeText ─────────────────────────────────────────────────────────
+ * Iterative pre-order walk (explicit stack, heap-allocated): the previous
+ * recursion consumed one C frame per DOM depth; a deep tree overflowed the
+ * device's 61.8KB game-task stack (the same class of crash this file's
+ * walker already converted away from). Semantics identical: text nodes
+ * advance the logical offset by their FULL length, writes clamped to cap.
+ */
+static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
 {
-    if (!n)
+    typedef struct
+    {
+        const DomNode *node;
+        int nextChild;
+    } ConcatFrame;
+    if (!node)
     {
         return off;
     }
-    if (n->kind == DOM_TEXT)
+    int cap_ = 64;
+    int top = 0;
+    ConcatFrame *st = (ConcatFrame *)PLUTO_MALLOC(sizeof(ConcatFrame) * (size_t)cap_);
+    if (!st)
     {
-        const char *t = n->text ? n->text : "";
-        size_t len = strlen(t);
-        if (off + 1 < cap)
-        {
-            size_t room = cap - off - 1;
-            size_t cn = len < room ? len : room;
-            memcpy(buf + off, t, cn);
-        }
-        return off + len; /* logical offset advances by FULL len; writes clamped */
+        return off; /* allocator out: report what we have (0) */
     }
-    if (n->kind == DOM_ELEMENT)
+    st[top].node = node;
+    st[top].nextChild = 0;
+    top++;
+    while (top > 0)
     {
-        for (int i = 0; i < n->childCount; i++)
+        ConcatFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (n->kind == DOM_TEXT)
         {
-            off = concat_rec(n->children[i], buf, cap, off);
+            const char *t = n->text ? n->text : "";
+            size_t len = strlen(t);
+            if (off + 1 < cap)
+            {
+                size_t room = cap - off - 1;
+                size_t cn = len < room ? len : room;
+                memcpy(buf + off, t, cn);
+            }
+            off += len; /* logical offset advances by FULL len; writes clamped */
+            top--;
+            continue;
+        }
+        if (f->nextChild < n->childCount)
+        {
+            const DomNode *c = n->children[f->nextChild++];
+            if (!c)
+            {
+                continue;
+            }
+            if (top + 1 >= cap_)
+            {
+                int ncap = cap_ * 2;
+                ConcatFrame *grown = (ConcatFrame *)PLUTO_REALLOC(
+                    st, sizeof(ConcatFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    PLUTO_FREE(st);
+                    return off; /* nothing more we can append */
+                }
+                st = grown;
+                cap_ = ncap;
+                f = &st[top - 1]; /* realloc may have moved the array */
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
         }
     }
+    PLUTO_FREE(st);
     return off;
 }
 
@@ -747,63 +797,147 @@ static int svg_append_escaped_attr(StrBuf *sb, const char *v)
     return 0;
 }
 
-static int svg_serialize(const DomNode *n, StrBuf *sb)
+/* Iterative SVG subtree serializer (explicit stack, heap-allocated). The
+ * recursion depth previously scaled with the SVG's element nesting — an
+ * inline SVG can be arbitrarily deep, so this was a device stack hazard on
+ * the same path the walker already converted. Output is byte-identical:
+ * enter prints the open tag + attrs, a frame pop prints the close tag. */
+static int svg_serialize(const DomNode *root, StrBuf *sb)
 {
-    if (n->kind == DOM_TEXT)
+    typedef struct
     {
-        char *enc = entities_encode(n->text ? n->text : "");
-        if (!enc)
-        {
-            return -1;
-        }
-        int rc = strbuf_append(sb, enc);
-        PLUTO_FREE(enc);
-        return rc;
+        const DomNode *node;
+        int nextChild;
+        int opened; /* 1 once ">" was emitted (close tag needed) */
+    } SvgFrame;
+    if (!root)
+    {
+        return 0;
     }
-    if (n->kind == DOM_ELEMENT)
+    int cap = 32;
+    int top = 0;
+    SvgFrame *st = (SvgFrame *)PLUTO_MALLOC(sizeof(SvgFrame) * (size_t)cap);
+    if (!st)
     {
-        if (strbuf_append_char(sb, '<') != 0 ||
-            strbuf_append(sb, n->tag ? n->tag : "") != 0)
+        return -1;
+    }
+    st[top].node = root;
+    st[top].nextChild = 0;
+    st[top].opened = 0;
+    top++;
+    while (top > 0)
+    {
+        SvgFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (n->kind == DOM_TEXT)
         {
-            return -1;
-        }
-        for (int i = 0; i < n->attrCount; i++)
-        {
-            const char *v = n->attrs[i].value == PLUTO_TOK_ATTR_TRUE
-                                ? ""
-                                : (n->attrs[i].value ? n->attrs[i].value : "");
-            if (strbuf_append_char(sb, ' ') != 0 ||
-                strbuf_append(sb, n->attrs[i].key) != 0 ||
-                strbuf_append(sb, "=\"") != 0 ||
-                svg_append_escaped_attr(sb, v) != 0 ||
-                strbuf_append_char(sb, '"') != 0)
+            char *enc = entities_encode(n->text ? n->text : "");
+            if (!enc)
             {
+                PLUTO_FREE(st);
                 return -1;
             }
-        }
-        if (n->childCount == 0)
-        {
-            return strbuf_append(sb, "/>") != 0 ? -1 : 0;
-        }
-        if (strbuf_append_char(sb, '>') != 0)
-        {
-            return -1;
-        }
-        for (int c = 0; c < n->childCount; c++)
-        {
-            if (svg_serialize(n->children[c], sb) != 0)
+            int rc = strbuf_append(sb, enc);
+            PLUTO_FREE(enc);
+            if (rc != 0)
             {
+                PLUTO_FREE(st);
                 return -1;
             }
+            top--;
+            continue;
         }
-        if (strbuf_append(sb, "</") != 0 ||
-            strbuf_append(sb, n->tag ? n->tag : "") != 0 ||
-            strbuf_append_char(sb, '>') != 0)
+        if (n->kind != DOM_ELEMENT)
         {
-            return -1;
+            top--; /* other kinds → "" (parity with the recursive version) */
+            continue;
+        }
+        if (f->nextChild == 0 && !f->opened)
+        {
+            /* open tag + attributes */
+            if (strbuf_append_char(sb, '<') != 0 ||
+                strbuf_append(sb, n->tag ? n->tag : "") != 0)
+            {
+                PLUTO_FREE(st);
+                return -1;
+            }
+            for (int i = 0; i < n->attrCount; i++)
+            {
+                const char *v = n->attrs[i].value == PLUTO_TOK_ATTR_TRUE
+                                    ? ""
+                                    : (n->attrs[i].value ? n->attrs[i].value : "");
+                if (strbuf_append_char(sb, ' ') != 0 ||
+                    strbuf_append(sb, n->attrs[i].key) != 0 ||
+                    strbuf_append(sb, "=\"") != 0 ||
+                    svg_append_escaped_attr(sb, v) != 0 ||
+                    strbuf_append_char(sb, '"') != 0)
+                {
+                    PLUTO_FREE(st);
+                    return -1;
+                }
+            }
+            if (n->childCount == 0)
+            {
+                if (strbuf_append(sb, "/>") != 0)
+                {
+                    PLUTO_FREE(st);
+                    return -1;
+                }
+                top--; /* leaf done: no close tag */
+                continue;
+            }
+            if (strbuf_append_char(sb, '>') != 0)
+            {
+                PLUTO_FREE(st);
+                return -1;
+            }
+            f->opened = 1;
+            /* fall through to the child loop below */
+        }
+        if (f->nextChild < n->childCount)
+        {
+            const DomNode *c = n->children[f->nextChild++];
+            if (!c)
+            {
+                continue;
+            }
+            if (top + 1 >= cap)
+            {
+                int ncap = cap * 2;
+                SvgFrame *grown = (SvgFrame *)PLUTO_REALLOC(
+                    st, sizeof(SvgFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    PLUTO_FREE(st);
+                    return -1;
+                }
+                st = grown;
+                cap = ncap;
+                f = &st[top - 1]; /* realloc may have moved the array */
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            st[top].opened = 0;
+            top++;
+        }
+        else
+        {
+            /* all children emitted: close tag */
+            if (f->opened)
+            {
+                if (strbuf_append(sb, "</") != 0 ||
+                    strbuf_append(sb, n->tag ? n->tag : "") != 0 ||
+                    strbuf_append_char(sb, '>') != 0)
+                {
+                    PLUTO_FREE(st);
+                    return -1;
+                }
+            }
+            top--;
         }
     }
-    return 0; /* other kinds → "" */
+    PLUTO_FREE(st);
+    return 0;
 }
 
 char *doc_serialize_svg_node(const DomNode *n)
