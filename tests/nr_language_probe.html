@@ -1,0 +1,18 @@
+<!doctype html><html><body><div id="out">pending</div><script>
+function t(label,fn){try{return label+':'+fn()+';';}catch(e){return label+':ERR:'+e.message+';';}}
+var result='';
+result+=t('binding',function(){var [a,b]=[1,2];return a+':'+b;});
+result+=t('assignment',function(){var a,b;[a,b]=[3,4];return a+':'+b;});
+result+=t('default',function(){var [a=5,b=6]=[undefined];return a+':'+b;});
+result+=t('rest',function(){var [a,...b]=[1,2,3];return a+':'+b.join(',');});
+result+=t('params',function(){function f([a,b]){return a+b;}return f([1,2]);});
+result+=t('spreadcall',function(){function f(){return Array.prototype.join.call(arguments,',');}return f(1,...[2,3],4);});
+result+=t('spreadarray',function(){return [1,...[2,3],4].join(',');});
+result+=t('forof',function(){var x=0;for(var a of [1,2])x+=a;return x;});
+result+=t('nestedbinding',function(){var [a,[b,c]]=[1,[2,3]];return a+b+c;});
+result+=t('callbinding',function(){function f(){return [7,8];}var [a,b]=f();return a+':'+b;});
+result+=t('closuremapbinding',function(){const make=e=>v=>typeof v===e, [a,b,c,d]=['string','number','boolean','object'].map(make);return a('x')+':'+b(3)+':'+c(true)+':'+d({});});
+result+=t('extends',function(){var obj={Base:class{value(){return 7;}}};class Child extends obj.Base{value(){return super.value()+1;}}const [a,b]=[1,2];return new Child().value()+':'+a+':'+b;});
+result+=t('computedmethod',function(){var key='value';class Box{[key](){return 9;}static [key+'Static'](){return 10;}get [key+'Get'](){return 11;}}return new Box().value()+':'+Box.valueStatic()+':'+new Box().valueGet;});
+document.getElementById('out').textContent=result;
+</script></body></html>

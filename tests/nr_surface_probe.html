@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>surface</title></head><body><div id="o">pending</div><script>
+function t(label,fn){try{return label+':'+fn()+';';}catch(e){return label+':ERR:'+e.message+';';}}
+var log='';
+log+=t('docEl',function(){return typeof document.documentElement;});
+log+=t('bodyStyle',function(){var s=document.body.style;s.width='1px';return s.width;});
+log+=t('gcsDocEl',function(){var c=getComputedStyle(document.documentElement);return c.getPropertyValue('width')+'|'+(typeof c.getPropertyValue);});
+log+=t('gcsElement',function(){var c=getComputedStyle(document.body);return c.getPropertyValue('width');});
+log+=t('gcsBogus',function(){var c=getComputedStyle({});return c.getPropertyValue('color');});
+log+=t('classList',function(){document.body.classList.add('z');return document.body.classList.contains('z');});
+log+=t('createElement',function(){var el=document.createElement('textarea');el.value='x';return el.tagName+':'+el.value;});
+log+=t('ownerDoc',function(){return document.body.ownerDocument===document;});
+log+=t('defaultView',function(){return document.defaultView===window;});
+log+=t('history',function(){history.pushState({a:1},'','/p');return JSON.stringify(history.state);});
+log+=t('xhr',function(){var x=new XMLHttpRequest();x.open('GET','/',true);return 'opened';});
+log+=t('iframeCtor',function(){return document.createElement('div') instanceof HTMLElement;});
+document.getElementById('o').textContent=log;
+</script></body></html>
