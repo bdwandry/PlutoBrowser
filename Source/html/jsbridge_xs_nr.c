@@ -473,7 +473,8 @@ void fxAbort(txMachine *the, int status)
         "too much computation", "unhandled rejection",
         "native stack overflow", "incompatible mod",
         "parser state corruption" };
-    const char *what = (status >= 0 && (unsigned)status < sizeof(kAbortNames) / sizeof(kAbortNames[
+    const char *what = (status >= 0 && (unsigned)status <
+                        sizeof(kAbortNames) / sizeof(kAbortNames[0]))
                            ? kAbortNames[status]
                            : "unknown";
     if (the->exitStatus == xsNormalExit)
