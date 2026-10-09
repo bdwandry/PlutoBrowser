@@ -12,6 +12,7 @@
 Source/pdex.elf
 Source/pdex.dylib
 
-# Device/simulator test logs (root-level; tests/logs fixtures stay tracked)
+# Device/simulator test logs (root-level + tests/logs run artifacts)
 /logs/
 /devlogs/
+tests/logs/
