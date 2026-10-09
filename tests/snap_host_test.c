@@ -473,6 +473,43 @@ int main(void)
     CHECK(pluto_snap_load(URL, MODE_RAW_HTML, 0, 0) == NULL,
           "invalidate removes the entry");
 
+    /* 5b. R29: empty renders are NEVER cached (a bot-blocked or failed
+     * first visit must not poison the fast path with "(Empty Web Page)")
+     * and a degenerate cached entry loads as a MISS (self-heal). The
+     * empty doc is built EXACTLY as the walker builds it: a single
+     * italic paragraph with the verbatim placeholder text — real pages
+     * always have ≥1 block and never match this shape. */
+    {
+        DocParseResult *empty = build_fake_doc();
+        /* strip the fake content: keep ONLY the walker's placeholder
+         * paragraph (1 block, 1 italic inline, verbatim text) — the exact
+         * shape document.c inserts for an empty page */
+        for (int i = 0; i < empty->blockCount; i++)
+        {
+            empty->blocks[i] = NULL;
+        }
+        empty->blockCount = 0;
+        DocBlock *p = add_block(empty, DOC_BLOCK_PARAGRAPH);
+        {
+            DocInline *in = mk_inline(g_a, DOC_INLINE_TEXT,
+                                      "(Empty Web Page)", DOC_INF_ITALIC,
+                                      NULL);
+            push_ptr((void ***)&p->inlines, &p->inlineCount, &p->inlineCap,
+                     in);
+        }
+        CHECK(doc_is_empty_render(empty) == 1,
+              "placeholder-only doc detected as empty render");
+        CHECK(doc_is_empty_render(orig) == 0,
+              "real-content doc is NOT an empty render");
+        CHECK(pluto_snap_save(empty, "https://example.com/empty-render",
+                              MODE_RAW_HTML, 1000003UL) == 0,
+              "empty render refuses to save");
+        CHECK(pluto_snap_load("https://example.com/empty-render",
+                              MODE_RAW_HTML, 0, 0) == NULL,
+              "empty render is not cached");
+        free_fake_doc(empty);
+    }
+
     /* 6. re-save for the LRU test + a second url */
     CHECK(pluto_snap_save(orig, URL, MODE_RAW_HTML, 1000000UL) > 0, "re-save ok");
     DocParseResult *orig2 = build_fake_doc();

@@ -42,8 +42,13 @@
 
 /* SW2b: bodies at or over this size become disk-resident (re-spilled);
  * smaller ones stay arena RAM copies exactly as before. The old per-script
- * cap REFUSED these; they now download fully and live on disk. */
-#define JSEXT_SPILL_THRESHOLD JSBRIDGE_MAX_SCRIPT_BYTES
+ * cap REFUSED these; they now download fully and live on disk. R15: 256KB
+ * (was JSBRIDGE_MAX_SCRIPT_BYTES) — with the streaming compile (R15) a
+ * disk-resident body costs the engine ~1KB of read window instead of a
+ * full RAM copy, so big scripts belong on disk as early as possible: the
+ * arena never squats the body and compile-time peak drops by the source
+ * size. Disk write cost is one pass per fetch (flash-wear safe). */
+#define JSEXT_SPILL_THRESHOLD (256 * 1024)
 
 PlaydateAPI *pluto_pd(void);
 void pluto_free(void *p);
@@ -1091,13 +1096,15 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
  * (The legacy overCap path stays armed for the no-spill RAM fallback.) */
 static void fetch_on_progress(int cur, int total)
 {
-    (void)total;
     JsExtFetch *f = g_fetch;
     if (!f || !f->fetching)
     {
         return;
     }
-    (void)cur;
+    /* R30l: feed the loading screen's byte counter (see jsext.h) — the
+     * 502716-byte bundle is the only transfer big enough to be visible,
+     * so this is the line the user actually watches move. */
+    pluto_ui_net_progress(cur, total);
 }
 
 static void fetch_on_error(const char *message)
@@ -1111,6 +1118,52 @@ static void fetch_on_error(const char *message)
                f->ext[f->idx].url[0] ? f->ext[f->idx].url : "(url)", message);
     f->fetching = 0;
     f->idx++; /* advance past the failed file: skip-on-fail semantics */
+}
+
+/* R15: zero-copy disk delivery — the HTTP client hands over a pure-body
+ * spill HANDLE (body never materialized in RAM). We adopt it directly as
+ * the disk-resident source: no re-spill round-trip, no body-size RAM
+ * transient anywhere in the fetch. This is the general disk-offload path
+ * the SW2b comment anticipated; every site's big script takes it. */
+static void fetch_on_success_spill(int status, SpillFile spill,
+                                   size_t bodyLen, const char *url)
+{
+    JsExtFetch *f = g_fetch;
+    if (!f || !f->fetching || !url)
+    {
+        if (spill >= 0)
+        {
+            pluto_spill_discard(spill); /* stale: nobody adopts it */
+        }
+        return;
+    }
+    int i = f->idx;
+    if (status < 200 || status >= 300)
+    {
+        logger_log("[jsext] FAIL %s status=%d", url, status);
+        pluto_spill_discard(spill);
+    }
+    else if (spill < 0 || bodyLen == 0)
+    {
+        logger_log("[jsext] FAIL %s empty disk body", url);
+        if (spill >= 0)
+        {
+            pluto_spill_discard(spill);
+        }
+    }
+    else
+    {
+        /* ADOPT the handle. No page budget: disk residency is the point
+         * of SW2b. The per-script SOURCE ceiling applies at execution. */
+        f->ext[i].body = NULL;
+        f->ext[i].spill = spill;
+        f->ext[i].len = bodyLen;
+        f->totalBytes += bodyLen;
+        logger_log("[jsext] ok %s (%zu bytes, disk-resident, zero-copy)",
+                   url, bodyLen);
+    }
+    f->fetching = 0;
+    f->idx++;
 }
 
 /* SW3 test hook: 0 = production default (JSBRIDGE_EXT_PAGE_BUDGET). */
@@ -1178,6 +1231,7 @@ int jsext_prefetch_step(void *state)
     HttpCallbacks cbs;
     memset(&cbs, 0, sizeof(cbs));
     cbs.onSuccess = fetch_on_success;
+    cbs.onSuccessSpill = fetch_on_success_spill;
     cbs.onProgress = fetch_on_progress;
     cbs.onError = fetch_on_error;
     f->overCap = 0;
@@ -1185,9 +1239,15 @@ int jsext_prefetch_step(void *state)
      * one materialized body here. fetch_on_success RE-SPILLS bodies over
      * the old per-script cap to disk (one flash write, RAM transient) and
      * adopts that handle as the disk-resident source — the arena never
-     * holds big sources. */
+     * holds big sources. R15: request IDENTITY encoding for script fetches
+     * — gzip bodies would be staged wholly in RAM for the one-shot gunzip
+     * (a ~500KB member = the heap-shredder that starved the next compile);
+     * raw bodies stream straight to disk. */
+    http_set_identity_encoding(1);
     int before = f->idx;
-    if (!http_get(e->url, &cbs))
+    int started = http_get(e->url, &cbs);
+    http_set_identity_encoding(0);
+    if (!started)
     {
         logger_log("[jsext] FAIL %s immediate", e->url);
         f->idx++;

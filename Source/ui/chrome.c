@@ -10,6 +10,7 @@
 
 #include "ui/chrome.h"
 #include "core/constants.h"
+#include "core/netmon.h"
 #include "render/style.h"
 #include "pd_api.h"
 
@@ -82,17 +83,39 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     truncate_ellipsis(displayHost, hostTrunc, sizeof(hostTrunc), 25);
     pd->graphics->drawText(hostTrunc, strlen(hostTrunc), kUTF8Encoding, 22, 4);
 
-    /* 3. Reader-mode badge */
+    /* ── Right-corner layout: clock (or comet) rightmost with a 6px screen
+     * margin, wifi icon 8px left of it, badge 8px left of the icon — all
+     * computed from the REAL text width so nothing ever overlaps. ── */
+    char timeFormatted[8] = "--:--";
+    int rightW = 26; /* loading comet cluster ≈26px */
+    if (!isLoading)
+    {
+        unsigned int ms = 0;
+        uint32_t epoch = pd->system->getSecondsSinceEpoch(&ms);
+        int tz = pd->system->getTimezoneOffset();
+        struct PDDateTime dt;
+        pd->system->convertEpochToDateTime(epoch + (uint32_t)(tz * 60), &dt);
+        snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", dt.hour, dt.minute);
+        rightW = style_get_text_width(PLUTO_FONT_BODY_BOLD, timeFormatted);
+    }
+    int iconX = SCREEN_WIDTH - 6 - rightW - 8 - 15; /* 15px icon, 8px gaps */
+
+    /* 5. Reader-mode badge — SAME font + SAME baseline as host and time
+     * (body bold, y=4): the whole top bar reads as one text line. */
     if (urlObj && strcmp(urlObj->scheme, "about") != 0 && !isLoading)
     {
         const char *badgeText = isReaderMode ? "[READ]" : "[WEB]";
-        pd->graphics->setFont(fontSmall);
-        int badgeW = style_get_text_width(PLUTO_FONT_SMALL, badgeText);
+        pd->graphics->setFont(font);
+        int badgeW = style_get_text_width(PLUTO_FONT_BODY_BOLD, badgeText);
         pd->graphics->drawText(badgeText, strlen(badgeText), kUTF8Encoding,
-                               SCREEN_WIDTH - badgeW - 62, 6);
+                               iconX - 8 - badgeW, 4);
     }
 
-    /* 4. Right status: loading animation or time */
+    /* 6. WiFi indicator by the clock (both loading and clock states),
+     * vertically centered on the y=4 text line (13px icon, text ~12px). */
+    netmon_draw(iconX, 4);
+
+    /* 7. Right status: loading animation or time */
     if (isLoading)
     {
         int baseX = SCREEN_WIDTH - 18;
@@ -133,18 +156,9 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     }
     else
     {
-        char timeFormatted[8] = "--:--";
-        unsigned int ms = 0;
-        uint32_t epoch = pd->system->getSecondsSinceEpoch(&ms);
-        int tz = pd->system->getTimezoneOffset();
-        struct PDDateTime dt;
-        pd->system->convertEpochToDateTime(epoch + (uint32_t)(tz * 60), &dt);
-        snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", dt.hour, dt.minute);
-
-        int timeW = style_get_text_width(PLUTO_FONT_BODY_BOLD, timeFormatted);
         pd->graphics->setFont(font);
         pd->graphics->drawText(timeFormatted, strlen(timeFormatted), kUTF8Encoding,
-                               SCREEN_WIDTH - timeW - 6, 4);
+                               SCREEN_WIDTH - rightW - 6, 4);
     }
 
     pd->graphics->setDrawMode(kDrawModeCopy);

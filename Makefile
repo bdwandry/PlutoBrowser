@@ -1,4 +1,8 @@
 HEAP_SIZE      = 16777216
+# NOTE (R17): STACK_SIZE does NOT resize the device game-task stack for a
+# pdex game — the OS fixes it (~61.8KB; no .S in the link script, nothing
+# consumes -D__STACK_SIZE). Kept at the SDK default; deep-parse admission
+# is handled by the compile-safety guards instead.
 STACK_SIZE     = 61800
 
 PRODUCT = PlutoBrowser.pdx
@@ -16,14 +20,15 @@ endif
 ######
 # IMPORTANT: You must add your source folders to VPATH for make to find them
 ######
-VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js/muJS:Source/js/duktape:Source/js/QuickJS:Source/js/xs_moddable/sources:Source/js/xs_moddable/platforms
+VPATH += Source:Source/core:Source/util:Source/html:Source/render:Source/render/decoders:Source/ui:Source/keyboard:Source/js/muJS:Source/js/duktape:Source/js/QuickJS:Source/js/xs_moddable/sources:Source/js/xs_moddable/platforms:Source/js/xs_moddable_no_recursion/sources:Source/js/xs_moddable_no_recursion/platforms
 
 # List C source files here (grows as phases land)
-SRC = \
+SRC_DEVICE = \
 	Source/main.c \
 	Source/core/logger.c \
 	Source/core/constants.c \
 	Source/core/url.c \
+	Source/core/netmon.c \
 	Source/core/encoding.c \
 	Source/core/cookie_jar.c \
 	Source/core/storage.c \
@@ -71,6 +76,7 @@ SRC = \
 	Source/html/document.c \
 	Source/html/readability.c \
 	Source/html/jsbridge.c \
+	Source/html/jsbridge_bundler.c \
 	Source/html/jsbridge_mujs.c \
 	Source/html/jsbridge_duktape.c \
 	Source/html/jsbridge_quickjs.c \
@@ -108,7 +114,6 @@ SRC = \
 	Source/js/muJS/utf.c \
 	Source/js/duktape/duktape.c \
 	Source/html/qjs_shim_quickjs.c \
-	Source/html/jsbridge_xs.c \
 	Source/js/xs_moddable/sources/xsAll.c \
 	Source/js/xs_moddable/sources/xsAPI.c \
 	Source/js/xs_moddable/sources/xsArguments.c \
@@ -158,10 +163,21 @@ SRC = \
 	Source/html/qjs_shim_libunicode.c \
 	Source/html/qjs_shim_cutils.c \
 	Source/html/qjs_shim_dtoa.c \
-	Source/html/qjs_pthread_stubs.c
+	Source/html/qjs_pthread_stubs.c \
+
+# The simulator compiles all engines in ONE gcc invocation, so per-object -D
+# separation is impossible. The sim therefore builds the FORK tree only
+# (isolation = fork's xs_nr_rename.h first-include; stock objects are NOT in
+# the dylib). The device build compiles per-object with per-object CPFLAGS
+# and swaps in the stock tree via SRC_DEVICE (below).
+# (SRC_DEVICE above lists the STOCK tree plus the sim-only extras — the fork
+# tree is DERIVED from it by the patsubst below, so the two lists can never
+# drift apart. jsbridge_xs_nr.c must NOT be patsubst-mapped; it is added to
+# the sim SRC separately, and the device build filters it out.)
+SRC = $(patsubst Source/js/xs_moddable/%,Source/js/xs_moddable_no_recursion/%,$(SRC_DEVICE)) Source/html/jsbridge_xs_nr.c
 
 # List all user directories here
-UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS Source/js/xs_moddable/sources Source/js/xs_moddable/platforms
+UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS Source/js/xs_moddable/sources Source/js/xs_moddable/platforms Source/js/xs_moddable_no_recursion/sources Source/js/xs_moddable_no_recursion/platforms
 
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
@@ -180,6 +196,19 @@ UDEFS =
 # units get distinct pluto_qjs_* symbols while muJS keeps its own. Do not
 # compile Source/js/QuickJS/*.c directly — always through the shims.
 UDEFS += -DCONFIG_VERSION="\"2026-06-04\""
+
+# R26g DEVICE-CRITICAL (2026-10-05): force JS_PTR64 so quickjs.h takes the
+# portable struct-JSValue path on the 32-bit ARM target instead of the
+# forced JS_NAN_BOXING (quickjs.h:63). The boxing path is the device
+# hard-crash mechanism: UNDEFINSTR wild jump during QuickJS's COMPILE of
+# bundle spans ≥~1KB (deterministic across 3 runs; spans ≤498B ran fine;
+# a 64KB-stack host thread with the funnel compiled identical bytes
+# containedly, and JS_NAN_BOXING forced on arm64 segfaults `1+1` — the
+# boxing representation itself is broken for this content). JS_PTR64's
+# only other consumer is map_hash_pointer's hash variant. Cost: JSValue is
+# 16B instead of 8B — engine heap grows ~1.5x, hence the raised
+# QJS_MEM_LIMIT in jsbridge_quickjs.c.
+UDEFS += -DJS_PTR64
 
 # Route QuickJS's pthread mutex/condvar calls (its Atomics intrinsics + a
 # JS_NewClassID guard) to no-op/safe-fail primitives for the single-threaded
@@ -251,6 +280,21 @@ ULIBS =
 
 override PDCFLAGS += -k -s
 
+# Device builds: per-object compilation lets BOTH XS engines coexist (the
+# fork's xs_nr_rename.h renames every engine symbol to its _nr twin and the
+# two bridge TUs keep their helpers static), so the device links the fork
+# tree as-is PLUS the stock tree and both bridge TUs. Settings can then
+# select XS (Moddable) or XS (No Recursion) on device, matching the sim.
+#
+# This MUST run before the common.mk include below: the pdex.elf rule's
+# prerequisite list ($(OBJS) <- $(SRC)) is expanded at include time, while
+# the link recipe expands it lazily — a later SRC mutation would leave the
+# prerequisite graph missing the appended stock objects (link fails with
+# "No such file" for objects make never planned to compile).
+ifeq ($(MAKECMDGOALS),device)
+SRC := $(SRC) $(patsubst Source/js/xs_moddable_no_recursion/%,Source/js/xs_moddable/%,$(filter Source/js/xs_moddable_no_recursion/%,$(SRC))) Source/html/jsbridge_xs.c
+endif
+
 include $(SDK)/C_API/buildsupport/common.mk
 
 # Optional extra flags for the simulator dylib (e.g. make SIMDEFS=-DPLUTO_JS_AUTOTEST)
@@ -264,6 +308,16 @@ endif
 # renames AND the muJS limits — so both targets compile the exact same code
 # (the sim validates device behavior only if the flags match).
 DYLIB_FLAGS += $(UDEFS)
+
+# The sim's single-pass dylib cannot hold both XS engines (per-file -D is
+# impossible there), so it links the no-recursion fork only. This macro
+# drops the stock-XS vtable reference from jsbridge.c in sim builds; the
+# device build keeps the stock engine fully linked.
+ifndef DEVICEDEFS
+ifeq ($(MAKECMDGOALS),simulator)
+DYLIB_FLAGS += -DPLUTO_NO_STOCK_XS
+endif
+endif
 
 # Duktape's stock duk_config.h probes for math functions (fmin/fmax/fmod)
 # that macOS's libSystem does not export as separate symbols — link libm
@@ -299,3 +353,10 @@ build/Source/html/qjs_shim_%.o: CPFLAGS = $(QJS_CPFLAGS) -MD -MP -MF $(DEPDIR)/$
 # re-added per-target so incremental builds stay correct.
 XS_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage
 build/Source/js/xs_moddable/sources/%.o: CPFLAGS = $(XS_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+
+# Same treatment for the no-recursion fork (Source/js/xs_moddable_no_recursion):
+# identical flags to the stock engine, isolated by the fork's xs_nr_rename.h
+# (every engine symbol compiles to its _nr twin, verified zero overlap).
+XS_NR_CPFLAGS = $(XS_CPFLAGS)
+build/Source/js/xs_moddable_no_recursion/sources/%.o: CPFLAGS = $(XS_NR_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+

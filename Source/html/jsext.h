@@ -73,6 +73,14 @@ void jsext_prefetch_abort(JsExtFetch *f);
 /* Total bytes fetched by the most recent session (diagnostics). */
 size_t jsext_last_bytes(void);
 
+/* R30l loading-UI byte counter: jsext's fetch loop reports the CURRENT
+ * file's transfer progress to main.c (which defines this function) so the
+ * device's loading screen shows REAL download bytes for big scripts.
+ * Before this the counter only tracked the main HTML request (a 402-byte
+ * gzip body, done in one frame) — the user always saw "0 bytes being
+ * downloaded" while the 502716-byte bundle moved with no visible number. */
+void pluto_ui_net_progress(int cur, int total);
+
 /* Navigation/teardown hook: abort ANY active session (module-global lookup,
  * safe on none). Called from navigate_to/render_error so a cancelled render
  * task never leaves a dangling fetch session behind. */

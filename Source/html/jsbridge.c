@@ -74,7 +74,8 @@ void jsbridge_set_engine(int engine)
     g_selectedEngine = (engine == JS_ENGINE_MUJS ||
                         engine == JS_ENGINE_DUKTAPE ||
                         engine == JS_ENGINE_QUICKJS ||
-                        engine == JS_ENGINE_XS)
+                        engine == JS_ENGINE_XS ||
+                        engine == JS_ENGINE_XS_NR)
                            ? engine
                            : JS_ENGINE_MUJS;
 }
@@ -88,7 +89,21 @@ int jsbridge_current_engine(void)
 extern const JsEngineImpl js_engine_mujs;
 extern const JsEngineImpl js_engine_duktape;
 extern const JsEngineImpl js_engine_quickjs;
+#ifndef PLUTO_NO_STOCK_XS
 extern const JsEngineImpl js_engine_xs;
+#endif
+extern const JsEngineImpl js_engine_xs_nr;
+
+/* The simulator dylib compiles every engine in ONE translation pass, so
+ * per-file -D isolation is impossible there: the sim build contains the
+ * no-recursion fork ONLY (its xs_nr_rename.h renames every fork symbol),
+ * and the STOCK XS engine is not linked at all. The stock engine remains
+ * fully present in device builds. */
+#ifdef TARGET_SIMULATOR
+#define PLUTO_STOCK_XS_LINKED 0
+#else
+#define PLUTO_STOCK_XS_LINKED 1
+#endif
 
 const JsEngineImpl *js_bridge_impl(JsBridge *b)
 {
@@ -104,9 +119,15 @@ const JsEngineImpl *js_bridge_impl(JsBridge *b)
     {
         return &js_engine_quickjs;
     }
+#ifndef PLUTO_NO_STOCK_XS
     if (b->engine == JS_ENGINE_XS)
     {
         return &js_engine_xs;
+    }
+#endif
+    if (b->engine == JS_ENGINE_XS_NR)
+    {
+        return &js_engine_xs_nr;
     }
     return &js_engine_mujs;
 }
@@ -798,7 +819,8 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     b->engine = (g_selectedEngine == JS_ENGINE_MUJS ||
                  g_selectedEngine == JS_ENGINE_DUKTAPE ||
                  g_selectedEngine == JS_ENGINE_QUICKJS ||
-                 g_selectedEngine == JS_ENGINE_XS)
+                 g_selectedEngine == JS_ENGINE_XS ||
+                 g_selectedEngine == JS_ENGINE_XS_NR)
                     ? g_selectedEngine
                     : JS_ENGINE_MUJS;
 
@@ -903,22 +925,39 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
                     }
                     else if (e->spill >= 0 && e->len)
                     {
-                        /* SW2b: disk-resident source — materialize just-in-
-                         * time (RAM holds one active script; disk holds the
-                         * rest), run, release. Source-ceiling gating and
-                         * short-read handling live in the materializer. */
-                        char *src = jsext_materialize_spill_script(e);
-                        if (src)
+                        const JsEngineImpl *implNow = js_bridge_impl(b);
+                        if (implNow && implNow->run_script_stream)
                         {
-                            impl->run_script(b, src, e->len, i + 1);
-                            JFree(src);
-                            logger_log("[js] ext ran from disk: %s (%zu bytes)",
+                            /* R15: the engine can parse straight off the
+                             * disk spill handle — no RAM copy of the source
+                             * at all (SW2b's materialize round-trip was
+                             * the last giant transient; compile-time peak
+                             * drops by the full source size). */
+                            implNow->run_script_stream(b, e->spill, e->len,
+                                                       i + 1);
+                            logger_log("[js] ext ran from disk (stream): %s "
+                                       "(%zu bytes)",
                                        e->url[0] ? e->url : "(url)", e->len);
                         }
                         else
                         {
-                            logger_log("[js] ext skip (materialize failed): %s",
-                                       e->url[0] ? e->url : "(url)");
+                            /* SW2b: disk-resident source — materialize just-in-
+                             * time (RAM holds one active script; disk holds the
+                             * rest), run, release. Source-ceiling gating and
+                             * short-read handling live in the materializer. */
+                            char *src = jsext_materialize_spill_script(e);
+                            if (src)
+                            {
+                                impl->run_script(b, src, e->len, i + 1);
+                                JFree(src);
+                                logger_log("[js] ext ran from disk: %s (%zu bytes)",
+                                           e->url[0] ? e->url : "(url)", e->len);
+                            }
+                            else
+                            {
+                                logger_log("[js] ext skip (materialize failed): %s",
+                                           e->url[0] ? e->url : "(url)");
+                            }
                         }
                     }
                     else
@@ -993,6 +1032,7 @@ void js_doc_close(JsBridge *b)
     {
         return;
     }
+    jsbridge_deferred_clear(b); /* waiting scripts die with the page */
     const JsEngineImpl *impl = js_bridge_impl(b);
     logger_log("[js] close[%s]: ran=%d errs=%d listeners=%d timers=%d "
                "budgetLeft=%d%s%s",
@@ -1190,6 +1230,8 @@ static void jsbridge_timer_retire(JsBridge *b, JsTimer *t)
  * callback consumed DOM budget (caller re-renders). Returns fires executed.
  * ≤ JSBRIDGE_TIMER_BUDGET fires per call; nested pumps (a timer scheduling
  * another timer) are bounded by JSBRIDGE_TIMER_MAX_CHAIN. */
+int jsbridge_mount_parked(JsBridge *b); /* R28: defined below (after eval_pending) */
+
 int jsbridge_timers_pump(JsBridge *b, unsigned nowMs, int *mutationsOut)
 {
     if (mutationsOut)
@@ -1199,6 +1241,10 @@ int jsbridge_timers_pump(JsBridge *b, unsigned nowMs, int *mutationsOut)
     if (!b || b->timerCount == 0 || b->inTimer)
     {
         return 0; /* nothing armed / nested call — stay silent */
+    }
+    if (jsbridge_mount_parked(b))
+    {
+        return 0; /* R28: parked mount owns the machine — timers wait */
     }
     const JsEngineImpl *impl = js_bridge_impl(b);
     if (!impl || !impl->run_timer_ref)
@@ -1333,6 +1379,180 @@ int jsbridge_timers_pump(JsBridge *b, unsigned nowMs, int *mutationsOut)
         *mutationsOut = mutations;
     }
     return fires;
+}
+
+/* ── R15: deferred compile retry (OS-truth admission) ────────────────────
+ * Engines skip a giant script containedly when the OS heap cannot grant
+ * its estimated compile peak RIGHT NOW. Disk-resident bodies are re-offered
+ * here on later frames: the probe is repeated every frame (cheap — a
+ * handful of transient mallocs), and the script compiles the moment memory
+ * frees (e.g. the download's network buffers released after attach). RAM
+ * sources cannot be deferred (no disk copy) and stay skipped. */
+void jsbridge_deferred_offer(JsBridge *b, int engine, SpillFile spill,
+                             size_t len)
+{
+    if (!b || spill < 0 || len == 0)
+    {
+        return;
+    }
+    /* Fail-fast: a script whose ESTIMATED compile peak exceeds the whole
+     * device budget can never be admitted — deferral would park it forever
+     * (R15 device data: a 502KB bundle needs ~7.0MB of parse against a
+     * 6.5MB budget; the parse tree is inherently RAM-resident, so no
+     * offloading changes this). Log the precise numbers and let it go. */
+    unsigned long need = jsbridge_compile_need((unsigned long)len);
+    unsigned long ceiling = pluto_mem_budget();
+    if (ceiling && need > ceiling)
+    {
+        logger_log("[js] %zuKB script exceeds the device compile budget "
+                   "(need ~%luKB, budget %luKB, ~%d parse bytes per source "
+                   "byte) — not runnable on this device in any engine",
+                   len >> 10, need >> 10, ceiling >> 10,
+                   JSBRIDGE_COMPILE_PER_BYTE);
+        return;
+    }
+    for (int i = 0; i < b->deferredCount; i++)
+    {
+        if (b->deferred[i].spill == spill)
+        {
+            return; /* already waiting */
+        }
+    }
+    if (b->deferredCount >= JSBRIDGE_DEFERRED_MAX)
+    {
+        return; /* table full: the skip stands */
+    }
+    b->deferred[b->deferredCount].engine = engine;
+    b->deferred[b->deferredCount].spill = spill;
+    b->deferred[b->deferredCount].len = len;
+    b->deferredCount++;
+    logger_log("[js] deferred: %zuKB script waits for memory (slot %d/%d)",
+               len >> 10, b->deferredCount, JSBRIDGE_DEFERRED_MAX);
+}
+
+void jsbridge_deferred_clear(JsBridge *b)
+{
+    if (b)
+    {
+        /* Spill handles are OWNED by the doc's ext slots — dropping the
+         * table entry never discards the file (page teardown resets spill). */
+        memset(b->deferred, 0, sizeof(b->deferred));
+        b->deferredCount = 0;
+    }
+}
+
+/* ── R20: per-frame ENGINE pump ────────────────────────────────────────────
+ * A hook for engines with background work that must be spread across
+ * frames to keep the SDK run loop alive (device watchdog fires at 10s
+ * without an update() return). Currently: the XS-NR fork resumes a
+ * time-sliced bundler-monolith split — each frame runs at most its own
+ * wall-clock budget of segments, then control returns to the run loop.
+ * mutationsOut mirrors jsbridge_deferred_pump: set when resumed work
+ * consumed DOM budget (caller schedules the standard re-render). No-op
+ * for engines without a pump (or while a callback is on the stack). */
+void jsbridge_engine_pump(JsBridge *b, unsigned nowMs, int *mutationsOut)
+{
+    if (mutationsOut)
+    {
+        *mutationsOut = 0;
+    }
+    if (!b || b->inTimer || b->inClick)
+    {
+        return;
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->pump)
+    {
+        return;
+    }
+    int budgetBefore = b->callBudget;
+    impl->pump(b, nowMs);
+    if (b->callBudget < budgetBefore && mutationsOut)
+    {
+        *mutationsOut = 1; /* resumed work mutated the DOM — re-render */
+    }
+}
+
+/* R27: 1 while the engine still has background eval work in flight (XS NR
+ * bundler split). The render pipeline gates the walk/snapshot on this so
+ * they observe the POST-JS DOM. */
+int jsbridge_eval_pending(JsBridge *b)
+{
+    if (!b || b->inTimer || b->inClick)
+    {
+        return 0;
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->eval_pending)
+    {
+        return 0;
+    }
+    return impl->eval_pending(b);
+}
+
+/* R28: 1 while a resumable-mount run is parked mid-program (XS NR). The
+ * router pumps SKIP deliveries while this holds — timers/XHR completions
+ * wait until the mount finishes, matching browser semantics (no timers
+ * during a synchronous task) without dropping anything. */
+int jsbridge_mount_parked(JsBridge *b)
+{
+    if (!b || b->inTimer || b->inClick)
+    {
+        return 0;
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->mount_parked)
+    {
+        return 0;
+    }
+    return impl->mount_parked(b);
+}
+
+void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut)
+{
+    if (mutationsOut)
+    {
+        *mutationsOut = 0;
+    }
+    if (!b || b->deferredCount == 0 || b->inTimer || b->inClick)
+    {
+        return;
+    }
+    if (jsbridge_mount_parked(b))
+    {
+        return; /* R28: parked mount owns the machine — retry next frame */
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->run_script_stream)
+    {
+        return;
+    }
+    /* Head-of-line: retry the OLDEST waiting script (FIFO keeps page
+     * script order meaningful for globals). */
+    SpillFile spill = b->deferred[0].spill;
+    size_t len = b->deferred[0].len;
+    unsigned long need = jsbridge_compile_need((unsigned long)len);
+    if (pluto_mem_probe_grantable(need) < need)
+    {
+        return; /* still not grantable — try again next frame (no spam) */
+    }
+    /* Remove BEFORE running: run_script_stream re-probes and would
+     * re-offer on a between-frames regression — that is the correct
+     * outcome (stays deferred), never a same-frame loop. */
+    memmove(&b->deferred[0], &b->deferred[1],
+            sizeof(b->deferred[0]) * (size_t)(b->deferredCount - 1));
+    b->deferredCount--;
+    logger_log("[js] deferred retry: memory freed — running %zuKB script "
+               "now (live %luKB)",
+               len >> 10, pluto_mem_live() >> 10);
+    int budgetBefore = b->callBudget;
+    b->inTimer = 1; /* same re-entrancy contract as a timer fire */
+    impl->run_script_stream(b, spill, len, 2);
+    b->inTimer = 0;
+    if (b->callBudget < budgetBefore && mutationsOut)
+    {
+        *mutationsOut = 1; /* the script mutated the DOM — re-render */
+    }
 }
 
 /* ── XMLHttpRequest / fetch — router-owned table + single-flight wire ──────
@@ -1711,6 +1931,10 @@ int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
     {
         return 0;
     }
+    if (jsbridge_mount_parked(b))
+    {
+        return 0; /* R28: parked mount owns the machine — completions wait */
+    }
     const JsEngineImpl *impl = js_bridge_impl(b);
     if (!impl || !impl->run_xhr_ref || !impl->clear_xhr_refs)
     {
@@ -1816,6 +2040,31 @@ int jsbridge_dispatch_link_click(JsBridge *b, const void *anchorNode)
 int jsbridge_listener_count(const JsBridge *b)
 {
     return b ? b->listenerCount : 0;
+}
+
+/* R30o: see jsbridge.h. Every axis that could still call back into the
+ * engine must be quiet: listeners (click handlers), timers (setTimeout /
+ * setInterval, including inert slots with a deferred engine ref), and XHR
+ * (in-flight flag plus any active/pending request entry — the xhrInFlight
+ * short-circuit alone would miss a queued-but-not-yet-sent request). */
+int jsbridge_is_idle(const JsBridge *b)
+{
+    if (!b)
+    {
+        return 0;
+    }
+    if (b->listenerCount != 0 || b->timerCount != 0 || b->xhrInFlight)
+    {
+        return 0;
+    }
+    for (int i = 0; i < b->xhrCount; i++)
+    {
+        if (b->xhr[i].active || b->xhr[i].release)
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 int jsbridge_timers_active(const JsBridge *b)

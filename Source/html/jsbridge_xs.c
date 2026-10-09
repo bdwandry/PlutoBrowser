@@ -2256,10 +2256,12 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
 const JsEngineImpl js_engine_xs = {
     xs_init,
     xs_run_script,
+    NULL, /* run_script_stream (R15: XS NR only) */
     xs_dispatch_click,
     xs_clear_timer_ref,
     xs_run_timer_ref,
     xs_run_xhr_ref,
     xs_clear_xhr_refs,
     xs_close,
+    NULL, /* pump (R20: time-sliced split is XS NR only) */
     "XS (Moddable)"};

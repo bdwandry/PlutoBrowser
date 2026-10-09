@@ -933,6 +933,20 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
     {
         return 0;
     }
+    /* R29: never persist an EMPTY render. A degenerate snapshot turns
+     * any transient failure — bot-blocked fetch (LinkedIn-class 999),
+     * stalled JS, interrupted load — into a PERMANENT one: the fast
+     * path then replays "(Empty Web Page)" forever and the site becomes
+     * unreachable from this browser. General-purpose contract, no site
+     * hard-coding: doc_is_empty_render() matches the walker's placeholder
+     * shape (a doc with any real content never matches; NOTE the raw
+     * blockCount==0 case never exists — the walker always inserts the
+     * placeholder paragraph, so blockCount is ≥1 by construction). */
+    if (doc_is_empty_render(doc))
+    {
+        logger_log("[snap] skip save (empty render) url=%s", url);
+        return 0;
+    }
     unsigned long key = snap_key(url, mode);
     if (!key)
     {
@@ -1126,7 +1140,8 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
     if (r.err || blockCount < 0 || blockCount > DOC_MAX_BLOCKS ||
         linkCount < 0 || linkCount > 4096 ||
         mapCount < 0 || mapCount > 128 ||
-        datalistCount < 0 || datalistCount > 128)
+        datalistCount < 0 || datalistCount > 128 ||
+        blockCount == 0) /* R29: zero-block entry = never from our walker */
     {
         pluto_spill_store_close(h);
         PLUTO_FREE(image);
@@ -1210,6 +1225,18 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
             doc->blocks[i] = b;
         }
         doc->blockCount = (int)blockCount;
+        /* R29: a cached EMPTY render (the walker's 1-block "(Empty Web
+         * Page)" placeholder — the shape a bot-blocked/failed first visit
+         * produces) is not a usable page: treat it as a MISS and DELETE
+         * the degenerate entry so the store self-heals and every later
+         * visit takes the fresh fetch path. Site-agnostic. */
+        if (doc_is_empty_render(doc))
+        {
+            logger_log("[snap] degenerate entry (empty render) — miss: %s",
+                       url);
+            pluto_snap_invalidate(url, mode);
+            goto fail;
+        }
     }
     if (linkCount > 0)
     {

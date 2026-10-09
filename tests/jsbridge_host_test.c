@@ -92,6 +92,9 @@ void *pluto_realloc(void *p, size_t n) { return pluto_mem_realloc(p, n); }
 /* raw SDK backend for the telemetry funnel (mirrors main.c on device) */
 void *pluto_mem_sdk_realloc(void *p, size_t n) { return realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; } /* readability stub */
+/* R30l: loading-UI byte counter (defined in main.c on device/sim) — the
+ * host harness has no loading screen, so swallow the jsext progress calls. */
+void pluto_ui_net_progress(int cur, int total) { (void)cur; (void)total; }
 
 /* http_client fakes: html/jsext.c (linked for jsext_arena_free) references
  * these; the XHR tests below DRIVE them scriptably. Default mode fails
@@ -135,6 +138,8 @@ int http_get(const char *url, const HttpCallbacks *cb)
 }
 void http_cancel(void) { g_fakeHttpCancelled++; }
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
+/* R16b identity-encoding switch: no-op under the fake HTTP layer. */
+void http_set_identity_encoding(int on) { (void)on; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
 /* Router's local about: path: answer XHRs for any 'about:' URL with a
@@ -1460,6 +1465,134 @@ int main(void)
         jsbridge_set_engine(0);
     }
 
+    /* ── R17 platform-surface block (QuickJS): the browser-API additions
+     * that CSR frameworks probe first — URL constructor, anchor URL getters,
+     * history shim, styleSheets, ownerDocument chain, inert DOM ctors. Each
+     * check is engine behavior, not site behavior. ── */
+    {
+        jsbridge_set_engine(2); /* QuickJS */
+        static const char R17_HTML[] =
+            "<html><head><title>r17</title>"
+            "<link rel=\"shortcut icon\" id=\"favicon\" href=\"/favicon.ico\">"
+            "</head><body>"
+            "<p id=\"o\">pending</p>"
+            "<a id=\"lnk\" href=\"https://bryanwandrych.com:8443/p/q?x=1#sec\"></a>"
+            "<script>"
+            "var out=[];"
+            "try{var u=new URL('/x?a=1#h','http://example.com');"
+            "out.push(u.pathname==='/x'&&u.search==='?a=1'&&u.hash==='#h'"
+            "&&u.host==='example.com'&&u.protocol==='http:'?'url-ok':'url-bad');}"
+            "catch(e){out.push('url-ERR');}"
+            "try{var a=document.getElementById('lnk');"
+            "out.push(a.pathname==='/p/q'&&a.host==='bryanwandrych.com:8443'"
+            "&&a.hostname==='bryanwandrych.com'&&a.port==='8443'"
+            "&&a.search==='?x=1'&&a.hash==='#sec'&&a.protocol==='https:'"
+            "?'anchor-ok':'anchor-bad');}catch(e){out.push('anchor-ERR');}"
+            "try{history.pushState({n:1},'','/r1');"
+            "out.push(history.state&&history.state.n===1?'hist-ok':'hist-bad');}catch(e){out.push('hist-ERR');}"
+            "try{out.push(Array.isArray(document.styleSheets)&&document.styleSheets.length===0?'ss-ok':'ss-bad');}catch(e){out.push('ss-ERR');}"
+            "try{out.push(document.body.ownerDocument===document?'od-ok':'od-bad');}catch(e){out.push('od-ERR');}"
+            "try{document.createElement('p') instanceof HTMLElement;out.push('ctor-ok');}catch(e){out.push('ctor-ERR');}"
+            "try{out.push(document.defaultView===window?'dv-ok':'dv-bad');}catch(e){out.push('dv-ERR');}"
+            "try{var fv=document.getElementById('favicon');"
+            "out.push(fv?'fav-ok':'fav-null');"
+            "if(fv){fv.href='/other.ico';out.push(fv.getAttribute('href')==='/other.ico'?'favset-ok':'favset-bad');}}catch(e){out.push('fav-ERR');}"
+            "document.getElementById('o').textContent=out.join(',');"
+            "</script></body></html>";
+        DocParseResult *rd = calloc(1, sizeof(DocParseResult));
+        document_parse_ex(R17_HTML, "http://bryanwandrych.com/",
+                          MODE_RAW_HTML, NULL, DOC_SCRIPT_RUN_KEEP, NULL, rd);
+        const char *res = find_inline_text(rd, "url-");
+        printf("  r17 results: %s\n", res ? res : "(none)");
+        CHECK(res && strstr(res, "url-ok"), "r17: new URL(path, base) components");
+        CHECK(res && strstr(res, "anchor-ok"), "r17: anchor URL property getters");
+        CHECK(res && strstr(res, "hist-ok"), "r17: history.pushState + state");
+        CHECK(res && strstr(res, "ss-ok"), "r17: document.styleSheets empty list");
+        CHECK(res && strstr(res, "od-ok"), "r17: element.ownerDocument === document");
+        CHECK(res && strstr(res, "ctor-ok"), "r17: inert DOM ctors accept instanceof");
+        CHECK(res && strstr(res, "dv-ok"), "r17: document.defaultView === window");
+        CHECK(res && strstr(res, "fav-ok"), "r17: getElementById finds <link> in head");
+        CHECK(res && strstr(res, "favset-ok"), "r17: link.href settable + stored");
+        CHECK(rd->jsErrors == 0, "r17: zero errors");
+        document_free(rd);
+        jsbridge_set_engine(0);
+    }
+
+    /* ── R18: general-purpose bundler monolith splitting ───────────────
+     * Synthetic webpack-shaped bundle: 12 `key:(e,t,n)=>{...}` modules in
+     * an IIFE whose registry var CONTINUES as a declarator list (`var
+     * e={...},t={};`). Modules require later-defined modules — the split
+     * must share ONE registry across engine brackets — and the tail mounts
+     * via document.getElementById("root") so a render proves the loader
+     * bootstrapped and the entry ran after the split. Structural policy:
+     * >= 8 plain key:value pairs, then tail. Not a site: this shape is
+     * every webpack/rollup production bundle. */
+    printf("r18: bundler monolith split\n");
+    {
+        static const char *const mods[] = {
+            "5513:(e,t,n)=>{n.d(t,{A:()=>a});function a(x){return x*2}}",
+            "7950:(e,t,n)=>{n.d(t,{B:()=>b});var r=n(5513);function b(x){return r.A(x)+1}}",
+            "8168:(e,t,n)=>{n.d(t,{C:()=>c});var r=n(7950);function c(x){return r.B(x)*10}}",
+            "2123:(e,t,n)=>{n.d(t,{D:()=>d});function d(){return 7}}",
+            "7067:(e,t,n)=>{n.d(t,{E:()=>h});var r=n(2123),o=n(8168);function h(){return o.C(r.D())}}",
+            "8812:(e,t,n)=>{n.d(t,{F:()=>f});function f(){return 'F'}}",
+            "918:(e,t,n)=>{n.d(t,{G:()=>g});var r=n(8812);function g(){return r.F()+'G'}}",
+            "3216:(e,t,n)=>{n.d(t,{H:()=>v});var r=n(918);function v(){return r.G()+'H'}}",
+            "6632:(e,t,n)=>{n.d(t,{I:()=>w});var r=n(3216);function w(){return r.H()+'I'}}",
+            "7758:(e,t,n)=>{n.d(t,{J:()=>x2});var r=n(6632);function x2(){return r.I()+'J'}}",
+            "8052:(e,t,n)=>{n.d(t,{K:()=>y2});var r=n(7758);function y2(){return r.J()+'K'}}",
+            "7266:(e,t,n)=>{n.d(t,{L:()=>z2});var r=n(8052);function z2(){return r.K()+'L'}}"
+        };
+        char *bundle = (char *)malloc(64 * 1024);
+        CHECK(bundle != NULL, "r18: alloc synthetic bundle");
+        if (bundle)
+        {
+            size_t off = (size_t)snprintf(bundle, 64,
+                "/*! license */(()=>{var e={");
+            for (int i = 0; i < 12; i++)
+                off += (size_t)snprintf(bundle + off, 64 * 1024 - off,
+                                        "%s%s", mods[i], i < 11 ? "," : "");
+            off += (size_t)snprintf(bundle + off, 64 * 1024 - off,
+                "},t={};function n(r){var o=t[r];if(void 0!==o)return o.exports;"
+                "var i=t[r]={exports:{}};return e[r](i,i.exports,n),i.exports}"
+                "n.d=(e2,t2)=>{for(var r in t2)n.o(t2,r)&&!n.o(e2,r)&&"
+                "Object.defineProperty(e2,r,{enumerable:!0,get:t2[r]})},"
+                "n.o=(e2,t2)=>Object.prototype.hasOwnProperty.call(e2,t2),"
+                "(()=>{var v=n(7067),w=n(7266);"
+                "document.getElementById('root').textContent='SPLIT:'+v.E()+'|'+w.L();"
+                "})()})();");
+            jsbridge_set_engine(2); /* QuickJS */
+            const char *R18_HTML_FMT =
+                "<!DOCTYPE html><html><head><title>r18</title></head>"
+                "<body><div id=root></div><script>%s</script>"
+                "<div id=o></div></body></html>";
+            char *html = (char *)malloc(strlen(R18_HTML_FMT) + strlen(bundle) + 1);
+            CHECK(html != NULL, "r18: alloc html");
+            if (html)
+            {
+                snprintf(html, strlen(R18_HTML_FMT) + strlen(bundle) + 1,
+                         R18_HTML_FMT, bundle);
+                DocParseResult *rd = calloc(1, sizeof(DocParseResult));
+                document_parse_ex(html, "http://example.com/", MODE_RAW_HTML,
+                                  NULL, DOC_SCRIPT_RUN_KEEP, NULL, rd);
+                const char *root = find_inline_text(rd, "SPLIT:");
+                printf("  r18 root: %s\n", root ? root : "(none)");
+                CHECK(root && strcmp(root, "SPLIT:150|FGHIJKL") == 0,
+                      "r18: split bundle mounts + cross-registry requires");
+                CHECK(rd->jsErrors == 0, "r18: zero errors (QuickJS split)");
+                document_free(rd);
+                free(html);
+            }
+            free(bundle);
+            jsbridge_set_engine(0);
+        }
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
+
+/* R26o stub: this harness doesn't link render/style.c. NULL → the NR engine's
+ * loading-screen overlay skips the text repaint (bar repaint still runs). */
+#include "render/style.h"
+LCDFont *style_font(PlutoFontRole role) { (void)role; return NULL; }

@@ -38,4 +38,18 @@ int dither_to_bits(int width, int height,
                    uint8_t (*getPixelGray)(void *userdata, int x, int y),
                    void *userdata, uint8_t *outBits, int outStride);
 
+/* R30o: streaming variant — same output as dither_to_bitmap (identical
+ * Bayer matrix, same white background, same getPixelGray contract) but
+ * WITHOUT the full-frame intermediate bits buffer: dithers row-by-row
+ * directly into the LCDBitmap's own data plane via getBitmapData. Saves
+ * the (width+7)/8 * height calloc (up to ~11.5KB per 380x240 image on top
+ * of the bitmap itself) and one full-frame memcpy pass. getPixelGray is
+ * called exactly like dither_to_bitmap (row 0 first, x ascending), so any
+ * pixel source that works for dither_to_bitmap produces identical pixels
+ * here. Returns the bitmap (caller owns via freeBitmap) or NULL (no PD
+ * API, invalid size, or bitmap allocation failure). */
+LCDBitmap *dither_to_bitmap_stream(int width, int height,
+                                   uint8_t (*getPixelGray)(void *userdata, int x, int y),
+                                   void *userdata);
+
 #endif /* PLUTO_DITHER_H */

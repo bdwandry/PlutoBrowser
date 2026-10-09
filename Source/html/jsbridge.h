@@ -183,6 +183,15 @@ void js_doc_flush_output(JsBridge *bridge);
  * document_free (document_free also frees a still-attached _dom). */
 void js_doc_close(JsBridge *bridge);
 
+/* R30o: TRUE when the page engine has NOTHING left to do — zero pinned
+ * listeners, zero timers (active or deferred-release), zero in-flight or
+ * pending XHR. Such a page's engine exists only to hold RAM: the post-eval
+ * snapshot is the render truth and links navigate by href, so the caller
+ * (page_swap_doc) may close the engine right after the snapshot saves and
+ * hand its heap (often 2.5MB+) back to the funnel. Conservative by
+ * construction: any registered handler/timer/keep-alive keeps the engine. */
+int jsbridge_is_idle(const JsBridge *b);
+
 /* Dispatch a click to page handlers registered on `anchorNode` (the <a>
  * element's DomNode). Returns a JsBridgeClickResult; a JSB_CLICK_SUPPRESSED
  * result means the page mutated the DOM (preventDefault) and the caller
@@ -228,6 +237,24 @@ int jsbridge_listener_count(const JsBridge *bridge);
  * re-render (the same path a preventDefault click uses). Returns the number
  * of timers fired this call (0 when no bridge / no timers). */
 int jsbridge_timers_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
+/* R15: retry admission-deferred giant scripts once per frame (call next to
+ * the timer pump; no-op when nothing is waiting or memory hasn't freed).
+ * mutationsOut (may be NULL) is set when the retry consumed DOM budget. */
+void jsbridge_deferred_pump(JsBridge *bridge, int *mutationsOut);
+/* R20: per-frame ENGINE pump — resumes background engine work that must
+ * be spread across frames to keep the device run loop alive (the XS-NR
+ * fork's time-sliced bundler split). Call once per frame next to the
+ * deferred pump; no-op for engines without background work.
+ * mutationsOut (may be NULL) is set when resumed work consumed DOM
+ * budget (caller schedules the standard re-render). */
+void jsbridge_engine_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
+/* R27: 1 while the engine's background eval (XS NR bundler split) is still
+ * in flight. The render pipeline gates the walk/snapshot on this so they
+ * observe the POST-JS DOM (device run 5 walked at eval second 1). */
+int jsbridge_eval_pending(JsBridge *bridge);
+/* R28: 1 while a resumable-mount run is parked mid-program (XS NR). The
+ * router pumps gate deliveries on this while the page is loading. */
+int jsbridge_mount_parked(JsBridge *bridge);
 /* Diagnostics: live timers / due-right-now timers (telemetry + tests). */
 int jsbridge_timers_active(const JsBridge *bridge);
 int jsbridge_timers_pending(const JsBridge *bridge, unsigned nowMs);

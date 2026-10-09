@@ -230,7 +230,7 @@ void settings_page_open(int prevState)
         g_staged.jsEnabled = 1; /* Off/Inline/Full — out-of-range → Inline */
     }
     g_staged.jsEngine = storage_setting_int("jsEngine");
-    if (g_staged.jsEngine < 0 || g_staged.jsEngine > 3)
+    if (g_staged.jsEngine < 0 || g_staged.jsEngine > 4)
     {
         g_staged.jsEngine = 0; /* muJS(0) / Duktape(1) / QuickJS(2) / XS(3) */
     }
@@ -331,6 +331,7 @@ const char *settings_page_staged_value(int optionIndex)
         return g_staged.jsEngine == 1   ? "Duktape"
                : g_staged.jsEngine == 2 ? "QuickJS"
                : g_staged.jsEngine == 3 ? "XS (Moddable)"
+               : g_staged.jsEngine == 4 ? "XS (No Recursion)"
                                         : "muJS";
     case 9:
         return "";
@@ -401,13 +402,13 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 7: /* Off → Full → Inline → Off (left decrements) */
             g_staged.jsEnabled = (g_staged.jsEnabled + 2) % 3;
             break;
-        case 8: /* muJS → Duktape → QuickJS → XS — ONLY while Execution is
-                 * active; a locked "Off" when Execution is Off (no engine
-                 * runs at all). Left is the inverse of Right: -1 ≡ +3
-                 * (mod 4). */
+        case 8: /* muJS → Duktape → QuickJS → XS → XS (No Recursion) — ONLY
+                 * while Execution is active; a locked "Off" when Execution
+                 * is Off (no engine runs at all). Left is the inverse of
+                 * Right: -1 ≡ +4 (mod 5). */
             if (g_staged.jsEnabled != 0)
             {
-                g_staged.jsEngine = (g_staged.jsEngine + 3) % 4;
+                g_staged.jsEngine = (g_staged.jsEngine + 4) % 5;
             }
             break;
         case 9:
@@ -461,11 +462,11 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 7: /* Off → Inline → Full → Off (right increments) */
             g_staged.jsEnabled = (g_staged.jsEnabled + 1) % 3;
             break;
-        case 8: /* muJS → Duktape → QuickJS → XS → muJS — same cycle both
-                 * directions, gated. */
+        case 8: /* muJS → Duktape → QuickJS → XS → XS (No Recursion) → muJS
+                 * — same cycle both directions, gated. */
             if (g_staged.jsEnabled != 0)
             {
-                g_staged.jsEngine = (g_staged.jsEngine + 1) % 4;
+                g_staged.jsEngine = (g_staged.jsEngine + 1) % 5;
             }
             break;
         case 9:

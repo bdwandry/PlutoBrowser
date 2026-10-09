@@ -8,6 +8,7 @@
  */
 #include "pluto_mem.h"
 #include <string.h>
+#include "logger.h"
 
 /* Call the SDK allocator DIRECTLY — never via main.c's pluto_realloc (which
  * routes INTO this funnel; that would recurse infinitely). The host suites
@@ -93,8 +94,22 @@ static void track_remove(const void *p)
     }
 }
 
+#ifdef PLUTO_MEM_TRACE
+/* Repro-diagnostic: trace substantial blocks (size, old ptr, new ptr) so a
+ * wild pointer handed to/from the engine arena layer is visible in the log
+ * right before a fault. Compile-time gated; never in production builds. */
+static unsigned long mem_traceSeq = 0;
+#endif
+
 void *pluto_mem_realloc(void *ptr, size_t n)
 {
+#ifdef PLUTO_MEM_TRACE
+    if (n >= 2048)
+    {
+        logger_log("[mem] %lu realloc %p n=%lu live=%lu", ++mem_traceSeq, ptr,
+                   (unsigned long)n, mem_live);
+    }
+#endif
     /* Budget gate (SW3a): refuse BEFORE the SDK heap is touched. A refusal
      * is a clean NULL the engines/callers already handle as OOM. Frees and
      * shrinks are never refused. */
@@ -125,6 +140,13 @@ void *pluto_mem_realloc(void *ptr, size_t n)
 
     void *np = pluto_mem_sdk_realloc(ptr, n);
 
+#ifdef PLUTO_MEM_TRACE
+    if (n >= 2048)
+    {
+        logger_log("[mem]   -> %p%s", np, np ? "" : " (REFUSED)");
+    }
+#endif
+
     if (!np)
     {
         return NULL; /* SDK OOM (or refusal) — old block untouched, tracked */
@@ -137,6 +159,14 @@ void *pluto_mem_realloc(void *ptr, size_t n)
         if (n > mem_peak_alloc)
         {
             mem_peak_alloc = n;
+            /* R30p diag: a single allocation this large is the fastest way
+             * to find heap hogs — name it in the log (caller may still be
+             * ambiguous, but the size narrows it to a handful of sites). */
+            if (n >= (512UL * 1024UL))
+            {
+                logger_log("[mem] BIG-ALLOC %lu bytes (live=%luKB)",
+                           (unsigned long)n, mem_live / 1024);
+            }
         }
         track_insert(np, n);
     }
@@ -222,6 +252,29 @@ unsigned long pluto_mem_headroom_bytes(void)
         return (unsigned long)-1 / 2; /* gate disabled = effectively unlimited */
     }
     return (mem_live < mem_budget) ? (mem_budget - mem_live) : 0;
+}
+
+unsigned long pluto_mem_probe_grantable(unsigned long want)
+{
+    unsigned long verified = 0;
+    unsigned long step = 4UL * 1024UL;
+    while (verified < want && step <= (1UL << 20))
+    {
+        unsigned long attempt = verified + step;
+        if (attempt > want)
+        {
+            attempt = want;
+        }
+        void *p = pluto_mem_sdk_realloc(NULL, attempt);
+        if (!p)
+        {
+            break;
+        }
+        pluto_mem_sdk_realloc(p, 0);
+        verified = attempt;
+        step <<= 1;
+    }
+    return verified;
 }
 
 void pluto_mem_peak_reset(void)

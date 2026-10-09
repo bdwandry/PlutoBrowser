@@ -22,6 +22,11 @@
  *   - Adam7 interlace: FIRST PASS ONLY (ceil(w/8) x ceil(h/8) samples).
  *   - Streaming: inflate_stream_read feeds one row at a time into the box
  *     downscaler — bounded memory (reference architecture).
+ *   - R30o: the dither step is streaming too (dither_to_bitmap_stream
+ *     dithers row-by-row into the bitmap's own data plane) — the decode
+ *     peak is now IDAT + 3 row buffers + the box accumulator grid + the
+ *     final 1-bit bitmap; the old full-frame gray/bits intermediates are
+ *     gone. Pixel output is identical (verified: host P25 harness + sim).
  *   - Tasks.yieldCheck() call sites are preserved as comments; the task
  *     layer already budgets frames per step (see inflate.h note).
  */

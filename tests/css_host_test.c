@@ -71,6 +71,9 @@ int http_is_loading(void) { return 0; }
 #include "html/document.h"
 #include "html/jsbridge.h"
 #include "html/jsbridge_internal.h"
+
+/* R16b: jsext's identity-encoding switch — no-op under the fake HTTP layer. */
+void http_set_identity_encoding(int on) { (void)on; }
 #include "core/constants.h"
 
 /* jsbridge_xs.c is not linked on host (needs device XS platform defines);
