@@ -18,6 +18,7 @@
 #include "core/pluto_spill.h"
 #include "core/pluto_page.h"
 #include "core/pluto_snap.h"
+#include "core/netmon.h"
 #include "core/encoding.h"
 #include "core/cookie_jar.h"
 #include "core/http_client.h"
@@ -162,6 +163,13 @@ static char pageTitle[256] = "CometBrowser Start Page";
 static int scrollY = 0;
 static int targetScrollY = 0;
 static int progressCurrent = 0;
+/* R30l: live script-prefetch byte counter (fed by html/jsext.c via
+ * pluto_ui_net_progress) — drives the loading screen's "Fetching scripts"
+ * line. The main-HTML counter above finishes in one frame (402B gzip), so
+ * the 502716-byte bundle previously NEVER moved any visible counter
+ * (device run 14: the user always saw "0 bytes being downloaded"). */
+static int progressNetCur = 0;
+static int progressNetTotal = 0;
 static int progressTotal = 0;
 static int isRendering = 0;
 static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
@@ -278,6 +286,8 @@ static void details_keys_clear(void)
 
 /* Diagnostic counters exposed in logs. */
 static unsigned int frameCount = 0;
+
+static size_t pluto_load_local_file(const char *fileUrl);
 
 /* navigate_to: full port of main.lua runNavigation/executeNavigation. */
 static void navigate_to(const char *urlString);
@@ -465,6 +475,28 @@ static void page_swap_doc(RenderTask *rt)
         currentDoc = rt->rewalkDoc;
         rt->rewalkDoc = NULL;
         g_pageJs = currentDoc->_jsbridge;
+        /* R27: the rewalk IS the post-eval truth — snapshot HERE too.
+         * This branch previously early-returned before the save block,
+         * so a deferred snapshot never materialized (the revisit then
+         * served whatever stale entry was already on disk). Same
+         * eval_pending gate as the fresh-render path below. */
+        if (!currentDoc->parseError && currentUrlObj &&
+            currentUrlObj->normalized[0])
+        {
+            if (g_pageJs && jsbridge_eval_pending(g_pageJs))
+            {
+                logger_log("[snap] save deferred (rewalk): eval still running");
+            }
+            else
+            {
+                unsigned long now = 0;
+                uint32_t ms = 0;
+                now = pd->system->getSecondsSinceEpoch(&ms);
+                pluto_snap_save(currentDoc, currentUrlObj->normalized,
+                                (int)currentBrowseMode, now);
+                pluto_snap_lru_sweep(SNAP_MAX_ENTRIES);
+            }
+        }
         return;
     }
     if (currentDoc)
@@ -495,16 +527,40 @@ static void page_swap_doc(RenderTask *rt)
      * the TTL skips network + parse + engine entirely. Failures are logged
      * inside pluto_snap and never affect the live render. Toggle re-renders
      * and JS-mutation rewalks snapshot too — the walk output is the current
-     * truth (toggle states / JS mutations included). */
+     * truth (toggle states / JS mutations included).
+     * R27 GATE: never snapshot while the engine's background eval (XS NR
+     * bundler split) is still running — the walker would capture the
+     * PRE-JS DOM (device run 5: blocks=1 poisoned snapshot saved 1s into
+     * the 61s eval, then served by the revisit). The split's completion
+     * triggers a rewalk (page_rewalk_now), which lands here with the
+     * eval done and snapshots the real page. */
     if (currentDoc && !currentDoc->parseError && currentUrlObj &&
         currentUrlObj->normalized[0])
     {
-        unsigned long now = 0;
-        uint32_t ms = 0;
-        now = pd->system->getSecondsSinceEpoch(&ms);
-        pluto_snap_save(currentDoc, currentUrlObj->normalized,
-                        (int)currentBrowseMode, now);
-        pluto_snap_lru_sweep(SNAP_MAX_ENTRIES);
+        if (g_pageJs && jsbridge_eval_pending(g_pageJs))
+        {
+            logger_log("[snap] save deferred: bundle eval still running");
+            /* R27: the entry on disk (if any) is now KNOWN-stale — this
+             * render's walk predates the JS. Invalidate so a revisit can
+             * never serve a poisoned pre-eval frame (device run 5 cached
+             * blocks=1; the healing also applies to snapshots written by
+             * older builds still on the device). */
+            pluto_snap_invalidate(currentUrlObj->normalized,
+                                  (int)currentBrowseMode);
+        }
+        else
+        {
+            unsigned long now = 0;
+            uint32_t ms = 0;
+            now = pd->system->getSecondsSinceEpoch(&ms);
+            pluto_snap_save(currentDoc, currentUrlObj->normalized,
+                            (int)currentBrowseMode, now);
+            pluto_snap_lru_sweep(SNAP_MAX_ENTRIES);
+            /* R30p: the idle-page engine close is DISABLED — it was part of
+             * the run-18 crash batch and never got runtime coverage in any
+             * environment. jsbridge_is_idle() stays available for a future
+             * one-change-at-a-time device A/B. */
+        }
     }
     /* SW8: under RAM pressure, page the largest cold DOM subtrees of the
      * live page out to the spill store. Only JS-mode pages have a live
@@ -575,6 +631,19 @@ static void js_timers_update(void)
     unsigned nowMs = pd->system->getCurrentTimeMilliseconds();
     int mutations = 0;
     (void)jsbridge_timers_pump(g_pageJs, nowMs, &mutations);
+    /* R15: retry admission-deferred giant scripts once per frame — the
+     * moment memory frees (download buffers released, page machinery
+     * settled), the compile goes through. A successful run mutates the DOM
+     * like any script and re-renders through page_rewalk_now below. */
+    int deferredMutations = 0;
+    jsbridge_deferred_pump(g_pageJs, &deferredMutations);
+    mutations |= deferredMutations;
+    /* R20: per-frame ENGINE pump — resumes a time-sliced bundler split
+     * (XS-NR) one wall-clock budget per frame so the SDK run loop keeps
+     * getting update() returns (device watchdog fires at a 10s stall). */
+    int engineMutations = 0;
+    jsbridge_engine_pump(g_pageJs, nowMs, &engineMutations);
+    mutations |= engineMutations;
     /* Roadmap #3: deliver settled XHR/fetch completions through the SAME
      * engine bracket + re-render path (the HTTP client was pumped earlier
      * this frame by http_update; completions it settled are pending here). */
@@ -800,6 +869,311 @@ static void snap_autotest_tick(void)
         logger_log("[snap-autotest] FAIL: revisit missed the snapshot "
                    "(hits=%d, state=%d)", g_snapFastPathHits, currentState);
         g_snapTestPhase = 3;
+    }
+}
+#endif
+
+#if defined(PLUTO_NR_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): prove the SW6 snapshot fast
+ * path for the deep-CSR page the NR engine just rendered. The boot nav
+ * bypasses the snapshot (the watchdog run must exercise the engine); once
+ * that render completes, this tick re-navigates to the SAME normalized URL
+ * and requires the revisit to come from the snapshot — network 0, parse 0,
+ * JS eval 0.
+ *   phase 0: wait for the live render (save happened in page_swap_doc;
+ *            fast-path hits must still be 0 — the boot bypassed the cache).
+ *   phase 1: revisit must be served from the fast path (hits >= 1).
+ * PASS/FAIL lands in pluto.log via [nr-autotest] lines. */
+#if defined(PLUTO_NR_AUTOTEST) && !defined(TARGET_PLAYDATE)
+/* MEMWATCH (sim-only): hold the SIM to the DEVICE's memory envelope for the
+ * revisit path and log per-phase RAM telemetry, so the host run can be
+ * judged against physical-device caps (6.5MB funnel budget inside the
+ * ~7.5MB usable app pool, 61.8KB fixed stack). The FIRST visit must NOT be
+ * budgeted: the sim eval legitimately scales to host-64 (peak ~86MB) and a
+ * device-scale refusal mid-eval would fabricate an OOM that the physical
+ * device (5.45MB peak, proven) never hits. The REVISIT — the path that must
+ * actually fit the device — runs fully budgeted: any refusal logged here is
+ * a real would-be device failure. */
+static unsigned long g_memWatchSavedBudget = 0;
+static int g_memWatchActive = 0;
+static void memwatch_arm(const char *phase)
+{
+    if (!g_memWatchActive)
+    {
+        g_memWatchSavedBudget = pluto_mem_budget();
+        g_memWatchActive = 1;
+    }
+    /* R43: keep the revisit arm in step with the boot envelope (7.5MB).
+     * The revisit's snapshot render uses ~1.3MB, so this only matters if a
+     * revisit ever re-evals; a stale 6.5 here would contradict boot. */
+    pluto_mem_set_budget(7UL * 1024UL * 1024UL + 512UL * 1024UL);
+    logger_log("[memwatch] ARM phase=%s budget=7.5MB (device envelope) "
+               "live=%luKB peak=%luKB refusals=%lu",
+               phase, pluto_mem_live() / 1024, pluto_mem_peak() / 1024,
+               pluto_mem_refusals());
+}
+static void memwatch_log(const char *phase)
+{
+    logger_log("[memwatch] %s live=%luKB peak=%luKB bigAlloc=%luKB "
+               "refusals=%lu stackPeak=%uB/61800B",
+               phase, pluto_mem_live() / 1024, pluto_mem_peak() / 1024,
+               pluto_mem_peak_alloc() / 1024, pluto_mem_refusals(),
+               logger_stack_peak());
+}
+static void memwatch_disarm(void)
+{
+    if (g_memWatchActive)
+    {
+        pluto_mem_set_budget(g_memWatchSavedBudget);
+        g_memWatchActive = 0;
+        logger_log("[memwatch] DISARM budget restored to %luKB",
+                   g_memWatchSavedBudget / 1024);
+    }
+}
+#else
+#define memwatch_arm(p) ((void)0)
+#define memwatch_log(p) ((void)0)
+#define memwatch_disarm() ((void)0)
+#endif
+
+static int g_nrSnapPhase = 0;
+static unsigned g_nrSnapFrames = 0;
+static int g_nrSoakDone = 0;   /* R47 soak: completed nav cycles */
+static int g_nrSoakRetries = 0; /* R47: boot-nav error-page retries */
+static int g_nrSoakBypass = 0;  /* R47b: bypass snapshot every cycle
+                                 * (force full fetch + eval per nav) */
+static int g_nrSoakTotal = 0;  /* R47 soak: cycles requested (0 = off) */
+static char g_nrSoakDocUrl[648] = ""; /* doc base at the START of this cycle */
+static char g_nrSnapUrl[648] = "";
+static char g_nrSnapDocUrl[648] = ""; /* the LIVE doc's baseUrl (may differ
+                         * from the nav URL when the server redirected —
+                         * bryanwandrych.com http->https) */
+static void nr_revisit_autotest_tick(void)
+{
+    if (g_nrSnapPhase == 3 || isRendering)
+    {
+        return;
+    }
+    ++g_nrSnapFrames;
+    if (g_nrSnapFrames < 30)
+    {
+        return; /* settle ~0.5s per phase */
+    }
+    if (g_nrSnapPhase == 0)
+    {
+        /* R47: state=3 is the ERROR page (network dead zone — run 41's
+         * boot nav timed out after 60s on WiFi). That is not an engine
+         * failure: retry the nav (snapshot keeps the offline cycles
+         * meaningful) instead of declaring FAIL and idling forever. */
+        if (currentState == STATE_ERROR)
+        {
+            if (g_nrSoakRetries < 3)
+            {
+                g_nrSoakRetries++;
+                logger_log("[nr-autotest] boot nav hit the error page — "
+                           "retrying (%d/3)", g_nrSoakRetries);
+                g_nrSnapFrames = 0;
+                pendingNavUrlSet = 1;
+                snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                         g_nrSnapUrl[0] ? g_nrSnapUrl : "http://bryanwandrych.com");
+                return;
+            }
+            logger_log("[nr-autotest] FAIL: boot nav stuck on the error "
+                       "page after %d retries (network, not engine)",
+                       g_nrSoakRetries);
+            g_nrSnapPhase = 3;
+            return;
+        }
+        if (currentState != STATE_PAGE || !currentDoc || !currentUrlObj ||
+            !currentUrlObj->normalized[0])
+        {
+            if (g_nrSnapFrames > 3600)
+            {
+                logger_log("[nr-autotest] FAIL: first render never completed "
+                           "(state=%d)", currentState);
+                g_nrSnapPhase = 3;
+            }
+            return;
+        }
+        /* R27: wait for the background eval (bundler split) to finish —
+         * the DOM is only the POST-JS truth after the last segment. The
+         * device race walked at eval second 1 and snapshotted blocks=1. */
+        if (g_pageJs && jsbridge_eval_pending(g_pageJs))
+        {
+            if (g_nrSnapFrames > 7200)
+            {
+                logger_log("[nr-autotest] FAIL: bundle eval never completed");
+                g_nrSnapPhase = 3;
+            }
+            return;
+        }
+        if (g_snapFastPathHits != 0)
+        {
+            logger_log("[nr-autotest] FAIL: fast path fired on the boot visit "
+                       "(hits=%d) — bypass lost", g_snapFastPathHits);
+            g_nrSnapPhase = 3;
+            return;
+        }
+        snprintf(g_nrSnapUrl, sizeof(g_nrSnapUrl), "%s",
+                 currentUrlObj->normalized);
+        snprintf(g_nrSnapDocUrl, sizeof(g_nrSnapDocUrl), "%s",
+                 currentDoc->baseUrl);
+        /* R47 soak: each cycle compares against the doc base recorded for
+         * THAT cycle (redirect can differ per nav). Cycle 1 uses the same
+         * value as the boot baseline. */
+        snprintf(g_nrSoakDocUrl, sizeof(g_nrSoakDocUrl), "%s",
+                 currentDoc->baseUrl);
+        memwatch_log("first-render");
+        memwatch_arm("revisit");
+        logger_log("[nr-autotest] first render live (blocks=%d jsRan=%d "
+                   "errs=%d), snap key=%s doc=%s — revisiting",
+                   currentDoc->blockCount, currentDoc->jsRan,
+                   currentDoc->jsErrors, g_nrSnapUrl, g_nrSnapDocUrl);
+        g_nrSnapPhase = 1;
+        g_nrSnapFrames = 0;
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", g_nrSnapUrl);
+        return;
+    }
+    /* Phase 1: the revisit must render from the snapshot (no JS eval).
+     * Compare the restored doc's baseUrl against the LIVE doc's baseUrl
+     * recorded in phase 0 — the snapshot key is the normalized NAV url,
+     * which can differ from the doc base (http->https redirect).
+     * R47b bypass cycles take a DIFFERENT contract: snapBypass skipped
+     * the snapshot, so success = a live full-eval render of the SAME doc
+     * (jsRan=1, blocks>0, no JS errors, same baseUrl). */
+    if (g_nrSoakBypass)
+    {
+        /* R47d: the PASS must observe the POST-JS doc, not the pre-React
+         * placeholder. Run 44's judge fired 2s into the 40s eval (the
+         * page attaches and the walker paints blocks=1 BEFORE the split
+         * starts mutating the DOM), so cycles 2-5 "PASSed" on an empty
+         * frame. Gate on eval-pending==0: the split is over, the mount
+         * completed, and the final rewalk has landed. */
+        if (g_pageJs && jsbridge_eval_pending(g_pageJs))
+        {
+            return; /* full eval still in flight — keep waiting */
+        }
+        if (currentState == STATE_PAGE && currentDoc && currentDoc->jsRan == 1 &&
+            currentDoc->blockCount > 1 && currentDoc->jsErrors == 0 &&
+            strcmp(currentDoc->baseUrl, g_nrSoakDocUrl) == 0)
+        {
+            logger_log("[nr-autotest] PASS: soak bypass cycle (full eval) "
+                       "(blocks=%d jsRan=%d errs=%d)",
+                       currentDoc->blockCount, currentDoc->jsRan,
+                       currentDoc->jsErrors);
+            memwatch_log("revisit-done");
+            memwatch_disarm();
+            g_nrSnapPhase = 3;
+            if (g_nrSoakTotal > 0 && ++g_nrSoakDone < g_nrSoakTotal)
+            {
+                logger_log("[nr-autotest] soak cycle %d/%d done — re-navigating "
+                           "(bypass)", g_nrSoakDone, g_nrSoakTotal);
+                snapBypass = 1; /* next cycle: full fetch + full eval again */
+                g_nrSnapPhase = 1;
+                g_nrSnapFrames = 0;
+                snprintf(g_nrSoakDocUrl, sizeof(g_nrSoakDocUrl), "%s",
+                         currentDoc->baseUrl);
+                pendingNavUrlSet = 1;
+                snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", g_nrSnapUrl);
+                return;
+            }
+            if (g_nrSoakTotal > 0)
+            {
+                logger_log("[nr-autotest] SOAK COMPLETE: %d/%d bypass cycles, "
+                           "no crash", g_nrSoakDone, g_nrSoakTotal);
+            }
+        }
+        else if (g_nrSnapFrames > 7200)
+        {
+            /* R47c: a failed fetch (WiFi drop — run 43 cycle 2: the HTML
+             * loaded but both ext scripts died on "Connection failed")
+             * renders empty WITHOUT touching the engine. That is a
+             * network miss, not the formerly-crashing path: retry the
+             * nav before declaring FAIL. */
+            if (g_nrSoakRetries < 2)
+            {
+                g_nrSoakRetries++;
+                logger_log("[nr-autotest] bypass cycle did not complete a "
+                           "full eval (state=%d blocks=%d jsRan=%d) — "
+                           "retrying (%d/2)",
+                           currentState,
+                           currentDoc ? currentDoc->blockCount : -1,
+                           currentDoc ? currentDoc->jsRan : -1,
+                           g_nrSoakRetries);
+                g_nrSnapPhase = 1;
+                g_nrSnapFrames = 0;
+                snapBypass = 1;
+                pendingNavUrlSet = 1;
+                snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                         g_nrSnapUrl);
+                return;
+            }
+            logger_log("[nr-autotest] FAIL: bypass cycle did not complete a "
+                       "full eval after %d retries (state=%d blocks=%d "
+                       "jsRan=%d errs=%d)",
+                       g_nrSoakRetries, currentState,
+                       currentDoc ? currentDoc->blockCount : -1,
+                       currentDoc ? currentDoc->jsRan : -1,
+                       currentDoc ? currentDoc->jsErrors : -1);
+            memwatch_disarm();
+            g_nrSnapPhase = 3;
+        }
+        return;
+    }
+    if (g_snapFastPathHits >= 1 && currentState == STATE_PAGE && currentDoc &&
+        strcmp(currentDoc->baseUrl, g_nrSoakDocUrl) == 0)
+    {
+        logger_log("[nr-autotest] PASS: revisit from snapshot (hits=%d "
+                   "blocks=%d jsRan=%d) — JS eval skipped",
+                   g_snapFastPathHits, currentDoc->blockCount,
+                   currentDoc->jsRan);
+        memwatch_log("revisit-done");
+        memwatch_disarm();
+        g_nrSnapPhase = 3;
+        /* R47 soak (PLUTO_NR_SOAK=n): the formerly-crashing edge was the
+         * SECOND navigation — one render + one revisit proves less than
+         * n consecutive cycles. After each PASS, re-arm the same nav and
+         * count the cycle; stop after n or on any FAIL. Cycles 2+ also
+         * exercise repeated snapshot save/load + funnel resync drift.
+         * R47b (PLUTO_NR_SOAK_BYPASS): re-arming snapBypass every cycle
+         * forces the FULL path each time — network fetch + 502KB bundle
+         * parse/split + React mount + boundary compacts + fresh snapshot
+         * save — the slow, memory-heavy path that only ran twice before.
+         * The phase-1 check below is bypassed to match: cycles are judged
+         * by the live render itself (blocks>0, no errors), not by a hit. */
+        if (g_nrSoakBypass)
+        {
+            snapBypass = 1; /* next nav re-downloads + re-evals everything */
+            logger_log("[nr-autotest] soak bypass armed — cycle %d will "
+                       "full-fetch + full-eval", g_nrSoakDone + 1);
+        }
+        if (g_nrSoakTotal > 0 && ++g_nrSoakDone < g_nrSoakTotal)
+        {
+            logger_log("[nr-autotest] soak cycle %d/%d done — re-navigating",
+                       g_nrSoakDone, g_nrSoakTotal);
+            g_nrSnapPhase = 1;
+            g_nrSnapFrames = 0;
+            snprintf(g_nrSoakDocUrl, sizeof(g_nrSoakDocUrl), "%s",
+                     currentDoc->baseUrl);
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", g_nrSnapUrl);
+            return;
+        }
+        if (g_nrSoakTotal > 0)
+        {
+            logger_log("[nr-autotest] SOAK COMPLETE: %d/%d cycles, no crash",
+                       g_nrSoakDone, g_nrSoakTotal);
+        }
+    }
+    else if (g_nrSnapFrames > 600)
+    {
+        logger_log("[nr-autotest] FAIL: revisit missed the snapshot "
+                   "(hits=%d state=%d baseUrl=%.80s)",
+                   g_snapFastPathHits, currentState,
+                   currentDoc ? currentDoc->baseUrl : "(none)");
+        memwatch_disarm();
+        g_nrSnapPhase = 3;
     }
 }
 #endif
@@ -1680,6 +2054,66 @@ static void nav_autotest_tick(void)
 }
 #endif
 
+/* R30l: user request — log the END RESULT of every DOM render: block/link
+ * counts AND the actual text that made it into the doc. Device run 14 kept
+ * ending "rewalk done blocks=1 links=0" with zero visibility into WHAT that
+ * one block was (the walker's "(Empty Web Page)" placeholder). This makes
+ * every render outcome diagnosable from pluto.log alone. */
+static void log_render_result(const char *tag, DocParseResult *doc)
+{
+    if (!doc)
+    {
+        logger_log("[render-result] %s: (no doc)", tag);
+        return;
+    }
+    logger_log("[render-result] %s: blocks=%d links=%d title='%.48s'",
+               tag, doc->blockCount, doc->linkCount,
+               doc->title[0] ? doc->title : "");
+    if (doc->blockCount == 0)
+    {
+        return;
+    }
+    int shown = doc->blockCount < 3 ? doc->blockCount : 3;
+    for (int bi = 0; bi < shown; bi++)
+    {
+        DocBlock *blk = doc->blocks[bi];
+        if (!blk)
+        {
+            continue;
+        }
+        char text[96];
+        size_t off = 0;
+        text[0] = '\0';
+        if (blk->type == DOC_BLOCK_CODE_BLOCK && blk->text)
+        {
+            snprintf(text, sizeof(text), "%.60s", blk->text);
+        }
+        else if (blk->type == DOC_BLOCK_IMAGE && blk->src)
+        {
+            snprintf(text, sizeof(text), "<img src=%.40s>", blk->src);
+        }
+        else
+        {
+            for (int ii = 0; ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+            {
+                const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                                    ? blk->inlines[ii]->text
+                                    : "";
+                size_t tl = strlen(t);
+                if (tl > sizeof(text) - 1 - off)
+                {
+                    tl = sizeof(text) - 1 - off;
+                }
+                memcpy(text + off, t, tl);
+                off += tl;
+            }
+            text[off] = '\0';
+        }
+        logger_log("[render-result]   block[%d] type=%d text='%.60s'",
+                   bi, blk->type, text);
+    }
+}
+
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
@@ -1697,6 +2131,7 @@ static int render_step(TaskCtx *ctx)
         }
         logger_log("render: rewalk done blocks=%d links=%d",
                    rt->rewalkDoc->blockCount, rt->rewalkDoc->linkCount);
+        log_render_result("rewalk", rt->rewalkDoc);
         /* Mark parsed so this branch runs exactly ONCE: the next task
          * re-entry must fall through to the layout step below. Without this
          * gate the task rewalked + yielded FOREVER — the loading screen
@@ -1745,6 +2180,10 @@ static int render_step(TaskCtx *ctx)
             rt->doc->_extArena = arena;
             logger_log("[jsext] prefetch done: %d file(s), %zu bytes",
                        extCount, jsext_last_bytes());
+            /* R30l: transfer over — hand the loading line back to the
+             * parse percent (counter resets with the next page). */
+            progressNetCur = 0;
+            progressNetTotal = 0;
         }
 
         /* detailsOpen overrides for toggle re-renders. */
@@ -1870,6 +2309,9 @@ static void render_done(void *result, void *userdata)
 
     /* Free the previous doc AFTER the new build (layout borrows strings). */
     page_swap_doc(rt);
+    /* R30l: what did this render actually produce? (pre-JS doc on the fresh
+     * path — the post-eval truth logs at the rewalk site). */
+    log_render_result(wasRewalk ? "done(rewalk)" : "done(fresh)", currentDoc);
 
     snprintf(pageTitle, sizeof(pageTitle), "%s",
              currentDoc->title[0] ? currentDoc->title
@@ -1973,6 +2415,7 @@ static void render_error(const char *message, void *userdata)
             {
                 js_doc_close(rt->doc->_jsbridge); /* engine dies with the doc */
             }
+            log_render_result("render-error(discarded)", rt->doc);
             document_free(rt->doc);
             free(rt->doc);
         }
@@ -1989,6 +2432,8 @@ static void render_body(const char *body, const char *url, int addToHistory)
     isRendering = 1;
     progressCurrent = 0;
     progressTotal = 0;
+    progressNetCur = 0; /* R30l: fresh page, fresh byte counter */
+    progressNetTotal = 0;
     snprintf(pageTitle, sizeof(pageTitle), "Rendering...");
     currentState = STATE_LOADING;
 
@@ -2037,8 +2482,38 @@ static void navigate_to(const char *urlString)
     jsext_abort_active(); /* FULL-mode prefetch: kill any in-flight session */
     isRendering = 0;
     /* Drop the previous page's layout (borrows doc strings) before the doc
-     * is freed on the next render_done. */
+     * is freed here. */
     layout_clear();
+
+    /* R28: tear the OLD page down at navigation START — a real browser
+     * unloads the previous document when navigation commits, not when the
+     * next one finishes. The mount fix made deep-CSR pages genuinely
+     * complete, so their engine heap stayed alive through the next load:
+     * the revisit autotest then armed the 6.5MB device-envelope budget
+     * over an 83MB live heap and every allocation was refused — the
+     * snapshot image malloc missed the fast path (hits=0) and
+     * http_client's URL-struct malloc left a zombie CONNECTING request
+     * that sat silent for the whole 60s watchdog (no connect attempt,
+     * then "[net] http error: Connection timed out"). On device the same
+     * double-booking presses the old page's engine heap against the new
+     * page's budget. Same-shaped block as page_swap_doc: free the doc,
+     * close the bridge (timers, XHR, listeners, machine), re-base the
+     * live counter. The fresh snapshot saved after the last rewalk stays
+     * on disk — invalidate only fires from render_done while eval is
+     * still pending. */
+    if (currentDoc)
+    {
+        if (currentDoc->_jsbridge)
+        {
+            js_doc_close(currentDoc->_jsbridge);
+        }
+        document_free(currentDoc);
+        free(currentDoc);
+        currentDoc = NULL;
+        g_pageJs = NULL;
+        pluto_mem_resync_live(); /* page-boundary counter re-base */
+        logger_log("[nav] old page torn down at navigation start");
+    }
 
     logger_log("navigate_to: %s", urlString);
 
@@ -2082,6 +2557,11 @@ static void navigate_to(const char *urlString)
         /* Other about: pages go through the normal load path (http_client
          * serves about:acidtest etc. internally). */
     }
+    else if (strncmp(urlBuf, "file://", 7) == 0)
+    {
+        /* Test seam: local Data-dir file kept as-is; the loader below
+         * serves it through the identical fetch→render pipeline. */
+    }
     else if (strncmp(urlBuf, "http://", 7) != 0 && strncmp(urlBuf, "https://", 8) != 0)
     {
         /* No scheme: search query or bare host (Lua parity). */
@@ -2123,14 +2603,24 @@ static void navigate_to(const char *urlString)
         unsigned long now = 0;
         uint32_t ms = 0;
         now = pd->system->getSecondsSinceEpoch(&ms);
+        /* Load with the SAME key the save used: currentUrlObj->normalized.
+         * The raw urlBuf differs whenever url_parse canonifies the input
+         * (empty path -> "/", host lowercased, default port stripped) —
+         * e.g. "http://bryanwandrych.com" vs the saved
+         * "http://bryanwandrych.com/" computed two different FNV keys and
+         * every revisit missed the cache. */
         DocParseResult *snap = snapBypass ? NULL
-            : pluto_snap_load(urlBuf, (int)currentBrowseMode, now,
+            : pluto_snap_load(currentUrlObj->normalized,
+                              (int)currentBrowseMode, now,
                               SNAP_TTL_SECONDS);
         snapBypass = 0;
         if (snap)
         {
             ++g_snapFastPathHits;
-            logger_log("[snap] fast path: %s", urlBuf);
+            logger_log("[snap] fast path: %s", currentUrlObj->normalized);
+#if defined(PLUTO_NR_AUTOTEST) && !defined(TARGET_PLAYDATE)
+            memwatch_log("snap-restore");
+#endif
             /* Tear down the old page exactly as render_done would have. */
             layout_clear();
             if (currentDoc)
@@ -2167,6 +2657,8 @@ static void navigate_to(const char *urlString)
     currentState = STATE_LOADING;
     progressCurrent = 0;
     progressTotal = 0;
+    progressNetCur = 0; /* R30l: fresh page, fresh byte counter */
+    progressNetTotal = 0;
     snprintf(pageTitle, sizeof(pageTitle), "Loading...");
     if (!navigatingHistory)
     {
@@ -2174,6 +2666,20 @@ static void navigate_to(const char *urlString)
     }
     navigatingHistory = 0;
     update_system_menu();
+
+    /* Test seam: file:// URLs are served locally — no network involved
+     * (used to reproduce engine crashes offline when the device radio is
+     * down, and to open local documents generally). */
+    if (strncmp(urlBuf, "file://", 7) == 0)
+    {
+        if (pluto_load_local_file(urlBuf) == 0)
+        {
+            currentState = STATE_ERROR;
+            snprintf(pageTitle, sizeof(pageTitle), "Local file error");
+            logger_log("[file] load failed: %s", urlBuf);
+        }
+        return;
+    }
 
     HttpCallbacks cbs;
     memset(&cbs, 0, sizeof(cbs));
@@ -2184,10 +2690,90 @@ static void navigate_to(const char *urlString)
 }
 
 /* ── HTTP callbacks (port of the HttpClient.get handler table) ──────────── */
+
+/* file:// loader (test seam + local documents). Streams a file from the
+ * Data dir through the SAME http_on_success pipeline: consumers see a
+ * normal page fetch with Content-Type text/html. GENERAL PURPOSE: no
+ * filename or content knowledge here — any local document loads the same
+ * way a desktop browser serves local files. Returns the byte length, or
+ * 0 when the file is missing/too large for RAM delivery. */
+static size_t pluto_load_local_file(const char *fileUrl)
+{
+    /* file://<path> — strip the scheme; device Data files live at /Data
+     * (sim: same relative path works under the game's Data dir). */
+    const char *path = fileUrl + 7;
+    while (*path == '/')
+    {
+        path++; /* file:///Data/x → /Data/x (device), Data/x (sim) */
+    }
+    SDFile *fp = pd->file->open(path, kFileReadData);
+    if (!fp)
+    {
+        logger_log("[file] open failed: %s", path);
+        return 0;
+    }
+    pd->file->seek(fp, 0, SEEK_END);
+    int flen = pd->file->tell(fp);
+    pd->file->seek(fp, 0, SEEK_SET);
+    if (flen <= 0 || flen > 2 * 1024 * 1024)
+    {
+        logger_log("[file] bad size %d: %s", flen, path);
+        pd->file->close(fp);
+        return 0;
+    }
+    char *buf = (char *)malloc((size_t)flen + 1);
+    if (!buf)
+    {
+        pd->file->close(fp);
+        return 0;
+    }
+    int got = pd->file->read(fp, buf, (unsigned int)flen);
+    pd->file->close(fp);
+    if (got != flen)
+    {
+        logger_log("[file] short read %d/%d: %s", got, flen, path);
+        free(buf);
+        return 0;
+    }
+    buf[flen] = '\0';
+    logger_log("[file] served %s (%d bytes)", path, flen);
+    char *keys[1] = { "content-type" };
+    char *vals[1] = { "text/html" };
+    http_on_success(200, keys, vals, 1, buf, (size_t)flen, fileUrl);
+    free(buf);
+    return (size_t)flen;
+}
+
 static void http_on_progress(int cur, int total)
 {
     progressCurrent = cur;
     progressTotal = total;
+}
+
+/* See html/jsext.h: loading-UI byte counter for external script fetches.
+ * jsext's HTTP session is separate from the page request above, so this
+ * is a distinct sink (called from html/jsext.c fetch_on_progress). */
+void pluto_ui_net_progress(int cur, int total)
+{
+    progressNetCur = cur;
+    progressNetTotal = total;
+    /* Log every 64KB so pluto.log alone proves real bytes moved on the
+     * device (user trust: "show me more than 0 bytes"). Log the start and
+     * every 64KB step even when total is unknown (chunked responses). */
+    static int lastLoggedK = -1;
+    int k = cur >> 6;
+    if (k != lastLoggedK)
+    {
+        lastLoggedK = k;
+        if (total > 0)
+        {
+            logger_log("[net] script fetch %d / %d bytes", cur, total);
+        }
+        else
+        {
+            logger_log("[net] script fetch %d bytes", cur);
+        }
+    }
 }
 
 static void http_on_success(int status, char **headerKeys, char **headerVals,
@@ -2228,6 +2814,20 @@ static void http_on_error(const char *message)
 static void page_rewalk_now(void)
 {
     if (!currentDoc || isRendering)
+    {
+        return;
+    }
+    /* R46 (device run 36 + sim run evidence): a parked XS-NR mount owns
+     * the machine and the DOM is a HALF-BUILT React tree. A mutation
+     * reported between bursts (budget_take inside setHostData) used to
+     * schedule a full rewalk EVERY FRAME: 98 rewalks rendered the
+     * "(Empty Web Page)" placeholder on the sim, and on the device the
+     * walker's allocations + renders ran concurrently with the parked
+     * mount until burst 18 resumed stale bytecode and hard-crashed
+     * (mmfar=0x287b at fxRunID_nr:872). The mount's own completion
+     * consumes callBudget on the split-exhausted path, which fires the
+     * ONE rewalk that sees the finished tree — skip the per-burst ones. */
+    if (g_pageJs && jsbridge_mount_parked(g_pageJs))
     {
         return;
     }
@@ -2810,6 +3410,51 @@ static void engine_flip_test_tick(void)
 
 
 
+/* R30j MERGE (user request, 2026-10-06): ONE painter for the render-progress
+ * screen. The eval overlay (xs_render_overlay) repaints the same bar onto the
+ * same framebuffer, and STATE_PAGE's own doc draw used to paint the walker's
+ * 1-block placeholder doc between overlay frames — the device showed TWO
+ * competing "render pages" (placeholder text + bar, flickering percents).
+ * This helper is the single source of the rendering UI: STATE_LOADING's
+ * isRendering branch and STATE_PAGE's eval-pending gate both draw it, so the
+ * placeholder doc NEVER paints while the engine is mid-eval. */
+static void draw_render_progress_ui(void)
+{
+    LCDFont *fontH = style_font(PLUTO_FONT_HEADING1);
+    LCDFont *fontB = style_font(PLUTO_FONT_BODY);
+    LCDColor white = kColorWhite;
+    LCDColor black = kColorBlack;
+    pd->graphics->fillRect(0, CONTENT_Y, SCREEN_WIDTH, CONTENT_HEIGHT, white);
+    pd->graphics->setFont(fontH);
+    pd->graphics->drawText("Rendering Web Page...",
+                           strlen("Rendering Web Page..."), kUTF8Encoding,
+                           24, 60);
+    pd->graphics->setFont(fontB);
+    {
+        char displayHost[512];
+        snprintf(displayHost, sizeof(displayHost), "%s",
+                 currentUrlObj ? currentUrlObj->normalized : "Web Request");
+        if (strlen(displayHost) > 45)
+        {
+            displayHost[42] = '\0';
+            strcat(displayHost, "...");
+        }
+        pd->graphics->drawText(displayHost, strlen(displayHost),
+                               kUTF8Encoding, 24, 90);
+    }
+    float p = tasks_get_progress();
+    if (p > 1.0f)
+    {
+        p = 1.0f;
+    }
+    int pct = (int)(p * 100.0f);
+    char line[96];
+    snprintf(line, sizeof(line), "Rendering page content... %d%%", pct);
+    pd->graphics->drawText(line, strlen(line), kUTF8Encoding, 24, 116);
+    pd->graphics->drawRect(24, 138, 352, 10, black);
+    pd->graphics->fillRect(24, 138, (int)(352.0f * p), 10, black);
+}
+
 static int updateFrame(void *userdata)
 {
     (void)userdata;
@@ -2899,6 +3544,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_SNAP_AUTOTEST)
     snap_autotest_tick();
+#endif
+
+#if defined(PLUTO_NR_AUTOTEST)
+    nr_revisit_autotest_tick();
 #endif
 
 #if defined(PLUTO_PAGE_AUTOTEST)
@@ -3467,12 +4116,25 @@ static int updateFrame(void *userdata)
             }
         }
 
-        layout_draw(scrollY);
-        layout_evict_offscreen(scrollY);
+        /* R30j MERGE: while the engine's eval is still running, the walker's
+         * doc is the PRE-JS placeholder ("(Empty Web Page)") — painting it
+         * here is the second competing "render page" the device showed
+         * (flickering bar, percent jumps). Draw the SAME progress UI the
+         * overlay paints instead; the real doc takes over at the post-eval
+         * rewalk. */
+        if (g_pageJs && jsbridge_eval_pending(g_pageJs))
         {
-            const LMLink *sel = lm_get_selected_link();
-            hud_draw(scrollY, layout_get_total_height(),
-                     sel ? sel->href : NULL);
+            draw_render_progress_ui();
+        }
+        else
+        {
+            layout_draw(scrollY);
+            layout_evict_offscreen(scrollY);
+            {
+                const LMLink *sel = lm_get_selected_link();
+                hud_draw(scrollY, layout_get_total_height(),
+                         sel ? sel->href : NULL);
+            }
         }
         break;
     }
@@ -3506,14 +4168,44 @@ static int updateFrame(void *userdata)
         }
         if (isRendering)
         {
-            float p = tasks_get_progress();
-            if (p > 1.0f) { p = 1.0f; }
-            int pct = (int)(p * 100.0f);
-            char line[96];
-            snprintf(line, sizeof(line), "Rendering page content... %d%%", pct);
-            pd->graphics->drawText(line, strlen(line), kUTF8Encoding, 24, 116);
-            pd->graphics->drawRect(24, 138, 352, 10, black);
-            pd->graphics->fillRect(24, 138, (int)(352.0f * p), 10, black);
+            /* R30j MERGE: single shared painter (same pixels as before —
+             * heading/URL above are redrawn idempotently by the helper). */
+            draw_render_progress_ui();
+            /* R30l: while a big external script downloads, replace the
+             * (slow-moving) parse percent with the REAL byte counter —
+             * device run 14: the 502716-byte bundle never moved any
+             * visible number, so the user could not trust the download.
+             * Same pixels as the percent line (overdraw after a white
+             * fill of its band; the bar itself stays shared).
+             * NOTE: bryanwandrych.com serves chunked (no Content-Length)
+             * — http_client reports total=0 — so the gate is on CUR and
+             * the percent only renders when a total is actually known. */
+            if (progressNetTotal > 0 || progressNetCur > 0)
+            {
+                int npct = progressNetTotal > 0
+                               ? (int)((float)progressNetCur /
+                                       (float)progressNetTotal * 100.0f)
+                               : -1;
+                if (npct > 100)
+                {
+                    npct = 100;
+                }
+                char nline[96];
+                if (npct >= 0)
+                {
+                    snprintf(nline, sizeof(nline),
+                             "Fetching scripts: %d / %d bytes (%d%%)",
+                             progressNetCur, progressNetTotal, npct);
+                }
+                else
+                {
+                    snprintf(nline, sizeof(nline),
+                             "Fetching scripts: %d bytes", progressNetCur);
+                }
+                pd->graphics->fillRect(24, 112, 352, 22, white);
+                pd->graphics->drawText(nline, strlen(nline), kUTF8Encoding,
+                                       24, 116);
+            }
         }
         else if (progressTotal > 0)
         {
@@ -3808,19 +4500,51 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
         pdtimer_init(pd);
         http_client_init(pd);
+        logger_log("[netmon] boot: wifi %s (signal %d/3)",
+                   netmon_state_name(), netmon_level());
         pluto_spill_init(); /* SW2b: disk-backed streaming storage dir */
         /* SW3/SW3a: enable the soft heap budget — the guarded-RAM raise.
          * Everything on the device allocates through the SW1 funnel, so this
          * one gate turns "allocate until the OS panics" into "refuse, log,
-         * fall back to disk". 6.5MB against the ~7.5MB usable app pool:
-         * 1MB of true headroom keeps Duktape's OOM-fatal handler out of the
-         * picture and leaves room for non-funneled SDK internals.
+         * fall back to disk".
+         * R30l (device run 16 hard numbers): the seg 407 mount (React's
+         * client render — the single biggest allocation of the whole eval)
+         * parked at live=4368KB headroom=2287KB, then burst 2/3/4 climbed
+         * live 5904→6107→6327KB and died "memory full" at headroom=328KB —
+         * React needs ~2.6MB from burst 1 and the 6.5MB envelope is ~600KB
+         * short.
+         * R30m REVERT (device run 17): the first and ONLY run with a 7.0MB
+         * boot budget HARD-CRASHED the device (unrecoverable until a manual
+         * reset) — no pluto.log, no errorlog.txt. The only delta vs runs
+         * 12–16 was this +512KB of funnel allowance; a real OS-pool malloc
+         * failure somewhere outside the XS contained-abort path panics
+         * PlaydateOS. 6.5MB was the envelope for the pre-R42 evals (5.45MB
+         * proven peak). Device run 32 (R42: the seg-105 free-run fixed)
+         * measured the REAL mount trajectory: the React hydration peak
+         * needs ~7MB+ on 32-bit (sim needs 10.9MB host-64; device died at
+         * the 6.5MB wall with 6.7MB genuinely free per the crashlog's
+         * heap-allocated watermark). Raise to 7.5MB — still leaves ~0.5MB
+         * of funnel guard, and the mount-finish compact collect reclaims
+         * the peak to ~2MB (sim-proven) once hydration completes.
          * DEVICE-ONLY: the simulator's app-resident watermark is ~45MB of
          * host-side allocations — enforcing a device-scale budget there would
          * refuse every large allocation and turn Duktape OOM fatal. The sim
          * stays pure telemetry (budget 0); its suites pin behavior instead. */
 #ifdef TARGET_PLAYDATE
-        pluto_mem_set_budget(6 * 1024UL * 1024UL + 512 * 1024UL);
+        /* R53: 8.0MB funnel budget (was 7.5MB). Device runs 48–50 evidence:
+         * the R52 crash fix works (no E0, three full-render bypass cycles
+         * PASSed), but every navigation leaves ~0.3–1MB of residue outside
+         * the JS machine (bundler-start live climbed 1623→2115→2752→3054→
+         * 4038KB across run 50's cycles), so at the old 7.5MB budget the
+         * seg-407 React mount's 1.5MB slot-heap grow was refused from cycle
+         * 2 on ("R32 LADDER … accepted=0" → meter overrun → contained
+         * abort + engine reset, page never rendered). Run 48's crashlog
+         * measured 6.7MB GENUINELY free at the old envelope, so the real
+         * OS ceiling is far above 8MB; the old 7.0MB hard-crash (R30m) was
+         * a different era (pre-R42 evals, higher engine peaks). 8.0MB
+         * covers 5+ full-eval cycles at the measured residue rate while
+         * keeping ~0.5MB of funnel guard under the observed envelope. */
+        pluto_mem_set_budget(8 * 1024UL * 1024UL);
 #endif
         imgdec_init(pd);
         tasks_init(pd);
@@ -4101,7 +4825,91 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         jsbridge_set_engine(3);
         logger_log("[js-autotest] engine forced: XS (Moddable)");
     #endif
+    #ifdef PLUTO_JS_AUTOTEST_XS_NR
+        /* Same, on the XS (NO RECURSION) fork engine (storage jsEngine=4,
+         * live router=4). close[XS-NR] in the log proves which binaries
+         * ran; the fork's heap-bounded walkers must survive the same page
+         * that crashes the stock engines' native C-stack recursion. */
+        storage_set_setting_int("jsEngine", 4);
+        jsbridge_set_engine(4);
+        logger_log("[js-autotest] engine forced: XS (No Recursion)");
+    #endif
 #endif /* TARGET_SIMULATOR guard above */
+
+#if defined(PLUTO_NR_AUTOTEST)
+#ifndef PLUTO_NR_AUTOTEST_URL
+#define PLUTO_NR_AUTOTEST_URL "http://bryanwandrych.com"
+#endif
+/* Optional offline repro: navigate to a local file instead of the URL
+ * (test builds only; used when the device radio is down but the crash
+ * must be iterated on). */
+#ifdef PLUTO_NR_AUTOTEST_FILE_URL
+#undef PLUTO_NR_AUTOTEST_URL
+#define PLUTO_NR_AUTOTEST_URL PLUTO_NR_AUTOTEST_FILE_URL
+#endif
+/* Optional engine force: 0=muJS 1=Duktape 2=QuickJS 4=XS NR (default).
+ * Mirrors PLUTO_NAV_AUTOTEST_ENGINE — lets one seam build drive the real
+ * CSR page under every engine for like-for-like comparison. */
+#ifndef PLUTO_NR_AUTOTEST_ENGINE
+#define PLUTO_NR_AUTOTEST_ENGINE 4
+#endif
+/* R47 soak: consecutive full render+revisit cycles after boot (the edge
+ * that used to die on the SECOND navigation). 0 = single cycle (default). */
+#ifndef PLUTO_NR_SOAK
+#define PLUTO_NR_SOAK 0
+#endif
+/* R47b: 1 = every soak cycle bypasses the snapshot (full fetch + full
+ * eval + mount + compact each time). Requires PLUTO_NR_SOAK > 0. */
+#ifndef PLUTO_NR_SOAK_BYPASS
+#define PLUTO_NR_SOAK_BYPASS 0
+#endif
+        /* TEMPORARY (PLUTO_NR_AUTOTEST builds, sim + device): navigate
+         * straight to the deep-CSR test page (bryanwandrych.com) with the
+         * XS (No Recursion) engine active. This is the end-to-end crash
+         * reproduction: the page's bundle depth overflows every stock
+         * engine's native recursion; the fork must parse, bind, emit and
+         * run it entirely from heap frames. */
+        /* Full JS execution is REQUIRED for the CSR page (user rule for
+         * this sweep): force jsEnabled=2 unconditionally, not just when Off. */
+        if (storage_setting_int("jsEnabled") != 2)
+            logger_log("[nr-autotest] jsEnabled was %d, forced to 2 (Full)", storage_setting_int("jsEnabled"));
+        storage_set_setting_int("jsEnabled", 2); /* Full */
+        storage_set_setting_int("jsEngine", PLUTO_NR_AUTOTEST_ENGINE);
+        jsbridge_set_engine(PLUTO_NR_AUTOTEST_ENGINE);
+        /* Snapshots persist across sessions (by design), so a bryanwandrych
+         * page snap from any previous run would otherwise fast-path this
+         * boot navigation and the watchdog test would never touch the
+         * engine. Force the classic fetch+eval path for THIS navigation. */
+        snapBypass = 1;
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", PLUTO_NR_AUTOTEST_URL);
+        logger_log("[nr-autotest] navigating to %s on engine %d", PLUTO_NR_AUTOTEST_URL, (int)PLUTO_NR_AUTOTEST_ENGINE);
+#if PLUTO_NR_SOAK > 0
+        g_nrSoakTotal = PLUTO_NR_SOAK;
+        logger_log("[nr-autotest] SOAK enabled: %d consecutive render+revisit cycles", g_nrSoakTotal);
+#endif
+#if PLUTO_NR_SOAK > 0 && PLUTO_NR_SOAK_BYPASS
+        g_nrSoakBypass = 1;
+        logger_log("[nr-autotest] SOAK BYPASS: every cycle full-fetches + full-evals (no snapshot)");
+#endif
+#if !defined(TARGET_PLAYDATE)
+        /* MEMWATCH scale note: the sim eval allocates at host-64 scale
+         * (~86MB peak on this page) — the DEVICE envelope is 6.5MB funnel
+         * inside the ~7.5MB app pool with a 61.8KB stack, and that envelope
+         * is enforced (sim-only) at the revisit via [memwatch] ARM. */
+        logger_log("[memwatch] sim boot: heap scale is HOST-64 (eval peak "
+                   "~86MB here; device envelope 6.5MB enforced at revisit)");
+#endif
+#ifdef PLUTO_QJS_PROBE_SPAN
+        /* R26g device bisect: compile the baked-in span bytes from boot
+         * depth in a fresh runtime BEFORE any navigation. */
+        {
+            extern void qjs_probe_span_compile(void);
+            qjs_probe_span_compile();
+            logger_log("[qjsprobe] complete");
+        }
+#endif
+#endif
 
 #if defined(PLUTO_JS_TIMERS_AUTOTEST)
         /* TEMPORARY (autotest builds, sim + device): navigate straight to

@@ -694,6 +694,23 @@ static int ns_tail_match(const char *buf, size_t L, const char *tail,
     return strncmp(buf + L - k - tlen, tail, tlen) == 0;
 }
 
+/* R29: the walker's empty-render placeholder, verbatim (document.c
+ * inserts it as a single italic paragraph when blockCount would be 0). */
+#define DOC_EMPTY_RENDER_TEXT "(Empty Web Page)"
+
+int doc_is_empty_render(const DocParseResult *doc)
+{
+    if (!doc || doc->parseError || doc->blockCount != 1)
+        return 0;
+    const DocBlock *b = doc->blocks[0];
+    if (!b || b->type != DOC_BLOCK_PARAGRAPH || b->inlineCount != 1)
+        return 0;
+    const DocInline *inl = b->inlines[0];
+    if (!inl || inl->type != DOC_INLINE_TEXT || !inl->text)
+        return 0;
+    return strcmp(inl->text, DOC_EMPTY_RENDER_TEXT) == 0;
+}
+
 int doc_is_noscript_warning(const char *text)
 {
     char buf[97 + 8]; /* 96 content chars + head byte + slack */
@@ -4237,6 +4254,20 @@ static void handle_element(Walker *w, const DomNode *node)
              strcmp(tag, "title") == 0)
     {
         /* Non-rendered: content stripped by the tokenizer; must not walk. */
+        if (strcmp(tag, "title") == 0)
+        {
+            /* Post-JS title capture (browser parity): CSR apps set
+             * document.title during bootstrap (often per route); the walk
+             * output title must reflect the live DOM exactly like
+             * blocks/links do. Empty text keeps the tokenizer's static
+             * <title> fallback. Rewalks re-capture on every re-render. */
+            char tbuf[256];
+            doc_concat_node_text(node, tbuf, sizeof(tbuf));
+            if (tbuf[0])
+            {
+                snprintf(w->doc->title, sizeof(w->doc->title), "%s", tbuf);
+            }
+        }
     }
     /* ── Metadata-only elements (WHATWG §4.2): carried by the parser — never
      * walked (walking would leak attribute-less child text into the page). */

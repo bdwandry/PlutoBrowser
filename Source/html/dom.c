@@ -123,7 +123,15 @@ static int is_void(const char *tag)
 
 static int is_skip_subtree(const char *tag)
 {
-    return strcmp(tag, "template") == 0 || strcmp(tag, "head") == 0 ||
+    /* R17: <head> is no longer skipped — its metadata children (<link>,
+     * <meta>, <base>) must exist in the DOM because pages address them by
+     * id (favicon swaps, canonical-link updates) and getElementById must
+     * find them like any browser. The render walker already no-ops these
+     * tags, so nothing leaks into the visual page. <template> stays skipped
+     * (inert content per HTML spec — browsers keep it out of getElementById
+     * reach too). */
+    (void)tag;
+    return strcmp(tag, "template") == 0 ||
            strcmp(tag, "selectedcontent") == 0;
 }
 

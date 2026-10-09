@@ -124,6 +124,7 @@ cc $COMMON -c Source/render/decoders/inflate.c -o "$D/inflate.o"
 # jsbridge deps pulled in by http_client's about: pages (muJS engine):
 for f in Source/js/muJS/*.c; do cc $COMMON -c "$f" -o "$D/mujs_$(basename $f .c).o"; done
 cc $COMMON -c Source/html/jsbridge.c        -o "$D/jsbridge.o"
+cc $COMMON -c Source/html/jsbridge_bundler.c -o "$D/bundler.o"
 cc $COMMON -c Source/html/jsbridge_mujs.c   -o "$D/mu_bridge.o"
 cc $COMMON -c Source/html/document.c        -o "$D/document.o"
 cc $COMMON -c Source/html/dom.c             -o "$D/dom.o"
@@ -136,6 +137,7 @@ cc $COMMON -c Source/core/storage.c         -o "$D/storage.o"
 cc $COMMON -c Source/core/constants.c       -o "$D/constants.o"
 cc $COMMON -c Source/util/pdtimer.c         -o "$D/pdtimer.o"
 cc $COMMON -c Source/core/tasks.c           -o "$D/tasks.o"
+cc $COMMON -c Source/core/pluto_page.c      -o "$D/page.o"
 
 sed 's/__GZ_FIXTURES__/#include "fixtures.h"/' tests/gzip_host_test.c > "$D/test.c"
 cc $COMMON -I"$D" -c "$D/test.c" -o "$D/test.o"
@@ -161,13 +163,18 @@ SHIMD="-DCONFIG_VERSION=\"2026-06-04\" -D_GNU_SOURCE=1 -D_POSIX_THREADS=1 -D__TM
 XSFLAGS='-DINCLUDE_XSPLATFORM -DXSPLATFORM="xs_platform.h"'
 cc $COMMON -c Source/html/jsbridge_duktape.c  -o "$D/duk_bridge.o"
 cc $COMMON $SHIMD -c Source/html/jsbridge_quickjs.c -o "$D/qjs_bridge.o"
-cc $COMMON $XSFLAGS -c Source/html/jsbridge_xs.c    -o "$D/xs_bridge.o"
+cc $COMMON -c Source/html/jsbridge_xs.c    -o "$D/xs_bridge.o"
+cc $COMMON $XSFLAGS -c Source/html/jsbridge_xs_nr.c -o "$D/xs_nr_bridge.o"
 cc $COMMON -c Source/js/duktape/duktape.c -o "$D/duk_eng.o"
 cc $COMMON $SHIMD -c Source/html/qjs_pthread_stubs.c -o "$D/qjs_thr.o"
 for f in Source/html/qjs_shim_*.c; do cc $COMMON $SHIMD -c "$f" -o "$D/shim_$(basename $f .c).o"; done
 i=0
 for f in $(ls Source/js/xs_moddable/sources/*.c | grep -vE "xsum.c|xsffi.c"); do
   cc $COMMON $XSFLAGS -c "$f" -o "$D/xssrc_$i.o"; i=$((i+1))
+done
+i=0
+for f in $(ls Source/js/xs_moddable_no_recursion/sources/*.c | grep -vE "xsum.c|xsffi.c"); do
+  cc $COMMON $XSFLAGS -c "$f" -o "$D/xsnrsrc_$i.o"; i=$((i+1))
 done
 cc -fsanitize=address,undefined "$D"/*.o -o /tmp/gztest
 echo BUILT /tmp/gztest

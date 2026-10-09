@@ -1681,6 +1681,7 @@ XS_CODE_JUMP:
 			#ifdef mxDebug
 				offset = slot->ID;
 			#endif
+			fprintf(stderr, "[gcdbg3] GET_CLOSURE idx=%d slotKind=%d slotID=%d varKind=%d env=%p scope=%p frame=%p stack=%p\n", (int)index, (int)slot->kind, (int)slot->ID, (int)slot->value.closure->kind, (void*)mxEnvironment, (void*)mxScope, (void*)mxFrame, (void*)mxStack); /* TEMP DIAG */
 			variable = slot->value.closure;
 			if (variable->kind < 0)
 				mxRunDebugID(XS_REFERENCE_ERROR, "get %s: not initialized yet", slot->ID);
@@ -2105,6 +2106,7 @@ XS_CODE_JUMP:
 			mxSaveState;
 			slot = fxNewEnvironmentInstance(the, C_NULL);
 			mxRestoreState;
+			fprintf(stderr, "[envdbg3] ENVIRONMENT created=%p\n", (void*)slot); /* TEMP DIAG */
 			variable = mxFunctionInstanceCode((mxStack + 1)->value.reference);
 			variable->value.code.closures = slot;
 			mxNextCode(1);
@@ -2121,6 +2123,7 @@ XS_CODE_JUMP:
 #ifdef mxTrace
 			if (gxDoTrace) fxTraceIndex(the, index - 1);
 #endif
+			fprintf(stderr, "[envdbg3] STORE idx=%d envRef=%p\n", (int)index, (void*)mxStack->value.reference); /* TEMP DIAG */
 			address = &(mxStack->value.reference->next);
 			while ((slot = *address)) {
 				address = &slot->next;

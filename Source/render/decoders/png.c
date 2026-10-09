@@ -440,6 +440,13 @@ LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH)
     if (rows && outCount > 0) /* Lua: if acc.count == 0 then return nil */
     {
         PngCtx pc = { rows, outCount, outWidth };
+        /* R30p: back to the buffered dither — the streaming variant is kept
+         * in dither.c (pixel-identical, host-tested) and will be re-armed
+         * as its OWN one-change-at-a-time device A/B after a stable
+         * baseline re-run. It was NOT implicated in the run-18 crash (low
+         * risk, pure C), but the R30p rule is: no behavioral changes ship
+         * in a batch, and this build's job is to reproduce the proven
+         * runs-15/16 configuration exactly. */
         img = dither_to_bitmap(targetW, targetH, png_out_pixel, &pc);
     }
 

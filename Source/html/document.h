@@ -398,6 +398,16 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
  * (DocParseResult.suppressNoscript). Never touches non-noscript content. */
 int doc_is_noscript_warning(const char *text);
 
+/* R29: True when a walk output is an EMPTY RENDER — the generic
+ * "(Empty Web Page)" placeholder paragraph and nothing else (the exact
+ * shape the walker inserts in document.c when a page yields no
+ * renderable blocks; a page with any real content never matches).
+ * pluto_snap_save refuses to persist such a doc and pluto_snap_load
+ * treats a persisted one as a MISS, so a server bot-block or a failed
+ * first visit can never be immortalized by the fast-path cache.
+ * Site-agnostic by construction. */
+int doc_is_empty_render(const DocParseResult *doc);
+
 /* Re-run ONLY the element walker over the (possibly JS-mutated) live DOM
  * kept by doc->_dom: blocks/links are rebuilt without re-parsing HTML or
  * re-running scripts. Layout must be cleared first (it borrows strings).

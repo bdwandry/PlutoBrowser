@@ -77,7 +77,13 @@ extern const DefaultBookmark DEFAULT_BOOKMARKS[DEFAULT_BOOKMARK_COUNT];
 
 /* ── User-Agent (constants.lua value; HTTP client sends a shorter header
  *    string built in http_client.c exactly like the Lua reference) ──────── */
-#define USER_AGENT "Mozilla/5.0 (Playdate OS 2.7; 400x240; 1-bit Mono) CometBrowser/1.0"
+/* R29 (user decision 2026-10-06): present as a desktop Chrome. Every site
+ * is built for a desktop browser and this browser renders desktop HTML
+ * anyway (the whole point of the XS engine), so asking for the desktop
+ * page is the honest request; the Playdate-branded UA only invited
+ * bot-walls and simplified variants. Single source of truth — the HTTP
+ * client builds its header from this macro. */
+#define USER_AGENT "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 /* ── Image mode label/names (settings UI + persistence) ────────────────── */
 extern const char *IMAGE_MODE_NAMES[IMAGE_MODE_COUNT];   /* keys stored in storage */

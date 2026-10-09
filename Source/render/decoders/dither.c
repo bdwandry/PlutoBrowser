@@ -120,3 +120,60 @@ LCDBitmap *dither_to_bitmap(int width, int height,
     free(bits);
     return img;
 }
+
+/* R30o streaming variant: dither row-by-row STRAIGHT into the bitmap's
+ * data plane — no full-frame intermediate bits buffer, no final memcpy
+ * pass. Pixel-exact with dither_to_bitmap: same dither_core inner loop,
+ * same row order, and the plane is EXPLICITLY zeroed first so the output
+ * never depends on what state newBitmap left the plane in — the legacy
+ * path's calloc'd intermediate (0 = black background, set bits = white,
+ * zero tail padding) is reproduced exactly: black pixels = 0 bits, white
+ * pixels = set bits, SDK tail padding beyond stride = 0. */
+LCDBitmap *dither_to_bitmap_stream(int width, int height,
+                                   uint8_t (*getPixelGray)(void *userdata, int x, int y),
+                                   void *userdata)
+{
+    PlaydateAPI *pd = pluto_pd();
+    if (!pd)
+    {
+        return NULL;
+    }
+    if (!getPixelGray || width <= 0 || height <= 0)
+    {
+        return NULL;
+    }
+    if (width > 380) width = 380;
+    if (height > 240) height = 240;
+
+    LCDBitmap *img = pd->graphics->newBitmap(width, height, kColorWhite);
+    if (!img)
+    {
+        return NULL;
+    }
+
+    int bw = 0, bh = 0, rb = 0;
+    uint8_t *mask = NULL, *data = NULL;
+    pd->graphics->getBitmapData(img, &bw, &bh, &rb, &mask, &data);
+    if (!data || rb < (width + 7) / 8)
+    {
+        pd->graphics->freeBitmap(img);
+        return NULL;
+    }
+    memset(data, 0, (size_t)rb * height);
+
+    for (int y = 0; y < height; y++)
+    {
+        const uint8_t *bayerRow = bayer4x4[y & 3];
+        uint8_t *rowBits = data + (size_t)y * rb;
+        for (int x = 0; x < width; x++)
+        {
+            int gray = getPixelGray(userdata, x, y);
+            int isBlack = gray < bayerRow[x & 3];
+            if (!isBlack)
+            {
+                rowBits[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+            }
+        }
+    }
+    return img;
+}

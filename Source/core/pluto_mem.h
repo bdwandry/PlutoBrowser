@@ -50,6 +50,14 @@ unsigned long pluto_mem_budget(void);
  * the legacy pure-RAM behavior in host tests. */
 unsigned long pluto_mem_headroom_bytes(void);
 
+/* R15: how much of `want` bytes is ACTUALLY grantable from the OS heap
+ * right now? Progressive malloc-test in doubling steps (4KB → 1MB),
+ * releasing everything — probing in steps catches the cliff without ever
+ * requesting the full size in one block. Returns the largest verified
+ * grantable amount (capped at `want`). Cost: a handful of transient
+ * allocations; never fragments (every probe block is freed). */
+unsigned long pluto_mem_probe_grantable(unsigned long want);
+
 /* Re-base the live counter to the tracked-table sum (page-boundary sync).
  * See pluto_mem.c for the drift explanation. */
 void pluto_mem_resync_live(void);

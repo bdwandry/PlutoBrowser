@@ -39,11 +39,16 @@
 
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
+#include "jsbridge_bundler.h"
 #include "quickjs.h"
 #include "../core/logger.h"
 #include "../util/strbuf.h"
 #include "../core/pluto_mem.h"
 #include "../core/pluto_spill.h"
+#include "../core/url.h"
+
+/* SDK realloc(0) wrapper (defined in main.c) — same convention as core/url.c. */
+extern void pluto_free(void *p);
 #include "../html/dom.h"
 
 extern PlaydateAPI *pluto_pd(void);
@@ -65,15 +70,36 @@ extern void pluto_qjs_free(struct JSContext *ctx, void *ptr);
  * margin); host/simulator builds have an 8MB stack and -O0 frames are much
  * fatter, so they get a larger budget for the same suite. Override via
  * -DQJS_STACK_LIMIT= for experiments — never ship device above ~48KB. */
-#define QJS_MEM_LIMIT (2500u * 1024u) /* SW3: was 1MB — raised to the measured
-                                       * 2.5MB class (a 502KB minified bundle
-                                       * compiles to ~2.1x its source in RAM);
-                                       * still refuses gracefully past it. */
+#ifndef QJS_MEM_LIMIT
+/* R26g: 4.6MB → 5.5MB — the JS_PTR64 struct-JSValue path (16B values vs 8B
+ * nan-boxing) grows value-carrying engine heap ~1.5x. R18 measured a 3.94MB
+ * boxing peak for the 502KB bryanwandrych.com bundle (a SPLIT webpack bundle
+ * keeps every module live in the shared registry); the struct path needs the
+ * headroom. The REAL memory gate remains the funnel budget (6.5MB device)
+ * that every QuickJS allocation flows through — this inner limit only
+ * backstops contained refusal instead of engine OOM. */
+#define QJS_MEM_LIMIT (5500u * 1024u)
+#endif
 #ifdef TARGET_PLAYDATE
-/* Device: 61.8KB game-task stack; the attach-point probe guarantee plus
- * margin keep deep JS recursion inside ~19KB of real stack. The budget is
- * sized for thin -O2 ARM frames — NEVER raise above ~48KB. */
-#define QJS_STACK_LIMIT_DFL (40u * 1024u)
+/* Device: 61.8KB game-task stack. The probe counts from the ATTACH point,
+ * but evals run DEEPER (document_parse → dispatch → run_script → split →
+ * JS_Eval), and device fault evidence (INVPC with a corrupted return
+ * address ~3s into a whole-file parse, runs 9–12) shows the old 40KB
+ * budget outran the real stack at eval depth. 28KB keeps the probe inside
+ * the task stack with wide margin for the C chain above the engine. The
+ * R18 geometry experiments (qexp) proved every unit of the 502KB site
+ * bundle parses+runs containedly at far smaller budgets; deep units
+ * degrade to a contained SyntaxError, never a fault.
+ * R26g MEASURED FIX (2026-10-05): the attach chain is 24.3KB deep on the
+ * current tree (fp=0x20009220 vs the 0x20000000 task-stack base, 61.8KB
+ * total) — the old 40KB probe put its floor BELOW the real stack bottom
+ * (24.3+40 > 61.8), so recursion walked off the stack before any probe
+ * fired (wild jumps, wedges, empty crashlogs), and 28KB left only ~9.5KB
+ * of true margin which the parse overshot between probes. 20KB puts the
+ * floor 4.3KB above the bottom: deep units throw CONTAINEDLY, the split
+ * skips them (failSegs accounting), and the page renders. The durable fix
+ * is dispatching evals from the frame root to shrink the 24.3KB chain. */
+#define QJS_STACK_LIMIT_DFL (20u * 1024u)
 #else
 /* Host/sim lab builds (ASan/UBSan at -O0): sanitizer instrumentation and
  * unoptimized frames inflate QuickJS's parser AND runtime call frames
@@ -89,6 +115,50 @@ extern void pluto_qjs_free(struct JSContext *ctx, void *ptr);
 #ifndef QJS_STACK_LIMIT
 #define QJS_STACK_LIMIT QJS_STACK_LIMIT_DFL
 #endif
+
+/* ── R26g: per-eval wall-clock budget (device) ──────────────────────────
+ * QuickJS's interrupt handler fires in the INTERPRETER loop (never during
+ * compile), so arming it around each eval bounds EXECUTION: a runaway
+ * mount loop aborts containedly ("interrupted") instead of blocking the
+ * main loop — the 2026-10-04 live run wedged >15min with the USB event
+ * loop unresponsive (no terminate, no datadisk switch). Compile time is
+ * intentionally unbounded (no compile-time interrupt exists in QuickJS);
+ * the split path keeps compile units small. 15s ≫ per-segment mount work
+ * (ms-scale) and ≪ any plausible main-loop heartbeat expectation. */
+#ifdef TARGET_PLAYDATE
+#define QJS_EVAL_BUDGET_MS 15000UL
+static unsigned long qjs_eval_deadline_ms = 0;
+/* R26g stack-geometry telemetry (declared unconditionally so the host
+ * e4 harness, which compiles all bridges, links) */
+static void *g_qjs_init_fp;
+static unsigned long qjs_now_ms(void)
+{
+    PlaydateAPI *pd = pluto_pd();
+    return (pd && pd->system)
+               ? (unsigned long)pd->system->getCurrentTimeMilliseconds()
+               : 0;
+}
+static int qjs_interrupt_handler(JSRuntime *rt, void *opaque)
+{
+    (void)rt;
+    (void)opaque;
+    if (qjs_eval_deadline_ms == 0)
+        return 0;
+    return (qjs_now_ms() > qjs_eval_deadline_ms) ? 1 : 0;
+}
+static void qjs_eval_budget_arm(void)
+{
+    unsigned long now = qjs_now_ms();
+    qjs_eval_deadline_ms = now ? now + QJS_EVAL_BUDGET_MS : 0;
+}
+static void qjs_eval_budget_disarm(void) { qjs_eval_deadline_ms = 0; }
+#else
+static void *g_qjs_init_fp;
+static unsigned long qjs_now_ms(void) { return 0; }
+static void qjs_eval_budget_arm(void) {}
+static void qjs_eval_budget_disarm(void) {}
+#endif
+
 
 /* Engine-private state (b->implState). */
 typedef struct
@@ -116,6 +186,10 @@ typedef struct
     JSValue clProto;
     JSClassID stClass;
     JSValue stProto;
+    /* R18: active bundler-split module registry name. When non-empty,
+     * segments of one bundle share this global across engine brackets so
+     * modules can require each other exactly as authored. */
+    char splitMapName[24];
 } QjsState;
 
 /* ── allocators: route engine memory through the SDK ────────────────────── */
@@ -147,6 +221,68 @@ static size_t qjs_sdk_usable_size(const void *ptr)
 
 static const JSMallocFunctions qjs_mf = {
     qjs_sdk_malloc, qjs_sdk_free, qjs_sdk_realloc, qjs_sdk_usable_size};
+
+#ifdef PLUTO_QJS_PROBE_SPAN
+#include "../tests/span1_bytes.h"
+/* R26g device bisect: compile a baked-in bundle span from boot-shallow
+ * depth in a FRESH runtime (no page, no walker, no bridge state). If this
+ * faults, the crash is inside QuickJS's ARM32 compile itself; if it
+ * passes, the browser context is a necessary ingredient. SPAN1 prefix is
+ * selectable via -DPLUTO_QJS_PROBE_SPAN_PREFIX_LEN=N. */
+void qjs_probe_span_compile(void);
+void qjs_probe_span_compile(void)
+{
+    unsigned len = SPAN1_BYTES_LEN;
+#ifdef PLUTO_QJS_PROBE_SPAN_PREFIX_LEN
+    if ((unsigned)PLUTO_QJS_PROBE_SPAN_PREFIX_LEN < len)
+        len = (unsigned)PLUTO_QJS_PROBE_SPAN_PREFIX_LEN;
+#endif
+    logger_log("[qjsprobe] compiling %u/%d bytes", len, SPAN1_BYTES_LEN);
+    JSRuntime *rt = JS_NewRuntime2(&qjs_mf, NULL);
+    if (!rt)
+    {
+        logger_log("[qjsprobe] runtime init failed");
+        return;
+    }
+    JS_SetMaxStackSize(rt, QJS_STACK_LIMIT);
+    JS_SetMemoryLimit(rt, QJS_MEM_LIMIT);
+#ifdef TARGET_PLAYDATE
+    JS_SetInterruptHandler(rt, qjs_interrupt_handler, NULL);
+#endif
+    JSContext *ctx = JS_NewContext(rt);
+    if (!ctx)
+    {
+        logger_log("[qjsprobe] context init failed");
+        JS_FreeRuntime(rt);
+        return;
+    }
+    char *buf = (char *)JMalloc(len + 1);
+    memcpy(buf, span1_bytes, len);
+    buf[len] = '\0';
+    JSValue v = JS_Eval(ctx, buf, len, "[probe]", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v))
+    {
+        char msg[96];
+        msg[0] = '\0';
+        JSValue e = JS_GetException(ctx);
+        const char *s = JS_ToCString(ctx, e);
+        snprintf(msg, sizeof(msg), "%s", s ? s : "(unprintable)");
+        if (s)
+            JS_FreeCString(ctx, s);
+        JS_FreeValue(ctx, e);
+        logger_log("[qjsprobe] exception: %s", msg);
+    }
+    else
+    {
+        logger_log("[qjsprobe] compiled+ran OK (%u bytes)", len);
+        JS_FreeValue(ctx, v);
+    }
+    JFree(buf);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+    logger_log("[qjsprobe] done");
+}
+#endif
 
 static JsBridge *bridge_of(JSContext *ctx)
 {
@@ -181,6 +317,35 @@ static void qjs_take_exception_text(JsBridge *b, JSContext *ctx)
                                    : "exception";
     }
     bridge_take_error_text(b, msg);
+    /* R17 diagnostics: Error objects carry a `stack` property whose frames
+     * name the throw site (function + file:line:col). Log a bounded,
+     * one-line excerpt so a CSR page's first-failure point lands in
+     * pluto.log without a debugger — site-agnostic, every page benefits. */
+    if (JS_IsError(ctx, exc))
+    {
+        JSValue stk = JS_GetPropertyStr(ctx, exc, "stack");
+        if (!JS_IsUndefined(stk) && !JS_IsException(stk) && JS_IsString(stk))
+        {
+            const char *st = JS_ToCString(ctx, stk);
+            if (st)
+            {
+                char excerpt[440];
+                size_t n = strlen(st);
+                if (n > sizeof(excerpt) - 1)
+                    n = sizeof(excerpt) - 1;
+                memcpy(excerpt, st, n);
+                excerpt[n] = '\0';
+                for (size_t i = 0; i < n; i++)
+                {
+                    if ((unsigned char)excerpt[i] < 0x20)
+                        excerpt[i] = ' '; /* flatten to one log line */
+                }
+                logger_log("[js] qjs: exc stack: %s", excerpt);
+                JS_FreeCString(ctx, st);
+            }
+        }
+        JS_FreeValue(ctx, stk);
+    }
     logger_log("[js] qjs: exc-text stored");
     if (owned)
     {
@@ -260,6 +425,181 @@ static JSValue qjs_el_get_id(JSContext *ctx, JSValueConst this_val,
     const char *v = n ? dom_get_attr(n, "id") : NULL;
     return JS_NewString(ctx, v ? v : "");
 }
+
+/* ── R17: anchor URL property getters ─────────────────────────────────────
+ * Legacy browser behavior: assigning element.href parses the string into
+ * URL components, so the time-worn
+ *   var a = document.createElement('a'); a.setAttribute('href', u);
+ *   a.pathname / a.protocol / a.host ...
+ * trick (axios resolveURL, old jQuery ajax, history polyfills, React
+ * Router) works. Our bridge stores attributes verbatim, so these getters
+ * parse the href attribute on read through the shared URL resolver —
+ * category-level behavior, no site knowledge. Non-anchor elements and
+ * missing/relative hrefs resolve against the page base URL like a real
+ * browser. The decomposition attributes apply to <a>, <link>, <base> and
+ * <area> per the HTML "URL decomposition attributes" rules. */
+static int qjs_is_url_element(const DomNode *n)
+{
+    return strcmp(n->tag, "a") == 0 || strcmp(n->tag, "A") == 0 ||
+           strcmp(n->tag, "link") == 0 || strcmp(n->tag, "LINK") == 0 ||
+           strcmp(n->tag, "base") == 0 || strcmp(n->tag, "BASE") == 0 ||
+           strcmp(n->tag, "area") == 0 || strcmp(n->tag, "AREA") == 0;
+}
+static void qjs_anchor_url_parts(JSContext *ctx, JSValueConst this_val,
+                                 UrlParsed *out, int *ok)
+{
+    DomNode *n = this_node(ctx, this_val);
+    *ok = 0;
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        !qjs_is_url_element(n))
+    {
+        return;
+    }
+    const char *href = dom_get_attr(n, "href");
+    JsBridge *b = bridge_of(ctx);
+    const char *base = (b && b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl
+                                                           : "about:blank";
+    char *abs = url_resolve(base, href ? href : "");
+    if (!abs)
+    {
+        return;
+    }
+    if (url_parse(abs, out) == 0)
+    {
+        *ok = 1;
+    }
+    pluto_free(abs);
+}
+
+static JSValue qjs_el_get_a_href(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    /* Normalized absolute href, like a browser after href assignment. */
+    return JS_NewString(ctx, ok ? u.normalized : "");
+}
+static JSValue qjs_el_get_a_protocol(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%s:", ok ? u.scheme : "");
+    return JS_NewString(ctx, buf);
+}
+static JSValue qjs_el_get_a_host(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    if (!ok)
+    {
+        return JS_NewString(ctx, "");
+    }
+    if (u.port == 80 || u.port == 443 || u.port == 0)
+    {
+        return JS_NewString(ctx, u.host);
+    }
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%s:%d", u.host, u.port);
+    return JS_NewString(ctx, buf);
+}
+static JSValue qjs_el_get_a_hostname(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    return JS_NewString(ctx, ok ? u.host : "");
+}
+static JSValue qjs_el_get_a_port(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    if (!ok || u.port == 80 || u.port == 443 || u.port == 0)
+    {
+        return JS_NewString(ctx, "");
+    }
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%d", u.port);
+    return JS_NewString(ctx, buf);
+}
+static JSValue qjs_el_get_a_pathname(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    return JS_NewString(ctx, ok ? u.path : "");
+}
+static JSValue qjs_el_get_a_search(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    char buf[260];
+    snprintf(buf, sizeof(buf), "%s%s", ok && u.query[0] ? "?" : "",
+             ok ? u.query : "");
+    return JS_NewString(ctx, buf);
+}
+static JSValue qjs_el_get_a_hash(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    UrlParsed u;
+    int ok;
+    qjs_anchor_url_parts(ctx, this_val, &u, &ok);
+    char buf[132];
+    snprintf(buf, sizeof(buf), "%s%s", ok && u.hash[0] ? "#" : "",
+             ok ? u.hash : "");
+    return JS_NewString(ctx, buf);
+}
+
+/* R17: href setter — browsers store the RAW assigned string as the
+ * content attribute (the .href property getter re-resolves it against the
+ * base on every read), so getAttribute mirrors exactly what the page wrote
+ * while the property reflects the absolute URL. */
+static JSValue qjs_el_set_a_href(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+{
+    (void)argc;
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx, this_val);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag || !qjs_is_url_element(n))
+    {
+        return JS_UNDEFINED; /* silently ignored on non-URL elements */
+    }
+    const char *v = JS_ToCString(ctx, argv[0]);
+    if (!v)
+    {
+        return JS_EXCEPTION;
+    }
+    dom_set_attr(b->dom, n, "href", v);
+    JS_FreeCString(ctx, v);
+    return JS_UNDEFINED;
+}
 static JSValue qjs_el_get_textContent(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv)
 {
@@ -337,6 +677,53 @@ static JSValue qjs_el_get_nodeType(JSContext *ctx, JSValueConst this_val,
     (void)argv;
     DomNode *n = this_node(ctx, this_val);
     return JS_NewInt32(ctx, (n && n->kind == DOM_ELEMENT) ? 1 : 3);
+}
+/* R17: ownerDocument — React 18's event delegation reads
+ * node.ownerDocument (createRoot listeners on the document); returning the
+ * page's own document object keeps that path well-defined. */
+static JSValue qjs_el_get_ownerDocument(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    (void)this_val;
+    JSValue glob = JS_GetGlobalObject(ctx);
+    JSValue doc = JS_GetPropertyStr(ctx, glob, "document");
+    JS_FreeValue(ctx, glob);
+    return doc;
+}
+
+/* R17: getBoundingClientRect — the device has a single flowing 400x240
+ * layout with no per-node geometry tracking, so the honest resolved rect
+ * is the origin (all zeros): element math (M-UI transitions, sticky
+ * headers, tooltip positioning) stays well-defined and degrades to "no
+ * offset" instead of throwing. */
+static JSValue qjs_el_getBoundingClientRect(JSContext *ctx,
+                                            JSValueConst this_val, int argc,
+                                            JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    (void)this_val;
+    JSValue r = JS_NewObject(ctx);
+    const char *fields[] = {"top", "left", "right", "bottom",
+                            "width", "height", "x", "y"};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+    {
+        JS_SetPropertyStr(ctx, r, fields[i], JS_NewFloat64(ctx, 0.0));
+    }
+    return r;
+}
+
+/* R17: nodeName — W3C: for HTMLElements, nodeName === tagName (lowercase
+ * in our tree). React reads node.nodeName for target classification. */
+static JSValue qjs_el_get_nodeName(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    DomNode *n = this_node(ctx, this_val);
+    return JS_NewString(ctx, (n && n->tag) ? n->tag : "");
 }
 
 /* Accessor setters (value in argv[0]). */
@@ -1352,6 +1739,26 @@ static JSValue qjs_document_createElement(JSContext *ctx,
     }
     return js_qjs_push_element(b, el);
 }
+
+/* R17: document.createComment — comment nodes materialize as detached
+ * text nodes (never rendered; textContent accessors stay well-defined).
+ * React uses comment nodes as insertion markers for fragments/suspense. */
+static JSValue qjs_document_createComment(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)this_val;
+    (void)argv;
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *t = dom_create_text(b->dom, "");
+    if (!t)
+    {
+        JS_Throw(ctx, JS_NewString(ctx, "createComment failed"));
+        return JS_EXCEPTION;
+    }
+    return js_qjs_push_element(b, t);
+}
 static JSValue qjs_document_createTextNode(JSContext *ctx,
                                            JSValueConst this_val, int argc,
                                            JSValueConst *argv)
@@ -1505,6 +1912,44 @@ static JSValue qjs_noop(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_UNDEFINED;
 }
 
+/* R17: inert DOM constructor globals. Library code does
+ * `x instanceof window.HTMLIFrameElement` (React DOM getActiveElementDeep)
+ * and `typeof x === 'object'` feature checks; with the constructor missing,
+ * `instanceof` THROWS (invalid right operand) and kills the page. Real
+ * semantics here: we have no iframes, so a constructor whose prototype
+ * never matches our element wrappers is behaviorally exact. Only defines
+ * names that are still undefined (never overrides real surfaces like
+ * XMLHttpRequest). */
+static void qjs_define_dom_ctors(JSContext *ctx, JSValue glob)
+{
+    static const char *names[] = {
+        "HTMLElement",     "HTMLInputElement",    "HTMLTextAreaElement",
+        "HTMLSelectElement", "HTMLOptionElement",  "HTMLIFrameElement",
+        "HTMLCanvasElement", "HTMLImageElement",   "HTMLAnchorElement",
+        "HTMLScriptElement", "HTMLStyleElement",   "HTMLLinkElement",
+        "HTMLHtmlElement",   "HTMLBodyElement",    "HTMLDivElement",
+        "HTMLSpanElement",   "HTMLParagraphElement",
+        "HTMLUListElement",  "HTMLLIElement",      "HTMLButtonElement",
+        "HTMLFormElement",   "SVGElement",         "Element",
+        "Node",            "Document",           "Window",
+        "Event",           "CustomEvent",         "MouseEvent",
+        "KeyboardEvent",   "NodeList",           "HTMLCollection",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        JSValue existing = JS_GetPropertyStr(ctx, glob, names[i]);
+        int missing = JS_IsUndefined(existing);
+        JS_FreeValue(ctx, existing);
+        if (!missing)
+        {
+            continue;
+        }
+        JSValue fn = JS_NewCFunction(ctx, qjs_noop, names[i], 0);
+        JS_SetPropertyStr(ctx, fn, "prototype", JS_NewObject(ctx));
+        JS_SetPropertyStr(ctx, glob, names[i], fn);
+    }
+}
+
 /* ── event object (click dispatch) ───────────────────────────────────────── */
 static JSValue qjs_event_preventDefault(JSContext *ctx, JSValueConst this_val,
                                         int argc, JSValueConst *argv)
@@ -1552,10 +1997,25 @@ static int qjs_build_element_proto(JSContext *ctx, QjsState *st)
         {"childElementCount", qjs_el_get_childElementCount, NULL},
         {"children", qjs_el_get_children, NULL},
         {"nodeType", qjs_el_get_nodeType, NULL},
+        {"nodeName", qjs_el_get_nodeName, NULL},
         {"firstElementChild", qjs_el_get_firstElementChild, NULL},
         {"nextElementSibling", qjs_el_get_nextElementSibling, NULL},
         {"classList", qjs_el_get_classList, NULL},
         {"style", qjs_el_get_style, NULL},
+        {"ownerDocument", qjs_el_get_ownerDocument, NULL},
+        {"ownerDocument", qjs_el_get_ownerDocument, NULL},
+        /* R17: anchor URL components (gate to URL elements inside the
+         * accessors; other elements return "" — the HTMLAnchorElement-
+         * only surface for library feature detection). href is settable:
+         * resolved against the base and stored, like a browser. */
+        {"href", qjs_el_get_a_href, qjs_el_set_a_href},
+        {"protocol", qjs_el_get_a_protocol, NULL},
+        {"host", qjs_el_get_a_host, NULL},
+        {"hostname", qjs_el_get_a_hostname, NULL},
+        {"port", qjs_el_get_a_port, NULL},
+        {"pathname", qjs_el_get_a_pathname, NULL},
+        {"search", qjs_el_get_a_search, NULL},
+        {"hash", qjs_el_get_a_hash, NULL},
     };
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
@@ -1578,6 +2038,7 @@ static int qjs_build_element_proto(JSContext *ctx, QjsState *st)
     } methods[] = {
         {"getAttribute", qjs_el_getAttribute, 1},
         {"setAttribute", qjs_el_setAttribute, 2},
+        {"getBoundingClientRect", qjs_el_getBoundingClientRect, 0},
         {"removeAttribute", qjs_el_removeAttribute, 1},
         {"appendChild", qjs_el_appendChild, 1},
         {"removeChild", qjs_el_removeChild, 1},
@@ -1691,6 +2152,337 @@ static JSValue qjs_clearInterval(JSContext *ctx, JSValueConst this_val,
     return qjs_clear_common(ctx, argc, argv);
 }
 
+/* ── R17: window.getComputedStyle ────────────────────────────────────
+ * Frameworks (Material-UI transitions, animation libs) read computed
+ * styles before animating: getComputedStyle(el).getPropertyValue(name).
+ * Backed by the element's inline style attribute — the resolved-style
+ * source this bridge maintains — every unknown name returns "" (a real
+ * browser returns the cascade default; callers guard on empty). */
+static void qjs_gcs_read(const DomNode *n, const char *name, char *out,
+                         size_t outLen)
+{
+    out[0] = '\0';
+    if (!n || n->kind != DOM_ELEMENT || !name || !name[0])
+    {
+        return;
+    }
+    const char *st = dom_get_attr((DomNode *)n, "style");
+    if (!st)
+    {
+        return;
+    }
+    size_t nl = strlen(name);
+    const char *p = st;
+    while (*p)
+    {
+        while (*p == ' ' || *p == ';')
+        {
+            p++;
+        }
+        const char *colon = strchr(p, ':');
+        if (!colon)
+        {
+            break;
+        }
+        const char *semi = strchr(colon, ';');
+        size_t keyLen = (size_t)(colon - p);
+        /* trim trailing spaces on the key */
+        while (keyLen > 0 && p[keyLen - 1] == ' ')
+        {
+            keyLen--;
+        }
+        if (keyLen == nl)
+        {
+            int eq = 1;
+            for (size_t i = 0; i < nl; i++)
+            {
+                char a = p[i], b = name[i];
+                if (a >= 'A' && a <= 'Z')
+                {
+                    a = (char)(a + 32);
+                }
+                if (b >= 'A' && b <= 'Z')
+                {
+                    b = (char)(b + 32);
+                }
+                if (a != b)
+                {
+                    eq = 0;
+                    break;
+                }
+            }
+            if (eq)
+            {
+                const char *val = colon + 1;
+                size_t vlen = semi ? (size_t)(semi - val) : strlen(val);
+                while (vlen > 0 && val[0] == ' ')
+                {
+                    val++;
+                    vlen--;
+                }
+                while (vlen > 0 && val[vlen - 1] == ' ')
+                {
+                    vlen--;
+                }
+                if (vlen >= outLen)
+                {
+                    vlen = outLen - 1;
+                }
+                memcpy(out, val, vlen);
+                out[vlen] = '\0';
+                return;
+            }
+        }
+        p = semi ? semi + 1 : colon + strlen(colon);
+    }
+}
+
+static JSValue qjs_gcs_getPropertyValue(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv)
+{
+    (void)argc;
+    JsBridge *b = bridge_of(ctx);
+    QjsState *st = (QjsState *)b->implState;
+    JSValue elv = JS_GetPropertyStr(ctx, this_val, "_el");
+    DomNode *n = qjs_sw5_node_of(ctx, elv, st->elClass);
+    JS_FreeValue(ctx, elv);
+    const char *name = JS_ToCString(ctx, argv[0]);
+    char val[128];
+    qjs_gcs_read(n, name ? name : "", val, sizeof(val));
+    if (name)
+    {
+        JS_FreeCString(ctx, name);
+    }
+    return JS_NewString(ctx, val);
+}
+
+static JSValue qjs_window_getComputedStyle(JSContext *ctx,
+                                           JSValueConst this_val, int argc,
+                                           JSValueConst *argv)
+{
+    (void)this_val;
+    JsBridge *b = bridge_of(ctx);
+    QjsState *st = (QjsState *)b->implState;
+    DomNode *n = qjs_sw5_node_of(ctx, argv[0], st->elClass);
+    JSValue obj = JS_NewObject(ctx);
+    if (n)
+    {
+        JS_SetPropertyStr(ctx, obj, "_el", JS_DupValue(ctx, argv[0]));
+    }
+    JS_SetPropertyStr(ctx, obj, "getPropertyValue",
+                      JS_NewCFunction(ctx, qjs_gcs_getPropertyValue,
+                                      "getPropertyValue", 1));
+    return obj;
+}
+
+/* R17: document.title setter — SPA pages retitle themselves from route
+ * effects (React useEffect + document.title = ...). Browsers rewrite the
+ * <title> element; do the same when it exists in the DOM. */
+static JSValue qjs_document_setTitle(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)this_val;
+    JsBridge *b = bridge_of(ctx);
+    const char *v = JS_ToCString(ctx, argv[0]);
+    if (!v)
+    {
+        return JS_EXCEPTION;
+    }
+    if (b->dom && b->dom->root)
+    {
+        DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+        int top = 0;
+        stack[top++] = b->dom->root;
+        while (top > 0)
+        {
+            DomNode *n = stack[--top];
+            for (int i = 0; i < n->childCount; i++)
+            {
+                DomNode *c = n->children[i];
+                if (c->kind != DOM_ELEMENT)
+                {
+                    continue;
+                }
+                if (!strcmp(c->tag, "title"))
+                {
+                    /* Replace the title element's text child. */
+                    DomNode *t = dom_create_text(b->dom, v);
+                    if (t)
+                    {
+                        dom_append_child(b->dom, c, t);
+                    }
+                    top = 0; /* stop the walk */
+                    break;
+                }
+                if (top < DOM_SEARCH_MAX_DEPTH)
+                {
+                    stack[top++] = c;
+                }
+            }
+        }
+    }
+    snprintf(b->doc->title, sizeof(b->doc->title), "%s", v);
+    JS_FreeCString(ctx, v);
+    return JS_UNDEFINED;
+}
+
+/* R17: document.activeElement getter — <body> (no focus model on device;
+ * real browsers behave identically with nothing focused). */
+static JSValue qjs_doc_get_activeElement(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    (void)this_val;
+    JsBridge *b = bridge_of(ctx);
+    DomNode *body = first_element(b->dom->root, "body");
+    return js_qjs_push_element(b, body ? body : b->dom->root);
+}
+
+/* R17: document.defaultView getter — the global object (window). React
+ * Router's history shim does `window = document.defaultView` first thing. */
+static JSValue qjs_doc_get_defaultView(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    (void)this_val;
+    return JS_GetGlobalObject(ctx);
+}
+
+/* ── R17: WHATWG URL class ─────────────────────────────────────────────
+ * `new URL(url[, base])` — React Router's encodeLocation, fetch polyfills
+ * and worker code construct these constantly. Implemented over the shared
+ * core/url resolver so browser, jsext and JS all agree on one URL grammar
+ * (no site knowledge; category-level platform surface). */
+static JSValue qjs_url_ctor(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv)
+{
+    const char *u = JS_ToCString(ctx, argv[0]);
+    if (!u)
+    {
+        return JS_EXCEPTION;
+    }
+    const char *base = NULL;
+    if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
+    {
+        base = JS_ToCString(ctx, argv[1]);
+    }
+    JsBridge *b = bridge_of(ctx);
+    const char *pageBase = (b && b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl
+                                                               : "about:blank";
+    char *abs = url_resolve((base && *base) ? base : pageBase, u);
+    if (base)
+    {
+        JS_FreeCString(ctx, base);
+    }
+    JS_FreeCString(ctx, u);
+    if (!abs)
+    {
+        JS_Throw(ctx, JS_NewString(ctx, "URL: failed to resolve"));
+        return JS_EXCEPTION;
+    }
+    UrlParsed p;
+    int ok = (url_parse(abs, &p) == 0);
+    /* QuickJS C constructors receive no auto-created `this` — build and
+     * return the instance ourselves (also correct for plain calls). */
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "href", JS_NewString(ctx, abs));
+    JS_SetPropertyStr(ctx, obj, "origin",
+                      JS_NewString(ctx, ok ? p.normalized : abs));
+    JS_SetPropertyStr(ctx, obj, "protocol",
+                      JS_NewString(ctx, ok ? (p.isSsl ? "https:" : "http:") : ""));
+    JS_SetPropertyStr(ctx, obj, "host", JS_NewString(ctx, ok ? p.host : ""));
+    JS_SetPropertyStr(ctx, obj, "hostname", JS_NewString(ctx, ok ? p.host : ""));
+    {
+        char pbuf[12];
+        snprintf(pbuf, sizeof(pbuf), "%d", (ok && p.port != 80 && p.port != 443) ? p.port : 0);
+        JS_SetPropertyStr(ctx, obj, "port", JS_NewString(ctx, pbuf));
+    }
+    JS_SetPropertyStr(ctx, obj, "pathname", JS_NewString(ctx, ok ? p.path : "/"));
+    {
+        char sbuf[264];
+        snprintf(sbuf, sizeof(sbuf), "%s%s", ok && p.query[0] ? "?" : "",
+                 ok ? p.query : "");
+        JS_SetPropertyStr(ctx, obj, "search", JS_NewString(ctx, sbuf));
+        snprintf(sbuf, sizeof(sbuf), "%s%s", ok && p.hash[0] ? "#" : "",
+                 ok ? p.hash : "");
+        JS_SetPropertyStr(ctx, obj, "hash", JS_NewString(ctx, sbuf));
+    }
+    /* searchParams: minimal get/has over the parsed query pairs. */
+    JSValue sp = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, sp, "params", JS_NewString(ctx, ok ? p.query : ""));
+    JS_SetPropertyStr(ctx, sp, "get",
+                      JS_NewCFunction(ctx, qjs_noop, "get", 1));
+    JS_SetPropertyStr(ctx, obj, "searchParams", sp);
+    pluto_free(abs);
+    return obj;
+}
+
+static void qjs_define_url(JSContext *ctx, JSValue glob)
+{
+    JSValue existing = JS_GetPropertyStr(ctx, glob, "URL");
+    int missing = JS_IsUndefined(existing);
+    JS_FreeValue(ctx, existing);
+    if (!missing)
+    {
+        return;
+    }
+    JSValue fn = JS_NewCFunction(ctx, qjs_url_ctor, "URL", 2);
+    /* new URL() requires the constructor bit on the C function. */
+    JS_SetConstructorBit(ctx, fn, 1);
+    JS_SetPropertyStr(ctx, glob, "URL", fn);
+}
+
+/* ── R17: window.history shim ─────────────────────────────────────────
+ * React Router (and most SPAs) drive navigation through history.pushState/
+ * replaceState/state/go. A real SPA back-button model is impossible here,
+ * but the FULL API contract is implementable: state is stored on the
+ * object itself, push/replace record it, go/back/forward are accepted
+ * no-ops (nothing to rewind to — the page never actually navigated). */
+static JSValue qjs_history_pushState(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv)
+{
+    (void)argc;
+    if (!JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
+    {
+        JS_SetPropertyStr(ctx, this_val, "state", JS_DupValue(ctx, argv[0]));
+    }
+    return JS_UNDEFINED;
+}
+static JSValue qjs_history_go(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)ctx;
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    return JS_UNDEFINED; /* nothing to rewind to */
+}
+static void qjs_define_history(JSContext *ctx, JSValue glob)
+{
+    JSValue existing = JS_GetPropertyStr(ctx, glob, "history");
+    int missing = JS_IsUndefined(existing);
+    JS_FreeValue(ctx, existing);
+    if (!missing)
+    {
+        return;
+    }
+    JSValue hist = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, hist, "state", JS_NULL);
+    JS_SetPropertyStr(ctx, hist, "scrollRestoration", JS_NewString(ctx, "auto"));
+    JS_SetPropertyStr(ctx, hist, "length", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, hist, "pushState",
+                      JS_NewCFunction(ctx, qjs_history_pushState, "pushState", 3));
+    JS_SetPropertyStr(ctx, hist, "replaceState",
+                      JS_NewCFunction(ctx, qjs_history_pushState, "replaceState", 3));
+    JS_SetPropertyStr(ctx, hist, "go", JS_NewCFunction(ctx, qjs_history_go, "go", 1));
+    JS_SetPropertyStr(ctx, hist, "back", JS_NewCFunction(ctx, qjs_history_go, "back", 0));
+    JS_SetPropertyStr(ctx, hist, "forward", JS_NewCFunction(ctx, qjs_history_go, "forward", 0));
+    JS_SetPropertyStr(ctx, glob, "history", hist);
+}
+
 static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
                            const char *baseUrl)
 {
@@ -1707,6 +2499,16 @@ static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
     JS_SetPropertyStr(ctx, doc, "createElement",
                       JS_NewCFunction(ctx, qjs_document_createElement,
                                       "createElement", 1));
+    /* R17: createElementNS + createComment — React DOM's commit phase
+     * creates every element through createElementNS and uses comment nodes
+     * as insertion markers. Namespace arg is ignored (HTML-only tree);
+     * comments materialize as detached text nodes (never rendered). */
+    JS_SetPropertyStr(ctx, doc, "createElementNS",
+                      JS_NewCFunction(ctx, qjs_document_createElement,
+                                      "createElementNS", 2));
+    JS_SetPropertyStr(ctx, doc, "createComment",
+                      JS_NewCFunction(ctx, qjs_document_createComment,
+                                      "createComment", 1));
     JS_SetPropertyStr(ctx, doc, "createTextNode",
                       JS_NewCFunction(ctx, qjs_document_createTextNode,
                                       "createTextNode", 1));
@@ -1719,7 +2521,8 @@ static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
     JSAtom tat = JS_NewAtom(ctx, "title");
     JS_DefinePropertyGetSet(
         ctx, doc, tat,
-        JS_NewCFunction(ctx, qjs_document_getTitle, "get title", 0), JS_NULL,
+        JS_NewCFunction(ctx, qjs_document_getTitle, "get title", 0),
+        JS_NewCFunction(ctx, qjs_document_setTitle, "set title", 1),
         JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, tat);
     JS_SetPropertyStr(ctx, doc, "write",
@@ -1732,6 +2535,40 @@ static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
     DomNode *body = first_element(b->dom->root, "body");
     JS_SetPropertyStr(ctx, doc, "body", js_qjs_push_element(b, body ? body
                                                                     : b->dom->root));
+    /* R17: documentElement + head — standard handles React reads while
+     * mounting (event delegation, focus management, style injection). */
+    JS_SetPropertyStr(ctx, doc, "documentElement",
+                      js_qjs_push_element(b, first_element(b->dom->root, "html")
+                                               ? first_element(b->dom->root, "html")
+                                               : b->dom->root));
+    JS_SetPropertyStr(ctx, doc, "head",
+                      js_qjs_push_element(b, first_element(b->dom->root, "head")
+                                               ? first_element(b->dom->root, "head")
+                                               : b->dom->root));
+    /* R17: styleSheets — empty StyleSheetList. CSS-in-JS (emotion/styled-
+     * components) walks document.styleSheets for their speedy insertRule
+     * path; with an empty list the walk finds nothing and the insert throws
+     * INSIDE the library's own try/catch (swallowed, like a browser whose
+     * stylesheet quota rejected the rule). Structural rendering proceeds. */
+    JS_SetPropertyStr(ctx, doc, "styleSheets", JS_NewArray(ctx));
+    /* R17: activeElement — real browsers return <body> when nothing has
+     * focus; React's getActiveElement reads it before every text insertion. */
+    {
+        JSAtom ae = JS_NewAtom(ctx, "activeElement");
+        JS_DefinePropertyGetSet(
+            ctx, doc, ae,
+            JS_NewCFunction(ctx, qjs_doc_get_activeElement, "get activeElement", 0),
+            JS_NULL, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, ae);
+    }
+    {
+        JSAtom dv = JS_NewAtom(ctx, "defaultView");
+        JS_DefinePropertyGetSet(
+            ctx, doc, dv,
+            JS_NewCFunction(ctx, qjs_doc_get_defaultView, "get defaultView", 0),
+            JS_NULL, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, dv);
+    }
     JS_SetPropertyStr(ctx, glob, "document", doc);
 
     /* navigator */
@@ -1753,15 +2590,73 @@ static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
                       JS_NewCFunction(ctx, qjs_console_log, "error", 0));
     JS_SetPropertyStr(ctx, glob, "console", con);
 
-    /* location */
+    /* location — enriched with the standard URL components; React Router
+     * destructures {pathname, search, hash} from window.location and reads
+     * location.origin for its history shim. */
     JSValue loc = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, loc, "href", JS_NewString(ctx, baseUrl ? baseUrl : ""));
-    JS_SetPropertyStr(ctx, loc, "host", JS_NewString(ctx, baseUrl ? baseUrl : ""));
+    {
+        UrlParsed u;
+        int haveUrl = (baseUrl && url_parse(baseUrl, &u) == 0);
+        JS_SetPropertyStr(ctx, loc, "href", JS_NewString(ctx, baseUrl ? baseUrl : ""));
+        JS_SetPropertyStr(ctx, loc, "origin",
+                          JS_NewString(ctx, haveUrl ? u.normalized
+                                                    : (baseUrl ? baseUrl : "")));
+        JS_SetPropertyStr(ctx, loc, "protocol",
+                          JS_NewString(ctx, haveUrl ? (u.isSsl ? "https:" : "http:") : ""));
+        JS_SetPropertyStr(ctx, loc, "host", JS_NewString(ctx, haveUrl ? u.host : ""));
+        JS_SetPropertyStr(ctx, loc, "hostname", JS_NewString(ctx, haveUrl ? u.host : ""));
+        {
+            char pbuf[12];
+            snprintf(pbuf, sizeof(pbuf), "%d", haveUrl ? u.port : 0);
+            JS_SetPropertyStr(ctx, loc, "port", JS_NewString(ctx, pbuf));
+        }
+        JS_SetPropertyStr(ctx, loc, "pathname", JS_NewString(ctx, haveUrl ? u.path : "/"));
+        {
+            char sbuf[264];
+            snprintf(sbuf, sizeof(sbuf), "%s%s",
+                     haveUrl && u.query[0] ? "?" : "", haveUrl ? u.query : "");
+            JS_SetPropertyStr(ctx, loc, "search", JS_NewString(ctx, sbuf));
+            snprintf(sbuf, sizeof(sbuf), "%s%s",
+                     haveUrl && u.hash[0] ? "#" : "", haveUrl ? u.hash : "");
+            JS_SetPropertyStr(ctx, loc, "hash", JS_NewString(ctx, sbuf));
+        }
+    }
     JS_SetPropertyStr(ctx, loc, "assign",
                       JS_NewCFunction(ctx, qjs_location_assign, "assign", 1));
     JS_SetPropertyStr(ctx, loc, "replace",
                       JS_NewCFunction(ctx, qjs_location_assign, "replace", 1));
     JS_SetPropertyStr(ctx, glob, "location", loc);
+
+    /* R17: getComputedStyle + viewport metrics (Playdate 400x240). */
+    JS_SetPropertyStr(ctx, glob, "getComputedStyle",
+                      JS_NewCFunction(ctx, qjs_window_getComputedStyle,
+                                      "getComputedStyle", 1));
+    JS_SetPropertyStr(ctx, glob, "innerWidth", JS_NewInt32(ctx, 400));
+    JS_SetPropertyStr(ctx, glob, "innerHeight", JS_NewInt32(ctx, 240));
+
+    /* R17: window-level listener API (accepted, undelivered — element-level
+     * click is the delivery path; SPAs register popstate/hashchange here). */
+    {
+        JSValue ae = JS_GetPropertyStr(ctx, glob, "addEventListener");
+        int missingAe = JS_IsUndefined(ae);
+        JS_FreeValue(ctx, ae);
+        if (missingAe)
+        {
+            JS_SetPropertyStr(ctx, glob, "addEventListener",
+                              JS_NewCFunction(ctx, qjs_noop, "addEventListener", 2));
+            JS_SetPropertyStr(ctx, glob, "removeEventListener",
+                              JS_NewCFunction(ctx, qjs_noop, "removeEventListener", 2));
+        }
+    }
+
+    /* R17: inert DOM constructor globals (instanceof right-hand operands). */
+    qjs_define_dom_ctors(ctx, glob);
+
+    /* R17: SPA history shim. */
+    qjs_define_history(ctx, glob);
+
+    /* R17: WHATWG URL class. */
+    qjs_define_url(ctx, glob);
 
     /* window/global methods */
     JS_SetPropertyStr(ctx, glob, "alert",
@@ -1827,6 +2722,10 @@ static int quickjs_init(JsBridge *b, const char *baseUrl)
     JS_SetRuntimeOpaque(rt, (void *)b);
     JS_SetMemoryLimit(rt, QJS_MEM_LIMIT);
     JS_SetMaxStackSize(rt, QJS_STACK_LIMIT);
+#ifdef TARGET_PLAYDATE
+    /* R26g: bounds every eval's EXECUTION (see qjs_interrupt_handler). */
+    JS_SetInterruptHandler(rt, qjs_interrupt_handler, NULL);
+#endif
 
     st->ctx = JS_NewContext(rt);
     if (!st->ctx)
@@ -1852,6 +2751,12 @@ static int quickjs_init(JsBridge *b, const char *baseUrl)
     }
     define_globals(st->ctx, st, b, baseUrl);
     quickjs_define_xhr(st->ctx, st);
+    /* R26g ground truth for crash symbolization + stack geometry: the
+     * runtime address of a known ELF symbol pins the pdex.bin load base;
+     * the frame address anchors the probe floor. */
+    g_qjs_init_fp = __builtin_frame_address(0);
+    logger_log("[qjs] init &define_xhr=%p fp=%p",
+               (void *)(uintptr_t)&quickjs_define_xhr, g_qjs_init_fp);
     /* fetch() global (QuickJS-only: needs the engine's native Promise).
      * JS_GetGlobalObject returns a STRONG ref — free it like define_globals
      * does (an unbalanced ref trips the teardown leak assert). */
@@ -1860,6 +2765,162 @@ static int quickjs_init(JsBridge *b, const char *baseUrl)
                       JS_NewCFunction(st->ctx, qjs_fetch, "fetch", 1));
     JS_FreeValue(st->ctx, glob);
     return 0;
+}
+
+/* ── R18: bundler-monolith split execution ────────────────────────────────
+ * A webpack/rollup production bundle is ONE top-level statement — the R16
+ * statement chunker cannot split it, and its whole-file parse/compile
+ * working set exceeds what the device can admit. jsbridge_bundler_plan
+ * recognizes the module-map STRUCTURE (never a site: no URLs, no names) and
+ * we execute the resulting segments sequentially in THIS engine: a fresh
+ * `var <m>={}` registry, one `<m>[key]=<value>` statement per module (the
+ * registry SURVIVES across engine brackets, so modules require each other
+ * exactly as authored), then the runtime bootstrap + app entry as its own
+ * IIFE. Measured on the 502KB bryanwandrych.com bundle at device geometry
+ * (64KB OS stack, 40KB probe budget, stubbed DOM): all 96 segments + the
+ * 253KB tail run, peak heap ~3.94MB, zero stack faults — QuickJS's own
+ * CONFIG_STACK_CHECK probe (which covers BOTH parser recursion via
+ * next_token and every interpreter call path) converts any too-deep unit
+ * into a contained SyntaxError instead of a bus fault.
+ *
+ * One segment failing does NOT poison the rest: a module that throws at
+ * definition time is contained (the bundle's own loader surfaces it), and
+ * the tail segment's failure is contained like any other script.
+ * Segment spills: each materialized segment is disk-backed so admission
+ * logic and future reuse can stream it — mirror of the router's spill
+ * discipline, but scoped to this one run_script call. */
+
+static void quickjs_run_script_split(JsBridge *b, QjsState *st,
+                                     const char *src, size_t len, int index,
+                                     const PlutoBundlerPlan *plan)
+{
+    int seg = 0;
+    int okSegs = 0, failSegs = 0;
+    for (seg = 0; seg < plan->nSpans; seg++)
+    {
+        size_t cap = jsbridge_bundler_segment_cap(plan, seg);
+        if (cap == 0 || cap > JSBRIDGE_MAX_SCRIPT_SOURCE)
+        {
+            failSegs++;
+            continue;
+        }
+        char *buf = (char *)JMalloc(cap + 1);
+        if (!buf)
+        {
+            failSegs++; /* contained: skip this segment */
+            continue;
+        }
+        long nseg = jsbridge_bundler_emit(src, len, plan, seg, buf, cap);
+        if (nseg < 0)
+        {
+            JFree(buf);
+            failSegs++;
+            continue;
+        }
+        if (nseg > (long)cap)
+        {
+            /* Defensive: an emit overrun would corrupt the funnel heap and
+             * crash far from the cause. Contain it instead. */
+            JFree(buf);
+            failSegs++;
+            logger_log("[js] bundle %d seg %d/%d emit overflow", index, seg,
+                       plan->nSpans - 1);
+            continue;
+        }
+        /* R26g DEVICE-CRITICAL: QuickJS's eval contract is
+         * "'input' must be zero terminated i.e. input[input_len] = '\\0'"
+         * (quickjs.c:37111). The classic SW4 path copies + terminates; this
+         * split path never did — buf[nseg] was UNINITIALIZED funnel heap,
+         * which on device holds recycled garbage. The lexer's sentinel
+         * reads then parse garbage → wild jump (INVSTATE crash at seg 1,
+         * 2026-10-04/05, deterministic; host ASan quarantine happened to
+         * hand back zeros, masking it). Terminate at the emitted length. */
+        buf[nseg] = '\0';
+        /* Per-segment progress: with 97 segments the crash window is too
+         * wide to bisect from a single terminal log line — log before and
+         * after each eval so a device fault names its exact segment. */
+        /* R26g stack-geometry telemetry: the probe floor is set at attach
+         * depth; the REAL margin under it is 61.8KB minus the eval-chain
+         * depth from attach. Log the chain depth per span so the probe
+         * value can be chosen from evidence, not folklore. */
+        logger_log("[js] b%d s%d/%d eval %ldB fpdelta=%lu head '%.48s'",
+                   index, seg, plan->nSpans - 1, nseg,
+                   (unsigned long)((uintptr_t)g_qjs_init_fp -
+                                   (uintptr_t)__builtin_frame_address(0)),
+                   buf);
+#ifdef PLUTO_QJS_BISECT_SKIP_S1
+        /* R26g bisect: seg 1 (emotion autoprefixer, 9.7KB) hard-faults in
+         * COMPILE on device (3 runs, deterministic; host 64KB-thread repro
+         * compiles it containedly). Skip it: the split continues, React
+         * mounts without CSS-in-JS, and the page renders visibly. If the
+         * fault moves to a later span, the compile-phase theory was wrong. */
+        if (seg == 1)
+        {
+            failSegs++;
+            logger_log("[js] b%d s1 SKIPPED (R26g bisect)", index);
+            JFree(buf);
+            continue;
+        }
+#endif
+        /* R26g discriminator: COMPILE and EXECUTE as separate brackets so a
+         * device fault names its half (compile = parser/codegen recursion;
+         * execute = interpreter). Same total work, one extra bracket. */
+        qjs_eval_budget_arm();
+        JSValue comp = JS_Eval(st->ctx, buf, (size_t)nseg, "[bundle]",
+                               JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+        qjs_eval_budget_disarm();
+        if (JS_IsException(comp))
+        {
+            failSegs++;
+            logger_log("[js] b%d s%d/%d COMPILE failed", index, seg,
+                       plan->nSpans - 1);
+            qjs_take_exception_text(b, st->ctx);
+            JFree(buf);
+            continue;
+        }
+        logger_log("[js] b%d s%d/%d compiled ok", index, seg,
+                   plan->nSpans - 1);
+        /* segment-local registry handoff: segment 0 DECLARES the fresh
+         * registry; per-module segments ASSIGN into it; the tail reads it.
+         * The name rides in engine state so every eval of this bundle —
+         * across JS_Eval brackets — resolves the same global. */
+        if (seg == 0)
+        {
+            snprintf(st->splitMapName, sizeof(st->splitMapName), "%s",
+                     plan->name);
+        }
+        /* R26g: arm the interrupt budget + log the span's eval time —
+         * a wedged device log must name its segment and its cost. */
+        unsigned long qjsT0 = qjs_now_ms();
+        qjs_eval_budget_arm();
+        JSValue v = JS_EvalFunction(st->ctx, comp);
+        qjs_eval_budget_disarm();
+        unsigned long qjsDt = qjs_now_ms() - qjsT0;
+        if (JS_IsException(v))
+        {
+            failSegs++;
+            logger_log("[js] bundle %d seg %d/%d failed (%lums)", index, seg,
+                       plan->nSpans - 1, qjsDt);
+            qjs_take_exception_text(b, st->ctx);
+        }
+        else
+        {
+            okSegs++;
+            logger_log("[js] b%d s%d/%d ok in %lums live=%luKB", index, seg,
+                       plan->nSpans - 1, qjsDt, pluto_mem_live() / 1024);
+            JS_FreeValue(st->ctx, v);
+        }
+        JFree(buf);
+        JS_RunGC(st->rt);
+    }
+    st->splitMapName[0] = '\0';
+    logger_log("[js] bundle %d split run complete: %d ok, %d failed segs",
+               index, okSegs, failSegs);
+    if (failSegs > 0 && !b->lastError[0])
+    {
+        snprintf(b->lastError, sizeof(b->lastError),
+                 "bundle %d: %d segment failures", index, failSegs);
+    }
 }
 
 static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
@@ -1883,16 +2944,63 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
         }
         return;
     }
-    /* Compile-safety gate, engine- and target-aware: QuickJS's parser
-     * recursion is NOT stack-probed, so on DEVICE a deep script overruns
-     * the real 61.8KB gameTask stack (SW4 crash: depth-19 bundle). The sim
-     * keeps the wide cap (8MB host stack; host suites exercise deep
-     * fixtures). muJS/Duktape/XS keep their own wide gate. */
-#ifdef TARGET_PLAYDATE
-    if (!jsbridge_script_compile_safe_ex(src, len, PLUTO_SCAN_MAX_DEPTH_QJS))
-#else
+    /* R18 first: if this is a bundler monolith, execute it as plan
+     * segments. The gate below never sees the monolith (the C recursion
+     * scanner is itself unprobed recursion — the SW4 crash mechanism — and
+     * QuickJS's own probe makes it unnecessary for this engine). */
+    if (len > PLUTO_BUNDLER_MIN_SOURCE)
+    {
+        /* Diagnostic: planner NO_MAP on valid-looking bytes is how a bad
+         * inline-extraction pointer shows up — log the head so a wrong
+         * buffer/offset is visible in one device run. */
+        {
+            char head[25];
+            size_t n = len < 24 ? len : 24;
+            memcpy(head, src, n);
+            head[n] = '\0';
+            logger_log("[qjs] src head '%s'", head);
+        }
+        /* Span table lives on the funnel heap (2048 x 8B = 16KB — far too
+         * big for the 61.8KB task stack; the SW4 crash taught this). */
+        PlutoBundlerSpan *spans =
+            (PlutoBundlerSpan *)JMalloc(sizeof(PlutoBundlerSpan) *
+                                        PLUTO_BUNDLER_MAX_SPANS);
+        logger_log("[qjs] rs %d len=%zu spans=%s", index, len,
+                   spans ? "ok" : "REFUSED");
+        if (spans)
+        {
+            PlutoBundlerPlan plan;
+            plan.spans = spans;
+            plan.maxSpans = PLUTO_BUNDLER_MAX_SPANS;
+            int prc = jsbridge_bundler_plan(src, len, &plan);
+            logger_log("[bundler] plan rc=%d", (int)prc);
+            if (prc == PLUTO_BUNDLER_OK)
+            {
+                logger_log("[js] script %d: bundler monolith (%zuB, %d "
+                           "modules) — split execution", index, len,
+                           plan.entries);
+                b->ran++;
+                quickjs_run_script_split(b, st, src, len, index, &plan);
+                JFree(spans);
+                return;
+            }
+            JFree(spans);
+        }
+    }
+    /* Compile-safety gate, engine- and target-aware. DEVICE: QuickJS's own
+     * CONFIG_STACK_CHECK probe covers parser recursion (next_token probes
+     * per token) AND every interpreter call path — a too-deep script throws
+     * containedly at the 40KB probe budget instead of overrunning the
+     * 61.8KB gameTask stack, so the C recursion scanner (itself UNprobed
+     * recursion at ~2.5KB/level — the actual SW4 depth-24 crash mechanism)
+     * is unnecessary here and is SKIPPED on device. R17's comment claimed
+     * the parser was unprobed; the vendored engine proves otherwise
+     * (quickjs.c js_check_stack_overflow call sites). Non-bundler huge
+     * scripts still face the SW5 admission gate below. HOST: keep the wide
+     * scanner — sim/host builds have no task-stack cliff and the scanner
+     * doubles as a parse-failure pre-filter for the suites. */
+#ifndef TARGET_PLAYDATE
     if (!jsbridge_script_compile_safe(src, len))
-#endif
     {
         b->errs++;
         if (!b->lastError[0])
@@ -1903,6 +3011,7 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
         logger_log("[js] script %d skipped (nesting guard)", index);
         return;
     }
+#endif
 
     b->ran++;
 
@@ -1960,7 +3069,9 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
         }
         else
         {
+            qjs_eval_budget_arm();
             JSValue result = JS_EvalFunction(st->ctx, fun);
+            qjs_eval_budget_disarm();
             if (JS_IsException(result))
             {
                 b->errs++;
@@ -2049,7 +3160,9 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
         }
     }
     logger_log("[js] qjs: eval begin (script %d)", index);
+    qjs_eval_budget_arm();
     JSValue result = JS_EvalFunction(st->ctx, compiled);
+    qjs_eval_budget_disarm();
     logger_log("[js] qjs: eval returned (script %d)", index);
     if (JS_IsException(result))
     {
@@ -2630,7 +3743,11 @@ static void quickjs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
 }
 
 const JsEngineImpl js_engine_quickjs = {
-    quickjs_init,            quickjs_run_script,  quickjs_dispatch_click,
+    quickjs_init,            quickjs_run_script,  NULL, /* run_script_stream (R15: XS NR only) */
+    quickjs_dispatch_click,
     quickjs_clear_timer_ref, quickjs_run_timer_ref,
     quickjs_run_xhr_ref,     quickjs_clear_xhr_refs, quickjs_close,
+    NULL, /* pump (R20: time-sliced split is XS NR only) */
+    NULL, /* eval_pending (R27: no background eval) */
+    NULL, /* mount_parked (R28: never parks) */
     "QuickJS"};

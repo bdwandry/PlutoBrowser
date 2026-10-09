@@ -1627,7 +1627,11 @@ static int mujs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
 }
 
 const JsEngineImpl js_engine_mujs = {
-    mujs_init,   mujs_run_script,     mujs_dispatch_click,
+    mujs_init,   mujs_run_script,     NULL, /* run_script_stream (R15: XS NR only) */
+    mujs_dispatch_click,
     mujs_clear_timer_ref, mujs_run_timer_ref,
     mujs_run_xhr_ref,     mujs_clear_xhr_refs, mujs_close,
+    NULL, /* pump (R20: time-sliced split is XS NR only) */
+    NULL, /* eval_pending (R27: no background eval) */
+    NULL, /* mount_parked (R28: never parks) */
     "muJS"};

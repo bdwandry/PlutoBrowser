@@ -24,6 +24,7 @@
 
 #include "jsbridge.h"
 #include "../util/strbuf.h"
+#include "../core/pluto_spill.h" /* SpillFile (run_script_stream) */
 
 /* ── JS timers (setTimeout / setInterval) — device-safe subset ─────────────
  * Browsers fire timers on an event loop; we have none. The router owns a
@@ -176,6 +177,16 @@ struct JsBridge
 
     char lastError[128];
     int ran, errs;
+
+    /* R15: scripts skipped by the admission gate, waiting for memory
+     * (JSBRIDGE_DEFERRED_MAX above). */
+    struct
+    {
+        int engine; /* engine index to run under when memory allows */
+        SpillFile spill;
+        size_t len;
+    } deferred[4];
+    int deferredCount;
 };
 
 /* Engine id (kept in sync with storage jsEngine / settings rows). */
@@ -184,7 +195,8 @@ typedef enum
     JS_ENGINE_MUJS = 0,
     JS_ENGINE_DUKTAPE = 1,
     JS_ENGINE_QUICKJS = 2,
-    JS_ENGINE_XS = 3
+    JS_ENGINE_XS = 3,
+    JS_ENGINE_XS_NR = 4 /* XS (No Recursion): heap-bounded walkers fork */
 } JsEngine;
 
 /* Exported from jsbridge.h so main.c/settings can select the engine; the
@@ -204,6 +216,14 @@ typedef struct JsEngineImpl
      * from the router; len < JSBRIDGE_MAX_SCRIPT_BYTES). Contained errors
      * increment b->errs / set b->lastError. */
     void (*run_script)(JsBridge *b, const char *src, size_t len, int index);
+    /* Compile + execute one DISK-RESIDENT script body (SW2b spill handle;
+     * position-independent reads via pluto_spill_read). Engines that can
+     * stream their parser input set this; the router prefers it over the
+     * materialize→run_script→free round-trip so a giant page script never
+     * needs a full RAM copy (compile-time peak drops by the source size).
+     * Optional: NULL = router falls back to run_script + materializer. */
+    void (*run_script_stream)(JsBridge *b, SpillFile spill, size_t len,
+                              int index);
     /* Call all click listeners registered on anchorNode. */
     int (*dispatch_click)(JsBridge *b, const void *anchorNode);
     /* Release one engine-held timer ref (table slot is already inert;
@@ -224,6 +244,24 @@ typedef struct JsEngineImpl
     void (*clear_xhr_refs)(JsBridge *b, void *fnRef, void *objRef);
     /* Destroy the engine + engine-held references. */
     void (*close)(JsBridge *b);
+    /* R20: per-frame engine pump (called from jsbridge_deferred_pump's
+     * caller path in main.c via the router). NULL = engine has no
+     * background work. Currently: XS-NR resumes a time-sliced bundler
+     * split across frames (watchdog-safe execution of giant bundles). */
+    void (*pump)(JsBridge *b, unsigned nowMs);
+    /* R27: 1 while a time-sliced bundler split is still executing its
+     * plan (background eval in flight). The render pipeline consults
+     * this BEFORE walking/snapshotting: the walker must observe the
+     * POST-JS DOM, which only exists after the last segment runs. NULL
+     * = engine has no background eval (always 0). */
+    int (*eval_pending)(JsBridge *b);
+    /* R28: 1 while a resumable-mount run is PARKED mid-program (machine
+     * registers hold a half-executed mount). The router pumps (timers,
+     * XHR completions, deferred scripts) consult this and SKIP their
+     * deliveries without consuming them — a browser never runs timers
+     * during a synchronous task, and the parked mount resumes on this
+     * very frame via pump(). NULL = engine never parks (always 0). */
+    int (*mount_parked)(JsBridge *b);
     /* One-word engine name for logs ("muJS", "Duktape"). */
     const char *name;
 } JsEngineImpl;
@@ -234,11 +272,59 @@ int budget_take(JsBridge *b);
 void bridge_take_error_text(JsBridge *b, const char *msg);
 /* Compile-safety gate (shared by ALL engines — one safety bar). */
 int jsbridge_script_compile_safe(const char *src, size_t len);
+
+/* ── R15: OS-truth admission + deferred-retry for giant scripts ──────────
+ * A compile's peak footprint (parse tree + emitted bytecode + machine
+ * growth) is estimated from the MEASURED device parser rate (~14 funnel
+ * bytes per input byte — R13 hardware data; using the true marginal rate
+ * here keeps admission conservative so a granted compile can always finish
+ * before the allocator's collapse point) + a machine-growth allowance.
+ * When the OS cannot grant that much RIGHT NOW, engines skip containedly
+ * and the ROUTER remembers the script (disk-resident only — the body
+ * never has to live in RAM) and re-offers it on later frames as memory
+ * frees. Scripts whose parse would exceed the engine's parser-memory cap
+ * fail fast instead (deferral could never succeed). */
+#define JSBRIDGE_COMPILE_PER_BYTE 14u
+#define JSBRIDGE_COMPILE_CODEGEN_PER_BYTE 5u /* R26f: emitted bytecode + coder nodes */
+#define JSBRIDGE_COMPILE_ALLOWANCE (512u * 1024u)
+static inline unsigned long jsbridge_compile_need(unsigned long len)
+{
+    /* R26f: include the codegen term. The cap exemption (fxNRParserCodegen)
+     * lets the coder allocate past the parse-only grant, which means the
+     * FUNNEL's admission grant is now the only brake between a successful
+     * parse and an unbounded codegen — size it for both phases or a 253KB
+     * monolith parses fine and then fxAborts the pool at codegen. Measured
+     * shape (react-dom 118KB on device, R26f): parse ≈14B/B fit the old
+     * grant; codegen pushed parser->total past it before dying. */
+    return len * (JSBRIDGE_COMPILE_PER_BYTE +
+                  JSBRIDGE_COMPILE_CODEGEN_PER_BYTE) +
+           JSBRIDGE_COMPILE_ALLOWANCE;
+}
+
+/* Router-side deferred table (router owns lifetime; engine never holds
+ * state across calls). Capacity must match struct JsBridge.deferred[]. */
+#define JSBRIDGE_DEFERRED_MAX 4
+void jsbridge_deferred_offer(JsBridge *b, int engine, SpillFile spill,
+                             size_t len);
+void jsbridge_deferred_clear(JsBridge *b);
+/* Per-frame retry (called from the timer pump path in main.c): probes
+ * the OS heap and runs the first script that now fits. mutationsOut (may
+ * be NULL) is set when the run consumed DOM budget — caller re-renders. */
+void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut);
 /* Engine-aware variant: the QuickJS DEVICE parser has no internal stack
  * probe (unlike muJS/Duktape/XS), so its gate uses a tighter depth cap.
  * Sim/host builds pass the wide cap. Defined here so both jsbridge.c
  * (scanner) and jsbridge_quickjs.c (gate call) share one number. */
 #define PLUTO_SCAN_MAX_DEPTH 40     /* muJS/Duktape/XS + all sim/host paths */
+/* QuickJS on DEVICE: parser depth costs ~2.5KB of the OS-set 61.8KB
+ * game-task stack per level (SW4 measurement), and the OS stack is FIXED —
+ * the Makefile STACK_SIZE define does not reach pdex games (no .S in the
+ * link; the scheduler owns the task stack). Depth 12 is the measured safe
+ * ceiling; R17 briefly tried 24 and the device bus-faulted mid-parse
+ * (crashlog 2026-10-02 15:10) — revert is evidence, not caution. A 500KB
+ * minified IIFE bundle parses at ~depth 24 ⇒ genuinely beyond a one-shot
+ * device compile on every engine (muJS/Duktape: ES5 parser; XS NR: 768KB
+ * parser-memory cap; QuickJS: this stack wall). */
 #define PLUTO_SCAN_MAX_DEPTH_QJS 12 /* QuickJS on DEVICE (parser stack wall) */
 int jsbridge_script_compile_safe_ex(const char *src, size_t len,
                                     int max_depth);

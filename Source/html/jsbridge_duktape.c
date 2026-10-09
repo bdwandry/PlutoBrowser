@@ -1778,7 +1778,11 @@ static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
 }
 
 const JsEngineImpl js_engine_duktape = {
-    duktape_init,     duktape_run_script,    duktape_dispatch_click,
+    duktape_init,     duktape_run_script,    NULL, /* run_script_stream (R15: XS NR only) */
+    duktape_dispatch_click,
     duktape_clear_timer_ref, duktape_run_timer_ref,
     duktape_run_xhr_ref,     duktape_clear_xhr_refs, duktape_close,
+    NULL, /* pump (R20: time-sliced split is XS NR only) */
+    NULL, /* eval_pending (R27: no background eval) */
+    NULL, /* mount_parked (R28: never parks) */
     "Duktape"};

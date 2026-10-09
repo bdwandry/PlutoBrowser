@@ -48,14 +48,23 @@
 
 #include <stddef.h>
 #include "pd_api.h"
+#include "pluto_spill.h" /* SpillFile (R15 disk delivery) */
 
 /* Callbacks mirroring the Lua table: onSuccess(status, headers, body, bodyLen, url),
- * onError(msg), onProgress(cur, total). All optional (NULL allowed). */
+ * onError(msg), onProgress(cur, total). All optional (NULL allowed).
+ * R15: onSuccessSpill — DISK delivery. When the raw body streamed to disk,
+ * the client hands over a pure-body spill HANDLE (body materializes only
+ * through pluto_spill_read windows) instead of a body-sized RAM buffer.
+ * Ownership: the receiver ADOPTS the handle (must discard/reset it later);
+ * if disk delivery is impossible (gzip staging, spill failure) the client
+ * falls back to onSuccess with the materialized RAM body. */
 typedef struct
 {
     void (*onSuccess)(int status, char **headerKeys, char **headerVals,
                       int headerCount, const char *body, size_t bodyLen,
                       const char *url);
+    void (*onSuccessSpill)(int status, SpillFile spill, size_t bodyLen,
+                           const char *url);
     void (*onError)(const char *message);
     void (*onProgress)(int cur, int total);
 } HttpCallbacks;
@@ -67,6 +76,13 @@ void http_client_init(PlaydateAPI *pd);
  * Returns 1 if a request was started (or answered internally), 0 on
  * immediate failure (onError already fired). */
 int http_get(const char *urlString, const HttpCallbacks *callbacks);
+
+/* R15: request UNCOMPRESSED responses (Accept-Encoding: identity). Set by
+ * consumers that adopt the body to DISK (jsext script fetches): raw bodies
+ * stream to disk as they arrive, while gzip bodies would be staged wholly
+ * in RAM for the one-shot gunzip — a heap-shredder at script sizes. One
+ * request at a time (single-flight client); reset it to 0 after. */
+void http_set_identity_encoding(int on);
 
 /* Cancel any in-flight request (safe when idle). */
 void http_cancel(void);

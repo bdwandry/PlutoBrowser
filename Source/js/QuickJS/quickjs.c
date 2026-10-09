@@ -1592,6 +1592,28 @@ static void *__js_malloc(JSMallocContext *s, size_t size)
     }
 }
 
+#ifdef PLUTO_MEM_TRACE
+/* Repro-diagnostic: validate an arena block header before use. A corrupted
+ * header used to send __js_free into the SDK allocator with a wild pointer
+ * (watchdog spin). Leak-instead-of-free on violation: the repro run wants
+ * to CONTINUE and name the corruption, not die. */
+static int arena_header_sane(JSMallocBlockHeader *b)
+{
+    if (b->block_size_idx >= JS_MALLOC_BLOCK_SIZE_COUNT)
+    {
+        extern void logger_log(const char *fmt, ...);
+        logger_log("[arena] CORRUPT hdr=%p size_idx=%u idx=%u",
+                   (void *)b, (unsigned)b->block_size_idx,
+                   (unsigned)b->u.block_idx);
+        return 0;
+    }
+    return 1;
+}
+#define ARENA_CANARY(b) arena_header_sane(b)
+#else
+#define ARENA_CANARY(b) 1
+#endif
+
 static void __js_free(JSMallocContext *s, void *ptr)
 {
     JSMallocBlockHeader *b;
@@ -1691,7 +1713,10 @@ static void *__js_realloc(JSMallocContext *s, void *ptr, size_t size)
         if (size > old_size)
             size = old_size;
         memcpy(new_ptr, ptr, size);
-        __js_free(s, ptr);
+        if (ARENA_CANARY(b))
+        {
+            __js_free(s, ptr);
+        }
         return new_ptr;
     }
 }
@@ -22711,6 +22736,22 @@ static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
 
 static __exception int next_token(JSParseState *s)
 {
+#ifdef PLUTO_MEM_TRACE
+    /* Repro-diagnostic: periodic token-position trace so a parser/lexer
+     * wedge names its exact source offset. Compile-time gated. */
+    {
+        static unsigned tokSeq = 0;
+        if ((++tokSeq & 511) == 0 && s->buf_end > s->buf_start)
+        {
+            extern void logger_log(const char *fmt, ...);
+            logger_log("[tok] n=%u pos=%u/%u val=%d",
+                       tokSeq,
+                       (unsigned)(s->buf_ptr - s->buf_start),
+                       (unsigned)(s->buf_end - s->buf_start),
+                       (int)s->token.val);
+        }
+    }
+#endif
     const uint8_t *p;
     int c;
     BOOL ident_has_escape;

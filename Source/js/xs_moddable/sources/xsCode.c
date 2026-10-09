@@ -37,7 +37,7 @@
 
 #include "xsScript.h"
 
-//#define mxCodePrint 1
+/* #define mxCodePrint 1 (diagnostic dump; re-enable for bytecode traces) */
 
 #define mxByteCodePart\
 	txByteCode* nextCode;\

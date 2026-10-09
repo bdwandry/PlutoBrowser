@@ -11,10 +11,12 @@
 #include "core/url.h"
 #include "core/cookie_jar.h"
 #include "core/logger.h"
+#include "core/netmon.h"
 #include "util/strbuf.h"
 #include "util/pdtimer.h"
 #include "core/pluto_mem.h"
 #include "core/pluto_spill.h"
+#include "core/constants.h"
 #include "render/decoders/inflate.h"
 
 /* ── SW2b: disk-backed response body storage ─────────────────────────────
@@ -68,6 +70,8 @@ typedef enum
     HS_IDLE = 0,
     HS_CONNECTING,
     HS_ACCESS_WAIT,
+    HS_RETRY_WAIT, /* R18b: backoff between connect attempts */
+    HS_RADIO_HEAL, /* R18c: cycling the radio to re-associate */
     HS_READING,
     HS_DONE,
     HS_ERROR
@@ -88,6 +92,15 @@ static int g_isChunked = 0;
 static long g_contentLength = -1;
 static int g_isGzip = 0; /* SW2c: Content-Encoding includes gzip */
 static int g_gzipHold = 0; /* SW2c: freeze spill — compressed staging in RAM */
+/* R15: identity-mode selector. The PAGE renderer wants raw streams: gzip
+ * bodies are staged WHOLLY in RAM (one contiguous member for the one-shot
+ * gunzip), which shreds the heap for a 500KB bundle and starves the next
+ * compile. HTML documents keep gzip (small pages, big bandwidth win); the
+ * external-script fetcher (jsext) flips this to 1 around its downloads so
+ * script bodies stream to disk raw. NOT site-specific: any consumer that
+ * adopts the body to disk opts in. */
+static int g_identityEncoding = 0;
+void http_set_identity_encoding(int on) { g_identityEncoding = on; }
 static int g_connOpen = 0;         /* open callback fired, connected */
 static int g_openFailed = 0;
 static int g_connClosed = 0;
@@ -145,6 +158,52 @@ static int g_hasPendingRedirect = 0;
 static int g_redirectDepth = 0;
 
 static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
+
+/* ── Connect-attempt watchdog + bounded retry (R18b) ───────────────────────
+ * Device evidence (runs 1–5, site-agnostic): the SDK open() can sit IN FLIGHT
+ * forever — its own 10s setConnectTimeout callback never fires, no error, no
+ * close — burning the whole 60s request budget on a wedged attempt. Every
+ * desktop browser treats flaky first-connect as routine and retries; that
+ * behavior is general-purpose. Design:
+ *   - Each connect attempt gets CONNECT_ATTEMPT_TIMEOUT_MS. On expiry, if the
+ *     open has NOT resolved, the attempt is handed to the orphan slot (its
+ *     stale-callback path closes+releases it — the proven safe teardown) and
+ *     a FRESH connection is opened after a short backoff.
+ *   - Bounded: HTTP_CONNECT_ATTEMPTS tries total, then the standard error
+ *     path runs. The 60s request watchdog still backstops everything.
+ *   - The window from open-resolved to first byte is separately watched
+ *     (RESPONSE_FIRST_BYTE_TIMEOUT_MS): a connection that opens but never
+ *     yields headers is recycled the same way. Once bytes flow, normal
+ *     60s budget applies.
+ * No URL/host knowledge anywhere — pure transport policy. */
+#define CONNECT_ATTEMPT_TIMEOUT_MS   12000 /* per-attempt open watchdog   */
+#define HTTP_CONNECT_ATTEMPTS        3     /* total attempts (incl. first) */
+#define CONNECT_BACKOFF_MS           1000  /* delay between attempts       */
+#define RESPONSE_FIRST_BYTE_TIMEOUT_MS 20000 /* open→headers-only window  */
+static unsigned int g_attemptStart = 0;   /* ms timestamp of attempt start */
+static int g_connectAttempts = 0;         /* attempts used so far          */
+static int g_responseWaitLogged = 0;      /* first-byte warning emitted    */
+
+/* ── R18c: radio self-heal ────────────────────────────────────────────
+ * Device evidence: three consecutive fresh TCP opens each sit in flight
+ * forever (no open callback, no error, no connect-timeout callback) while
+ * the OS still reports the Wi-Fi association up — the stale-association
+ * signature. Desktop OSes recover from exactly this by cycling the
+ * interface; the SDK exposes the same lever:
+ * network->setEnabled(false→true) with completion callbacks. One heal
+ * cycle per request, gated on transport-dead evidence, then the connect
+ * budget starts over. No URL/host/site knowledge — pure transport policy. */
+static int g_radioHealUsed = 0;          /* max one heal per request       */
+static int g_radioHealPhase = 0;         /* 1 disabling, 2 enabling, 3 settle */
+static unsigned int g_healPhaseStart = 0;
+static volatile int g_radioCbFired = 0;
+static volatile int g_radioCbErr = 0;
+static int g_radioCbErrLogged = 0;       /* enable-cb error logged once */
+#define RADIO_PHASE_TIMEOUT_MS 6000 /* per-phase callback wait cap        */
+#define RADIO_ASSOC_WAIT_MS   25000 /* association wait after enable req  */
+#define RADIO_STEP_GAP_MS      1000 /* pause between disable and enable   */
+static int g_lastAssocStatus = -1;       /* for status-transition logging  */
+
 
 /* ── Internal about: pages (verbatim from the reference) ─────────────────── */
 typedef struct
@@ -655,6 +714,12 @@ static void reset_state(void)
     g_openFailed = 0;
     g_connClosed = 0;
     g_error[0] = '\0';
+    g_attemptStart = 0;
+    g_connectAttempts = 0;
+    g_responseWaitLogged = 0;
+    g_radioHealUsed = 0;
+    g_radioHealPhase = 0;
+    g_radioCbErrLogged = 0;
     g_state = HS_IDLE;
 }
 
@@ -671,13 +736,26 @@ static void build_request(StrBuf *out)
     {
         strbuf_appendf(out, "Host: %s\r\n", g_parsed->host);
     }
-    strbuf_appendf(out, "User-Agent: CometBrowser/1.0 (Playdate)\r\n");
+    /* R29: single source of truth (constants.h USER_AGENT) — the ad-hoc
+     * short string here disagreed with the documented constant and both
+     * invited bot-walls. Chrome-like per user decision (we render the
+     * desktop page anyway). */
+    strbuf_appendf(out, "User-Agent: %s\r\n", USER_AGENT);
     strbuf_appendf(out, "Accept: text/html,text/plain;q=0.8\r\n");
     strbuf_appendf(out, "Accept-Language: en-US,en;q=0.9\r\n");
     /* SW2c: opt into gzip. deflate (zlib) is NOT requested — our raw-
      * entry inflate handles the rare HTTP "deflate" as raw deflate if a
-     * server sends it, but we do not advertise it. */
-    strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
+     * server sends it, but we do not advertise it. R15: identity-mode
+     * consumers (disk-adopting fetches) request no encoding so the body
+     * streams straight to disk instead of RAM-staging a gzip member. */
+    if (g_identityEncoding)
+    {
+        strbuf_appendf(out, "Accept-Encoding: identity\r\n");
+    }
+    else
+    {
+        strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
+    }
     char cookie[768];
     cookie_jar_get_header(g_parsed->host, g_parsed->path, g_parsed->isSsl,
                           cookie, sizeof(cookie));
@@ -1114,11 +1192,21 @@ static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
     if (err != NET_OK)
     {
         g_openFailed = 1;
+        netmon_probe_fail(); /* network-layer fault */
         snprintf(g_error, sizeof(g_error), "Connection failed: %d", (int)err);
         g_state = HS_ERROR;
         return;
     }
     g_connOpen = 1;
+}
+
+/* R18c: setEnabled completion — runs on the SDK event loop; only flips a
+ * flag. All sequencing happens on the update tick (never inside an SDK
+ * callback). */
+static void radio_enabled_cb(PDNetErr err)
+{
+    g_radioCbFired = 1;
+    g_radioCbErr = (int)err;
 }
 
 static void access_cb(bool allowed, void *ud)
@@ -1204,6 +1292,12 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_openFailed = 0;
     g_connClosed = 0;
     g_error[0] = '\0';
+    g_attemptStart = 0;
+    g_connectAttempts = 0;
+    g_responseWaitLogged = 0;
+    g_radioHealUsed = 0;
+    g_radioHealPhase = 0;
+    g_radioCbErrLogged = 0;
 
     /* ── Internal about: pages ────────────────────────────────────────────── */
     if (strncmp(g_url, "about:", 6) == 0)
@@ -1265,6 +1359,18 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
         g_parsed = (UrlParsed *)PLUTO_MALLOC(sizeof(UrlParsed));
         if (!g_parsed)
         {
+            /* Refused (SW3a soft budget): fail the request NOW. g_state is
+             * already HS_CONNECTING with the 60s watchdog armed — returning
+             * while leaving CONNECTING made a zombie request that sat
+             * silent with no connect attempt until the watchdog fired
+             * "Connection timed out" (R28 sim revisit died exactly here).
+             * reset_state drops to HS_IDLE; the refused-malloc onError
+             * contract matches the about-page OOM path. */
+            if (g_cb.onError)
+            {
+                g_cb.onError("out of memory");
+            }
+            reset_state();
             return 0;
         }
     }
@@ -1330,24 +1436,29 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
  * deferral pattern). */
 static void open_connection(void)
 {
-    int pooled = g_pooledTcp && g_pooledPort == g_parsed->port &&
-                 g_pooledSsl == g_parsed->isSsl &&
-                 strncmp(g_pooledHost, g_parsed->host, sizeof(g_pooledHost)) == 0;
+    /* R52: POOLING DISABLED (device runs 48+49: byte-identical hard crash
+     * 8s into the soak's second navigation, r0/pc pointing into the string
+     * "bryanwandrych"). Sequence: the page's TLS connection is pooled, the
+     * snapshot fast path serves the next page, its image/script fetch hits
+     * the SAME https host, and open_connection RE-OPENS the just-closed
+     * pooled TLS object — exactly the SDK re-setup trap the lifecycle
+     * comment documents as hazard 2 ("closing+releasing a COMPLETED TLS
+     * connection and setting up a new TLS connection shortly after traps
+     * the SDK"). The pooled path closes and immediately re-opens the SAME
+     * object with no cooling-off window, and the crash reproduces 100%.
+     * Every new fetch now gets a FRESH connection; the old connection is
+     * closed and handed to the graveyard (released GRAVE_FRAMES later —
+     * the proven-safe deferred pattern). Cost: one extra TLS handshake
+     * per same-host fetch (~0.5-1s on device, measured in runs 40/42);
+     * correctness wins. */
     TCPConnection *tcp;
-    if (pooled)
-    {
-        /* Same host as last request: reopen the pooled connection (skips the
-         * TLS handshake and dodges the SDK re-setup trap). */
-        tcp = g_pooledTcp;
-        g_pd->network->tcp->close(tcp);
-    }
-    else
     {
         if (g_pooledTcp)
         {
-            /* Host switch: close now, but DEFER the release to the graveyard
-             * tick (GRAVE_FRAMES later) — releasing while the SDK event loop
-             * may still drain the connection's state crashes it (hazards 1+2). */
+            /* Close the old connection now, DEFER the release to the
+             * graveyard tick (GRAVE_FRAMES later) — never touch the object
+             * again while the SDK event loop may still have state for it
+             * (hazards 1+2), and NEVER re-open it. */
             g_pd->network->tcp->close(g_pooledTcp);
             g_graveTcp = g_pooledTcp;
             g_graveTimer = GRAVE_FRAMES;
@@ -1368,18 +1479,27 @@ static void open_connection(void)
         return;
     }
 
-    if (!pooled)
-    {
-        g_pooledTcp = tcp;
-        snprintf(g_pooledHost, sizeof(g_pooledHost), "%s", g_parsed->host);
-        g_pooledPort = g_parsed->port;
-        g_pooledSsl = g_parsed->isSsl;
-    }
+    /* R52: every fetch pools its connection (close happens at the NEXT
+     * fetch's open_connection, via the graveyard) — the pool fields stay
+     * bookkept so host-switch logging and the defensive pool checks in
+     * tcp_open_cb/tcp_closed_cb keep working. */
+    g_pooledTcp = tcp;
+    snprintf(g_pooledHost, sizeof(g_pooledHost), "%s", g_parsed->host);
+    g_pooledPort = g_parsed->port;
+    g_pooledSsl = g_parsed->isSsl;
 
     g_tcp = tcp;
 
     /* Generation id: any callback that no longer matches is a stale event. */
     unsigned int myId = ++g_requestId;
+
+    /* R18b: attempt bookkeeping — the update-loop watchdog (below) measures
+     * from HERE, when this attempt actually goes in flight. */
+    g_connectAttempts++;
+    g_attemptStart = g_pd->system->getCurrentTimeMilliseconds();
+    logger_log("[http] connect attempt %d to %s:%d%s", g_connectAttempts,
+               g_parsed->host, g_parsed->port,
+               g_parsed->isSsl ? " (tls)" : "");
 
     g_pd->network->tcp->setConnectTimeout(tcp, SDK_TIMEOUT_MS);
     g_pd->network->tcp->setReadTimeout(tcp, SDK_TIMEOUT_MS);
@@ -1434,6 +1554,7 @@ void http_cancel(void)
 int http_is_loading(void)
 {
     return g_state == HS_CONNECTING || g_state == HS_READING ||
+           g_state == HS_RETRY_WAIT || g_state == HS_RADIO_HEAL ||
            g_state == HS_ACCESS_WAIT;
 }
 
@@ -1481,6 +1602,229 @@ void http_update(void)
         return;
     }
 
+    /* ── R18c: radio self-heal sequencer (runs on the update tick) ──────
+     * Phase 1: disable the radio. Phase 2: re-enable it. Phase 3: let the
+     * association settle. Each phase is callback-gated with a timeout:
+     * a missing setEnabled callback must not wedge the request (we fall
+     * through to the error path — still strictly better than silence).
+     * After a successful heal the full connect-attempt budget restarts. */
+    if (g_state == HS_RADIO_HEAL)
+    {
+        if (g_radioHealPhase == 1)
+        {
+            if (g_radioCbFired)
+            {
+                logger_log("[http] radio disable cb err=%d", g_radioCbErr);
+                g_radioHealPhase = 2;
+                g_healPhaseStart = now;
+                return; /* gap starts next tick */
+            }
+            if (now - g_healPhaseStart > RADIO_STEP_GAP_MS)
+            {
+                /* No callback for the disable step: proceed anyway — the
+                 * enable step below is what actually matters. */
+                logger_log("[http] radio disable cb absent; continuing");
+                g_radioHealPhase = 2;
+                g_healPhaseStart = now;
+                return;
+            }
+            return;
+        }
+        if (g_radioHealPhase == 2)
+        {
+            if (now - g_healPhaseStart < RADIO_STEP_GAP_MS)
+            {
+                return; /* hold the 1s gap between off and on */
+            }
+            g_radioCbFired = 0;
+            g_radioCbErr = 0;
+            g_pd->network->setEnabled(1, radio_enabled_cb); /* returns void */
+            logger_log("[http] radio enable requested");
+            g_radioHealPhase = 3;
+            g_healPhaseStart = now;
+            return;
+        }
+        /* Phase 3: wait for real association. The enable callback never
+         * fired on device (run 8), so poll getStatus() instead — success
+         * is the OS reporting kWifiConnected. Association takes seconds;
+         * give it RADIO_ASSOC_WAIT_MS before declaring failure. */
+        if (g_radioCbFired && !g_radioCbErrLogged)
+        {
+            logger_log("[http] radio enable cb err=%d", g_radioCbErr);
+            g_radioCbErrLogged = 1;
+        }
+        {
+            int st = (int)g_pd->network->getStatus();
+            if (st != g_lastAssocStatus)
+            {
+                logger_log("[http] wifi status %d -> %d (t+%d ms)",
+                           g_lastAssocStatus, st,
+                           (int)(now - g_healPhaseStart));
+                g_lastAssocStatus = st;
+            }
+            if (st == (int)kWifiConnected &&
+                now - g_healPhaseStart > 500)
+            {
+                g_radioHealPhase = 4;
+            }
+            else if (now - g_healPhaseStart > RADIO_ASSOC_WAIT_MS)
+            {
+                logger_log("[http] association wait expired (status=%d)", st);
+                snprintf(g_error, sizeof(g_error),
+                         "Wi-Fi did not reassociate after radio reset "
+                         "(status %d).", st);
+                reset_state();
+                return;
+            }
+            else
+            {
+                return;
+            }
+        }
+        if (g_radioHealPhase == 4)
+        {
+            logger_log("[http] radio healed; restarting connect attempts");
+            g_state = HS_CONNECTING;
+            g_requestStart = now;
+            g_attemptStart = 0;
+            g_connectAttempts = 0;
+            /* Old attempt objects were already handed to orphan/graveyard
+             * before entering the heal; nothing else to reclaim here. */
+            return;
+        }
+        return;
+    }
+
+    /* ── R18b: per-attempt connect watchdog ─────────────────────────────
+     * A wedged in-flight open (SDK connect-timeout callback does not fire;
+     * device runs 1–5 all sat silent for the full 60s) is recycled:
+     * hand the attempt to the orphan slot — its stale open callback closes
+     * and releases it, the proven-safe teardown — then open a fresh
+     * connection after a short backoff. Bounded by HTTP_CONNECT_ATTEMPTS;
+     * the 60s request watchdog still backstops. Pure transport policy:
+     * identical for every site. */
+    if (g_state == HS_CONNECTING && g_tcp && !g_connOpen && !g_openFailed &&
+        now - g_attemptStart > CONNECT_ATTEMPT_TIMEOUT_MS)
+    {
+        TCPConnection *dead = g_tcp;
+        g_tcp = NULL;
+        if (g_pooledTcp == dead)
+        {
+            g_pooledTcp = NULL; /* pool entry owned by the orphan now */
+        }
+        g_orphanTcp = dead; /* its stale open callback closes + releases */
+        if (g_connectAttempts < HTTP_CONNECT_ATTEMPTS)
+        {
+            logger_log("[http] connect attempt %d stalled; retrying",
+                       g_connectAttempts);
+            g_attemptStart = now; /* backoff phase starts now */
+            g_state = HS_RETRY_WAIT;
+            return;
+        }
+        /* R18c: before giving up, heal the radio once and retry the whole
+         * connect cycle — the stale-association recovery every desktop OS
+         * performs. The 60s request budget is extended for the heal window
+         * (heal is bounded: ≤ ~10s). */
+        logger_log("[http] connect attempt %d stalled; giving up",
+                   g_connectAttempts);        int wifiNow = (int)g_pd->network->getStatus();
+        int hasSetEnabled = (g_pd->network->setEnabled != NULL);
+        /* Two healable states, both transport-only, no site knowledge:
+         *  - kWifiNotAvailable (observed on device: os wifi=2): the OS
+         *    reports association was ATTEMPTED but no AP came up — the
+         *    lazy (re)associate never completed. Recovery: request
+         *    association via setEnabled(true). This does NOT override a
+         *    user's OFF setting (that reports kWifiNotConnected). */
+        int healable = (wifiNow == (int)kWifiConnected ||
+                        wifiNow == (int)kWifiNotAvailable);
+        if (!g_radioHealUsed && healable && hasSetEnabled)
+        {
+            g_radioHealUsed = 1;
+            g_radioCbFired = 0;
+            g_radioCbErr = 0;
+            g_radioCbErrLogged = 0;
+            g_lastAssocStatus = -1;
+            g_healPhaseStart = now;
+            /* `dead` is ALREADY in the orphan slot (set above): its stale
+             * open callback closes+releases it when the open eventually
+             * settles. Do NOT close() here — closing a still-connecting
+             * connection is the documented SDK crash. */
+            if (wifiNow == (int)kWifiNotAvailable)
+            {
+                /* Skip the disable step — nothing to disassociate from.
+                 * Enter phase 2; the sequencer issues setEnabled(true)
+                 * after the gap elapses (no double-enable here). */
+                g_radioHealPhase = 2;
+                g_healPhaseStart = now;
+                logger_log("[http] os wifi=NotAvailable; requesting "
+                           "(re)association");
+            }
+            else
+            {
+                g_radioHealPhase = 1;
+                g_pd->network->setEnabled(0, radio_enabled_cb); /* void */
+                logger_log("[http] transport dead (os wifi=Connected); "
+                           "cycling radio");
+            }
+            g_state = HS_RADIO_HEAL;
+            return;
+        }
+        logger_log("[http] giving up (os wifi=%d, healUsed=%d, setEnabled=%d)",
+                   wifiNow, g_radioHealUsed, hasSetEnabled);
+        netmon_probe_fail(); /* network-layer fault */
+        snprintf(g_error, sizeof(g_error),
+                 "Connection timed out after %d seconds.",
+                 (int)(REQUEST_TIMEOUT_MS / 1000));
+        g_state = HS_ERROR;
+        return;
+    }
+
+    /* R18b: backoff between attempts, then reopen on a later tick. */
+    if (g_state == HS_RETRY_WAIT)
+    {
+        if (now - g_attemptStart >= CONNECT_BACKOFF_MS)
+        {
+            g_state = HS_CONNECTING;
+        }
+        return;
+    }
+
+    /* ── R18b: open→first-byte watchdog ─────────────────────────────────
+     * Connection is open but no headers have arrived: if the server/radio
+     * never sends anything, recycle exactly like a wedged connect (same
+     * orphan teardown). Once any byte flows the normal 60s budget covers
+     * the rest of the transfer. */
+    if (g_state == HS_READING && g_connOpen && g_tcp && !g_bodyStart &&
+        g_buf.len == 0 &&
+        now - g_attemptStart > RESPONSE_FIRST_BYTE_TIMEOUT_MS)
+    {
+        TCPConnection *dead = g_tcp;
+        g_tcp = NULL;
+        g_pd->network->tcp->close(dead); /* open fully resolved: close is safe */
+        if (g_pooledTcp == dead)
+        {
+            g_pooledTcp = NULL;
+        }
+        /* Release the closed connection long after the SDK event loop has
+         * drained it (same deferred-release pattern as host switches). */
+        g_graveTcp = dead;
+        g_graveTimer = GRAVE_FRAMES;
+        if (g_connectAttempts < HTTP_CONNECT_ATTEMPTS)
+        {
+            logger_log("[http] no response in %d s (attempt %d); retrying",
+                       (int)(RESPONSE_FIRST_BYTE_TIMEOUT_MS / 1000),
+                       g_connectAttempts);
+            g_attemptStart = now; /* backoff phase starts now */
+            g_connOpen = 0; /* retry must re-open (deferred-open guard) */
+            g_state = HS_RETRY_WAIT;
+            return;
+        }
+        netmon_probe_fail(); /* network-layer fault */
+        snprintf(g_error, sizeof(g_error),
+                 "No response from server.");
+        g_state = HS_ERROR;
+        return;
+    }
+
     /* Timeout watchdog (connecting/reading only — never ACCESS_WAIT). */
     if (g_state == HS_CONNECTING || g_state == HS_READING)
     {
@@ -1492,6 +1836,7 @@ void http_update(void)
             }
             else
             {
+                netmon_probe_fail(); /* network-layer fault */
                 snprintf(g_error, sizeof(g_error),
                          "Connection timed out after 60 seconds.");
                 g_state = HS_ERROR;
@@ -1519,11 +1864,16 @@ void http_update(void)
         StrBuf req;
         strbuf_init(&req);
         build_request(&req);
+        int reqLen = (int)req.len;
         int sent = g_pd->network->tcp->write(g_tcp, req.data, req.len);
         strbuf_free(&req);
         if (sent >= 0)
         {
             g_state = HS_READING;
+            g_attemptStart = now; /* first-byte window starts at send time */
+            logger_log("[http] request sent (%d bytes), awaiting response "
+                       "[net: %s, signal %d/3]",
+                       reqLen, netmon_state_name(), netmon_level());
         }
         else if (sent == NET_WRITE_BUSY)
         {
@@ -1531,6 +1881,7 @@ void http_update(void)
         }
         else
         {
+            netmon_probe_fail(); /* network-layer fault */
             snprintf(g_error, sizeof(g_error), "Send failed: %d", (int)sent);
             g_state = HS_ERROR;
         }
@@ -1546,6 +1897,11 @@ void http_update(void)
             int n = g_pd->network->tcp->read(g_tcp, g_readChunk, want);
             if (n > 0)
             {
+                /* netmon: FIRST byte of the response completes the latency
+                 * probe (request-send → first byte = DNS+TLS+TTFB of a
+                 * fresh connection — the browser's own radio probe). */
+                netmon_probe_ok(g_requestId,
+                                now - g_attemptStart);
                 /* SW2c: gzip bodies do NOT stream to disk — the compressed
                  * staging stays in the RAM StrBuf so the whole member is
                  * in one contiguous buffer for the one-shot gunzip at the
@@ -1982,6 +2338,77 @@ void http_update(void)
             }
             bodyLen = ramBody + (size_t)diskBytes;
             deliveredLen = bodyLen;
+            /* R15: ZERO-COPY disk delivery — when the receiver can adopt a
+             * spill handle and the ENTIRE body is on disk (ramBody == 0:
+             * headers ended before the first read; any RAM prefix forces
+             * the materialized path), build a pure-body spill file in
+             * bounded windows instead of a body-sized RAM buffer. Saves the
+             * whole body-size transient at delivery (R14 measured 490KB
+             * bigAlloc here) AND the receiver's re-spill round-trip. */
+            if (g_cb.onSuccessSpill && ramBody == 0 && diskBytes > 0 &&
+                bodyLen <= (size_t)MAX_RESPONSE_SIZE)
+            {
+                SpillFile out = pluto_spill_begin();
+                int failed = 0;
+                if (out != PLUTO_SPILL_INVALID)
+                {
+                    size_t done = 0;
+                    while (done < bodyLen)
+                    {
+                        size_t want = bodyLen - done;
+                        if (want > READ_CHUNK)
+                        {
+                            want = READ_CHUNK;
+                        }
+                        long got = pluto_spill_read(sp, (long)done,
+                                                    g_readChunk, want);
+                        if (got <= 0)
+                        {
+                            failed = 1;
+                            break;
+                        }
+                        if (pluto_spill_write(out, g_readChunk,
+                                              (size_t)got) != 0)
+                        {
+                            failed = 1;
+                            break;
+                        }
+                        done += (size_t)got;
+                    }
+                }
+                else
+                {
+                    failed = 1;
+                }
+                if (!failed)
+                {
+                    pluto_spill_finish(out);
+                    pluto_spill_discard(sp); /* source no longer needed */
+                    /* Snapshot + reset BEFORE the callback (same contract
+                     * as the materialized path below): g_url/g_cb are
+                     * module state the callback must not see mutated, and
+                     * reset_state does not touch `out` (receiver-owned). */
+                    static char urlSnap[1024];
+                    strncpy(urlSnap, g_url, sizeof(urlSnap) - 1);
+                    urlSnap[sizeof(urlSnap) - 1] = '\0';
+                    HttpCallbacks cbDisk = g_cb;
+                    int statusDisk = g_savedStatus;
+                    size_t lenDisk = (size_t)bodyLen;
+                    reset_state();
+                    logger_log("[http] disk delivery: %zu bytes (no RAM body)",
+                               lenDisk);
+                    cbDisk.onSuccessSpill(statusDisk, out, lenDisk, urlSnap);
+                    return;
+                }
+                /* Disk delivery failed: drop the partial copy and fall
+                 * through to the materialized-RAM delivery (sp still
+                 * valid — the windows are re-read there). */
+                if (out != PLUTO_SPILL_INVALID)
+                {
+                    pluto_spill_discard(out);
+                }
+                logger_log("[http] disk delivery failed; RAM fallback");
+            }
             body = (char *)PLUTO_MALLOC(bodyLen + 1);
             if (body)
             {

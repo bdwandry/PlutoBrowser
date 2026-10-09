@@ -5,11 +5,22 @@ Source/core/pluto_snap.c Source/core/pluto_spill.c Source/core/pluto_page.c Sour
 Source/html/document.c Source/html/dom.c Source/html/entities.c Source/html/tokenizer.c Source/html/readability.c Source/html/css.c
 Source/core/url.c Source/core/constants.c Source/core/encoding.c Source/core/cookie_jar.c Source/core/storage.c
 Source/util/strbuf.c Source/util/strutil.c Source/util/json.c Source/util/pdtimer.c
-Source/html/jsbridge.c Source/html/jsext.c
+Source/html/jsbridge.c Source/html/jsext.c Source/html/jsbridge_bundler.c
 Source/render/decoders/scale.c Source/render/decoders/dither.c Source/render/decoders/inflate.c Source/render/decoders/png.c
 Source/js/muJS/*.c Source/js/duktape/duktape.c
 Source/html/qjs_shim_quickjs.c Source/html/qjs_shim_libregexp.c Source/html/qjs_shim_libunicode.c Source/html/qjs_shim_cutils.c Source/html/qjs_shim_dtoa.c Source/html/qjs_pthread_stubs.c
-Source/html/jsbridge_mujs.c Source/html/jsbridge_duktape.c Source/html/jsbridge_quickjs.c Source/html/jsbridge_xs.c
+Source/html/jsbridge_mujs.c Source/html/jsbridge_duktape.c Source/html/jsbridge_quickjs.c Source/html/jsbridge_xs.c Source/html/jsbridge_xs_nr.c
+Source/js/xs_moddable_no_recursion/sources/xsAll.c Source/js/xs_moddable_no_recursion/sources/xsAPI.c Source/js/xs_moddable_no_recursion/sources/xsArguments.c Source/js/xs_moddable_no_recursion/sources/xsArray.c
+Source/js/xs_moddable_no_recursion/sources/xsAtomics.c Source/js/xs_moddable_no_recursion/sources/xsBigInt.c Source/js/xs_moddable_no_recursion/sources/xsBoolean.c Source/js/xs_moddable_no_recursion/sources/xsCode.c
+Source/js/xs_moddable_no_recursion/sources/xsCommon.c Source/js/xs_moddable_no_recursion/sources/xsDataView.c Source/js/xs_moddable_no_recursion/sources/xsDate.c Source/js/xs_moddable_no_recursion/sources/xsDebug.c
+Source/js/xs_moddable_no_recursion/sources/xsDefaults.c Source/js/xs_moddable_no_recursion/sources/xsError.c Source/js/xs_moddable_no_recursion/sources/xsFunction.c Source/js/xs_moddable_no_recursion/sources/xsGenerator.c
+Source/js/xs_moddable_no_recursion/sources/xsGlobal.c Source/js/xs_moddable_no_recursion/sources/xsJSON.c Source/js/xs_moddable_no_recursion/sources/xsLexical.c Source/js/xs_moddable_no_recursion/sources/xsLockdown.c
+Source/js/xs_moddable_no_recursion/sources/xsMapSet.c Source/js/xs_moddable_no_recursion/sources/xsMarshall.c Source/js/xs_moddable_no_recursion/sources/xsMath.c Source/js/xs_moddable_no_recursion/sources/xsMemory.c
+Source/js/xs_moddable_no_recursion/sources/xsModule.c Source/js/xs_moddable_no_recursion/sources/xsNumber.c Source/js/xs_moddable_no_recursion/sources/xsObject.c Source/js/xs_moddable_no_recursion/sources/xsPlatforms.c
+Source/js/xs_moddable_no_recursion/sources/xsProfile.c Source/js/xs_moddable_no_recursion/sources/xsPromise.c Source/js/xs_moddable_no_recursion/sources/xsProperty.c Source/js/xs_moddable_no_recursion/sources/xsProxy.c
+Source/js/xs_moddable_no_recursion/sources/xsRegExp.c Source/js/xs_moddable_no_recursion/sources/xsRun.c Source/js/xs_moddable_no_recursion/sources/xsScope.c Source/js/xs_moddable_no_recursion/sources/xsScript.c
+Source/js/xs_moddable_no_recursion/sources/xsSourceMap.c Source/js/xs_moddable_no_recursion/sources/xsString.c Source/js/xs_moddable_no_recursion/sources/xsSymbol.c Source/js/xs_moddable_no_recursion/sources/xsSyntaxical.c
+Source/js/xs_moddable_no_recursion/sources/xsTree.c Source/js/xs_moddable_no_recursion/sources/xsType.c Source/js/xs_moddable_no_recursion/sources/xsdtoa.c Source/js/xs_moddable_no_recursion/sources/xsre.c Source/js/xs_moddable_no_recursion/sources/xsmc.c
 Source/js/xs_moddable/sources/xsAll.c Source/js/xs_moddable/sources/xsAPI.c Source/js/xs_moddable/sources/xsArguments.c Source/js/xs_moddable/sources/xsArray.c
 Source/js/xs_moddable/sources/xsAtomics.c Source/js/xs_moddable/sources/xsBigInt.c Source/js/xs_moddable/sources/xsBoolean.c Source/js/xs_moddable/sources/xsCode.c
 Source/js/xs_moddable/sources/xsCommon.c Source/js/xs_moddable/sources/xsDataView.c Source/js/xs_moddable/sources/xsDate.c Source/js/xs_moddable/sources/xsDebug.c
@@ -23,8 +34,8 @@ Source/js/xs_moddable/sources/xsSourceMap.c Source/js/xs_moddable/sources/xsStri
 Source/js/xs_moddable/sources/xsTree.c Source/js/xs_moddable/sources/xsType.c Source/js/xs_moddable/sources/xsdtoa.c Source/js/xs_moddable/sources/xsre.c Source/js/xs_moddable/sources/xsmc.c"
 cc -o /tmp/jstest $SRCS \
  -I. -ISource -ISource/core -ISource/util -ISource/html -ISource/render -ISource/render/decoders -I$SDK/C_API \
- -I Source/js/muJS -I Source/js/duktape -I Source/js/QuickJS -I Source/js/xs_moddable/sources -I Source/js/xs_moddable/platforms \
- -DPLUTO_SPILL_HOST -DTARGET_SIMULATOR=1 -DTARGET_EXTENSION=1 -DCONFIG_VERSION=\"2026-06-04\" \
+ -I Source/js/muJS -I Source/js/duktape -I Source/js/QuickJS -I Source/js/xs_moddable_no_recursion/sources -I Source/js/xs_moddable_no_recursion/platforms -I Source/js/xs_moddable/sources -I Source/js/xs_moddable/platforms \
+ -DPLUTO_SPILL_HOST -DTARGET_SIMULATOR=1 -DTARGET_EXTENSION=1 -DCONFIG_VERSION=\"2026-06-04\" -DPLUTO_BUNDLER_MIN_SOURCE=512 \
  -Dpthread_mutex_lock=pluto_qjs_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_qjs_pthread_mutex_unlock \
  -Dpthread_cond_init=pluto_qjs_pthread_cond_init -Dpthread_cond_destroy=pluto_qjs_pthread_cond_destroy \
  -Dpthread_cond_signal=pluto_qjs_pthread_cond_signal -Dpthread_cond_wait=pluto_qjs_pthread_cond_wait \
