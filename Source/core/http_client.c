@@ -1568,11 +1568,29 @@ void http_update(void)
     }
 
     /* Graveyard: release a host-switched connection once its event-loop state
-     * has long drained (deferred release, see the lifecycle comment). */
+     * has long drained (deferred release, see the lifecycle comment).
+     * R53 (device run 55, 03:28:38 crash): the release must ALSO wait for
+     * the CURRENT request to finish. Evidence: fetch A (:443) opened at
+     * t+0, fetch B (:80) at t+1 buried A in the graveyard, the 120-frame
+     * release fired at ~t+4 while B's fresh TLS session was LIVE, and B's
+     * response read crashed 4s later with pc inside the SDK heap executing
+     * the URL string ('yanw' = bytes 9-12 of http://bryanwandrych.com/).
+     * Releasing one TLS object while another is mid-session is hazard 2's
+     * remaining window — the graveyard delay alone doesn't cover it. */
     if (g_graveTcp && --g_graveTimer <= 0)
     {
-        g_pd->network->tcp->release(g_graveTcp);
-        g_graveTcp = NULL;
+        if (http_is_loading())
+        {
+            /* An active request holds SDK TLS event-loop state; releasing
+             * the grave connection now lands in hazard 2. Hold until the
+             * next idle tick (graveTimer stays 0 → release on that tick). */
+            ;
+        }
+        else
+        {
+            g_pd->network->tcp->release(g_graveTcp);
+            g_graveTcp = NULL;
+        }
     }
 
     /* A deferred redirect (from a prior tick) opens the next connection now,

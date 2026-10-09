@@ -1082,6 +1082,11 @@ static void nr_revisit_autotest_tick(void)
             {
                 logger_log("[nr-autotest] SOAK COMPLETE: %d/%d bypass cycles, "
                            "no crash", g_nrSoakDone, g_nrSoakTotal);
+                /* Return the device to a friendly state: the soak ends on
+                 * a page screen with a dead engine, so navigate home. */
+                pendingNavUrlSet = 1;
+                snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+                logger_log("[nr-autotest] navigating home");
             }
         }
         else if (g_nrSnapFrames > 7200)
@@ -1164,6 +1169,11 @@ static void nr_revisit_autotest_tick(void)
         {
             logger_log("[nr-autotest] SOAK COMPLETE: %d/%d cycles, no crash",
                        g_nrSoakDone, g_nrSoakTotal);
+            /* Return the device to a friendly state: the soak ends on
+             * a page screen with a dead engine, so navigate home. */
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+            logger_log("[nr-autotest] navigating home");
         }
     }
     else if (g_nrSnapFrames > 600)
@@ -4838,7 +4848,7 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
 #if defined(PLUTO_NR_AUTOTEST)
 #ifndef PLUTO_NR_AUTOTEST_URL
-#define PLUTO_NR_AUTOTEST_URL "http://bryanwandrych.com"
+#define PLUTO_NR_AUTOTEST_URL "https://bryanwandrych.com"
 #endif
 /* Optional offline repro: navigate to a local file instead of the URL
  * (test builds only; used when the device radio is down but the crash
