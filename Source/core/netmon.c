@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "core/netmon.h"
+#include "core/logger.h"
 #include "pd_api.h"
 
 extern PlaydateAPI *pluto_pd(void);
@@ -17,11 +18,30 @@ static int g_lastReqId = -1;       /* per-request probe latch */
 static unsigned g_lastLatency = 0; /* ms, request-send -> first byte */
 static int g_lastLevel = 0;        /* 1..3, derived from g_lastLatency */
 static int g_faultStreak = 0;      /* consecutive network faults */
+static unsigned g_lastOkMs = 0;    /* timestamp of the last successful probe */
+static unsigned g_nowMs = 0;       /* monotonic now, refreshed by poll */
 
 /* Latency bands (ms, first byte on a FRESH connection incl. DNS+TLS).
  * <=800ms strong, <=2500ms ok, else weak; >60s is treated as unknown. */
 #define LEVEL3_MAX_MS 800u
 #define LEVEL2_MAX_MS 2500u
+
+/* SIM workaround (fix for "always disconnected" on home screen): the
+ * Playdate SIMULATOR's C pd->network->getStatus() always returns 0
+ * (kWifiNotConnected) even with a live host network — verified by running
+ * Panic's own Networking example (Lua) in the SAME simulator at the same
+ * time: Lua reports Connected while our C poll reads 0 forever. The DEVICE
+ * API is correct. So "connected" is derived from BOTH sources of truth:
+ * the OS status OR a recent successful first-byte probe from
+ * http_client (PROBE_FRESH_MS window). On device the OS status governs;
+ * in the sim the app's own demonstrated-working networking converges the
+ * icon to connected after the first real page load. */
+#define PROBE_FRESH_MS 600000u /* 10 minutes */
+
+/* How often the 1s poll may re-issue setEnabled(true) when the OS reports
+ * not connected. Conservative: association takes seconds, and hammering the
+ * radio OS-side is unkind. 15s between kicks. */
+#define RADIO_KICK_INTERVAL_MS 15000u
 
 static int os_status(void)
 {
@@ -31,6 +51,18 @@ static int os_status(void)
         return (int)kWifiNotConnected; /* defensive: no API = down */
     }
     return (int)pd->network->getStatus();
+}
+
+/* Connect/link present = OS says so, OR a probe succeeded recently
+ * (covers the simulator's always-0 C getStatus). */
+static int link_present(void)
+{
+    if (os_status() == (int)kWifiConnected)
+    {
+        return 1;
+    }
+    return g_lastOkMs != 0 && g_nowMs != 0 &&
+           (g_nowMs - g_lastOkMs) <= PROBE_FRESH_MS;
 }
 
 static int level_from_latency(unsigned ms)
@@ -50,6 +82,15 @@ static int level_from_latency(unsigned ms)
     return 1;
 }
 
+/* Radio-kick completion callback (R-critical: NEVER pass NULL as the
+ * setEnabled callback — the device OS derefs/calls it and hard-crashes
+ * with "Error accessing buffer at 0x00000000"; device errorlog 2026-10-09
+ * 17:54). It's a fire-and-forget completion: nothing to record. */
+static void netmon_kick_cb(PDNetErr err)
+{
+    (void)err; /* completion of the association request; poll reads truth */
+}
+
 void netmon_probe_ok(int reqId, unsigned elapsedMs)
 {
     if (reqId == g_lastReqId)
@@ -59,6 +100,7 @@ void netmon_probe_ok(int reqId, unsigned elapsedMs)
     g_lastReqId = reqId;
     g_lastLatency = elapsedMs;
     g_lastLevel = level_from_latency(elapsedMs);
+    g_lastOkMs = g_nowMs; /* freshness anchor for link_present() */
     g_faultStreak = 0; /* a success breaks the fault streak */
 }
 
@@ -79,7 +121,7 @@ void netmon_probe_fail(void)
 
 int netmon_level(void)
 {
-    if (os_status() != (int)kWifiConnected)
+    if (!link_present())
     {
         return 0;
     }
@@ -90,17 +132,74 @@ int netmon_level(void)
     return g_lastLevel;
 }
 
+int netmon_poll(void)
+{
+    static unsigned int g_lastPollMs = 0;
+    static unsigned g_lastKickMs = 0;
+    static int g_lastVisible = -1; /* 0..3 level as last reported */
+    PlaydateAPI *pd = pluto_pd();
+    if (!pd || !pd->system)
+    {
+        return 0;
+    }
+    unsigned int now = pd->system->getCurrentTimeMilliseconds();
+    if (g_lastPollMs != 0 && now - g_lastPollMs < 1000u)
+    {
+        return 0; /* 1-second cadence (user spec) */
+    }
+    g_lastPollMs = now;
+    g_nowMs = now; /* monotonic clock anchor for link_present() */
+
+    int st = os_status();
+
+    /* First-launch association (user screenshot: at boot the icon shows
+     * not-connected and stays that way until a page load — the OS's lazy
+     * (re)association only happens during a real request in http_client's
+     * radio-heal path). Fix: the 1s poll itself kicks the radio via
+     * setEnabled(true) when the OS reports not-connected/not-available,
+     * mirroring the radio-heal's recovery. No OFF-vs-lazy guard exists in
+     * the SDK (a user's OS-level OFF also reports not-connected); repeated
+     * kicks are re-bounced safely by the OS, and the 15s interval keeps it
+     * gentle. */
+    if ((st == (int)kWifiNotConnected || st == (int)kWifiNotAvailable) &&
+        pd->network->setEnabled != NULL)
+    {
+        unsigned int nowMs = (unsigned int)now;
+        if (g_lastKickMs == 0 || nowMs - g_lastKickMs > RADIO_KICK_INTERVAL_MS)
+        {
+            g_lastKickMs = nowMs;
+            pd->network->setEnabled(1, netmon_kick_cb);
+            logger_log("[netmon] radio kick at boot (os status=%d)", st);
+        }
+    }
+
+    /* os_status() lives below; direct call keeps this self-contained. */
+    int visible = netmon_level();
+    int changed = (g_lastVisible >= 0 && visible != g_lastVisible);
+    int prevVisible = g_lastVisible;
+    g_lastVisible = visible;
+    if (changed)
+    {
+        logger_log("[netmon] wifi level %d -> %d (os=%s)", prevVisible,
+                   visible, netmon_state_name());
+        return 1; /* caller: force a chrome redraw */
+    }
+    return 0;
+}
+
 const char *netmon_state_name(void)
 {
-    switch (os_status())
+    int st = os_status();
+    if (st == (int)kWifiConnected || link_present())
     {
-    case (int)kWifiConnected:
-        return "connected";
-    case (int)kWifiNotAvailable:
-        return "not-available";
-    default:
-        return "not-connected";
+        /* The sim path: OS reads 0 forever but probes succeed. */
+        return st == (int)kWifiConnected ? "connected" : "connected(probe)";
     }
+    if (st == (int)kWifiNotAvailable)
+    {
+        return "not-available";
+    }
+    return "not-connected";
 }
 
 unsigned netmon_last_latency_ms(void)

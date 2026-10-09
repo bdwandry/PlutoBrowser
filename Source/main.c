@@ -3733,6 +3733,12 @@ static int updateFrame(void *userdata)
         skipInputFrames--;
     }
 
+    /* ── WiFi poll: refresh the status-icon truth every 1s and force a
+     * chrome redraw when the visible level changes (user fix: the icon
+     * used to stick on "disconnected" on pages that never fire a
+     * network probe). Runs in EVERY state, including SETTINGS. ── */
+    netmon_poll();
+
     /* ── STATE MACHINE ── */
     switch (currentState)
     {

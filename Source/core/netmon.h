@@ -30,6 +30,14 @@ void netmon_probe_ok(int reqId, unsigned elapsedMs);
  * the OS status owns the not-connected state. */
 void netmon_probe_fail(void);
 
+/* 1-second OS-status poll (user fix: the icon showed "disconnected" for
+ * whole sessions on pages that never fire a network probe). Re-reads
+ * pd->network->getStatus() every 1000ms, updates the cached level badge
+ * latency band state, and RETURNS 1 exactly when the visible status
+ * changed (level 0<->N or the lastLatency band flipped) so the caller can
+ * force a redraw. Cheap: one SDK call per second. */
+int netmon_poll(void);
+
 /* Current dot level 0..3. 0 = not connected (per the OS), 1..3 = connected
  * at weak/ok/strong per last measured latency + fault streak. */
 int netmon_level(void);
