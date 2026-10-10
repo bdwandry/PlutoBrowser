@@ -155,10 +155,21 @@ extern void *pluto_realloc(void *p, size_t n);
 void pluto_free(void *p) { pluto_realloc(p, 0); }
 void *pluto_malloc(size_t n) { return pluto_realloc(0, n); }
 EOF
+cat > "$D/stubs3.c" <<'EOF'
+/* Symbols owned by main.c / netmon.c in product builds (not compiled into
+ * this harness): http_client's netmon probes + log name/level, and jsext's
+ * loading-UI progress sink. No-ops with exact product signatures. */
+void netmon_probe_ok(int reqId, unsigned elapsedMs) { (void)reqId; (void)elapsedMs; }
+void netmon_probe_fail(void) {}
+int netmon_level(void) { return 0; }
+const char *netmon_state_name(void) { return "test"; }
+void pluto_ui_net_progress(int cur, int total) { (void)cur; (void)total; }
+EOF
 # The 3 engine vtables not under test: jsbridge.c references all four.
 # Duktape + QuickJS need their shim define sets; XS its platform headers.
 cc $COMMON -c "$D/stubs.c"  -o "$D/stubs.o"
 cc $COMMON -c "$D/stubs2.c" -o "$D/stubs2.o"
+cc $COMMON -c "$D/stubs3.c" -o "$D/stubs3.o"
 SHIMD="-DCONFIG_VERSION=\"2026-06-04\" -D_GNU_SOURCE=1 -D_POSIX_THREADS=1 -D__TM_GMTOFF=tm_gmtoff -Djs_malloc=pluto_qjs_malloc -Djs_free=pluto_qjs_free -Djs_realloc=pluto_qjs_realloc -Djs_strdup=pluto_qjs_strdup"
 XSFLAGS='-DINCLUDE_XSPLATFORM -DXSPLATFORM="xs_platform.h"'
 cc $COMMON -c Source/html/jsbridge_duktape.c  -o "$D/duk_bridge.o"

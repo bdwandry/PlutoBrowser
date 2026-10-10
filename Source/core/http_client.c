@@ -157,6 +157,40 @@ static HttpCallbacks g_pendingRedirectCb;
 static int g_hasPendingRedirect = 0;
 static int g_redirectDepth = 0;
 
+/* ── HTTP keep-alive reuse (same-host request chaining) ─────────────────────
+ * Cost truth (gallery benchmark, sim): 19 sequential images ≈ 8.1s total,
+ * ~40ms of it decode — 99.5% is per-request setup (DNS + TCP + TLS) on a
+ * FRESH connection every time. Reusing one open socket for same-host chains
+ * removes the setup without any concurrency: the client stays strictly
+ * single-flight (one request at a time), so every crash-hardened rule below
+ * keeps holding.
+ * This is NOT the R52-pooled-reopen pattern (close + immediately re-open
+ * the SAME object = 100%-repro device trap, hazard 2): the socket is NEVER
+ * closed between chained requests, so no re-setup ever happens. Close only
+ * ever happens on the proven paths (failure/cancel/host-switch/idle-death),
+ * and any fallback opens a FRESH object via open_connection as today.
+ * Eligibility (evaluated at each clean completion, sticky until consumed):
+ *   - transfer framing was EXACT (Content-Length fulfilled byte-for-byte,
+ *     or non-spill chunked with a verified terminal chunk) — close-delimited
+ *     bodies, caps, and partials can never reuse (body end unknown);
+ *   - the server did not close (g_connClosed unset at completion);
+ *   - the response carries no "Connection: close" token (silent 1.1-implicit
+ *     and Upgrade-only responses reuse; a wrong guess on a silent-1.0
+ *     server degrades to ONE failed write + fresh-connect fallback, logged).
+ * Match (evaluated at the next start): same host/port/ssl, socket object
+ * identical and open, and preserved ≤ KEEPALIVE_MAX_IDLE_MS ago. Anything
+ * else — different host, cancel, error, redirect, idle server-side close —
+ * falls back to today's close+fresh behavior bit-for-bit. */
+static TCPConnection *g_keepAliveTcp = NULL; /* preserved socket (== g_tcp) */
+static char g_keepAliveHost[256];
+static int g_keepAlivePort = 0;
+static int g_keepAliveSsl = 0;
+static unsigned int g_keepAliveStamp = 0; /* ms at preservation */
+static int g_reusedSocket = 0;   /* current request runs on a reused socket */
+static int g_reuseRetried = 0;   /* fresh-connect fallback already spent */
+static int g_completedFramedExact = 0; /* this completion framed exactly */
+#define KEEPALIVE_MAX_IDLE_MS 2000 /* older idles go fresh (server timeouts) */
+
 static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
 
 /* ── Connect-attempt watchdog + bounded retry (R18b) ───────────────────────
@@ -685,8 +719,144 @@ static void close_tcp(void)
     }
 }
 
+/* ── Keep-alive helpers (see design note at the state block) ─────────────── */
+
+/* Defined with the header parser below; needed by the consent check. */
+static const char *saved_header(const char *key);
+
+static void keepalive_invalidate(void)
+{
+    g_keepAliveTcp = NULL;
+    g_keepAliveHost[0] = '\0';
+    g_keepAlivePort = 0;
+    g_keepAliveSsl = 0;
+    g_keepAliveStamp = 0;
+}
+
+/* Slim preserve used ONLY on the reuse path: mirrors reset_state's field
+ * resets except the socket/connect trio (stays live), the requestId bump
+ * (same socket generation continues — no superseded connection exists),
+ * and the parse buffer (re-parse overwrites it, saving a malloc/free). */
+static void reset_state_preserve(void)
+{
+    if (g_spill != PLUTO_SPILL_INVALID)
+    {
+        pluto_spill_discard(g_spill);
+        g_spill = PLUTO_SPILL_INVALID;
+    }
+    g_spillMode = SPILL_NONE;
+    g_bodySpilled = 0;
+    g_completedFramedExact = 0;
+    g_state = HS_IDLE;
+}
+
+/* True when urlString can run on the preserved socket. Parses into g_parsed
+ * (re-parsed by start_request; deterministic). Only called from http_get
+ * BEFORE any teardown, while the previous socket is still live. */
+static int keepalive_match_for(const char *urlString)
+{
+    if (!urlString || !urlString[0]) return 0;
+    if (!g_pd || !g_pd->network || !g_pd->network->tcp) return 0;
+    if (!g_keepAliveTcp || g_keepAliveTcp != g_tcp) return 0;
+    if (!g_connOpen || g_openFailed || g_connClosed) return 0;
+    if (!g_parsed)
+    {
+        g_parsed = (UrlParsed *)PLUTO_MALLOC(sizeof(UrlParsed));
+        if (!g_parsed) return 0;
+    }
+    if (url_parse(urlString, g_parsed) != 0 || g_parsed->host[0] == '\0')
+        return 0;
+    if (strcmp(g_parsed->host, g_keepAliveHost) != 0 ||
+        g_parsed->port != g_keepAlivePort ||
+        g_parsed->isSsl != g_keepAliveSsl)
+        return 0;
+    if (g_pd->system->getCurrentTimeMilliseconds() - g_keepAliveStamp >
+        KEEPALIVE_MAX_IDLE_MS)
+        return 0; /* server may have idled out — go fresh, no wasted write */
+    return 1;
+}
+
+/* Server consent: any "close" token vetoes; silent (1.1-implicit) and
+ * Upgrade-only responses reuse. A wrong guess degrades to the logged
+ * fresh-connect fallback — never to corruption (framing was verified). */
+static int keepalive_consent_ok(void)
+{
+    const char *c = saved_header("connection");
+    const char *p;
+    if (!c || !c[0]) return 1;
+    p = c;
+    for (;;)
+    {
+        char tok[32];
+        size_t n = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        while (*p && *p != ',' && n + 1 < sizeof(tok))
+            tok[n++] = *p++;
+        while (n > 0 && (tok[n - 1] == ' ' || tok[n - 1] == '\t')) n--;
+        tok[n] = '\0';
+        if (n == 5 && (tok[0] == 'c' || tok[0] == 'C') &&
+            strcasecmp(tok, "close") == 0)
+            return 0;
+        if (*p != ',') break;
+        p++;
+    }
+    return 1;
+}
+
+/* Evaluated at each clean-delivery exit (disk + RAM funnels): snapshot the
+ * reusable socket and preserve it past the callback. Returns 1 when the
+ * caller must SKIP reset_state (already preserve-reset); 0 → reset as
+ * today. `now` stamps the idle window. */
+static int keepalive_preserve_if_eligible(unsigned int now)
+{
+    if (!g_completedFramedExact || g_connClosed) return 0;
+    if (!g_tcp || !g_connOpen || g_openFailed) return 0;
+    if (!keepalive_consent_ok()) return 0;
+    if (!g_parsed || !g_parsed->host[0]) return 0;
+    g_keepAliveTcp = g_tcp;
+    snprintf(g_keepAliveHost, sizeof(g_keepAliveHost), "%s", g_parsed->host);
+    g_keepAlivePort = g_parsed->port;
+    g_keepAliveSsl = g_parsed->isSsl;
+    g_keepAliveStamp = now;
+    reset_state_preserve();
+    logger_log("[http] keep-alive socket preserved (%s:%d%s)", g_parsed->host,
+               g_parsed->port, g_parsed->isSsl ? " (tls)" : "");
+    return 1;
+}
+
+/* Reused-socket failure (send fail / zero-byte close): tear down exactly
+ * like a dead fresh connection, then re-enter CONNECTING with no socket so
+ * the normal path opens FRESH and resends ONCE (g_reuseRetried guards). The
+ * 60s user watchdog (g_requestStart) keeps spanning the whole request. */
+static void keepalive_fallback(const char *reason)
+{
+    logger_log("[http] keep-alive reuse failed (%s); fresh connect", reason);
+    {
+        TCPConnection *dead = g_tcp;
+        g_tcp = NULL;
+        if (dead)
+        {
+            g_pd->network->tcp->close(dead);
+            if (g_pooledTcp == dead)
+            {
+                g_pooledTcp = NULL;
+            }
+            g_graveTcp = dead;
+            g_graveTimer = GRAVE_FRAMES;
+        }
+    }
+    keepalive_invalidate();
+    g_connOpen = 0;
+    g_openFailed = 0;
+    g_connClosed = 0;
+    g_connectAttempts = 0;
+    g_reuseRetried = 1;
+    g_state = HS_CONNECTING;
+}
+
 static void reset_state(void)
 {
+    keepalive_invalidate(); /* every teardown path drops reuse first */
     close_tcp();
     g_requestId++;
     memset(&g_cb, 0, sizeof(g_cb));
@@ -763,7 +933,7 @@ static void build_request(StrBuf *out)
     {
         strbuf_appendf(out, "Cookie: %s\r\n", cookie);
     }
-    strbuf_appendf(out, "Connection: close\r\n\r\n");
+    strbuf_appendf(out, "Connection: keep-alive\r\n\r\n");
 }
 
 /* SW2c: gzip member header/footer unwrap. RFC 1952: ID1=0x1f ID2=0x8b
@@ -1167,6 +1337,23 @@ static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
     {
         g_connClosed = 1;
     }
+    else if (g_tcp == conn)
+    {
+        /* In IDLE the only open socket possible is a preserved keep-alive
+         * one (every teardown nulls g_tcp): the server idled it out. Tear
+         * down exactly like a host switch (close + deferred release) so
+         * the next request goes fresh — never a write to a dead socket. */
+        g_pd->network->tcp->close(conn);
+        if (g_pooledTcp == conn)
+        {
+            g_pooledTcp = NULL;
+        }
+        g_graveTcp = conn;
+        g_graveTimer = GRAVE_FRAMES;
+        g_tcp = NULL;
+        g_connOpen = 0;
+        keepalive_invalidate();
+    }
 }
 
 static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
@@ -1267,7 +1454,8 @@ static void about_timer_cb(void *ud)
     reset_state();
 }
 
-static int start_request(const char *urlString, const HttpCallbacks *callbacks)
+static int start_request(const char *urlString, const HttpCallbacks *callbacks,
+                         int allowReuse)
 {
     if (callbacks)
     {
@@ -1288,9 +1476,22 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_contentLength = -1;
     g_isGzip = 0;
     g_gzipHold = 0;
-    g_connOpen = 0;
-    g_openFailed = 0;
-    g_connClosed = 0;
+    g_completedFramedExact = 0;
+    if (allowReuse)
+    {
+        /* Keep-alive path (matched in http_get): socket/connect trio stays
+         * live; everything else resets exactly as the fresh path. */
+        g_reusedSocket = 1;
+        g_reuseRetried = 0;
+    }
+    else
+    {
+        g_connOpen = 0;
+        g_openFailed = 0;
+        g_connClosed = 0;
+        g_reusedSocket = 0;
+        g_reuseRetried = 0;
+    }
     g_error[0] = '\0';
     g_attemptStart = 0;
     g_connectAttempts = 0;
@@ -1537,12 +1738,23 @@ void http_client_init(PlaydateAPI *pd)
 
 int http_get(const char *urlString, const HttpCallbacks *callbacks)
 {
-    /* Cancel any previous request cleanly (Lua HttpClient.get). */
-    reset_state();
+    /* Keep-alive: chain onto the preserved socket when the new URL matches
+     * it (same host/port/ssl, fresh). Otherwise cancel previous cleanly. */
+    int reuse = keepalive_match_for(urlString);
+    if (reuse)
+    {
+        reset_state_preserve();
+        logger_log("[http] keep-alive reuse chained");
+    }
+    else
+    {
+        /* Cancel any previous request cleanly (Lua HttpClient.get). */
+        reset_state();
+    }
     /* A fresh top-level request starts a new redirect chain. */
     g_hasPendingRedirect = 0;
     g_redirectDepth = 0;
-    return start_request(urlString, callbacks);
+    return start_request(urlString, callbacks, reuse);
 }
 
 void http_cancel(void)
@@ -1601,8 +1813,9 @@ void http_update(void)
         g_hasPendingRedirect = 0;
         reset_state();
         /* No stack copy needed: start_request memcpy's the URL into g_url
-         * before anything else can touch g_pendingRedirectUrl. */
-        start_request(g_pendingRedirectUrl, &cb);
+         * before anything else can touch g_pendingRedirectUrl. Redirects
+         * always close+fresh (reuse flag 0) — simple and proven. */
+        start_request(g_pendingRedirectUrl, &cb, 0);
         return;
     }
 
@@ -1897,6 +2110,13 @@ void http_update(void)
         {
             g_writePending = 1; /* retry next frame */
         }
+        else if (g_reusedSocket && !g_reuseRetried)
+        {
+            /* Reused socket died between requests (server idle timeout):
+             * ONE fresh-connect resend, then real errors as today. */
+            keepalive_fallback("send failed");
+            return;
+        }
         else
         {
             netmon_probe_fail(); /* network-layer fault */
@@ -1916,8 +2136,8 @@ void http_update(void)
             if (n > 0)
             {
                 /* netmon: FIRST byte of the response completes the latency
-                 * probe (request-send → first byte = DNS+TLS+TTFB of a
-                 * fresh connection — the browser's own radio probe). */
+                 * probe (request-send → first byte = TTFB; plus DNS+TLS on
+                 * a fresh connection, skipped on keep-alive reuse). */
                 netmon_probe_ok(g_requestId,
                                 now - g_attemptStart);
                 /* SW2c: gzip bodies do NOT stream to disk — the compressed
@@ -2093,6 +2313,7 @@ void http_update(void)
                 if (dec)
                 {
                     pluto_free(dec);
+                    g_completedFramedExact = 1; /* terminal chunk verified */
                     g_state = HS_DONE;
                 }
             }
@@ -2101,6 +2322,9 @@ void http_update(void)
         {
             if ((long)bodyBytes >= g_contentLength)
             {
+                /* Exact byte count only (overlong = framing broken). */
+                g_completedFramedExact =
+                    (bodyBytes == (size_t)g_contentLength);
                 g_state = HS_DONE;
             }
         }
@@ -2124,6 +2348,13 @@ void http_update(void)
     {
         if (g_buf.len == 0 && g_bodySpilled == 0)
         {
+            if (g_reusedSocket && !g_reuseRetried)
+            {
+                /* Server had already closed the reused socket: resend
+                 * ONCE over a fresh connection (see send-fail fallback). */
+                keepalive_fallback("server closed reused socket");
+                return;
+            }
             snprintf(g_error, sizeof(g_error),
                      "Connection closed before any data was received.");
             g_state = HS_ERROR;
@@ -2405,14 +2636,19 @@ void http_update(void)
                     /* Snapshot + reset BEFORE the callback (same contract
                      * as the materialized path below): g_url/g_cb are
                      * module state the callback must not see mutated, and
-                     * reset_state does not touch `out` (receiver-owned). */
+                     * reset_state does not touch `out` (receiver-owned).
+                     * Keep-alive: preserve the open socket when eligible. */
                     static char urlSnap[1024];
                     strncpy(urlSnap, g_url, sizeof(urlSnap) - 1);
                     urlSnap[sizeof(urlSnap) - 1] = '\0';
                     HttpCallbacks cbDisk = g_cb;
                     int statusDisk = g_savedStatus;
                     size_t lenDisk = (size_t)bodyLen;
-                    reset_state();
+                    if (!keepalive_preserve_if_eligible(
+                            g_pd->system->getCurrentTimeMilliseconds()))
+                    {
+                        reset_state();
+                    }
                     logger_log("[http] disk delivery: %zu bytes (no RAM body)",
                                lenDisk);
                     cbDisk.onSuccessSpill(statusDisk, out, lenDisk, urlSnap);
@@ -2514,7 +2750,13 @@ void http_update(void)
         urlSnapshot[sizeof(urlSnapshot) - 1] = '\0';
         HttpCallbacks cb = g_cb;
 
-        reset_state();
+        /* Keep-alive: preserve the open socket when this completion was
+         * framed exactly and the server consents; else reset (close). */
+        if (!keepalive_preserve_if_eligible(
+                g_pd->system->getCurrentTimeMilliseconds()))
+        {
+            reset_state();
+        }
 
         if (cb.onSuccess && body)
         {

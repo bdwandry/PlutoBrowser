@@ -5083,6 +5083,20 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
          * and presses A through the real input path (see updateFrame). */
 #endif
 
+#if defined(PLUTO_BITMAP_AUTOTEST)
+        /* TEMPORARY (user-requested image-pipeline test, sim only): boot
+         * straight to the bitmap gallery (every image format the console
+         * supports) instead of the home page. Product behavior is untouched:
+         * without -DPLUTO_BITMAP_AUTOTEST this block compiles out and boot
+         * goes home as usual. Revert = rebuild without the flag (no code
+         * change needed). snapBypass forces the live fetch + decode path —
+         * never a stale snapshot. */
+        snapBypass = 1;
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 "https://wiesmann.codiferes.net/share/bitmaps/");
+#endif
+
         /* Keyboard instance. The port's contract:
          * setPlaydateUpdateCallback MUST be called before show() — while the
          * keyboard is visible it OWNS the system update callback and invokes

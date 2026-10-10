@@ -8,10 +8,13 @@
  * update(), and the exact placeholder-card painter.
  *
  * C mapping of the Lua control flow:
- *   - decodeRawImageData's async branches (JPEG/PNG/GIF/WebP) schedule a
- *     tasks_run() whose single step performs the decode; onDone/onError map
- *     1:1 onto Tasks.run's onComplete/onError, including the isDecoding flag.
- *   - The sync branches (BMP/ICO/SVG) decode inline (pcall ≈ NULL check).
+ *   - decodeRawImageData classifies by magic (same order/conditions as the
+ *     reference) then decodes EVERY known format in a tasks_run() step whose
+ *     single step performs the decode (pipelined: the next download starts
+ *     while the current decode runs — the client stays single-flight, so
+ *     its lifecycle is untouched); onDone/onError map 1:1 onto Tasks.run's
+ *     onComplete/onError, including the isDecoding flag. Unknown formats
+ *     (AVIF/JP2/...) take the immediate negative-cache path, as before.
  *   - processNextImage's playdate.timer.performAfterDelay(16, …) re-schedule
  *     uses the project's pdtimer framework (P4), which fires on the first
  *     frame update after the delay — the same observable pacing.
@@ -125,14 +128,23 @@ static void cache_put(const char *url, LCDBitmap *bmp)
 static void process_next_timer(void *userdata);
 static void process_next(void);
 
-/* ── Async decode task (one step does the work; mirrors Tasks.run's contract) ── */
+/* ── Decode task (one step does the work; mirrors Tasks.run's contract) ── */
+/* PIPELINED (all formats tasked): every known format decodes in a task step
+ * so the NEXT download can start while the CURRENT decode runs — download
+ * and decode overlap instead of alternating. The HTTP client stays strictly
+ * single-flight (one request at a time; the decode holds no client state),
+ * so its crash-hardened lifecycle is untouched. Overlap depth is
+ * self-limiting: a download takes 100s of ms while a decode step takes ms,
+ * so at most one decode is ever outstanding when the next fetch starts.
+ * Pixels are bit-identical: same bytes into the same decoder functions. */
 
 typedef struct AsyncDecodeState
 {
     uint8_t *data;   /* owned copy of the body */
     size_t len;
     char url[IMGDEC_URL_MAX];
-    int kind;        /* 0 jpeg, 1 png, 2 webp, 3 gif */
+    int kind;        /* 0 jpeg, 1 png, 2 webp, 3 gif, 4 bmp, 5 tif, 6 tga,
+                      * 7 psd, 8 sgi, 9 xbm, 10 pdf, 11 svg, 12 ico */
     int phase;       /* 0 = decode pending, 1 = finished */
     LCDBitmap *result;
     TaskCtx *ctx;    /* set by the step for yield_check parity */
@@ -144,13 +156,26 @@ static int async_decode_step(TaskCtx *ctx)
     if (!st || st->phase != 0) return 0;
     st->ctx = ctx;
     /* Tasks.yieldCheck() call site (task layer owns the frame budget) —
-     * JPEG/PNG/GIF/WebP decode loops check it per row/MCU in the Lua ref. */
+     * decode loops check it per row/MCU in the Lua ref. Every format runs
+     * to completion inside this one step (the P24–P29 architecture); the
+     * step is CPU-identical to the old inline sync path, only relocated
+     * from the HTTP-callback frame to the task frame so downloads overlap. */
     switch (st->kind)
     {
     case 0: st->result = jpeg_decode(st->data, st->len, 360, 200); break;
     case 1: st->result = png_decode(st->data, st->len, 360, 200); break;
     case 2: st->result = webp_decode(st->data, st->len, 360, 200); break;
-    default: st->result = gif_decode(st->data, st->len, 360, 200); break;
+    case 3: st->result = gif_decode(st->data, st->len, 360, 200); break;
+    case 4: st->result = bmp_decode(st->data, st->len); break;
+    case 5: st->result = tif_decode(st->data, st->len); break;
+    case 6: st->result = tga_decode(st->data, st->len); break;
+    case 7: st->result = psd_decode(st->data, st->len); break;
+    case 8: st->result = sgi_decode(st->data, st->len); break;
+    case 9: st->result = xbm_decode(st->data, st->len); break;
+    case 10: st->result = pdfimg_decode(st->data, st->len); break;
+    case 11: st->result = svg_decode((const char *)st->data, 360, 200); break;
+    case 12: st->result = ico_decode(st->data, st->len, 360, 200); break;
+    default: st->result = NULL; break; /* unknown kind never tasked */
     }
 
     st->phase = 1;
@@ -210,7 +235,7 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
 
     uint8_t b1 = data[0], b2 = data[1], b3 = data[2], b4 = data[3];
 
-    int kind = -1; /* -1 = not async */
+    int kind = -1; /* -1 = unknown (immediate FAIL, as before) */
     if (b1 == 0xFF && b2 == 0xD8)
         kind = 0; /* JPEG */
     else if (b1 == 0x89 && b2 == 0x50 && b3 == 0x4E && b4 == 0x47)
@@ -219,8 +244,54 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
         kind = 2; /* WebP */
     else if (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0)
         kind = 3; /* GIF */
+    else if (data[0] == 'B' && data[1] == 'M')
+        kind = 4; /* BMP */
+    else if (b1 == 0 && b2 == 0 && (b3 == 1 || b3 == 2) && b4 == 0 &&
+             !(len >= 18 && data[2] == 2 && data[3] == 0 &&
+               data[16] >= 8 && data[16] <= 32))
+        kind = 12; /* ICO / CUR */
+    else if ((b1 == 'I' && b2 == 'I' && b3 == '*' && b4 == 0) ||
+             (b1 == 'M' && b2 == 'M' && b3 == 0 && b4 == '*'))
+        kind = 5; /* TIFF */
+    else if (len >= 18 && b1 == 0x01 && b2 == 0xDA)
+        kind = 8; /* SGI (0x01DA magic at offset 0) */
+    else if (len >= 26 && memcmp(data, "8BPS", 4) == 0)
+        kind = 7; /* Photoshop */
+    else if (len >= 5 && memcmp(data, "%PDF-", 5) == 0)
+        kind = 10; /* PDF embedded raster */
+    else if (len > 32 && (memcmp(data, "#define", 7) == 0))
+        kind = 9; /* X BitMap (ASCII) */
+    else if (len >= 18 && (data[1] == 0 || data[1] == 1) &&
+             (data[2] == 1 || data[2] == 2 || data[2] == 3 ||
+              data[2] == 9 || data[2] == 10 || data[2] == 11) &&
+             data[16] >= 8 && data[16] <= 32)
+        kind = 6; /* TGA last (weak header) */
+    else
+    {
+        char head[201];
+        size_t hl = len < 200 ? len : 200;
+        memcpy(head, data, hl);
+        head[hl] = '\0';
+        for (size_t i = 0; i < hl; i++)
+            head[i] = (char)((head[i] >= 'A' && head[i] <= 'Z') ? head[i] + 32 : head[i]);
+        if (strstr(head, "<svg") || strstr(head, "<?xml"))
+            kind = 11; /* SVG */
+    }
 
-    if (kind >= 0)
+    if (kind < 0)
+    {
+        /* Unknown format (AVIF/JP2/...) — immediate negative entry,
+         * byte-identical to the old inline fallthrough. */
+        logger_log("IMGDEC FAIL %s sync (head %02x %02x %02x %02x, %zu bytes)",
+                   url, b1, b2, b3, b4, len);
+        cache_put(url, NULL);
+        g_isDecoding = 0;
+        return;
+    }
+
+    /* Every known format decodes in a task step (see struct comment): the
+     * malloc+memcpy body copy is required because the HTTP body is freed
+     * when its callback returns while the step runs on a later pump. */
     {
         AsyncDecodeState *st = (AsyncDecodeState *)calloc(1, sizeof(AsyncDecodeState));
         if (st)
@@ -250,72 +321,6 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
         g_isDecoding = 0;
         return;
     }
-
-    LCDBitmap *img = NULL;
-
-    if (data[0] == 'B' && data[1] == 'M')
-    {
-        img = bmp_decode(data, len); /* pcall: NULL on error */
-    }
-    else if (b1 == 0 && b2 == 0 && (b3 == 1 || b3 == 2) && b4 == 0 &&
-             !(len >= 18 && data[2] == 2 && data[3] == 0 &&
-               data[16] >= 8 && data[16] <= 32))
-    {
-        img = ico_decode(data, len, 360, 200); /* ICO / CUR */
-    }
-    else if ((b1 == 'I' && b2 == 'I' && b3 == '*' && b4 == 0) ||
-             (b1 == 'M' && b2 == 'M' && b3 == 0 && b4 == '*'))
-    {
-        img = tif_decode(data, len); /* TIFF */
-    }
-    else if (len >= 18 && b1 == 0x01 && b2 == 0xDA)
-    {
-        img = sgi_decode(data, len); /* SGI (0x01DA magic at offset 0) */
-    }
-    else if (len >= 26 && memcmp(data, "8BPS", 4) == 0)
-    {
-        img = psd_decode(data, len); /* Photoshop */
-    }
-    else if (len >= 5 && memcmp(data, "%PDF-", 5) == 0)
-    {
-        img = pdfimg_decode(data, len); /* PDF embedded raster */
-    }
-    else if (len > 32 && (memcmp(data, "#define", 7) == 0))
-    {
-        img = xbm_decode(data, len); /* X BitMap (ASCII) */
-    }
-    else if (len >= 18 && (data[1] == 0 || data[1] == 1) &&
-             (data[2] == 1 || data[2] == 2 || data[2] == 3 ||
-              data[2] == 9 || data[2] == 10 || data[2] == 11) &&
-             data[16] >= 8 && data[16] <= 32)
-    {
-        img = tga_decode(data, len); /* TGA last (weak header) */
-    }
-    else
-    {
-        char head[201];
-        size_t hl = len < 200 ? len : 200;
-        memcpy(head, data, hl);
-        head[hl] = '\0';
-        for (size_t i = 0; i < hl; i++)
-            head[i] = (char)((head[i] >= 'A' && head[i] <= 'Z') ? head[i] + 32 : head[i]);
-        if (strstr(head, "<svg") || strstr(head, "<?xml"))
-            img = svg_decode((const char *)data, 360, 200);
-    }
-
-    /* onDone(img or nil) → img or false */
-    if (!img)
-    {
-        logger_log("IMGDEC FAIL %s sync (head %02x %02x %02x %02x, %zu bytes)",
-                   url, b1, b2, b3, b4, len);
-    }
-    else
-    {
-        int iw = 0, ih = 0;
-        pd->graphics->getBitmapData(img, &iw, &ih, NULL, NULL, NULL);
-        logger_log("IMGDEC ok %s sync %dx%d (%zu bytes)", url, iw, ih, len);
-    }
-    cache_put(url, img);
 }
 
 /* ── Download queue (processNextImage) ────────────────────────────────────── */
@@ -336,6 +341,10 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
     if (body && bodyLen > 8)
     {
         size_t blen = bodyLen;
+        /* The async/sync split below is historical shape only: every known
+         * format now decodes in a task step (see decode_raw_image_data), so
+         * both branches behave identically and the next fetch overlaps the
+         * decode via imgdec_update. Structure kept for a minimal diff. */
         int async = 1;
         uint8_t b1 = (uint8_t)body[0];
         if (blen >= 4)
@@ -383,7 +392,11 @@ static void http_on_error(const char *message)
 
 static void process_next(void)
 {
-    if (g_isDownloading || g_isDecoding || g_queueCount == 0) return;
+    /* PIPELINED: a download may start while a decode task is outstanding
+     * (g_isDecoding is NOT a gate here). The HTTP client stays strictly
+     * single-flight — a decode holds no client state, so the next fetch
+     * only ever starts when the client is idle. */
+    if (g_isDownloading || g_queueCount == 0) return;
     /* Don't download images while the main page is loading. */
     if (http_is_loading()) return;
 
@@ -396,7 +409,7 @@ static void process_next(void)
      * stacked on top of a live JS callback chain. Identical semantics: pop
      * entries until an uncached URL is found (then download it) or the
      * queue drains. */
-    while (g_queueCount > 0 && !g_isDownloading && !g_isDecoding &&
+    while (g_queueCount > 0 && !g_isDownloading &&
            !http_is_loading())
     {
         char url[IMGDEC_URL_MAX];
@@ -515,7 +528,9 @@ void imgdec_update(void)
     /* A decode task cancelled by navigation never runs onDone. */
     if (g_isDecoding && !tasks_is_running())
         g_isDecoding = 0;
-    if (!g_isDownloading && !g_isDecoding && g_queueCount > 0 && !http_is_loading())
+    /* PIPELINED: the next fetch starts as soon as the client is idle, even
+     * with a decode task outstanding — that is the overlap. */
+    if (!g_isDownloading && g_queueCount > 0 && !http_is_loading())
         process_next();
 }
 
