@@ -9,9 +9,10 @@
  *
  * Row 8 ("Javascript Engine") picks the engine used for ALL script
  * execution: when Execution (row 7) is Off the row is a locked "Off" mirror
- * (no engine runs); when Inline/Full it cycles muJS ↔ Duktape and persists
- * (storage jsEngine: 0=muJS default, 1=Duktape, 2=QuickJS, 3=XS). The selected
- * engine runs
+ * (no engine runs); when Inline/Full it cycles muJS ↔ Duktape ↔ QuickJS ↔
+ * XS (Moddable) ↔ XS (No Recursion) and persists
+ * (storage jsEngine: 0=muJS, 1=Duktape, 2=QuickJS, 3=XS, 4=XS-NR default).
+ * The selected engine runs
  * the page exclusively — no cross-engine execution.
  */
 #include <stdio.h>
@@ -73,9 +74,9 @@ static struct
     int invertCrank;              /* 0/1 */
     char imageMode[16];           /* persisted name */
     int showFps;                  /* 0/1 — FPS overlay */
-    int displayFps;               /* display refresh target: 30 or 50 fps */
+    int displayFps;               /* display refresh target: 30, 50, or 0 (Uncapped) */
     int jsEnabled;                /* 0/1/2 — JavaScript execution: Off/Inline/Full */
-    int jsEngine;                 /* 0/1/2/3 — engine: muJS/Duktape/QuickJS/XS */
+    int jsEngine;                 /* 0..4 — engine: muJS/Duktape/QuickJS/XS/XS-NR */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -220,19 +221,19 @@ void settings_page_open(int prevState)
              im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_VIEWPORT]);
     g_staged.showFps = storage_setting_int("showFps");
     g_staged.displayFps = storage_setting_int("displayFps");
-    if (g_staged.displayFps != 50)
+    if (g_staged.displayFps != 50 && g_staged.displayFps != 0)
     {
-        g_staged.displayFps = 30; /* only 30 or 50 are valid (Playdate max = 50) */
+        g_staged.displayFps = 30; /* 30/50/Uncapped(0) valid — out-of-range → 30 */
     }
     g_staged.jsEnabled = storage_setting_int("jsEnabled");
     if (g_staged.jsEnabled < 0 || g_staged.jsEnabled > 2)
     {
-        g_staged.jsEnabled = 1; /* Off/Inline/Full — out-of-range → Inline */
+        g_staged.jsEnabled = 2; /* Off/Inline/Full — out-of-range → Full (default) */
     }
     g_staged.jsEngine = storage_setting_int("jsEngine");
     if (g_staged.jsEngine < 0 || g_staged.jsEngine > 4)
     {
-        g_staged.jsEngine = 0; /* muJS(0) / Duktape(1) / QuickJS(2) / XS(3) */
+        g_staged.jsEngine = 4; /* muJS(0) / Duktape(1) / QuickJS(2) / XS(3) / XS-NR(4, default) */
     }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
@@ -313,8 +314,10 @@ const char *settings_page_staged_value(int optionIndex)
         int n = image_mode_from_name(g_staged.imageMode);
         return image_mode_label((ImageMode)(n >= 0 ? n : IMAGE_MODE_ALL));
     }
-    case 5:
-        return g_staged.displayFps == 50 ? "50" : "30";
+    case 5: /* Display FPS: 30 / 50 / Uncapped (0 = unrestricted rate) */
+        return g_staged.displayFps == 50 ? "50"
+               : g_staged.displayFps == 0 ? "Uncapped"
+                                          : "30";
     case 6:
         return g_staged.showFps ? "On" : "Off";
     case 7: /* JavaScript execution: Off / Inline / Full (0/1/2) */
@@ -323,7 +326,8 @@ const char *settings_page_staged_value(int optionIndex)
                                          : "Off";
     case 8: /* Javascript Engine: locked "Off" mirror while Execution is
              * Off; otherwise the selected engine (storage jsEngine:
-             * 0=muJS default, 1=Duktape) that will run ALL page scripts. */
+             * 0=muJS, 1=Duktape, 2=QuickJS, 3=XS, 4=XS-NR default) that
+             * will run ALL page scripts. */
         if (g_staged.jsEnabled == 0)
         {
             return "Off";
@@ -393,8 +397,10 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
                      IMAGE_MODE_NAMES[idx]);
             break;
         }
-        case 5:
-            g_staged.displayFps = (g_staged.displayFps == 50) ? 30 : 50;
+        case 5: /* 30 → Uncapped (0) → 50 → 30 (left decrements) */
+            g_staged.displayFps = (g_staged.displayFps == 30) ? 0
+                                  : (g_staged.displayFps == 0) ? 50
+                                                               : 30;
             break;
         case 6:
             g_staged.showFps = !g_staged.showFps;
@@ -453,8 +459,10 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
                      IMAGE_MODE_NAMES[idx]);
             break;
         }
-        case 5:
-            g_staged.displayFps = (g_staged.displayFps == 50) ? 30 : 50;
+        case 5: /* 30 → 50 → Uncapped (0) → 30 (right increments) */
+            g_staged.displayFps = (g_staged.displayFps == 30)   ? 50
+                                  : (g_staged.displayFps == 50) ? 0
+                                                                : 30;
             break;
         case 6:
             g_staged.showFps = !g_staged.showFps;
