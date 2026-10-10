@@ -46,7 +46,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 9
+#define OPTION_COUNT 10
 
 /* ── Scrolling list geometry ──────────────────────────────────────────────
  * The panel is fixed-size; the row list scrolls under it as the browser
@@ -77,6 +77,7 @@ static struct
     int displayFps;               /* display refresh target: 30, 50, or 0 (Uncapped) */
     int jsEnabled;                /* 0/1/2 — JavaScript execution: Off/Inline/Full */
     int jsEngine;                 /* 0..4 — engine: muJS/Duktape/QuickJS/XS/XS-NR */
+    int encodingMode;             /* 0/1 — Compression: Off(raw identity)/Gzip */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -86,7 +87,7 @@ void settings_page_set_onchange_callback(void (*fn)(void));
 static const char *const k_settingsLabels[OPTION_COUNT] = {
     "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
     "Display FPS", "Show FPS", "Javascript Execution", "Javascript Engine",
-    "Clear Cookies"};
+    "Compression", "Clear Cookies"};
 
 const char *settings_page_label(int optionIndex)
 {
@@ -235,6 +236,11 @@ void settings_page_open(int prevState)
     {
         g_staged.jsEngine = 4; /* muJS(0) / Duktape(1) / QuickJS(2) / XS(3) / XS-NR(4, default) */
     }
+    g_staged.encodingMode = storage_setting_int("encodingMode");
+    if (g_staged.encodingMode != 1)
+    {
+        g_staged.encodingMode = 0; /* Off(raw)/Gzip — out-of-range → Off (default) */
+    }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
      * value of the JavaScript row so simulator/device pluto.log runs can
@@ -245,6 +251,10 @@ void settings_page_open(int prevState)
      * and device pluto.log runs can verify the mirror stays in sync. */
     logger_log("SETTINGS: open label8='%s' staged8='%s'",
                settings_page_label(8), settings_page_staged_value(8));
+    /* Row 9 (Compression) — logged so runs can verify the staged value
+     * without human eyes on the panel. */
+    logger_log("SETTINGS: open label9='%s' staged9='%s'",
+               settings_page_label(9), settings_page_staged_value(9));
 }
 
 void settings_page_close(void)
@@ -262,6 +272,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("displayFps", g_staged.displayFps);
     storage_set_setting_int("jsEnabled", g_staged.jsEnabled);
     storage_set_setting_int("jsEngine", g_staged.jsEngine);
+    storage_set_setting_int("encodingMode", g_staged.encodingMode);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -337,7 +348,9 @@ const char *settings_page_staged_value(int optionIndex)
                : g_staged.jsEngine == 3 ? "XS (Moddable)"
                : g_staged.jsEngine == 4 ? "XS (No Recursion)"
                                         : "muJS";
-    case 9:
+    case 9: /* Compression: Off (raw identity) / Gzip */
+        return g_staged.encodingMode == 1 ? "Gzip" : "Off";
+    case 10:
         return "";
     default:
         return "";
@@ -418,6 +431,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             }
             break;
         case 9:
+            g_staged.encodingMode = !g_staged.encodingMode;
+            break;
+        case 10:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -478,6 +494,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             }
             break;
         case 9:
+            g_staged.encodingMode = !g_staged.encodingMode;
+            break;
+        case 10:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -489,7 +508,7 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
     }
     else if (pushed & BTN_A)
     {
-        if (g_selectedIndex == 9)
+        if (g_selectedIndex == 10)
         {
             /* Clear Cookies action: execute immediately */
             if (g_clearCookiesCb)
@@ -600,7 +619,7 @@ void settings_page_draw(void)
                 continue; /* fully outside the visible window */
             }
             int isSel = (i == g_selectedIndex);
-            int isAction = (i == 9);
+            int isAction = (i == 10);
             /* Engine row shows no < > affordance only while locked (Off). */
             int isLocked = (i == 8 && g_staged.jsEnabled == 0);
 

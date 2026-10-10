@@ -17,6 +17,7 @@
 #include "core/pluto_mem.h"
 #include "core/pluto_spill.h"
 #include "core/constants.h"
+#include "core/storage.h"
 #include "render/decoders/inflate.h"
 
 /* ── SW2b: disk-backed response body storage ─────────────────────────────
@@ -1008,18 +1009,22 @@ static void build_request(StrBuf *out)
     strbuf_appendf(out, "User-Agent: %s\r\n", USER_AGENT);
     strbuf_appendf(out, "Accept: text/html,text/plain;q=0.8\r\n");
     strbuf_appendf(out, "Accept-Language: en-US,en;q=0.9\r\n");
-    /* SW2c: opt into gzip. deflate (zlib) is NOT requested — our raw-
-     * entry inflate handles the rare HTTP "deflate" as raw deflate if a
-     * server sends it, but we do not advertise it. R15: identity-mode
-     * consumers (disk-adopting fetches) request no encoding so the body
-     * streams straight to disk instead of RAM-staging a gzip member. */
-    if (g_identityEncoding)
+    /* Compression setting (user decision, default Off): Off sends
+     * Accept-Encoding: identity (raw bytes — reliable on weak radio);
+     * Gzip opts back into gzip (smaller transfers on good WiFi).
+     * Read live from storage per request (same pattern as invertCrank/
+     * mode) so all 4 sessions follow it with no apply step.
+     * g_identityEncoding is intentionally ignored here (kept only for
+     * API compatibility with jsext); the gzip RESPONSE decode path
+     * below stays intact as a fallback for servers/proxies that send
+     * gzip unasked. */
+    if (storage_setting_int("encodingMode") == 1)
     {
-        strbuf_appendf(out, "Accept-Encoding: identity\r\n");
+        strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
     }
     else
     {
-        strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
+        strbuf_appendf(out, "Accept-Encoding: identity\r\n");
     }
     char cookie[768];
     cookie_jar_get_header(g_parsed->host, g_parsed->path, g_parsed->isSsl,
