@@ -16,3 +16,6 @@ Source/pdex.dylib
 /logs/
 /devlogs/
 tests/logs/
+
+# Host-suite scratch build dirs (recreate via tests/build_*.sh)
+/.build_gz/

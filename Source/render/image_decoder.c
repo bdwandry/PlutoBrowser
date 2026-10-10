@@ -68,9 +68,22 @@ static int g_cacheCount = 0;
 static char g_queue[IMGDEC_QUEUE_CAP][IMGDEC_URL_MAX];
 static int g_queueCount = 0;
 
-static int g_isDownloading = 0;
+/* ── In-flight slots (bounded parallel fetches) ─────────────────────────────
+ * Up to 3 downloads fly at once on client sessions 1..3; completions free
+ * their slot (success matches by URL, errors by per-slot wrapper). The
+ * decode of a completed download runs independently — download and decode
+ * overlap across slots. Zero-init = all slots free. */
+#define IMGDEC_FLY_COUNT 3
+typedef struct
+{
+    int busy;
+    int session; /* client slot handle while busy */
+    char url[IMGDEC_URL_MAX]; /* staged before fetch (sync-failure routing) */
+} ImgFlySlot;
+static ImgFlySlot g_fly[IMGDEC_FLY_COUNT];
+static int g_assignSlot = -1; /* slot being filled (sync-failure routing) */
+
 static int g_isDecoding = 0;
-static char g_currentUrl[IMGDEC_URL_MAX]; /* URL being downloaded (for callbacks) */
 
 /* ── Cache helpers ────────────────────────────────────────────────────────── */
 
@@ -325,11 +338,17 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
 
 /* ── Download queue (processNextImage) ────────────────────────────────────── */
 
+/* Defined below (slot completion); declared here for http_on_success. */
+static void fly_done(const char *url);
+
 static void http_on_success(int status, char **headerKeys, char **headerVals,
                             int headerCount, const char *body, size_t bodyLen,
                             const char *url)
 {
-    (void)status; (void)headerKeys; (void)headerVals; (void)headerCount; (void)url;
+    (void)status; (void)headerKeys; (void)headerVals; (void)headerCount;
+    /* The download settled: free its flight slot first so the next fetch
+     * can start while this body decodes (pipeline overlap across slots). */
+    fly_done(url);
     /* The busy flag is released by the decode completion / the failure path
      * below; the queue re-schedules 16ms after the cache write. */
     /* Lua: if body and #body > 8 → decodeRawImageData(body, url, cb);
@@ -360,8 +379,7 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
         }
         if (async)
         {
-            g_isDownloading = 0;
-            decode_raw_image_data((const uint8_t *)body, blen, g_currentUrl);
+            decode_raw_image_data((const uint8_t *)body, blen, url);
             if (!g_isDecoding)
             {
                 /* Sync dispatch already cached — re-schedule now. */
@@ -370,34 +388,80 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
         }
         else
         {
-            g_isDownloading = 0;
-            decode_raw_image_data((const uint8_t *)body, blen, g_currentUrl);
+            decode_raw_image_data((const uint8_t *)body, blen, url);
             pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
         }
     }
     else
     {
-        cache_put(g_currentUrl, NULL);
-        g_isDownloading = 0;
+        cache_put(url, NULL);
         pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
     }
 }
 
-static void http_on_error(const char *message)
+/* Complete a download: free its flight slot (matched by URL — 3 may fly).
+ * Runs at every download settlement, before decode/cache work below. */
+static void fly_done(const char *url)
 {
-    cache_put(g_currentUrl, NULL);
-    g_isDownloading = 0;
+    int i;
+    if (!url || !url[0]) return;
+    for (i = 0; i < IMGDEC_FLY_COUNT; i++)
+    {
+        if (g_fly[i].busy && strncmp(g_fly[i].url, url, IMGDEC_URL_MAX) == 0)
+        {
+            g_fly[i].busy = 0;
+            g_fly[i].session = 0;
+            return;
+        }
+    }
+}
+
+/* Shared error path per slot (wrappers below bind the slot index). */
+static void fly_error(int slot, const char *message)
+{
+    int s;
+    (void)message;
+    /* Negative-cache the flying URL so the queue drops it (matches the old
+     * singleton immediate-failure path). A synchronous failure fires before
+     * the slot is recorded busy — routed via g_assignSlot (see
+     * process_next); draw re-enqueues the URL if still visible. */
+    s = (slot >= 0) ? slot : g_assignSlot;
+    if (s >= 0 && s < IMGDEC_FLY_COUNT && g_fly[s].url[0])
+    {
+        /* Audible failure (4-slot lesson: silent http errors hid a
+         * server-throttle wall) — then negative-cache as before. */
+        logger_log("IMGDEC http error %s (%s)",
+                   g_fly[s].url,
+                   (message && message[0]) ? message : "fetch failed");
+        cache_put(g_fly[s].url, NULL);
+        g_fly[s].busy = 0;
+        g_fly[s].session = 0;
+    }
     pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
 }
 
+static void http_on_error_slot0(const char *message) { fly_error(0, message); }
+static void http_on_error_slot1(const char *message) { fly_error(1, message); }
+static void http_on_error_slot2(const char *message) { fly_error(2, message); }
+
+/* Defined below (download settlement); declared here for the slot table. */
+static void http_on_success(int status, char **headerKeys, char **headerVals,
+                            int headerCount, const char *body, size_t bodyLen,
+                            const char *url);
+
+static const HttpCallbacks g_flyCb[IMGDEC_FLY_COUNT] = {
+    { http_on_success, NULL, http_on_error_slot0, NULL },
+    { http_on_success, NULL, http_on_error_slot1, NULL },
+    { http_on_success, NULL, http_on_error_slot2, NULL },
+};
+
 static void process_next(void)
 {
-    /* PIPELINED: a download may start while a decode task is outstanding
-     * (g_isDecoding is NOT a gate here). The HTTP client stays strictly
-     * single-flight — a decode holds no client state, so the next fetch
-     * only ever starts when the client is idle. */
-    if (g_isDownloading || g_queueCount == 0) return;
-    /* Don't download images while the main page is loading. */
+    /* PARALLEL SLOTS: fill every free flight slot (up to 3 concurrent
+     * downloads on client sessions 1..3). Decodes run independently, so
+     * download and decode overlap across slots. */
+    if (g_queueCount == 0) return;
+    /* Don't download images while the main page is loading (session 0). */
     if (http_is_loading()) return;
 
     /* The cache-hit skip is a LOOP, not self-recursion: the recursive form
@@ -409,10 +473,11 @@ static void process_next(void)
      * stacked on top of a live JS callback chain. Identical semantics: pop
      * entries until an uncached URL is found (then download it) or the
      * queue drains. */
-    while (g_queueCount > 0 && !g_isDownloading &&
-           !http_is_loading())
+    while (g_queueCount > 0 && !http_is_loading())
     {
         char url[IMGDEC_URL_MAX];
+        int slot;
+        int rc;
         snprintf(url, IMGDEC_URL_MAX, "%s", g_queue[0]);
         for (int i = 1; i < g_queueCount; i++)
             memcpy(g_queue[i - 1], g_queue[i], IMGDEC_URL_MAX);
@@ -430,22 +495,52 @@ static void process_next(void)
             continue;
         }
 
-        snprintf(g_currentUrl, IMGDEC_URL_MAX, "%s", url);
-        g_isDownloading = 1;
-        HttpCallbacks cb;
-        memset(&cb, 0, sizeof(cb));
-        cb.onSuccess = http_on_success;
-        cb.onError = http_on_error;
-        if (!http_get(url, &cb))
+        /* Find a free flight slot (all 3 busy → completions free them). */
+        for (slot = 0; slot < IMGDEC_FLY_COUNT; slot++)
         {
-            /* Immediate failure: onError already fired (cache + timer
-             * scheduled). Return, exactly like the recursive original, so
-             * the next URL is attempted on the timer's 16ms pacing rather
-             * than hammered in this same tick. */
-            g_isDownloading = 0;
+            if (!g_fly[slot].busy)
+            {
+                break;
+            }
+        }
+        if (slot >= IMGDEC_FLY_COUNT)
+        {
+            /* No free slot: requeue at the head (order-preserving) and
+             * wait for a completion — can only happen if a slot freed
+             * check raced, since completions free slots synchronously. */
+            if (g_queueCount < IMGDEC_QUEUE_CAP)
+            {
+                for (int i = g_queueCount; i > 0; i--)
+                    memcpy(g_queue[i], g_queue[i - 1], IMGDEC_URL_MAX);
+                snprintf(g_queue[0], IMGDEC_URL_MAX, "%s", url);
+                g_queueCount++;
+            }
             return;
         }
-        break; /* download started — callbacks own the next step */
+        /* Stage the URL before the fetch: a synchronous failure fires the
+         * slot's error wrapper during the call (see g_assignSlot). */
+        snprintf(g_fly[slot].url, IMGDEC_URL_MAX, "%s", url);
+        g_assignSlot = slot;
+        rc = http_image_fetch(url, &g_flyCb[slot]);
+        g_assignSlot = -1;
+        if (rc == 0)
+        {
+            /* Defensive only (a free slot was just found): drop the staged
+             * URL; draw re-enqueues it if still visible. */
+            g_fly[slot].url[0] = '\0';
+            return;
+        }
+        if (rc < 0)
+        {
+            /* Immediate failure: the error wrapper already negative-cached
+             * the URL and scheduled the timer. Return, exactly like the
+             * old singleton path, so the next URL is attempted on the
+             * timer's 16ms pacing rather than hammered in this tick. */
+            return;
+        }
+        g_fly[slot].busy = 1;
+        g_fly[slot].session = rc;
+        /* Slot filled — loop fills the next free slot (no break). */
     }
 }
 static void process_next_timer(void *userdata)
@@ -461,11 +556,21 @@ void imgdec_init(PlaydateAPI *api) { pd = api; }
 
 void imgdec_clear_cache(void)
 {
-    for (int i = 0; i < g_cacheCount; i++)
+    int i;
+    for (i = 0; i < g_cacheCount; i++)
         if (g_cache[i].bmp) pd->graphics->freeBitmap(g_cache[i].bmp);
     g_cacheCount = 0;
     g_queueCount = 0;
-    g_isDownloading = 0;
+    /* Cancel all in-flight image sessions (their callbacks must never fire
+     * into the cleared state) and release the slots. */
+    http_image_cancel_all();
+    for (i = 0; i < IMGDEC_FLY_COUNT; i++)
+    {
+        g_fly[i].busy = 0;
+        g_fly[i].session = 0;
+        g_fly[i].url[0] = '\0';
+    }
+    g_assignSlot = -1;
     g_isDecoding = 0;
 }
 
@@ -481,11 +586,16 @@ void imgdec_enqueue(const char *src)
 
 void imgdec_evict(const char *src)
 {
+    int i;
     if (!src) return;
-    /* Don't delete the URL currently downloading: its callbacks would
-     * re-insert a fresh entry mid-flight (cache_put on completion), which
-     * desyncs the queue bookkeeping. */
-    if (g_isDownloading && strcmp(g_currentUrl, src) == 0) return;
+    /* Don't delete a URL currently flying: its completion would re-insert
+     * a fresh entry into a slot possibly reassigned since (slot desync).
+     * Decode-stage URLs (slot already freed) are safe — completion just
+     * cache_puts. */
+    for (i = 0; i < IMGDEC_FLY_COUNT; i++)
+    {
+        if (g_fly[i].busy && strcmp(g_fly[i].url, src) == 0) return;
+    }
     for (int i = 0; i < g_cacheCount; i++)
     {
         if (strncmp(g_cache[i].url, src, IMGDEC_URL_MAX) == 0)
@@ -521,16 +631,25 @@ int imgdec_is_cached(const char *src)
 
 void imgdec_update(void)
 {
-    /* Stall recovery: a download whose HTTP client went idle (cancelled by
-     * navigation) will never fire callbacks — release the flag. */
-    if (g_isDownloading && !http_is_loading())
-        g_isDownloading = 0;
+    int i;
+    /* Stall recovery per slot: a slot left busy with an idle session (a
+     * silent reset with no callback, e.g. abandoned heal paths) releases
+     * it. The URL was already popped; draw re-enqueues it if visible —
+     * same self-heal as the old singleton flag. */
+    for (i = 0; i < IMGDEC_FLY_COUNT; i++)
+    {
+        if (g_fly[i].busy && !http_image_slot_loading(g_fly[i].session))
+        {
+            g_fly[i].busy = 0;
+            g_fly[i].session = 0;
+        }
+    }
     /* A decode task cancelled by navigation never runs onDone. */
     if (g_isDecoding && !tasks_is_running())
         g_isDecoding = 0;
-    /* PIPELINED: the next fetch starts as soon as the client is idle, even
-     * with a decode task outstanding — that is the overlap. */
-    if (!g_isDownloading && g_queueCount > 0 && !http_is_loading())
+    /* Fill free flight slots whenever the queue is non-empty (the page
+     * gate lives inside process_next). */
+    if (g_queueCount > 0)
         process_next();
 }
 

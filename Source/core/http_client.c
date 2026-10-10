@@ -30,9 +30,7 @@
  * of spill and keep the historical RAM-growth behavior. */
 #define SPILL_NONE 0
 #define SPILL_ACTIVE 1
-static SpillFile g_spill = PLUTO_SPILL_INVALID;
-static int g_spillMode = SPILL_NONE; /* SPILL_ACTIVE once streaming */
-static long g_bodySpilled = 0;       /* body bytes written to disk     */
+/* (request state lives in HttpSession above) */
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
@@ -48,8 +46,7 @@ extern void pluto_free(void *p);
 
 /* Read buffer lives in BSS, not on the update-loop stack: the device
  * game-task stack is small, and a 32KB local was the P22-class hazard
- * this file must not repeat. */
-static char g_readChunk[READ_CHUNK];
+ * this file must not repeat. (The buffer lives in HttpSession above.) */
 #define SDK_READ_BUFFER    16384   /* Lua setReadBufferSize(16384)           */
 #define SDK_TIMEOUT_MS     10000   /* Lua passed 10 (seconds); C takes ms    */
 
@@ -79,35 +76,153 @@ typedef enum
 
 static PlaydateAPI *g_pd = NULL;
 
-static TCPConnection *g_tcp = NULL;
-static HttpCallbacks g_cb;
-static char g_url[1024];
-static UrlParsed *g_parsed = NULL; /* heap: UrlParsed is ~1.7KB */
+/* ── Session state (parallel image fetches) ─────────────────────────────────
+ * The client runs HTTP_SESSION_COUNT independent state machines (0 = page /
+ * jsext / XHR on the unchanged public API; 1..3 = image-queue slots) pumped
+ * in one http_update pass. Function bodies below are UNTOUCHED by the
+ * conversion: every former module static lives in HttpSession and is
+ * reached through a g_cur-redirecting macro of the SAME name, so the
+ * crash-hardened lifecycle (pool/orphan/grave, generations, retry, heal,
+ * keep-alive) behaves per session exactly as it did globally. Callers set
+ * g_cur on entry (public API, pump loop, routed SDK/timer callbacks).
+ * Deliberately NOT per-session: g_pd (init-once API pointer), the radio
+ * callback flags (SDK-owned), the assoc log throttle, and the heal
+ * owner/result arbitration (one radio — see the heal protocol). */
+typedef struct HttpSession
+{
+    SpillFile spill;
+    int spillMode;
+    long bodySpilled;
+    char readChunk[READ_CHUNK];
+    TCPConnection *tcp;
+    HttpCallbacks cb;
+    char url[1024];
+    UrlParsed *parsed;
+    HttpState state;
+    int status;
+    StrBuf buf;
+    size_t bodyStart;
+    int isChunked;
+    long contentLength;
+    int isGzip;
+    int gzipHold;
+    int identityEncoding;
+    int connOpen;
+    int openFailed;
+    int connClosed;
+    char error[256];
+    unsigned int requestStart;
+    unsigned int requestId;
+    unsigned int accessRequestId;
+    TCPConnection *pooledTcp;
+    char pooledHost[256];
+    int pooledPort;
+    int pooledSsl;
+    TCPConnection *orphanTcp;
+    TCPConnection *graveTcp;
+    int graveTimer;
+    int savedStatus;
+    StrBuf savedBuf;
+    size_t savedBodyStart;
+    int savedIsChunked;
+    char hdrLine[768];
+    char setCookies[16][512];
+    char savedHeaders[64][2][256];
+    int savedHeaderCount;
+    char pendingRedirectUrl[1024];
+    HttpCallbacks pendingRedirectCb;
+    int hasPendingRedirect;
+    int redirectDepth;
+    TCPConnection *keepAliveTcp;
+    char keepAliveHost[256];
+    int keepAlivePort;
+    int keepAliveSsl;
+    unsigned int keepAliveStamp;
+    int reusedSocket;
+    int reuseRetried;
+    int completedFramedExact;
+    int writePending;
+    unsigned int attemptStart;
+    int connectAttempts;
+    int responseWaitLogged;
+    int radioHealUsed;
+    int radioHealPhase;
+    unsigned int healPhaseStart;
+    int radioCbErrLogged;
+    unsigned int healWaitStart; /* phase-0 waiter: tick the wait began */
+} HttpSession;
+#define HTTP_SESSION_COUNT 4
+#define HTTP_IMAGE_SESSIONS 3 /* sessions 1..3 serve the image queue */
+static HttpSession g_sess[HTTP_SESSION_COUNT];
+static HttpSession *g_cur = &g_sess[0];
+/* One radio: heal ownership + last-good-heal stamp shared by all sessions. */
+static HttpSession *g_healOwner = NULL;
+static unsigned int g_healOkStamp = 0;
+#define g_spill (g_cur->spill)
+#define g_spillMode (g_cur->spillMode)
+#define g_bodySpilled (g_cur->bodySpilled)
+#define g_readChunk (g_cur->readChunk)
+#define g_tcp (g_cur->tcp)
+#define g_cb (g_cur->cb)
+#define g_url (g_cur->url)
+#define g_parsed (g_cur->parsed)
+#define g_state (g_cur->state)
+#define g_status (g_cur->status)
+#define g_buf (g_cur->buf)
+#define g_bodyStart (g_cur->bodyStart)
+#define g_isChunked (g_cur->isChunked)
+#define g_contentLength (g_cur->contentLength)
+#define g_isGzip (g_cur->isGzip)
+#define g_gzipHold (g_cur->gzipHold)
+#define g_identityEncoding (g_cur->identityEncoding)
+#define g_connOpen (g_cur->connOpen)
+#define g_openFailed (g_cur->openFailed)
+#define g_connClosed (g_cur->connClosed)
+#define g_error (g_cur->error)
+#define g_requestStart (g_cur->requestStart)
+#define g_requestId (g_cur->requestId)
+#define g_accessRequestId (g_cur->accessRequestId)
+#define g_pooledTcp (g_cur->pooledTcp)
+#define g_pooledHost (g_cur->pooledHost)
+#define g_pooledPort (g_cur->pooledPort)
+#define g_pooledSsl (g_cur->pooledSsl)
+#define g_orphanTcp (g_cur->orphanTcp)
+#define g_graveTcp (g_cur->graveTcp)
+#define g_graveTimer (g_cur->graveTimer)
+#define g_savedStatus (g_cur->savedStatus)
+#define g_savedBuf (g_cur->savedBuf)
+#define g_savedBodyStart (g_cur->savedBodyStart)
+#define g_savedIsChunked (g_cur->savedIsChunked)
+#define g_hdrLine (g_cur->hdrLine)
+#define g_setCookies (g_cur->setCookies)
+#define g_savedHeaders (g_cur->savedHeaders)
+#define g_savedHeaderCount (g_cur->savedHeaderCount)
+#define g_pendingRedirectUrl (g_cur->pendingRedirectUrl)
+#define g_pendingRedirectCb (g_cur->pendingRedirectCb)
+#define g_hasPendingRedirect (g_cur->hasPendingRedirect)
+#define g_redirectDepth (g_cur->redirectDepth)
+#define g_keepAliveTcp (g_cur->keepAliveTcp)
+#define g_keepAliveHost (g_cur->keepAliveHost)
+#define g_keepAlivePort (g_cur->keepAlivePort)
+#define g_keepAliveSsl (g_cur->keepAliveSsl)
+#define g_keepAliveStamp (g_cur->keepAliveStamp)
+#define g_reusedSocket (g_cur->reusedSocket)
+#define g_reuseRetried (g_cur->reuseRetried)
+#define g_completedFramedExact (g_cur->completedFramedExact)
+#define g_writePending (g_cur->writePending)
+#define g_attemptStart (g_cur->attemptStart)
+#define g_connectAttempts (g_cur->connectAttempts)
+#define g_responseWaitLogged (g_cur->responseWaitLogged)
+#define g_radioHealUsed (g_cur->radioHealUsed)
+#define g_radioHealPhase (g_cur->radioHealPhase)
+#define g_healPhaseStart (g_cur->healPhaseStart)
+#define g_radioCbErrLogged (g_cur->radioCbErrLogged)
+#define g_healWaitStart (g_cur->healWaitStart)
 
-static HttpState g_state = HS_IDLE;
-static int g_status = 200;
-static StrBuf g_buf;               /* raw response (headers + body) */
-static size_t g_bodyStart = 0;     /* 0 = headers not parsed yet    */
-static int g_isChunked = 0;
-static long g_contentLength = -1;
-static int g_isGzip = 0; /* SW2c: Content-Encoding includes gzip */
-static int g_gzipHold = 0; /* SW2c: freeze spill — compressed staging in RAM */
-/* R15: identity-mode selector. The PAGE renderer wants raw streams: gzip
- * bodies are staged WHOLLY in RAM (one contiguous member for the one-shot
- * gunzip), which shreds the heap for a 500KB bundle and starves the next
- * compile. HTML documents keep gzip (small pages, big bandwidth win); the
- * external-script fetcher (jsext) flips this to 1 around its downloads so
- * script bodies stream to disk raw. NOT site-specific: any consumer that
- * adopts the body to disk opts in. */
-static int g_identityEncoding = 0;
-void http_set_identity_encoding(int on) { g_identityEncoding = on; }
-static int g_connOpen = 0;         /* open callback fired, connected */
-static int g_openFailed = 0;
-static int g_connClosed = 0;
-static char g_error[256];
-static unsigned int g_requestStart = 0;
-static unsigned int g_requestId = 0; /* bumped on every reset */
-static unsigned int g_accessRequestId = 0; /* generation owning the pending access reply */
+/* Identity mode is a session-0 property (jsext flips it around its own
+ * session-0 downloads; image sessions always read THEIR flag, default 0).
+ * Targeted explicitly: g_cur is arbitrary in the caller's context. */
+void http_set_identity_encoding(int on) { g_sess[0].identityEncoding = on; }
 
 /* ── Connection lifecycle (SDK TCP/TLS crash workarounds) ───────────────────
  * Two documented-by-experiment SDK hazards shape this design:
@@ -126,36 +241,21 @@ static unsigned int g_accessRequestId = 0; /* generation owning the pending acce
  *   - g_graveTcp: a pooled connection dropped on host switch — closed now,
  *     RELEASED only after GRAVE_FRAMES frames (http_update tick), long after
  *     the SDK's event loop has drained any pending state for it. */
-static TCPConnection *g_pooledTcp = NULL;
-static char g_pooledHost[256];
-static int g_pooledPort = 0;
-static int g_pooledSsl = 0;
-static TCPConnection *g_orphanTcp = NULL;  /* open callback owns close+release */
-static TCPConnection *g_graveTcp = NULL;   /* closed; release after the delay */
-static int g_graveTimer = 0;
+/* (pool/orphan/grave live in HttpSession; hazards documented above) */
 #define GRAVE_FRAMES 120  /* ~4s at 30fps */
 
 /* Saved response for the done path (reset() clears live state before the
- * user callback fires — Lua saved locals for the same reason). */
-static int g_savedStatus;
-static StrBuf g_savedBuf;
-static size_t g_savedBodyStart;
-static int g_savedIsChunked;
+ * user callback fires — Lua saved locals for the same reason). Fields live
+ * in HttpSession. */
 /* Header-line scratch lives in BSS, not on the update-loop stack (P22
- * lesson: the device game-task stack is small). */
-static char g_hdrLine[768];
+ * lesson: the device game-task stack is small). Field in HttpSession. */
 
-/* Set-Cookie collection buffer — BSS (P22 stack rule). */
-static char g_setCookies[16][512];
+/* Set-Cookie collection buffer — BSS (P22 stack rule). Field in HttpSession. */
 
-static char g_savedHeaders[64][2][256]; /* [i][0]=key [i][1]=value */
-static int g_savedHeaderCount;
+/* (header table lives in HttpSession) */
 
 /* Redirects: deferred to a later update tick (reference parity). */
-static char g_pendingRedirectUrl[1024];
-static HttpCallbacks g_pendingRedirectCb;
-static int g_hasPendingRedirect = 0;
-static int g_redirectDepth = 0;
+/* (redirect state lives in HttpSession) */
 
 /* ── HTTP keep-alive reuse (same-host request chaining) ─────────────────────
  * Cost truth (gallery benchmark, sim): 19 sequential images ≈ 8.1s total,
@@ -180,18 +280,11 @@ static int g_redirectDepth = 0;
  * Match (evaluated at the next start): same host/port/ssl, socket object
  * identical and open, and preserved ≤ KEEPALIVE_MAX_IDLE_MS ago. Anything
  * else — different host, cancel, error, redirect, idle server-side close —
- * falls back to today's close+fresh behavior bit-for-bit. */
-static TCPConnection *g_keepAliveTcp = NULL; /* preserved socket (== g_tcp) */
-static char g_keepAliveHost[256];
-static int g_keepAlivePort = 0;
-static int g_keepAliveSsl = 0;
-static unsigned int g_keepAliveStamp = 0; /* ms at preservation */
-static int g_reusedSocket = 0;   /* current request runs on a reused socket */
-static int g_reuseRetried = 0;   /* fresh-connect fallback already spent */
-static int g_completedFramedExact = 0; /* this completion framed exactly */
+ * falls back to today's close+fresh behavior bit-for-bit.
+ * (Record + flags live in HttpSession.) */
 #define KEEPALIVE_MAX_IDLE_MS 2000 /* older idles go fresh (server timeouts) */
 
-static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
+/* (write-pending flag lives in HttpSession) */
 
 /* ── Connect-attempt watchdog + bounded retry (R18b) ───────────────────────
  * Device evidence (runs 1–5, site-agnostic): the SDK open() can sit IN FLIGHT
@@ -214,9 +307,7 @@ static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
 #define HTTP_CONNECT_ATTEMPTS        3     /* total attempts (incl. first) */
 #define CONNECT_BACKOFF_MS           1000  /* delay between attempts       */
 #define RESPONSE_FIRST_BYTE_TIMEOUT_MS 20000 /* open→headers-only window  */
-static unsigned int g_attemptStart = 0;   /* ms timestamp of attempt start */
-static int g_connectAttempts = 0;         /* attempts used so far          */
-static int g_responseWaitLogged = 0;      /* first-byte warning emitted    */
+/* (attempt bookkeeping lives in HttpSession) */
 
 /* ── R18c: radio self-heal ────────────────────────────────────────────
  * Device evidence: three consecutive fresh TCP opens each sit in flight
@@ -226,13 +317,12 @@ static int g_responseWaitLogged = 0;      /* first-byte warning emitted    */
  * interface; the SDK exposes the same lever:
  * network->setEnabled(false→true) with completion callbacks. One heal
  * cycle per request, gated on transport-dead evidence, then the connect
- * budget starts over. No URL/host/site knowledge — pure transport policy. */
-static int g_radioHealUsed = 0;          /* max one heal per request       */
-static int g_radioHealPhase = 0;         /* 1 disabling, 2 enabling, 3 settle */
-static unsigned int g_healPhaseStart = 0;
+ * budget starts over. No URL/host/site knowledge — pure transport policy.
+ * (Per-request heal fields live in HttpSession; owner/result shared — see
+ * the session block. The volatile SDK flags stay global.) */
 static volatile int g_radioCbFired = 0;
 static volatile int g_radioCbErr = 0;
-static int g_radioCbErrLogged = 0;       /* enable-cb error logged once */
+/* (per-session enable-cb log throttle lives in HttpSession) */
 #define RADIO_PHASE_TIMEOUT_MS 6000 /* per-phase callback wait cap        */
 #define RADIO_ASSOC_WAIT_MS   25000 /* association wait after enable req  */
 #define RADIO_STEP_GAP_MS      1000 /* pause between disable and enable   */
@@ -857,6 +947,11 @@ static void keepalive_fallback(const char *reason)
 static void reset_state(void)
 {
     keepalive_invalidate(); /* every teardown path drops reuse first */
+    if (g_healOwner == g_cur)
+    {
+        g_healOwner = NULL; /* heal abandoned with the request; a phase-0
+                             * waiter takes over (re-cycles) on its tick */
+    }
     close_tcp();
     g_requestId++;
     memset(&g_cb, 0, sizeof(g_cb));
@@ -1330,8 +1425,22 @@ static int parse_headers_saved(void)
 
 static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
 {
-    (void)conn;
     (void)err;
+    /* Route to the owning session (grave/orphan late events match nothing
+     * and are ignored, exactly like the old generation-id rule). */
+    int i;
+    for (i = 0; i < HTTP_SESSION_COUNT; i++)
+    {
+        if (g_sess[i].tcp == conn)
+        {
+            break;
+        }
+    }
+    if (i >= HTTP_SESSION_COUNT)
+    {
+        return;
+    }
+    g_cur = &g_sess[i];
     /* Stale events from a previous connection are ignored via generation id. */
     if (g_tcp == conn && g_state != HS_IDLE)
     {
@@ -1358,7 +1467,16 @@ static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
 
 static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
 {
-    unsigned int myId = (unsigned int)(uintptr_t)ud;
+    /* ud packs owning session (top 2 bits) + open generation: routes the
+     * async open to its session even with 4 concurrent connects in flight. */
+    unsigned int udv = (unsigned int)(uintptr_t)ud;
+    int sess = (int)(udv >> 30);
+    unsigned int myId = udv & 0x3FFFFFFFu;
+    if (sess < 0 || sess >= HTTP_SESSION_COUNT)
+    {
+        return;
+    }
+    g_cur = &g_sess[sess];
     if (myId != g_requestId)
     {
         /* Stale open (cancelled/superseded while connecting): the async open
@@ -1398,7 +1516,12 @@ static void radio_enabled_cb(PDNetErr err)
 
 static void access_cb(bool allowed, void *ud)
 {
-    (void)ud;
+    int sess = (int)(uintptr_t)ud;
+    if (sess < 0 || sess >= HTTP_SESSION_COUNT)
+    {
+        return;
+    }
+    g_cur = &g_sess[sess];
     if (!allowed)
     {
         /* Only meaningful if this reply still belongs to the live request.
@@ -1426,6 +1549,7 @@ typedef struct
 {
     InternalPage *page;
     unsigned int id; /* request generation at scheduling time */
+    int sess;        /* owning session (about: always runs on session 0) */
 } AboutTimerCtx;
 
 static void about_timer_cb(void *ud)
@@ -1433,7 +1557,13 @@ static void about_timer_cb(void *ud)
     AboutTimerCtx *ctx = (AboutTimerCtx *)ud;
     InternalPage *page = ctx->page;
     unsigned int id = ctx->id;
+    int sess = ctx->sess;
     PLUTO_FREE(ctx);
+    if (sess < 0 || sess >= HTTP_SESSION_COUNT)
+    {
+        return;
+    }
+    g_cur = &g_sess[sess];
     if (id != g_requestId)
     {
         /* Superseded between scheduling and firing: a stale about: timer
@@ -1523,6 +1653,7 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks,
             {
                 ctx->page = page;
                 ctx->id = g_requestId;
+                ctx->sess = (int)(g_cur - g_sess);
                 pdtimer_perform_after_delay(g_pd, 20, about_timer_cb, ctx);
             }
             else
@@ -1611,7 +1742,8 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks,
         g_accessRequestId = ++g_requestId;
         int reply = g_pd->network->tcp->requestAccess(
             g_parsed->host, g_parsed->port, 1,
-            "CometBrowser Web Browsing", access_cb, NULL);
+            "CometBrowser Web Browsing", access_cb,
+            (void *)(uintptr_t)(g_cur - g_sess));
         if (reply == kAccessAllow)
         {
                 g_state = HS_CONNECTING;
@@ -1691,8 +1823,11 @@ static void open_connection(void)
 
     g_tcp = tcp;
 
-    /* Generation id: any callback that no longer matches is a stale event. */
+    /* Generation id: any callback that no longer matches is a stale event.
+     * Top 2 bits carry the owning session (4 concurrent opens in flight). */
     unsigned int myId = ++g_requestId;
+    unsigned int openUd = ((unsigned int)(g_cur - g_sess) << 30) |
+                          (myId & 0x3FFFFFFFu);
 
     /* R18b: attempt bookkeeping — the update-loop watchdog (below) measures
      * from HERE, when this attempt actually goes in flight. */
@@ -1707,7 +1842,7 @@ static void open_connection(void)
     g_pd->network->tcp->setReadBufferSize(tcp, SDK_READ_BUFFER);
     g_pd->network->tcp->setConnectionClosedCallback(tcp, tcp_closed_cb);
 
-    PDNetErr rc = g_pd->network->tcp->open(tcp, tcp_open_cb, (void *)(uintptr_t)myId);
+    PDNetErr rc = g_pd->network->tcp->open(tcp, tcp_open_cb, (void *)(uintptr_t)openUd);
     if (rc != NET_OK)
     {
         if (g_cb.onError)
@@ -1731,13 +1866,21 @@ static void open_connection(void)
 
 void http_client_init(PlaydateAPI *pd)
 {
+    int i;
     g_pd = pd;
-    strbuf_init(&g_buf);
-    strbuf_init(&g_savedBuf);
+    for (i = 0; i < HTTP_SESSION_COUNT; i++)
+    {
+        strbuf_init(&g_sess[i].buf);
+        strbuf_init(&g_sess[i].savedBuf);
+        g_sess[i].spill = PLUTO_SPILL_INVALID;
+    }
+    g_cur = &g_sess[0];
 }
 
 int http_get(const char *urlString, const HttpCallbacks *callbacks)
 {
+    /* Session 0: page / jsext / XHR behavior, byte-identical to before. */
+    g_cur = &g_sess[0];
     /* Keep-alive: chain onto the preserved socket when the new URL matches
      * it (same host/port/ssl, fresh). Otherwise cancel previous cleanly. */
     int reuse = keepalive_match_for(urlString);
@@ -1759,26 +1902,143 @@ int http_get(const char *urlString, const HttpCallbacks *callbacks)
 
 void http_cancel(void)
 {
+    g_cur = &g_sess[0];
     reset_state();
 }
 
 
 int http_is_loading(void)
 {
+    g_cur = &g_sess[0];
     return g_state == HS_CONNECTING || g_state == HS_READING ||
            g_state == HS_RETRY_WAIT || g_state == HS_RADIO_HEAL ||
            g_state == HS_ACCESS_WAIT;
 }
 
-/* ── Update: call once per frame ──────────────────────────────────────────── */
-
-void http_update(void)
+/* ── Image-queue sessions (bounded parallel fetches) ────────────────────────
+ * Sessions 1..3 download images concurrently; session 0 keeps the unchanged
+ * page/jsext/XHR behavior above. Slots are leased explicitly (the image
+ * queue owns the queueing; the client owns the sockets):
+ *   >0 = slot handle (== session index); 0 = all busy, retry later;
+ *   -1 = immediate failure with onError already fired (drop the URL).
+ * Per-slot error routing needs no callback changes: the queue passes one
+ * of three static onError wrappers that each know their slot. */
+int http_image_fetch(const char *urlString, const HttpCallbacks *callbacks)
 {
-    if (!g_pd)
+    int i;
+    int reuse;
+    for (i = 1; i < HTTP_SESSION_COUNT; i++)
+    {
+        if (g_sess[i].state == HS_IDLE)
+        {
+            break;
+        }
+    }
+    if (i >= HTTP_SESSION_COUNT)
+    {
+        return 0;
+    }
+    g_cur = &g_sess[i];
+    reuse = keepalive_match_for(urlString);
+    if (reuse)
+    {
+        reset_state_preserve();
+        logger_log("[http] keep-alive reuse chained");
+    }
+    else
+    {
+        reset_state();
+    }
+    /* Image fetches are top-level (no redirect chain to inherit). */
+    g_hasPendingRedirect = 0;
+    g_redirectDepth = 0;
+    if (!start_request(urlString, callbacks, reuse))
+    {
+        return -1;
+    }
+    return i;
+}
+
+void http_image_cancel(int handle)
+{
+    if (handle < 1 || handle > HTTP_IMAGE_SESSIONS)
     {
         return;
     }
+    g_cur = &g_sess[handle];
+    reset_state();
+    g_cur = &g_sess[0];
+}
 
+void http_image_cancel_all(void)
+{
+    int i;
+    for (i = 1; i < HTTP_SESSION_COUNT; i++)
+    {
+        if (g_sess[i].state != HS_IDLE)
+        {
+            g_cur = &g_sess[i];
+            reset_state();
+        }
+    }
+    g_cur = &g_sess[0];
+}
+
+int http_image_slot_loading(int handle)
+{
+    HttpState st;
+    if (handle < 1 || handle > HTTP_IMAGE_SESSIONS)
+    {
+        return 0;
+    }
+    st = g_sess[handle].state;
+    return st == HS_CONNECTING || st == HS_READING || st == HS_RETRY_WAIT ||
+           st == HS_RADIO_HEAL || st == HS_ACCESS_WAIT;
+}
+
+/* ── Update: call once per frame ──────────────────────────────────────────── */
+/* Per-session pump body (g_cur set by the loop below). anyLoading = another
+ * session is mid-request (R53: never release a grave object while ANY
+ * session holds a live TLS session — the delay alone doesn't cover it). */
+
+/* Claim the shared radio and enter the heal (phase 1, or phase 2 when
+ * nothing is associated). Caller verified healable + ownership. Shared by
+ * the watchdog trigger and the phase-0 take-over below. */
+static void heal_begin(unsigned int now, int wifiNow)
+{
+    g_healOwner = g_cur;
+    g_radioHealUsed = 1;
+    g_radioCbFired = 0;
+    g_radioCbErr = 0;
+    g_radioCbErrLogged = 0;
+    g_lastAssocStatus = -1;
+    g_healPhaseStart = now;
+    /* `dead` is ALREADY in the orphan slot (set above): its stale
+     * open callback closes+releases it when the open eventually
+     * settles. Do NOT close() here — closing a still-connecting
+     * connection is the documented SDK crash. */
+    if (wifiNow == (int)kWifiNotAvailable)
+    {
+        /* Skip the disable step — nothing to disassociate from.
+         * Enter phase 2; the sequencer issues setEnabled(true)
+         * after the gap elapses (no double-enable here). */
+        g_radioHealPhase = 2;
+        g_healPhaseStart = now;
+        logger_log("[http] os wifi=NotAvailable; requesting "
+                   "(re)association");
+    }
+    else
+    {
+        g_radioHealPhase = 1;
+        g_pd->network->setEnabled(0, radio_enabled_cb); /* void */
+        logger_log("[http] transport dead (os wifi=Connected); "
+                   "cycling radio");
+    }
+    g_state = HS_RADIO_HEAL;
+}
+
+static void http_update_one(int anyLoading)
+{
     /* Graveyard: release a host-switched connection once its event-loop state
      * has long drained (deferred release, see the lifecycle comment).
      * R53 (device run 55, 03:28:38 crash): the release must ALSO wait for
@@ -1791,11 +2051,11 @@ void http_update(void)
      * remaining window — the graveyard delay alone doesn't cover it. */
     if (g_graveTcp && --g_graveTimer <= 0)
     {
-        if (http_is_loading())
+        if (anyLoading)
         {
-            /* An active request holds SDK TLS event-loop state; releasing
+            /* A sibling session holds SDK TLS event-loop state; releasing
              * the grave connection now lands in hazard 2. Hold until the
-             * next idle tick (graveTimer stays 0 → release on that tick). */
+             * next fully-idle tick (graveTimer stays 0 → release then). */
             ;
         }
         else
@@ -1841,6 +2101,46 @@ void http_update(void)
      * After a successful heal the full connect-attempt budget restarts. */
     if (g_state == HS_RADIO_HEAL)
     {
+        if (g_radioHealPhase == 0)
+        {
+            /* Phase 0: waiting on a sibling session's heal cycle. */
+            if (g_healOwner != NULL && g_healOwner != g_cur)
+            {
+                return; /* still cycling — bounded by the owner's phases */
+            }
+            if (g_healOwner == NULL && g_healOkStamp > g_healWaitStart)
+            {
+                /* Owner healed while we waited: ride along, no cycle. */
+                logger_log("[http] radio healed by sibling; retrying");
+                g_state = HS_CONNECTING;
+                g_requestStart = now;
+                g_attemptStart = 0;
+                g_connectAttempts = 0;
+                return;
+            }
+            /* Owner failed/abandoned (or nothing recorded): take over. */
+            {
+                int w2 = (int)g_pd->network->getStatus();
+                int healable2 = (w2 == (int)kWifiConnected ||
+                                 w2 == (int)kWifiNotAvailable);
+                int se2 = (g_pd->network->setEnabled != NULL);
+                if (healable2 && se2)
+                {
+                    heal_begin(now, w2);
+                }
+                else
+                {
+                    logger_log("[http] giving up (os wifi=%d, setEnabled=%d)",
+                               w2, se2);
+                    netmon_probe_fail(); /* network-layer fault */
+                    snprintf(g_error, sizeof(g_error),
+                             "Connection timed out after %d seconds.",
+                             (int)(REQUEST_TIMEOUT_MS / 1000));
+                    g_state = HS_ERROR;
+                }
+                return;
+            }
+        }
         if (g_radioHealPhase == 1)
         {
             if (g_radioCbFired)
@@ -1915,6 +2215,8 @@ void http_update(void)
         if (g_radioHealPhase == 4)
         {
             logger_log("[http] radio healed; restarting connect attempts");
+            g_healOkStamp = now; /* waiters ride along (phase 0) */
+            g_healOwner = NULL;
             g_state = HS_CONNECTING;
             g_requestStart = now;
             g_attemptStart = 0;
@@ -1969,34 +2271,16 @@ void http_update(void)
                         wifiNow == (int)kWifiNotAvailable);
         if (!g_radioHealUsed && healable && hasSetEnabled)
         {
-            g_radioHealUsed = 1;
-            g_radioCbFired = 0;
-            g_radioCbErr = 0;
-            g_radioCbErrLogged = 0;
-            g_lastAssocStatus = -1;
-            g_healPhaseStart = now;
-            /* `dead` is ALREADY in the orphan slot (set above): its stale
-             * open callback closes+releases it when the open eventually
-             * settles. Do NOT close() here — closing a still-connecting
-             * connection is the documented SDK crash. */
-            if (wifiNow == (int)kWifiNotAvailable)
+            if (g_healOwner != NULL && g_healOwner != g_cur)
             {
-                /* Skip the disable step — nothing to disassociate from.
-                 * Enter phase 2; the sequencer issues setEnabled(true)
-                 * after the gap elapses (no double-enable here). */
-                g_radioHealPhase = 2;
-                g_healPhaseStart = now;
-                logger_log("[http] os wifi=NotAvailable; requesting "
-                           "(re)association");
+                /* Sibling session is cycling the radio: wait for it
+                 * (phase 0) instead of stacking a second cycle. */
+                g_radioHealPhase = 0;
+                g_healWaitStart = now;
+                g_state = HS_RADIO_HEAL;
+                return;
             }
-            else
-            {
-                g_radioHealPhase = 1;
-                g_pd->network->setEnabled(0, radio_enabled_cb); /* void */
-                logger_log("[http] transport dead (os wifi=Connected); "
-                           "cycling radio");
-            }
-            g_state = HS_RADIO_HEAL;
+            heal_begin(now, wifiNow);
             return;
         }
         logger_log("[http] giving up (os wifi=%d, healUsed=%d, setEnabled=%d)",
@@ -2779,6 +3063,34 @@ void http_update(void)
             cb.onError(errSnapshot);
         }
     }
+}
+
+/* Pump all sessions each frame (page session first for priority). */
+void http_update(void)
+{
+    int i;
+    int anyLoading;
+    if (!g_pd)
+    {
+        return;
+    }
+    anyLoading = 0;
+    for (i = 0; i < HTTP_SESSION_COUNT; i++)
+    {
+        HttpState st = g_sess[i].state;
+        if (st == HS_CONNECTING || st == HS_READING || st == HS_RETRY_WAIT ||
+            st == HS_RADIO_HEAL || st == HS_ACCESS_WAIT)
+        {
+            anyLoading = 1;
+            break;
+        }
+    }
+    for (i = 0; i < HTTP_SESSION_COUNT; i++)
+    {
+        g_cur = &g_sess[i];
+        http_update_one(anyLoading);
+    }
+    g_cur = &g_sess[0];
 }
 
 /* TEST-ONLY accessor (host CSS verification): the raw body of an internal

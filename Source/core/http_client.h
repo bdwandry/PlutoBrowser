@@ -87,6 +87,16 @@ void http_set_identity_encoding(int on);
 /* Cancel any in-flight request (safe when idle). */
 void http_cancel(void);
 
+/* ── Image-queue sessions (bounded parallel fetches) ────────────────────────
+ * Sessions 1..3 download images concurrently behind this API; session 0
+ * (http_get/cancel/is_loading above) is untouched. Callbacks keep the exact
+ * HttpCallbacks shape (per-slot error routing is the caller's static
+ * wrappers); onSuccess already carries the URL for completion matching. */
+int http_image_fetch(const char *urlString, const HttpCallbacks *callbacks);
+void http_image_cancel(int handle);
+void http_image_cancel_all(void);
+int http_image_slot_loading(int handle);
+
 /* 1 while a request is connecting/reading. */
 int http_is_loading(void);
 
