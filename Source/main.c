@@ -3247,10 +3247,9 @@ static void submit_form(const char *formAction, const LayoutItem *inputBlock)
 /* ── Settings change (reference SettingsPage.onChangeCallback) ──────────── */
 /* ── FPS overlay (Beta: user request) ──────────────────────────────────── */
 static int g_showFps = 0;              /* cached setting; re-read on boot/save */
-static unsigned int g_fpsFrames = 0;   /* frames since last sample window */
-static unsigned int g_fpsWindowStart = 0; /* ms timestamp of window start */
+static float g_fpsEma = 0.0f;          /* EMA of instantaneous per-frame rate */
+static unsigned int g_fpsLastMs = 0;   /* ms timestamp of the previous frame */
 static int g_fpsValue = 0;             /* last computed frames-per-second */
-static unsigned int g_fpsLastSampleMs = 0;
 static LCDFont *g_fpsFont = NULL;      /* bold body font, loaded once */
 
 /* Draw a small bold FPS number flush in the bottom-right corner.
@@ -3279,33 +3278,41 @@ static void draw_fps_overlay(void)
     pd->graphics->popContext();
 }
 
-/* ── Display FPS (Playdate: 30 fps default, 50 fps max per SDK docs) ───── */
+/* ── Display FPS (30 default; 50 max; 0 = Uncapped/unrestricted rate) ───── */
 /* Apply the displayFps setting to the OS display + the keyboard component's
  * key-repeat timing (which is frame-count based). Called once at boot and
  * again whenever settings are saved. */
 static void apply_display_fps(void)
 {
     int fps = storage_setting_int("displayFps");
-    if (fps != 50)
+    if (fps != 50 && fps != 0)
     {
-        fps = 30; /* only 30 or 50 are valid; 30 is the OS default */
+        fps = 30; /* 30/50/Uncapped(0) valid; 30 is the default */
     }
     pd->display->setRefreshRate((float)fps);
     if (g_kb)
     {
         keyboardApi.setRefreshRate(g_kb, (float)fps);
     }
-    logger_log("DISPLAY: refresh rate set to %d fps", fps);
+    if (fps == 0)
+    {
+        logger_log("DISPLAY: refresh rate uncapped (0 = unrestricted)");
+    }
+    else
+    {
+        logger_log("DISPLAY: refresh rate set to %d fps", fps);
+    }
 }
 
 /* Engine selection lives in the router (jsbridge_set_engine); this helper
- * only names it for logs (0=muJS, 1=Duktape, 2=QuickJS, 3=XS). */
+ * only names it for logs (0=muJS, 1=Duktape, 2=QuickJS, 3=XS, 4=XS-NR). */
 static const char *engine_name(void)
 {
     int e = storage_setting_int("jsEngine");
     return e == 1   ? "Duktape"
            : e == 2 ? "QuickJS"
            : e == 3 ? "XS (Moddable)"
+           : e == 4 ? "XS (No Recursion)"
                     : "muJS";
 }
 
@@ -4431,7 +4438,7 @@ static int updateFrame(void *userdata)
 
 
 
-    /* Log a periodic heartbeat every 300 frames (~10s at 30fps) so logs show liveness. */
+    /* Log a periodic heartbeat every 300 frames so logs show liveness. */
     if (frameCount % 300 == 0)
     {
         logger_log("updateFrame: heartbeat frame=%u fps=%d overlay=%d stackPeak=%uB/61800B heap=%luKB peak=%luKB bigAlloc=%luKB refusals=%lu",
@@ -4442,26 +4449,36 @@ static int updateFrame(void *userdata)
 
 
 
-    /* FPS sampling: frames over a rolling 500ms window (display runs 30 or
-     * 50 fps; the counter only dips below that when a frame runs long). */
-    g_fpsFrames++;
+    /* FPS sampling: exponential moving average of the instantaneous
+     * per-frame rate (1000 / frame-delta-ms, alpha 0.1 ≈ last ~10 frames).
+     * Unlike a fixed time window — which flickers ±2fps from single-frame
+     * quantization — the EMA converges rock-solid when the OS tick locks
+     * (30/50/uncapped) yet still tracks genuine dips within ~a second.
+     * Zero-delta frames (sub-ms, uncapped hosts) carry no information and
+     * are skipped rather than counted as infinite rate. */
     {
         unsigned int now = pd->system->getCurrentTimeMilliseconds();
-        if (g_fpsWindowStart == 0)
+        if (g_fpsLastMs == 0)
         {
-            g_fpsWindowStart = now;
-            g_fpsLastSampleMs = now;
+            g_fpsLastMs = now;
         }
-        else if (now - g_fpsLastSampleMs >= 500)
+        else
         {
-            unsigned int span = now - g_fpsWindowStart;
-            if (span > 0)
+            unsigned int dt = now - g_fpsLastMs;
+            g_fpsLastMs = now;
+            if (dt > 0)
             {
-                g_fpsValue = (int)((g_fpsFrames * 1000u + span / 2) / span);
+                float inst = 1000.0f / (float)dt;
+                if (g_fpsEma <= 0.0f)
+                {
+                    g_fpsEma = inst; /* snap on first real sample */
+                }
+                else
+                {
+                    g_fpsEma += (inst - g_fpsEma) * 0.1f;
+                }
+                g_fpsValue = (int)(g_fpsEma + 0.5f);
             }
-            g_fpsFrames = 0;
-            g_fpsWindowStart = now;
-            g_fpsLastSampleMs = now;
         }
     }
 
