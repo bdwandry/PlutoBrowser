@@ -46,7 +46,7 @@ static Setting g_settings[16] = {
     {"mode", "", 1, 1},       /* Constants.MODE_RAW_HTML = "html" (Lua default) */
     {"autoReader", "", 0, 1}, /* false */
     {"fontSize", "medium", 0, 0},
-    {"imageMode", "viewport", 0, 0}, /* string name; Lua stores Constants names */
+    {"imageMode", "all", 0, 0}, /* string name; Render All by default */
     {"invertCrank", "", 0, 1}, /* false */
     {"showFps", "", 0, 1}, /* false — FPS overlay off by default */
     {"displayFps", "", 30, 1}, /* display refresh target: 30 default, 50, or 0 (Uncapped) */
@@ -366,7 +366,7 @@ void storage_load(void)
     storage_set_setting_int("mode", 1); /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_int("autoReader", 0);
     storage_set_setting_str("fontSize", "medium");
-    storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
+    storage_set_setting_str("imageMode", "all"); /* Render All by default */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("invertCrank", 0);
     storage_set_setting_int("displayFps", 30); /* 30 fps default (50 or 0/Uncapped also valid) */
@@ -690,7 +690,7 @@ void storage_init(PlaydateAPI *pd)
     logger_log("STORAGE: init enter");
     /* fill the two settings whose defaults come from Constants */
     storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
-    storage_set_setting_str("imageMode", "viewport"); /* IMAGE_MODE_VIEWPORT */
+    storage_set_setting_str("imageMode", "all"); /* Render All by default */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("displayFps", 30); /* 30 fps default (50 or 0/Uncapped also valid) */
     storage_set_setting_int("jsEnabled", 2); /* JavaScript execution Full by default */

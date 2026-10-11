@@ -220,7 +220,7 @@ void settings_page_open(int prevState)
     g_staged.invertCrank = storage_setting_int("invertCrank");
     const char *im = storage_setting_str("imageMode");
     snprintf(g_staged.imageMode, sizeof(g_staged.imageMode), "%s",
-             im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_VIEWPORT]);
+             im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_ALL]);
     g_staged.showFps = storage_setting_int("showFps");
     g_staged.displayFps = storage_setting_int("displayFps");
     if (g_staged.displayFps != 50 && g_staged.displayFps != 0)
