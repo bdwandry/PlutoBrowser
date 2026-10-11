@@ -46,7 +46,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 10
+#define OPTION_COUNT 11
 
 /* ── Scrolling list geometry ──────────────────────────────────────────────
  * The panel is fixed-size; the row list scrolls under it as the browser
@@ -78,6 +78,7 @@ static struct
     int jsEnabled;                /* 0/1/2 — JavaScript execution: Off/Inline/Full */
     int jsEngine;                 /* 0..4 — engine: muJS/Duktape/QuickJS/XS/XS-NR */
     int encodingMode;             /* 0/1 — Compression: Off(raw identity)/Gzip */
+    int cacheWebsite;             /* 0/1 — Cached Website: Off(fresh fetch)/On(snapshot) */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -87,7 +88,7 @@ void settings_page_set_onchange_callback(void (*fn)(void));
 static const char *const k_settingsLabels[OPTION_COUNT] = {
     "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
     "Display FPS", "Show FPS", "Javascript Execution", "Javascript Engine",
-    "Compression", "Clear Cookies"};
+    "Compression", "Cached Website", "Clear Cookies"};
 
 const char *settings_page_label(int optionIndex)
 {
@@ -241,6 +242,11 @@ void settings_page_open(int prevState)
     {
         g_staged.encodingMode = 0; /* Off(raw)/Gzip — out-of-range → Off (default) */
     }
+    g_staged.cacheWebsite = storage_setting_int("cacheWebsite");
+    if (g_staged.cacheWebsite != 1)
+    {
+        g_staged.cacheWebsite = 0; /* Off(fresh)/On — out-of-range → Off (default) */
+    }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
      * value of the JavaScript row so simulator/device pluto.log runs can
@@ -269,6 +275,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("jsEnabled", g_staged.jsEnabled);
     storage_set_setting_int("jsEngine", g_staged.jsEngine);
     storage_set_setting_int("encodingMode", g_staged.encodingMode);
+    storage_set_setting_int("cacheWebsite", g_staged.cacheWebsite);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -346,7 +353,9 @@ const char *settings_page_staged_value(int optionIndex)
                                          : "muJS";
     case 9: /* Compression: Off (raw identity) / Gzip */
         return g_staged.encodingMode == 1 ? "Gzip" : "Off";
-    case 10:
+    case 10: /* Cached Website: Off (fresh fetch) / On (snapshot) */
+        return g_staged.cacheWebsite == 1 ? "On" : "Off";
+    case 11:
         return "";
     default:
         return "";
@@ -430,6 +439,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             g_staged.encodingMode = !g_staged.encodingMode;
             break;
         case 10:
+            g_staged.cacheWebsite = !g_staged.cacheWebsite;
+            break;
+        case 11:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -493,6 +505,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             g_staged.encodingMode = !g_staged.encodingMode;
             break;
         case 10:
+            g_staged.cacheWebsite = !g_staged.cacheWebsite;
+            break;
+        case 11:
             if (g_clearCookiesCb)
             {
                 g_clearCookiesCb();
@@ -504,7 +519,7 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
     }
     else if (pushed & BTN_A)
     {
-        if (g_selectedIndex == 10)
+        if (g_selectedIndex == 11)
         {
             /* Clear Cookies action: execute immediately */
             if (g_clearCookiesCb)
@@ -615,7 +630,7 @@ void settings_page_draw(void)
                 continue; /* fully outside the visible window */
             }
             int isSel = (i == g_selectedIndex);
-            int isAction = (i == 10);
+            int isAction = (i == 11);
             /* Engine row shows no < > affordance only while locked (Off). */
             int isLocked = (i == 8 && g_staged.jsEnabled == 0);
 

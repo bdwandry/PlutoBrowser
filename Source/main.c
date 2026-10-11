@@ -380,9 +380,20 @@ static const char *k_viewOptions[2] = { "Reader", "HTML" };
  * (also consumed by the snap autotest for a deterministic PASS verdict). */
 static int g_snapFastPathHits = 0;
 static int snapBypass = 0; /* 1 = next navigation skips the snapshot load
-                            * (hard reload: view-mode flip, settings save) */
+                             * (hard reload: view-mode flip, settings save) */
 #define SNAP_TTL_SECONDS (7UL * 24UL * 3600UL) /* 7-day freshness window */
 #define SNAP_MAX_ENTRIES 8                     /* storage-pressure LRU cap */
+
+/* Cached Website setting: 1 = snapshot behavior (load/serve, as before);
+ * anything else = Off (default): every new-site click fetches + renders a
+ * fresh copy — the snapshot LOAD is skipped. The save flow and spill
+ * staging keep running normally in both modes (big-site rendering is
+ * untouched); the page being left is purged from disk (see navigate_to).
+ * Live read (same pattern as invertCrank/mode) so it applies immediately. */
+static int cache_off(void)
+{
+    return storage_setting_int("cacheWebsite") != 1;
+}
 
 static void view_menu_callback(void *ud)
 {
@@ -793,8 +804,10 @@ static void js_timers_autotest_tick(void)
  *   phase 0: wait for the live render (save happened in render_done;
  *            fast-path hits must still be 0 — first visit is NOT cached).
  *   phase 1: navigate to about:home (a different, never-saved page).
- *   phase 2: navigate back and require the revisit to come from the
- *            snapshot fast path (g_snapFastPathHits >= 1).
+ *   phase 2: navigate back. Cached Website On → the revisit must come
+ *            from the snapshot fast path (g_snapFastPathHits >= 1).
+ *            Off (default) → the revisit must fetch + render FRESH
+ *            (hits stay 0).
  * PASS/FAIL lands in pluto.log via [snap-autotest] lines. */
 static int g_snapTestPhase = 0;
 static unsigned g_snapTestFrames = 0;
@@ -855,18 +868,40 @@ static void snap_autotest_tick(void)
         }
         return;
     }
-    /* Phase 2: the revisit must render from the snapshot. */
-    if (g_snapFastPathHits >= 1 && currentState == STATE_PAGE && currentDoc &&
+    /* Phase 2: On → the revisit must render from the snapshot.
+     * Off → the revisit must fetch + render fresh (no fast path). */
+    if (storage_setting_int("cacheWebsite") == 1)
+    {
+        if (g_snapFastPathHits >= 1 && currentState == STATE_PAGE &&
+            currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:acidtest", 14) == 0)
+        {
+            logger_log("[snap-autotest] PASS: revisit served from snapshot "
+                       "(hits=%d, blocks=%d, title=%.40s)",
+                       g_snapFastPathHits, currentDoc->blockCount, pageTitle);
+            g_snapTestPhase = 3;
+        }
+        else if (g_snapTestFrames > 600)
+        {
+            logger_log("[snap-autotest] FAIL: revisit missed the snapshot "
+                       "(hits=%d, state=%d)", g_snapFastPathHits,
+                       currentState);
+            g_snapTestPhase = 3;
+        }
+        return;
+    }
+    if (g_snapFastPathHits == 0 && g_snapTestFrames > 30 &&
+        currentState == STATE_PAGE && currentDoc &&
         strncmp(currentDoc->baseUrl, "about:acidtest", 14) == 0)
     {
-        logger_log("[snap-autotest] PASS: revisit served from snapshot "
+        logger_log("[snap-autotest] PASS: cache off, revisit fetched fresh "
                    "(hits=%d, blocks=%d, title=%.40s)",
                    g_snapFastPathHits, currentDoc->blockCount, pageTitle);
         g_snapTestPhase = 3;
     }
-    else if (g_snapTestFrames > 600)
+    else if (g_snapFastPathHits != 0 || g_snapTestFrames > 600)
     {
-        logger_log("[snap-autotest] FAIL: revisit missed the snapshot "
+        logger_log("[snap-autotest] FAIL: cache off but snapshot served "
                    "(hits=%d, state=%d)", g_snapFastPathHits, currentState);
         g_snapTestPhase = 3;
     }
@@ -2527,6 +2562,20 @@ static void navigate_to(const char *urlString)
 
     logger_log("navigate_to: %s", urlString);
 
+    /* Cached Website Off (default): the page being left must leave
+     * nothing on disk — drop its snapshot now (currentUrlObj still
+     * addresses the OLD page here) so the next visit fetches fresh.
+     * Snapshots live key-targeted in the spill store, so in-flight
+     * bodies for other sessions are untouched. On = no-op (snapshot
+     * behavior resumes exactly as before). */
+    if (cache_off() && currentUrlObj && currentUrlObj->normalized[0])
+    {
+        pluto_snap_invalidate(currentUrlObj->normalized,
+                              (int)currentBrowseMode);
+        logger_log("[snap] cache off: purged %s",
+                   currentUrlObj->normalized);
+    }
+
     char urlBuf[648];
     char *unwrapped = url_unwrap_redirect(urlString);
     char *trimmed = strutil_trim_dup(unwrapped ? unwrapped : urlString);
@@ -2619,7 +2668,9 @@ static void navigate_to(const char *urlString)
          * e.g. "http://bryanwandrych.com" vs the saved
          * "http://bryanwandrych.com/" computed two different FNV keys and
          * every revisit missed the cache. */
-        DocParseResult *snap = snapBypass ? NULL
+        /* Cached Website Off NEVER serves a snapshot: every navigation
+         * fetches + renders fresh. On keeps the fast path exactly. */
+        DocParseResult *snap = (snapBypass || cache_off()) ? NULL
             : pluto_snap_load(currentUrlObj->normalized,
                               (int)currentBrowseMode, now,
                               SNAP_TTL_SECONDS);
