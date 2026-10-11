@@ -16,3 +16,6 @@ Source/pdex.dylib
 /logs/
 /devlogs/
 tests/logs/
+
+# gzip host-suite build dir (recreate with: tests/build_gz.sh)
+/.build_gz/
