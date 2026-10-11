@@ -2692,6 +2692,7 @@ static void xs_build_globals(JsBridge *b)
     def_fn(the, glob, "setTimeout", xs_setTimeout, 0);
     def_fn(the, glob, "requestAnimationFrame", xs_setTimeout, 0);
     def_fn(the, glob, "setInterval", xs_setInterval, 0);
+    def_fn(the, glob, "clearTimeout", xs_clearTimeout, 0);
     def_fn(the, glob, "clearInterval", xs_clearInterval, 0);
     def_fn(the, glob, "requestAnimationFrame", xs_setTimeout, 0);
 }
