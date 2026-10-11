@@ -555,6 +555,27 @@ void storage_load(void)
     pluto_pd()->file->close(f);
     g_haveDefaults = 0;
 
+    /* One-time rename: the retired "Motherfucking Website" default became
+     * bryanwandrych.com (constants.c) — rewrite saved copies so existing
+     * installs pick it up. No-op once saved (the old URL is gone). */
+    int bmMigrated = 0;
+    for (int i = 0; i < g_bookmarkCount; i++)
+    {
+        if (g_bookmarks[i]->url &&
+            strcmp(g_bookmarks[i]->url, "https://motherfuckingwebsite.com") == 0)
+        {
+            snprintf(g_bookmarks[i]->title, 400, "%s", "Bryan Wandrych");
+            snprintf(g_bookmarks[i]->url, 600, "%s", "https://bryanwandrych.com/");
+            snprintf(g_bookmarks[i]->desc, 400, "%s", "Personal website");
+            bmMigrated = 1;
+        }
+    }
+    if (bmMigrated)
+    {
+        logger_log("STORAGE: bookmark rename migrated, saving");
+        storage_save(); /* persist so the file matches (first-run precedent) */
+    }
+
     /* Lua parity: a saved table without bookmarks (or empty) falls back to
      * DEFAULT_BOOKMARKS; history/cookies simply stay empty when absent. */
     if (g_bookmarkCount == 0)

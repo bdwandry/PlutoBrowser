@@ -24,7 +24,7 @@ const DefaultBookmark DEFAULT_BOOKMARKS[DEFAULT_BOOKMARK_COUNT] = {
     { "DuckDuckGo Lite",        "https://html.duckduckgo.com/html/",         "Fast private search" },
     { "FrogFind",               "http://frogfind.com",                       "Text web for vintage devices" },
     { "Wiby Search",            "https://wiby.me",                           "Search engine for simple web" },
-    { "Motherfucking Website",  "https://motherfuckingwebsite.com",          "Lightweight pure HTML" },
+    { "Bryan Wandrych",         "https://bryanwandrych.com/",                "Personal website" },
     { "Dan Luu's Blog",         "https://danluu.com",                        "Engineering essays & blogs" }
 };
 
