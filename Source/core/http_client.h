@@ -77,11 +77,13 @@ void http_client_init(PlaydateAPI *pd);
  * immediate failure (onError already fired). */
 int http_get(const char *urlString, const HttpCallbacks *callbacks);
 
-/* R15: request UNCOMPRESSED responses (Accept-Encoding: identity). Set by
- * consumers that adopt the body to DISK (jsext script fetches): raw bodies
- * stream to disk as they arrive, while gzip bodies would be staged wholly
- * in RAM for the one-shot gunzip — a heap-shredder at script sizes. One
- * request at a time (single-flight client); reset it to 0 after. */
+/* R15 + Compression setting: the request builder sends Accept-Encoding:
+ * identity (raw bytes; reliable on weak radio) when the stored
+ * encodingMode is Off (default), gzip when the user picks Gzip in
+ * Settings. Kept only for API compatibility with existing callers
+ * (jsext script fetches) — the builder reads the setting live instead.
+ * Gzip RESPONSE decoding stays as a fallback for servers/proxies that
+ * compress unasked. */
 void http_set_identity_encoding(int on);
 
 /* Cancel any in-flight request (safe when idle). */
