@@ -179,7 +179,23 @@ static char pendingNavUrl[640] = "";
 static int navigatingHistory = 0;             /* Lua navigatingHistory */
 static int mouseX = 200, mouseY = 100;        /* HTML-mode virtual cursor */
 #define MOUSE_SPEED 4                          /* Lua mouseSpeed */
-static const LayoutItem *formInputItem = NULL;/* Lua activeInputField */
+/* ── Form keyboard target key ─────────────────────────────────────────────── */
+/* LayoutItem pointers die on every layout rebuild (React re-renders fire a
+ * rewalk per mutation), but the Playdate keyboard lives across frames: a
+ * keystroke written through the stale pointer lands in whatever reused the
+ * freed memory — on multi-box pages, deterministically the FIRST box. So
+ * the keyboard remembers WHAT was opened (form action + input name +
+ * ordinal among its twins) and re-resolves to the live item AND the live
+ * DOM node on every keystroke and on commit. DOM write-through also makes
+ * typed text survive rebuilds (new items are built from the value attr). */
+typedef struct
+{
+    char form[256];
+    char name[64];
+    int ordinal;
+    int valid;
+} FormKey;
+static FormKey g_formKey;
 static int formKeyboardOpen = 0;              /* Lua keyboardOpen */
 
 /* detailsOpenSet (Lua map keyed "d1".."dN"): C stores the doc's d-key list in
@@ -297,9 +313,13 @@ static void activate_form_block(const LayoutItem *item);
 static void submit_form(const char *formAction, const LayoutItem *inputBlock);
 static void open_keyboard_for_input(const LayoutItem *item);
 static void form_kb_did_hide(void *ud);
+/* Form keyboard target key (defined with the keyboard code, used early by
+ * the formclick autotest). */
+static void form_key_snapshot(const LayoutItem *item);
+static void form_key_write(const char *text);
+static const char *form_item_value(const LayoutItem *item);
 static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
-static void form_set_block_value(const LayoutItem *item, const char *text);
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap);
 static void http_on_progress(int cur, int total);
 static void http_on_success(int status, char **headerKeys, char **headerVals,
@@ -1513,6 +1533,289 @@ static void js_click_autotest_tick(void)
 }
 #endif
 
+#if defined(PLUTO_FORMCLICK_AUTOTEST)
+/* TEMPORARY (autotest builds, sim + device): prove the about:acidtest
+ * "Interactive Controls" section is really clickable. After the acidtest
+ * page renders, drive the same activate_form_block() path a tap uses:
+ *   radio: click the unchecked "ship" option, require group exclusivity
+ *          (exactly one checked, and it is the clicked one);
+ *   select: click the "size" dropdown, require selectedIndex to advance.
+ * PASS/FAIL lands in pluto.log via [formclick-autotest] lines. */
+static int g_formClickTestPhase = 0; /* 0=nav, 1=radio, 2=select, 3=focus, 4=twins, 5=done */
+static unsigned g_formClickTestFrames = 0;
+static int g_twinsStaged = 0;
+static void formclick_autotest_tick(void)
+{
+    if (g_formClickTestPhase == 5 || isRendering)
+    {
+        return;
+    }
+    if (g_formClickTestPhase == 0)
+    {
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:acidtest", 14) == 0)
+        {
+            g_formClickTestPhase = 1;
+            g_formClickTestFrames = 0;
+            return;
+        }
+        if (++g_formClickTestFrames == 1)
+        {
+            navigate_to("about:acidtest");
+        }
+        else if (g_formClickTestFrames > 600)
+        {
+            logger_log("[formclick-autotest] FAIL: never reached "
+                       "about:acidtest");
+            g_formClickTestPhase = 3;
+        }
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc ||
+        strncmp(currentDoc->baseUrl, "about:acidtest", 14) != 0)
+    {
+        return;
+    }
+    if (++g_formClickTestFrames < 30)
+    {
+        return; /* let the page settle ~0.5s */
+    }
+    if (g_formClickTestPhase == 1)
+    {
+        const LayoutItem *target = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_CHECKBOX_FIELD && it->radio &&
+                it->name && strcmp(it->name, "ship") == 0 && it->block &&
+                !((const DocBlock *)it->block)->checked)
+            {
+                target = it;
+                break;
+            }
+        }
+        if (!target)
+        {
+            logger_log("[formclick-autotest] FAIL: no unchecked ship "
+                       "radio found");
+            g_formClickTestPhase = 3;
+            return;
+        }
+        activate_form_block(target);
+        int checkedCount = 0;
+        int targetChecked = 0;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_CHECKBOX_FIELD && it->radio &&
+                it->name && strcmp(it->name, "ship") == 0 &&
+                it->block && ((const DocBlock *)it->block)->checked)
+            {
+                checkedCount++;
+                if (it->block == target->block)
+                {
+                    targetChecked = 1;
+                }
+            }
+        }
+        if (checkedCount == 1 && targetChecked)
+        {
+            logger_log("[formclick-autotest] PASS: radio click selected, "
+                       "group exclusive");
+        }
+        else
+        {
+            logger_log("[formclick-autotest] FAIL: radio group state "
+                       "checked=%d target=%d",
+                       checkedCount, targetChecked);
+        }
+        g_formClickTestPhase = 2;
+        return;
+    }
+    /* Phase 2: click the size dropdown, require selectedIndex to advance. */
+    if (g_formClickTestPhase == 2)
+    {
+    const LayoutItem *sel = NULL;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->type == LRI_SELECT_FIELD && it->name &&
+            strcmp(it->name, "size") == 0)
+        {
+            sel = it;
+            break;
+        }
+    }
+    if (!sel)
+    {
+        logger_log("[formclick-autotest] FAIL: size select not found");
+        g_formClickTestPhase = 3;
+        return;
+    }
+    {
+        DocBlock *b = (DocBlock *)sel->block;
+        int before = b ? b->selectedIndex : -1;
+        int n = b ? b->optionCount : 0;
+        activate_form_block(sel);
+        int after = b ? b->selectedIndex : -2;
+        int want = (n > 0) ? ((before % n) + 1) : before;
+        if (n > 0 && after == want && after != before)
+        {
+            logger_log("[formclick-autotest] PASS: select click %d -> %d",
+                       before, after);
+        }
+        else
+        {
+            logger_log("[formclick-autotest] FAIL: select index %d -> %d "
+                       "(want %d, n=%d)",
+                       before, after, want, n);
+        }
+    }
+    g_formClickTestPhase = 3;
+    return;
+    } /* end phase 2 */
+    /* Phase 3: every interactive control must be a cursor stop. Walk the
+     * same link table the D-pad uses and require focusable entries for
+     * both ship radios and the size dropdown. */
+    if (g_formClickTestPhase == 3)
+    {
+    const int total = lm_get_link_count();
+    int shipStops = 0;
+    int sizeStops = 0;
+    for (int i = 1; i <= total; i++)
+    {
+        const LMRectAux *aux = lm_rect_aux(i, 0);
+        if (aux && aux->isFormInput && aux->inputItem)
+        {
+            const LayoutItem *it = (const LayoutItem *)aux->inputItem;
+            if (it->name && strcmp(it->name, "ship") == 0)
+            {
+                shipStops++;
+            }
+            else if (it->name && strcmp(it->name, "size") == 0)
+            {
+                sizeStops++;
+            }
+        }
+    }
+    if (shipStops == 2 && sizeStops == 1)
+    {
+        logger_log("[formclick-autotest] PASS: cursor stops ship=%d "
+                   "size=%d (of %d links)",
+                   shipStops, sizeStops, total);
+    }
+    else
+    {
+        logger_log("[formclick-autotest] FAIL: cursor stops ship=%d "
+                   "(want 2) size=%d (want 1) of %d links",
+                   shipStops, sizeStops, total);
+    }
+    g_formClickTestPhase = 4;
+    return;
+    } /* end phase 3 */
+    /* Phase 4: twin text fields (same name, the contact-page shape). Type
+     * into twin 0, force a full rebuild mid-session, then type into twin 1
+     * through the keyboard key path. Each twin must keep its own text —
+     * the stale-pointer bug put twin 1's keystrokes into twin 0. */
+    if (g_formClickTestPhase == 4)
+    {
+        const LayoutItem *w0 = NULL;
+        const LayoutItem *w1 = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_FIELD && it->name &&
+                strcmp(it->name, "who") == 0)
+            {
+                if (!w0)
+                {
+                    w0 = it;
+                }
+                else if (!w1)
+                {
+                    w1 = it;
+                }
+            }
+        }
+        if (!w0 || !w1)
+        {
+            logger_log("[formclick-autotest] FAIL: twin who fields not "
+                       "found");
+            g_formClickTestPhase = 5;
+            return;
+        }
+        if (!g_twinsStaged)
+        {
+            form_key_snapshot(w0);
+            form_key_write("AAA-first");
+            page_rewalk_now(); /* rebuild everything under the keyboard */
+            g_twinsStaged = 1;
+            g_formClickTestFrames = 0;
+            return;
+        }
+        if (currentState != STATE_PAGE || ++g_formClickTestFrames < 30)
+        {
+            return;
+        }
+        /* Re-resolve twin 1 AFTER the rebuild and type through the key. */
+        const LayoutItem *u1 = NULL;
+        int seen = 0;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_FIELD && it->name &&
+                strcmp(it->name, "who") == 0 && seen++ == 1)
+            {
+                u1 = it;
+                break;
+            }
+        }
+        if (!u1)
+        {
+            logger_log("[formclick-autotest] FAIL: twin 1 gone after "
+                       "rebuild");
+            g_formClickTestPhase = 5;
+            return;
+        }
+        form_key_snapshot(u1);
+        form_key_write("BBB-second");
+        const LayoutItem *v0 = NULL;
+        const LayoutItem *v1 = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_FIELD && it->name &&
+                strcmp(it->name, "who") == 0)
+            {
+                if (!v0)
+                {
+                    v0 = it;
+                }
+                else if (!v1)
+                {
+                    v1 = it;
+                }
+            }
+        }
+        const char *s0 = v0 ? form_item_value(v0) : "?";
+        const char *s1 = v1 ? form_item_value(v1) : "?";
+        if (v0 && v1 && strcmp(s0, "AAA-first") == 0 &&
+            strcmp(s1, "BBB-second") == 0)
+        {
+            logger_log("[formclick-autotest] PASS: twins keep own text "
+                       "across rebuild ('%s' / '%s')", s0, s1);
+        }
+        else
+        {
+            logger_log("[formclick-autotest] FAIL: twin text cross-talk "
+                       "'%s' / '%s'", s0, s1);
+        }
+        g_formClickTestPhase = 5;
+        return;
+    }
+}
+#endif
+
 #if defined(PLUTO_FIELDTEST_AUTOTEST)
 /* SW0 BENCHMARK MATRIX (SIMULATOR-ONLY): reads tests/fieldtest_urls.txt from the
  * project root — one site per line: "<engine 0|1|2> <url> [| <criterion>]".
@@ -2586,7 +2889,7 @@ static void navigate_to(const char *urlString)
     /* Reset per-navigation state (Lua runNavigation). The old layout items
      * (with their owned values) are freed by layout_clear during the render
      * task, so no form-value cleanup is needed here. */
-    formInputItem = NULL;
+    memset(&g_formKey, 0, sizeof(g_formKey));
     formKeyboardOpen = 0;
     imgdec_clear_cache();
 
@@ -2950,6 +3253,244 @@ static void toggle_details(const char *dkey)
     tasks_run(render_step, rt, render_done, render_error, rt);
 }
 
+/* ── Form keyboard target resolution ─────────────────────────────────────── */
+/* Mirror of the walker's text-input branch (document.c): lowered type in
+ * the text set (missing type = text), plus <textarea>. Hidden/submit/
+ * checkbox/radio inputs become other item kinds and are never counted. */
+static int form_is_text_type(const char *t)
+{
+    if (!t || !t[0])
+    {
+        return 1;
+    }
+    char b[32];
+    size_t i;
+    for (i = 0; i + 1 < sizeof(b) && t[i]; i++)
+    {
+        char c = t[i];
+        b[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    b[i] = '\0';
+    return (strcmp(b, "text") == 0 || strcmp(b, "search") == 0 ||
+            strcmp(b, "email") == 0 || strcmp(b, "url") == 0 ||
+            strcmp(b, "number") == 0 || strcmp(b, "password") == 0 ||
+            strcmp(b, "tel") == 0 || strcmp(b, "date") == 0 ||
+            strcmp(b, "time") == 0 || strcmp(b, "month") == 0 ||
+            strcmp(b, "week") == 0 || strcmp(b, "datetime-local") == 0 ||
+            strcmp(b, "color") == 0);
+}
+
+static const char *form_node_attr(const DomNode *n, const char *key)
+{
+    if (!n || !key)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        if (n->attrs[i].key && strcmp(n->attrs[i].key, key) == 0)
+        {
+            return n->attrs[i].value ? n->attrs[i].value : "";
+        }
+    }
+    return NULL;
+}
+
+/* Snapshot the key for the item the keyboard is opening. Ordinal = index
+ * among same-(form,name) text inputs in layout order (== DOM order). */
+static void form_key_snapshot(const LayoutItem *item)
+{
+    memset(&g_formKey, 0, sizeof(g_formKey));
+    if (!item)
+    {
+        return;
+    }
+    snprintf(g_formKey.form, sizeof(g_formKey.form), "%s",
+             item->formAction ? item->formAction : "");
+    snprintf(g_formKey.name, sizeof(g_formKey.name), "%s",
+             item->name ? item->name : "q");
+    int ord = 0;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (!it || it->type != LRI_INPUT_FIELD || !it->name)
+        {
+            continue;
+        }
+        const char *fa = it->formAction ? it->formAction : "";
+        int isArea = it->inputType && strcmp(it->inputType, "textarea") == 0;
+        if (strcmp(fa, g_formKey.form) != 0 ||
+            strcmp(it->name, g_formKey.name) != 0 ||
+            (!isArea && !form_is_text_type(it->inputType)))
+        {
+            continue;
+        }
+        if (it == item)
+        {
+            g_formKey.ordinal = ord;
+            g_formKey.valid = 1;
+            return;
+        }
+        ord++;
+    }
+}
+
+/* Resolve the key to the CURRENT layout item (NULL if rebuilt away). */
+static const LayoutItem *form_key_item(void)
+{
+    if (!g_formKey.valid)
+    {
+        return NULL;
+    }
+    int ord = 0;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (!it || it->type != LRI_INPUT_FIELD || !it->name)
+        {
+            continue;
+        }
+        const char *fa = it->formAction ? it->formAction : "";
+        int isArea = it->inputType && strcmp(it->inputType, "textarea") == 0;
+        if (strcmp(fa, g_formKey.form) != 0 ||
+            strcmp(it->name, g_formKey.name) != 0 ||
+            (!isArea && !form_is_text_type(it->inputType)))
+        {
+            continue;
+        }
+        if (ord == g_formKey.ordinal)
+        {
+            return it;
+        }
+        ord++;
+    }
+    return NULL;
+}
+
+/* Nearest enclosing <form> action, resolved to absolute ("" if formless).
+ * Mirrors the walker's resolve_href(w, action or ""). */
+static void form_node_form(char *out, size_t cap, const DomNode *n)
+{
+    out[0] = '\0';
+    const char *base = (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl : "";
+    for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
+    {
+        if (p->kind == DOM_ELEMENT && p->tag && strcmp(p->tag, "form") == 0)
+        {
+            const char *act = form_node_attr(p, "action");
+            char *abs = url_resolve(base, act ? act : "");
+            if (abs)
+            {
+                snprintf(out, cap, "%s", abs);
+                pluto_free(abs);
+            }
+            return;
+        }
+    }
+}
+
+/* Recursive DOM search (document order, depth-capped like the builder):
+ * ordinal-th text input/textarea with this key. Textarea counts by
+ * document order; hidden/non-text types never match. */
+static DomNode *form_node_search(DomNode *n, int *ord, int depth)
+{
+    if (!n || depth > DOM_SEARCH_MAX_DEPTH)
+    {
+        return NULL;
+    }
+    if (n->kind == DOM_ELEMENT && n->tag)
+    {
+        int isArea = strcmp(n->tag, "textarea") == 0;
+        int isTextInput = strcmp(n->tag, "input") == 0 &&
+                          form_is_text_type(form_node_attr(n, "type"));
+        if ((isArea || isTextInput))
+        {
+            const char *nm = form_node_attr(n, "name");
+            if (!nm)
+            {
+                nm = "q";
+            }
+            if (strcmp(nm, g_formKey.name) == 0)
+            {
+                char fa[256];
+                const char *fact = form_node_attr(n, "formaction");
+                if (fact)
+                {
+                    const char *base = (currentDoc && currentDoc->baseUrl)
+                                           ? currentDoc->baseUrl
+                                           : "";
+                    char *abs = url_resolve(base, fact);
+                    snprintf(fa, sizeof(fa), "%s", abs ? abs : "");
+                    if (abs)
+                    {
+                        pluto_free(abs);
+                    }
+                }
+                else
+                {
+                    form_node_form(fa, sizeof(fa), n);
+                }
+                if (strcmp(fa, g_formKey.form) == 0)
+                {
+                    if (*ord == g_formKey.ordinal)
+                    {
+                        return n;
+                    }
+                    (*ord)++;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        DomNode *hit = form_node_search(n->children[i], ord, depth + 1);
+        if (hit)
+        {
+            return hit;
+        }
+    }
+    return NULL;
+}
+
+static DomNode *form_key_node(void)
+{
+    if (!g_formKey.valid || !currentDoc || !currentDoc->_dom)
+    {
+        return NULL;
+    }
+    DomResult *dom = (DomResult *)currentDoc->_dom;
+    if (!dom->root)
+    {
+        return NULL;
+    }
+    int ord = 0;
+    return form_node_search(dom->root, &ord, 0);
+}
+
+/* Write keystrokes to the live item (echo) AND the live DOM node
+ * (survives rebuilds: the walker rebuilds block->value from the attr). */
+static void form_key_write(const char *text)
+{
+    if (!text)
+    {
+        return;
+    }
+    const LayoutItem *it = form_key_item();
+    if (it)
+    {
+        layout_set_input_value(it, text);
+        layout_set_selected_input(it);
+    }
+    if (g_formKey.valid && currentDoc && currentDoc->_dom)
+    {
+        DomNode *n = form_key_node();
+        if (n && n->tag && strcmp(n->tag, "input") == 0)
+        {
+            dom_set_attr((DomResult *)currentDoc->_dom, n, "value", text);
+        }
+    }
+}
+
 /* ── Form input values ─────────────────────────────────────────────────────
  * Lua input items alias the block table, so openKeyboardForInput's
  * activeInputField.value = entered made typed text visible to BOTH the
@@ -2957,11 +3498,6 @@ static void toggle_details(const char *dkey)
  * structs, so the typed text lives on the item itself (owned heap copy set
  * through layout_set_input_value; freed by layout_clear). form_item_value()
  * therefore just reads the item's current value. */
-static void form_set_block_value(const LayoutItem *item, const char *text)
-{
-    layout_set_input_value(item, text);
-}
-
 /* Effective value for an input item (live typed value > block value). */
 static const char *form_item_value(const LayoutItem *item)
 {
@@ -2975,7 +3511,7 @@ static void open_keyboard_for_input(const LayoutItem *item)
     {
         return;
     }
-    formInputItem = item;
+    form_key_snapshot(item);
     formKeyboardOpen = 1;
     layout_set_selected_input(item); /* Lua: Layout.selectedInputItem = block */
     keyboardApi.setKeyboardWillHideCallback(g_kb, form_kb_will_hide, NULL);
@@ -2996,23 +3532,25 @@ static void form_kb_did_hide(void *ud)
     (void)ud;
     formKeyboardOpen = 0;
     skipInputFrames = 2;
-    if (formInputItem && g_kb)
+    if (g_kb)
     {
         char *txt = NULL;
         unsigned int n = 0;
         keyboardApi.getText(g_kb, &txt, &n);
         if (txt)
         {
-            /* Lua: maxlength truncation on commit. */
-            if (formInputItem->maxlength >= 0 && (int)n > formInputItem->maxlength)
+            /* Lua: maxlength truncation on commit (read from the live
+             * item — the one at open time may be long freed). */
+            const LayoutItem *it = form_key_item();
+            if (it && it->maxlength >= 0 && (int)n > it->maxlength)
             {
-                txt[formInputItem->maxlength] = '\0';
+                txt[it->maxlength] = '\0';
             }
-            form_set_block_value(formInputItem, txt);
+            form_key_write(txt);
             pluto_free(txt);
         }
     }
-    formInputItem = NULL;
+    memset(&g_formKey, 0, sizeof(g_formKey)); /* valid=0 */
     if (g_kb)
     {
         keyboardApi.setKeyboardWillHideCallback(g_kb, NULL, NULL);
@@ -3024,15 +3562,17 @@ static void form_kb_did_hide(void *ud)
 static void form_kb_text_changed(void *ud)
 {
     (void)ud;
-    /* Lua updateFrame: live-sync keyboard text into the focused input. */
-    if (formInputItem && g_kb)
+    /* Lua updateFrame: live-sync keyboard text into the focused input.
+     * Resolved per keystroke — never through the open-time pointer. */
+    if (g_kb)
     {
         char *txt = NULL;
         unsigned int n = 0;
         keyboardApi.getText(g_kb, &txt, &n);
         if (txt)
         {
-            form_set_block_value(formInputItem, txt);
+            (void)n;
+            form_key_write(txt);
             pluto_free(txt);
         }
     }
@@ -3162,7 +3702,11 @@ static void submit_form(const char *formAction, const LayoutItem *inputBlock)
             }
             break;
         case LRI_CHECKBOX_FIELD:
-            if (!it->disabled && sameForm && it->checked)
+            /* Checked state lives on the DocBlock (taps mutate the block,
+             * not the item cache) — read it live so submit sends the
+             * option the user actually picked. */
+            if (!it->disabled && sameForm && it->block &&
+                ((const DocBlock *)it->block)->checked)
             {
                 name = it->name ? it->name : "";
                 value = (it->value && it->value[0]) ? it->value : "on";
@@ -3604,6 +4148,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_JS_CLICK_AUTOTEST)
     js_click_autotest_tick();
+#endif
+
+#if defined(PLUTO_FORMCLICK_AUTOTEST)
+    formclick_autotest_tick();
 #endif
 
 #if defined(PLUTO_JS_TIMERS_AUTOTEST)

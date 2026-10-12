@@ -3052,8 +3052,8 @@ static void handle_element(Walker *w, const DomNode *node)
         push_children(w, node);
     }
     else if (strcmp(tag, "p") == 0 || strcmp(tag, "div") == 0 ||
-             strcmp(tag, "section") == 0 || strcmp(tag, "article") == 0 ||
-             strcmp(tag, "main") == 0 || strcmp(tag, "header") == 0 ||
+             strcmp(tag, "body") == 0 || strcmp(tag, "section") == 0 ||
+             strcmp(tag, "article") == 0 || strcmp(tag, "main") == 0 || strcmp(tag, "header") == 0 ||
              strcmp(tag, "footer") == 0 || strcmp(tag, "nav") == 0 ||
              strcmp(tag, "aside") == 0 || strcmp(tag, "address") == 0 ||
              strcmp(tag, "hgroup") == 0 || strcmp(tag, "noindex") == 0 ||
@@ -3492,6 +3492,19 @@ static void handle_element(Walker *w, const DomNode *node)
             }
             x->fallback = fb ? doc_arena_str(w, fb) : NULL;
         }
+    }
+    else if (strcmp(tag, "nobr") == 0)
+    {
+        /* <nobr>: legacy no-wrap container. Same scoping discipline as the
+         * span chain (flags restored at WX_SPAN_END) plus DOC_INF_NOWRAP,
+         * which the line breaker honors over both wrapping and break-word. */
+        ExitCtx *x = push_exit(w, WX_SPAN_END);
+        if (x)
+        {
+            x->flags = w->flags;
+        }
+        push_children(w, node);
+        w->flags |= DOC_INF_NOWRAP;
     }
     else if (strcmp(tag, "ruby") == 0 || strcmp(tag, "rp") == 0 ||
              strcmp(tag, "rb") == 0 || strcmp(tag, "rtc") == 0)
@@ -5003,6 +5016,13 @@ static void handle_element(Walker *w, const DomNode *node)
     }
     /* ── Metadata-only elements (WHATWG §4.2): carried by the parser — never
      * walked (walking would leak attribute-less child text into the page). */
+    else if (strcmp(tag, "head") == 0)
+    {
+        /* The head itself renders nothing, but its children must still be
+         * walked: <title> capture, <meta> refresh, <style> rules and
+         * <script> sources all run as walker side effects. */
+        push_children(w, node);
+    }
     else if (strcmp(tag, "base") == 0 || strcmp(tag, "link") == 0 ||
              strcmp(tag, "command") == 0 || strcmp(tag, "eventsource") == 0)
     {

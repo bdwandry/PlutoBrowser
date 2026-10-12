@@ -1622,7 +1622,6 @@ void layout_build(DocParseResult *doc)
             it->w = boxH;
             it->h = boxH;
             it->radio = block->radio;
-            it->checked = block->checked;
             it->name = block->name ? block->name : "";
             it->value = block->value ? block->value : "";
             it->label = block->label ? block->label : "";
@@ -1687,7 +1686,6 @@ void layout_build(DocParseResult *doc)
             it->name = block->name ? block->name : "q";
             it->options = block->options;
             it->optionCount = block->optionCount;
-            it->selectedIndex = block->selectedIndex ? block->selectedIndex : 1;
             it->formAction = block->formAction ? block->formAction : "";
             it->formMethod = block->formMethod ? block->formMethod : "get";
             it->disabled = block->disabled;
@@ -2641,6 +2639,11 @@ void layout_draw(int scrollY)
             if (drawY + item->h >= CONTENT_Y && drawY <= SCREEN_HEIGHT)
             {
                 int isSel = (g_selectedInput == item);
+                /* Checked state lives on the DocBlock (activate_form_block
+                 * mutates the block, not this cached copy) — read it live
+                 * so taps update the drawing on the very next frame. */
+                const DocBlock *cb = (const DocBlock *)item->block;
+                int isChecked = cb ? cb->checked : 0;
                 if (item->radio)
                 {
                     /* drawCircleAtPoint(cx, cy, r) line circle: fillEllipse stroke
@@ -2655,7 +2658,7 @@ void layout_draw(int scrollY)
                     int r2 = r - 1;
                     g_pd->graphics->fillEllipse(cx - r2, cy - r2, r2 * 2 + 1, r2 * 2 + 1,
                                                 0.f, 360.f, kColorWhite);
-                    if (item->checked)
+                    if (isChecked)
                     {
                         int r3 = item->h / 2 - 3;
                         fill_circle_at(cx, cy, r3, kColorBlack);
@@ -2664,7 +2667,7 @@ void layout_draw(int scrollY)
                 else
                 {
                     g_pd->graphics->drawRoundRect(item->x, drawY, item->h, item->h, 3, 1, kColorBlack);
-                    if (item->checked)
+                    if (isChecked)
                     {
                         g_pd->graphics->drawLine(item->x + 4, drawY + item->h / 2,
                                                  item->x + item->h / 2, drawY + item->h - 4,
@@ -2696,10 +2699,14 @@ void layout_draw(int scrollY)
                 int isSel = (g_selectedInput == item);
                 g_pd->graphics->drawRoundRect(item->x, drawY, item->w, item->h, 4, 1, kColorBlack);
                 const char *val = "";
-                if (item->options && item->selectedIndex >= 1 &&
-                    item->selectedIndex <= item->optionCount)
+                /* Selection lives on the DocBlock — read it live so each
+                 * tap visibly advances to the next option. */
+                const DocBlock *sb = (const DocBlock *)item->block;
+                int si = sb ? sb->selectedIndex : 1;
+                if (item->options && si >= 1 &&
+                    si <= item->optionCount)
                 {
-                    const DocOption *opt = item->options[item->selectedIndex - 1];
+                    const DocOption *opt = item->options[si - 1];
                     if (opt && opt->text)
                     {
                         val = opt->text;

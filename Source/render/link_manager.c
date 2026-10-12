@@ -79,7 +79,14 @@ void lm_add_link_rect_ex(const char *href, const char *text, const LMRect *rect,
         int anchorMatches = (anchorIndex == 0) || (last->anchorIndex == anchorIndex);
         /* Lua quirk: text==nil never merges (nil ~= string comparison). */
         int textMatches = (text != NULL) && last->text && strcmp(last->text, text) == 0;
-        if (last->href && strcmp(last->href, href) == 0 && textMatches && anchorMatches)
+        /* Form inputs never merge: every control (each radio in a group,
+         * each checkbox, each dropdown) is its own cursor stop with its
+         * own inputItem. Merging same-name radios into one link left all
+         * but the first unreachable by the D-pad cursor. */
+        int bothPlain = (!aux || !aux->isFormInput) &&
+                        (last->rectCount == 0 || !lm_rect_aux(g_linkCount, 0) ||
+                         !lm_rect_aux(g_linkCount, 0)->isFormInput);
+        if (bothPlain && last->href && strcmp(last->href, href) == 0 && textMatches && anchorMatches)
         {
             if (last->rectCount == last->rectCap)
             {

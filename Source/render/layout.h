@@ -111,8 +111,7 @@ typedef struct LayoutItem
     const char *inputType;
     int disabled, readonly, required;
     int maxlength;      /* -1 = Lua nil */
-    int radio, checked;
-    int selectedIndex;  /* 1-based */
+    int radio;
     DocOption **options; /* borrowed */
     int optionCount;
 

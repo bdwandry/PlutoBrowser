@@ -161,10 +161,10 @@ static int is_block(const char *tag)
     * caption/optgroup/address/xmp/listing/plaintext/marquee/colgroup/fenced
     * frame/h1group beyond the reference set. */
     static const char *const BLOCK[] = {
-        "address", "article", "aside", "blockquote", "caption", "center",
+        "address", "article", "aside", "blockquote", "body", "caption", "center",
         "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset",
         "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hgroup", "hr", "li", "listing", "main",
+        "h5", "h6", "head", "header", "hgroup", "hr", "li", "listing", "main",
         "marquee", "menu", "nav", "ol", "optgroup", "p", "plaintext",
         "pre", "section", "table", "ul", "xmp"
     };
