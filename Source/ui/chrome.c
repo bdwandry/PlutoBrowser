@@ -7,10 +7,12 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "ui/chrome.h"
 #include "core/constants.h"
 #include "core/netmon.h"
+#include "core/storage.h"
 #include "render/style.h"
 #include "pd_api.h"
 
@@ -86,16 +88,45 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     /* ── Right-corner layout: clock (or comet) rightmost with a 6px screen
      * margin, wifi icon 8px left of it, badge 8px left of the icon — all
      * computed from the REAL text width so nothing ever overlaps. ── */
-    char timeFormatted[8] = "--:--";
+    char timeFormatted[16] = "--:--";
     int rightW = 26; /* loading comet cluster ≈26px */
     if (!isLoading)
     {
         unsigned int ms = 0;
         uint32_t epoch = pd->system->getSecondsSinceEpoch(&ms);
-        int tz = pd->system->getTimezoneOffset();
+        int hour24, minute;
+#ifdef TARGET_SIMULATOR
+        /* Simulator stub: getTimezoneOffset() always returns 0, so the OS
+         * formula can only yield UTC here — use host libc local time. */
+        time_t unixSec = (time_t)epoch + 946684800L; /* 2000-epoch → Unix */
+        struct tm lt;
+        localtime_r(&unixSec, &lt);
+        hour24 = lt.tm_hour;
+        minute = lt.tm_min;
+#else
+        /* Device: getTimezoneOffset() is SECONDS (signed, e.g. -14400 for
+         * EDT) and convertEpochToDateTime() yields GMT — add seconds. */
+        int32_t tz = pd->system->getTimezoneOffset();
         struct PDDateTime dt;
-        pd->system->convertEpochToDateTime(epoch + (uint32_t)(tz * 60), &dt);
-        snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", dt.hour, dt.minute);
+        pd->system->convertEpochToDateTime((uint32_t)((int32_t)epoch + tz), &dt);
+        hour24 = dt.hour;
+        minute = dt.minute;
+#endif
+        /* Clock format follows Settings > Clock Format (default 12-Hour). */
+        if (storage_setting_int("clockFormat") == 1)
+        {
+            snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", hour24, minute);
+        }
+        else
+        {
+            int hour12 = hour24 % 12;
+            if (hour12 == 0)
+            {
+                hour12 = 12;
+            }
+            snprintf(timeFormatted, sizeof(timeFormatted), "%d:%02d %s", hour12,
+                     minute, hour24 < 12 ? "AM" : "PM");
+        }
         rightW = style_get_text_width(PLUTO_FONT_BODY_BOLD, timeFormatted);
     }
     int iconX = SCREEN_WIDTH - 6 - rightW - 8 - 15; /* 15px icon, 8px gaps */

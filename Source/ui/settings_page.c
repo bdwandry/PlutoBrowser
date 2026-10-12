@@ -46,7 +46,7 @@ extern PlaydateAPI *pluto_pd(void);
 #define CENTER_X (SCREEN_WIDTH / 2)
 #define CENTER_Y (BOX_Y + BOX_H / 2)
 
-#define OPTION_COUNT 11
+#define OPTION_COUNT 12
 
 /* ── Scrolling list geometry ──────────────────────────────────────────────
  * The panel is fixed-size; the row list scrolls under it as the browser
@@ -79,6 +79,7 @@ static struct
     int jsEngine;                 /* 0..4 — engine: muJS/Duktape/QuickJS/XS/XS-NR */
     int encodingMode;             /* 0/1 — Compression: Off(raw identity)/Gzip */
     int cacheWebsite;             /* 0/1 — Cached Website: Off(fresh fetch)/On(snapshot) */
+    int clockFormat;              /* 0/1 — Clock: 12-Hour (default)/24-Hour */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -88,7 +89,7 @@ void settings_page_set_onchange_callback(void (*fn)(void));
 static const char *const k_settingsLabels[OPTION_COUNT] = {
     "Search Engine", "Browse Mode", "Invert Crank", "Image Mode",
     "Display FPS", "Show FPS", "Javascript Execution", "Javascript Engine",
-    "Compression", "Cached Website", "Clear Cookies"};
+    "Compression", "Cached Website", "Clear Cookies", "Clock Format"};
 
 const char *settings_page_label(int optionIndex)
 {
@@ -247,6 +248,11 @@ void settings_page_open(int prevState)
     {
         g_staged.cacheWebsite = 0; /* Off(fresh)/On — out-of-range → Off (default) */
     }
+    g_staged.clockFormat = storage_setting_int("clockFormat");
+    if (g_staged.clockFormat != 1)
+    {
+        g_staged.clockFormat = 0; /* 12-Hour/24-Hour — out-of-range → 12-Hour (default) */
+    }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
      * value of the JavaScript row so simulator/device pluto.log runs can
@@ -276,6 +282,7 @@ static void save_and_close(char **out)
     storage_set_setting_int("jsEngine", g_staged.jsEngine);
     storage_set_setting_int("encodingMode", g_staged.encodingMode);
     storage_set_setting_int("cacheWebsite", g_staged.cacheWebsite);
+    storage_set_setting_int("clockFormat", g_staged.clockFormat);
     storage_save();
     if (g_onChangeCallback)
     {
@@ -357,6 +364,8 @@ const char *settings_page_staged_value(int optionIndex)
         return g_staged.cacheWebsite == 1 ? "On" : "Off";
     case 11:
         return "";
+    case 12: /* Clock Format: 12-Hour (default) / 24-Hour */
+        return g_staged.clockFormat == 1 ? "24-Hour" : "12-Hour";
     default:
         return "";
     }
@@ -447,6 +456,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
                 g_clearCookiesCb();
             }
             break;
+        case 12: /* Clock Format: 12-Hour ↔ 24-Hour */
+            g_staged.clockFormat = !g_staged.clockFormat;
+            break;
         default:
             break;
         }
@@ -512,6 +524,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
             {
                 g_clearCookiesCb();
             }
+            break;
+        case 12: /* Clock Format: 12-Hour ↔ 24-Hour */
+            g_staged.clockFormat = !g_staged.clockFormat;
             break;
         default:
             break;

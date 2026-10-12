@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "core/storage.h"
 #include "core/constants.h"
@@ -53,9 +54,10 @@ static Setting g_settings[16] = {
     {"jsEnabled", "", 2, 1}, /* JavaScript execution: 0=Off 1=Inline 2=Full (default Full) */
     {"jsEngine", "", 4, 1}, /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS 3=XS 4=XS-NR default (only used when jsEnabled != 0) */
     {"encodingMode", "", 0, 1}, /* Compression: 0=Off/raw identity (default) 1=Gzip */
-    {"cacheWebsite", "", 0, 1} /* Cached Website: 0=Off/fresh fetch (default) 1=On/snapshot */
+    {"cacheWebsite", "", 0, 1}, /* Cached Website: 0=Off/fresh fetch (default) 1=On/snapshot */
+    {"clockFormat", "", 0, 1} /* Clock: 0=12-Hour (default) 1=24-Hour */
 };
-static int g_settingCount = 12;
+static int g_settingCount = 13;
 
 static int g_haveDefaults = 0;
 
@@ -374,6 +376,7 @@ void storage_load(void)
     storage_set_setting_int("jsEngine", 4); /* XS (No Recursion) engine by default */
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
+    storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
 
     char *line = g_loadLine;
     char section[32] = "";
@@ -718,6 +721,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("jsEngine", 4); /* XS (No Recursion) engine by default */
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
+    storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
     storage_load();
     logger_log("STORAGE: init exit");
 }
@@ -833,14 +837,42 @@ void storage_add_history(const char *title, const char *url)
         }
     }
 
-    /* HH:MM local time (Lua: playdate.getTime().hour/minute) */
-    char timeFormatted[8] = "Recent";
+    /* HH:MM local time, 12-hour (matches the chrome clock) */
+    char timeFormatted[16] = "Recent";
     unsigned int ms = 0;
     uint32_t epoch = pluto_pd()->system->getSecondsSinceEpoch(&ms);
-    int tz = pluto_pd()->system->getTimezoneOffset(); /* minutes */
+    int hour24, minute;
+#ifdef TARGET_SIMULATOR
+    /* Simulator stub: getTimezoneOffset() always returns 0 — use host libc. */
+    time_t unixSec = (time_t)epoch + 946684800L; /* 2000-epoch → Unix */
+    struct tm lt;
+    localtime_r(&unixSec, &lt);
+    hour24 = lt.tm_hour;
+    minute = lt.tm_min;
+#else
+    /* getTimezoneOffset() returns SECONDS (signed); convertEpochToDateTime()
+     * yields GMT, so add seconds (NOT minutes — see chrome.c clock fix). */
+    int32_t tz = pluto_pd()->system->getTimezoneOffset();
     struct PDDateTime dt;
-    pluto_pd()->system->convertEpochToDateTime(epoch + (uint32_t)(tz * 60), &dt);
-    snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", dt.hour, dt.minute);
+    pluto_pd()->system->convertEpochToDateTime((uint32_t)((int32_t)epoch + tz), &dt);
+    hour24 = dt.hour;
+    minute = dt.minute;
+#endif
+    int hour12 = hour24 % 12;
+    if (hour12 == 0)
+    {
+        hour12 = 12;
+    }
+    /* Clock format follows Settings > Clock Format (default 12-Hour). */
+    if (storage_setting_int("clockFormat") == 1)
+    {
+        snprintf(timeFormatted, sizeof(timeFormatted), "%02d:%02d", hour24, minute);
+    }
+    else
+    {
+        snprintf(timeFormatted, sizeof(timeFormatted), "%d:%02d %s", hour12, minute,
+                 hour24 < 12 ? "AM" : "PM");
+    }
 
     /* shift down and insert at top (Lua table.insert(history, 1, …)) */
     if (g_historyCount < HISTORY_MAX)

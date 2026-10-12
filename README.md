@@ -236,6 +236,7 @@ PlutoBrowser/
     │   ├── jsbridge_mujs.c / jsbridge_duktape.c / jsbridge_quickjs.c
     │   │                       # Per-engine bindings (stock engines, never modified)
     │   ├── jsbridge_xs.c / jsbridge_xs_nr.c  # Stock XS + No-Recursion fork: time-sliced bundler, stepwise parse, resumable mounts
+    │   ├── jsbridge_bundler.c        # General-purpose bundler monolith splitter (see jsbridge_bundler.h)
     │   └── jsbridge.h          # Bridge API + device resource limits (run limit, call budget, script caps)
     │
     ├── render/                 # Layout & visual rendering
@@ -266,7 +267,7 @@ PlutoBrowser/
     │       └── scale.c         # Image scaling utilities
     │
     ├── ui/                     # User interface components
-    │   ├── chrome.c            # Top toolbar (URL, SSL lock, page title, progress, battery)
+    │   ├── chrome.c            # Top toolbar (URL, SSL lock, page title, progress, WiFi, battery)
     │   ├── address_bar.c       # URL entry & search bar with on-screen keyboard
     │   ├── home_page.c         # Speed dial grid start page
     │   ├── hud.c               # Scrollbar, link preview bar, URL hover status bar

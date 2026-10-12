@@ -63,7 +63,11 @@ static void nowString(char *out, size_t outLen)
 {
     struct PDDateTime t;
     memset(&t, 0, sizeof(t));
-    g_pd->system->convertEpochToDateTime(g_pd->system->getSecondsSinceEpoch(NULL), &t);
+    /* Local wall-clock: convertEpochToDateTime() yields GMT, so add the
+     * timezone offset (SECONDS, signed — NOT minutes, see chrome.c fix). */
+    uint32_t epoch = g_pd->system->getSecondsSinceEpoch(NULL);
+    int32_t tz = g_pd->system->getTimezoneOffset();
+    g_pd->system->convertEpochToDateTime((uint32_t)((int32_t)epoch + tz), &t);
     snprintf(out, outLen, "%02d:%02d:%02d", (int)t.hour, (int)t.minute, (int)t.second);
 }
 
