@@ -49,7 +49,7 @@ static Setting g_settings[16] = {
     {"imageMode", "all", 0, 0}, /* string name; Render All by default */
     {"invertCrank", "", 0, 1}, /* false */
     {"showFps", "", 0, 1}, /* false — FPS overlay off by default */
-    {"displayFps", "", 30, 1}, /* display refresh target: 30 default, 50, or 0 (Uncapped) */
+    {"displayFps", "", 50, 1}, /* display refresh target: 50 default, 30, or 0 (Uncapped) */
     {"jsEnabled", "", 2, 1}, /* JavaScript execution: 0=Off 1=Inline 2=Full (default Full) */
     {"jsEngine", "", 4, 1}, /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS 3=XS 4=XS-NR default (only used when jsEnabled != 0) */
     {"encodingMode", "", 0, 1}, /* Compression: 0=Off/raw identity (default) 1=Gzip */
@@ -369,7 +369,7 @@ void storage_load(void)
     storage_set_setting_str("imageMode", "all"); /* Render All by default */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
     storage_set_setting_int("invertCrank", 0);
-    storage_set_setting_int("displayFps", 30); /* 30 fps default (50 or 0/Uncapped also valid) */
+    storage_set_setting_int("displayFps", 50); /* 50 fps default (30 or 0/Uncapped also valid) */
     storage_set_setting_int("jsEnabled", 2); /* JavaScript execution Full by default */
     storage_set_setting_int("jsEngine", 4); /* XS (No Recursion) engine by default */
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
@@ -713,7 +713,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("mode", 1);       /* Constants.MODE_RAW_HTML (Lua default) */
     storage_set_setting_str("imageMode", "all"); /* Render All by default */
     storage_set_setting_int("showFps", 0); /* FPS overlay off by default */
-    storage_set_setting_int("displayFps", 30); /* 30 fps default (50 or 0/Uncapped also valid) */
+    storage_set_setting_int("displayFps", 50); /* 50 fps default (30 or 0/Uncapped also valid) */
     storage_set_setting_int("jsEnabled", 2); /* JavaScript execution Full by default */
     storage_set_setting_int("jsEngine", 4); /* XS (No Recursion) engine by default */
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */

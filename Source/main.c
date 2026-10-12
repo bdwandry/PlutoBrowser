@@ -3873,16 +3873,16 @@ static void draw_fps_overlay(void)
     pd->graphics->popContext();
 }
 
-/* ── Display FPS (30 default; 50 max; 0 = Uncapped/unrestricted rate) ───── */
+/* ── Display FPS (50 default; 30 low-power; 0 = Uncapped/unrestricted rate) ─ */
 /* Apply the displayFps setting to the OS display + the keyboard component's
  * key-repeat timing (which is frame-count based). Called once at boot and
  * again whenever settings are saved. */
 static void apply_display_fps(void)
 {
     int fps = storage_setting_int("displayFps");
-    if (fps != 50 && fps != 0)
+    if (fps != 30 && fps != 0)
     {
-        fps = 30; /* 30/50/Uncapped(0) valid; 30 is the default */
+        fps = 50; /* 30/50/Uncapped(0) valid; 50 is the default */
     }
     pd->display->setRefreshRate((float)fps);
     if (g_kb)

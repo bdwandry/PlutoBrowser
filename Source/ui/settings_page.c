@@ -223,9 +223,9 @@ void settings_page_open(int prevState)
              im ? im : IMAGE_MODE_NAMES[IMAGE_MODE_ALL]);
     g_staged.showFps = storage_setting_int("showFps");
     g_staged.displayFps = storage_setting_int("displayFps");
-    if (g_staged.displayFps != 50 && g_staged.displayFps != 0)
+    if (g_staged.displayFps != 30 && g_staged.displayFps != 0)
     {
-        g_staged.displayFps = 30; /* 30/50/Uncapped(0) valid — out-of-range → 30 */
+        g_staged.displayFps = 50; /* 30/50/Uncapped(0) valid — out-of-range → 50 */
     }
     g_staged.jsEnabled = storage_setting_int("jsEnabled");
     if (g_staged.jsEnabled < 0 || g_staged.jsEnabled > 2)
