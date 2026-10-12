@@ -93,11 +93,12 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 - **Default Speed Dial**: 10 pre-loaded bookmarks on the home page (Wikipedia, DuckDuckGo Lite, FrogFind, Wiby and more).
 
 ### Rendering
-- **JavaScript Engine (muJS 1.3.10)**: Real ES5 execution wired into the DOM pipeline, toggled via **Settings > Enable Javascript**. Pages can read and mutate the live DOM (`getElementById`, `textContent`, `setAttribute`, `createElement`/`appendChild`/`removeChild`, element `click` listeners with `preventDefault`), use `document.write` during load, and drive live re-renders. Includes hard device-safety limits: instruction run-limit per event, DOM-call budget per page, per-script size cap, and bounded `document.write` capture (runaway scripts are contained, never lock the browser). Not a modern engine: no timers, network (`fetch`/XHR), storage, or ES6+ syntax. Test the engine at `about:javascript`.
+- **JavaScript Engines (default XS-NoRecursion)**: Real script execution wired into the DOM pipeline, toggled via **Settings > JavaScript Execution** (default **Full**). Five vendored stock engines run pages exclusively (Settings cycles **muJS ↔ Duktape ↔ QuickJS ↔ XS (Moddable) ↔ XS (No Recursion)**): muJS 1.3.10, Duktape 2.7.0 (ES5-class), QuickJS 2026-06-04 (ES2023, same DOM surface), and XS with time-sliced bundle evaluation, stepwise parsing, and resumable mounts for deep pages on the 61.8KB game-task stack. Pages can read and mutate the live DOM (`getElementById`, `textContent`, `setAttribute`, `createElement`/`appendChild`/`removeChild`, element `click` listeners with `preventDefault`), use `document.write` during load, fire `setTimeout`/`setInterval` timers between frames, and fetch (`XMLHttpRequest` GET, `fetch` on QuickJS). Hard device-safety limits: instruction run-limit per event, DOM-call budget per page, per-script size cap, and bounded `document.write` capture (runaway scripts are contained, never lock the browser). Test the engine at `about:javascript`.
 - **Dual Browsing Modes**:
   - **Reader Mode**: Distills articles for clean, distraction-free reading.
   - **HTML Mode**: Full visual layout with virtual mouse cursor, interactive forms, and clickable elements.
-- **HTML Elements**: `<h1>`-`<h6>`, `<p>`, `<a>`, `<ul>`/`<ol>`/`<li>`, `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<fieldset>`, `<select>`, `<dialog>`, and `<script>` blocks (Inline mode runs embedded scripts; Full mode additionally downloads and runs `src=` files in page order; Off skips scripts entirely).
+- **HTML Elements**: `<html>`/`<head>`/`<body>`, `<h1>`-`<h6>`, `<p>`, `<div>`/`<span>`, `<a>`, `<ul>`/`<ol>`/`<li>`, semantic containers (`<article>`/`<section>`/`<nav>`/`<header>`/`<footer>`/`<main>`/`<figure>`), `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`/`<wbr>`/`<nobr>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<dialog>`, `<fieldset>`, `<select>`, ruby, text-level semantics, and `<script>` blocks (Inline mode runs embedded scripts; Full mode additionally downloads and runs `src=` files in page order; Off skips scripts entirely). Script pages show an honest `Loading...` state while content arrives.
+- **CSS Engine**: Selectors (child `>`, `:first/last/only/nth-child`, `:link`, `[attr]`, `!important`), `@media` (width/height, print, monochrome, orientation), `::before`/`::after` with `content`/`attr()`, borders, box spacing, tables with `border-collapse`, dithered grays, font-size buckets, `white-space`/`break-word`, and `display` mapping (flex/grid/table linearize for 1-bit). Covered by `about:acidtest`.
 - **Form Support**: Text inputs, checkboxes, radio buttons, dropdowns, submit buttons, hidden fields, and `<button>` elements. Forms are submitted per the HTML spec (hidden inputs included, submit button name/value always appended).
 - **Inline Styles**: Bold, italic, underline, strikethrough, code, small, sub/superscript, text alignment.
 - **`<base href>` Support**: Resolves relative URLs correctly when a base element is present.
@@ -119,24 +120,26 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 
 | Mode | Behavior |
 | :--- | :--- |
-| **Render All** | Downloads and renders every image on the page in the background. Full visual fidelity at the cost of memory and initial load time. |
-| **In-View Only** (default) | Downloads images only when they scroll into the visible viewport. Automatically evicts (frees) images from memory when they scroll off-screen with a 200px buffer. Best balance of visual quality and memory on device. |
+| **Render All** (default) | Downloads and renders every image on the page in the background. Full visual fidelity at the cost of memory and initial load time. |
+| **In-View Only** | Downloads images only when they scroll into the visible viewport. Automatically evicts (frees) images from memory when they scroll off-screen with a 200px buffer. Best balance of visual quality and memory on device. |
 | **On-Demand** | Shows a placeholder card for each image. Tapping an image opens a choice overlay: **(A) View Image** to download and render it, or **(B) Open Link** to follow the hyperlink. Loaded images can be tapped again to **Unload** them from memory. Maximum control over what gets downloaded. |
 | **Hover** | Shows a `[Hover]` placeholder until the cursor (HTML mode) or link selector (Reader mode) moves over the image, then temporarily loads and renders it. The image is evicted from memory as soon as the cursor/selection moves away. Good for quick previews without long-term memory cost. |
 | **Disabled** | Shows an `[Image Off]` placeholder for every image. No images are downloaded or rendered. Maximum frame rate on physical device for text-heavy browsing. |
 
 ### Networking
-- **Dual-Engine HTTP/HTTPS**: Native async socket communication using Playdate OS 2.7+ (`playdate.network.http` & `https`).
+- **Dual-Engine HTTP/HTTPS**: Native async socket communication over raw TCP with SDK TLS, HTTP/1.1 keep-alive, redirect following with depth tracking, and `Accept-Encoding: identity` by default with a gzip fallback (**Settings > Compression**).
 - **HTTP Redirect Handling**: Follows 301/302 redirects with depth tracking.
 - **Chunked Transfer**: Supports chunked transfer-encoding.
 - **Cookie Jar**: Session cookie persistence across requests.
 - **Character Encoding Detection**: Scans `<meta charset>`, `<meta http-equiv="Content-Type">`, BOM markers, and chardet heuristics.
 
 ### User Interface
-- **Display FPS**: Settings option with **30** (default) or **50** fps (the Playdate's hardware maximum). 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
-- **JavaScript Execution**: Settings option with three modes (default **Inline**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run in muJS during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order, with a 64KB per-file cap, a 160KB per-page budget, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
-- **JavaScript Engine**: Settings row selecting the active JS engine — cycles **muJS → Duktape → QuickJS** (persisted) when Execution is Inline or Full, and locks to **Off** when Execution is Off (derived from the Execution policy — it can never disagree with it). Strict engine isolation: the selected engine runs the page exclusively (all inline and external scripts, listeners, `document.write`, click dispatch); the other engines' code is never entered — no mixing, no fallback. All engines are vendored stock and never modified: muJS 1.3.10 (ES5 subset), Duktape 2.7.0 (ES5.1), QuickJS 2026-06-04 (ES2023 with the same browser DOM surface).
-- **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, battery level, reader/HTML mode toggle.
+- **Display FPS**: Settings option with **30** (default), **50**, or **0-Uncapped**. 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
+- **JavaScript Execution**: Settings option with three modes (default **Full**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order, with a 64KB per-file cap, a 160KB per-page budget, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
+- **JavaScript Engine**: Settings row selecting the active JS engine — cycles **muJS ↔ Duktape ↔ QuickJS ↔ XS (Moddable) ↔ XS (No Recursion)** (persisted, default **XS (No Recursion)**) when Execution is Inline or Full, and locks to **Off** when Execution is Off (derived from the Execution policy — it can never disagree with it). Strict engine isolation: the selected engine runs the page exclusively (all inline and external scripts, listeners, `document.write`, click dispatch); the other engines' code is never entered — no mixing, no fallback. All engines are vendored stock and never modified: muJS 1.3.10 (ES5 subset), Duktape 2.7.0 (ES5.1), QuickJS 2026-06-04 (ES2023 with the same browser DOM surface).
+- **Compression**: Settings option (**Off** default, identity-first requests; **Gzip** sends `Accept-Encoding: gzip` with strict accounting and a transparent fallback).
+- **Cached Website**: Settings option (**Off** default) serving snapshot revisits instantly; empty/loading renders are never cached.
+- **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, WiFi indicator, battery level, reader/HTML mode toggle.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
 - **Link Preview**: Bottom HUD displays `-> https://...` for D-pad-selected links in reader mode.
@@ -147,7 +150,7 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 ### Internal Pages
 - `about:home` — Speed Dial start page
 - `about:acidtest` — HTML & image rendering test suite
-- `about:javascript` — JavaScript engine & DOM-integration test suite (PASS/PART/MISS per capability; full demo of supported muJS + DOM features)
+- `about:javascript` — JavaScript engine & DOM-integration test suite (PASS/PART/MISS per capability; full demo of supported engine + DOM features)
 - `about:blank` — Blank page
 - `about:jsext` — External `<script src>` (Full mode) test suite
 
@@ -214,8 +217,13 @@ PlutoBrowser/
     │   ├── storage.c           # Persistent datastore for bookmarks, history, & settings
     │   ├── cookie_jar.c        # Session cookie persistence across requests
     │   ├── encoding.c          # Character encoding detection (charset, BOM, chardet)
+    │   ├── netmon.c            # WiFi status polling with radio-kick backoff
+    │   ├── pluto_mem.c         # funneled allocator with device-envelope budgets
+    │   ├── pluto_snap.c        # Rendered-snapshot cache (empty/loading renders never persist)
+    │   ├── pluto_spill.c       # Disk-backed overflow for large payloads
+    │   ├── pluto_page.c        # Paged document support
     │   ├── tasks.c             # Cooperative task scheduler for async operations
-    │   └── logger.c            # Debug logging
+    │   └── logger.c            # Debug logging (previous-run tail preserved across boot)
     │
     ├── html/                   # HTML parsing & document model
     │   ├── tokenizer.c         # HTML sanitizer & token parser
@@ -223,7 +231,11 @@ PlutoBrowser/
     │   ├── document.c          # Block hierarchy builder, form parsing, meta refresh detection
     │   ├── entities.c          # HTML entity decoder (&amp; &#123; etc.)
     │   ├── readability.c       # Article distillation for reader mode
-    │   ├── jsbridge.c          # muJS engine bridge: document/window/console bindings, DOM objects, click dispatch, document.write adoption
+    │   ├── css.c               # CSS engine: selectors, cascade, box model, 1-bit mapping
+    │   ├── jsbridge.c          # Multi-engine router: document/window/console bindings, DOM objects, click dispatch, document.write adoption, timers, XHR/fetch
+    │   ├── jsbridge_mujs.c / jsbridge_duktape.c / jsbridge_quickjs.c
+    │   │                       # Per-engine bindings (stock engines, never modified)
+    │   ├── jsbridge_xs.c / jsbridge_xs_nr.c  # Stock XS + No-Recursion fork: time-sliced bundler, stepwise parse, resumable mounts
     │   └── jsbridge.h          # Bridge API + device resource limits (run limit, call budget, script caps)
     │
     ├── render/                 # Layout & visual rendering
@@ -261,7 +273,7 @@ PlutoBrowser/
     │   ├── error_page.c        # Error page with retry / search / home options
     │   ├── bookmarks_page.c    # Bookmarks list & management
     │   ├── history_page.c      # Browsing history viewer
-    │   └── settings_page.c     # Settings overlay (search engine, browse mode, image mode, invert crank, clear cookies)
+    │   └── settings_page.c     # Settings overlay (JS execution/engine, display FPS, image mode, compression, website cache, search engine, browse mode, invert crank, clear cookies)
     │
     ├── keyboard/               # On-screen keyboard component
     │   └── keyboard.c          # Full QWERTY input for address bar & form fields
@@ -272,7 +284,7 @@ PlutoBrowser/
     │   ├── strutil.c           # String helpers
     │   └── pdtimer.c           # Timer API bindings
     │
-    ├── js/                     # Vendored muJS 1.3.10 (official ArtifexSoftware release) — lightweight ES5 JavaScript engine
+    ├── js/                     # Vendored stock engines (never modified): muJS 1.3.10, Duktape 2.7.0, QuickJS 2026-06-04, XS (Moddable) + XS No-Recursion fork
     │
     ├── fonts/                  # Roobert font family (Playdate .fnt format)
     │   ├── Roobert-20-Medium.fnt
