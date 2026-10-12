@@ -135,11 +135,12 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 
 ### User Interface
 - **Display FPS**: Settings option with **50** (default), **30**, or **0-Uncapped**. 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
-- **JavaScript Execution**: Settings option with three modes (default **Full**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order, with a 64KB per-file cap, a 160KB per-page budget, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
+- **JavaScript Execution**: Settings option with three modes (default **Full**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order (max 48 script elements, 24 unique external files), with disk-streamed downloads uncapped, a 512KB RAM-resident per-page budget, a 768KB per-script execution ceiling, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
 - **JavaScript Engine**: Settings row selecting the active JS engine — cycles **muJS ↔ Duktape ↔ QuickJS ↔ XS (Moddable) ↔ XS (No Recursion)** (persisted, default **XS (No Recursion)**) when Execution is Inline or Full, and locks to **Off** when Execution is Off (derived from the Execution policy — it can never disagree with it). Strict engine isolation: the selected engine runs the page exclusively (all inline and external scripts, listeners, `document.write`, click dispatch); the other engines' code is never entered — no mixing, no fallback. All engines are vendored stock and never modified: muJS 1.3.10 (ES5 subset), Duktape 2.7.0 (ES5.1), QuickJS 2026-06-04 (ES2023 with the same browser DOM surface).
 - **Compression**: Settings option (**Off** default, identity-first requests; **Gzip** sends `Accept-Encoding: gzip` with strict accounting and a transparent fallback).
 - **Cached Website**: Settings option (**Off** default) serving snapshot revisits instantly; empty/loading renders are never cached.
-- **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, WiFi indicator, battery level, reader/HTML mode toggle.
+- **Clock Format**: Settings option (**12-Hour** default, **24-Hour** alternative) for the chrome-bar clock and history timestamps — always live device-local time, following travel and daylight-saving changes with no restart.
+- **Chrome Bar**: URL display, SSL lock icon, page title, loading progress, local-time clock, WiFi indicator, battery level, reader/HTML mode toggle.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
 - **Link Preview**: Bottom HUD displays `-> https://...` for D-pad-selected links in reader mode.
@@ -200,9 +201,10 @@ PlutoBrowser/
 ├── README.md                   # This file
 ├── AGENTS.md                   # Device deploy & log-collection workflow
 ├── MASTER_TODO.md              # Development roadmap & phase history
-├── tests/                      # Host tests, vector generators, reference outputs
+├── tests/                      # Host-side suites (css/gzip/jsbridge/jsext/json/snap/spill/page/tags), vector generators, reference outputs
+│   ├── build_*.sh                # Per-suite build scripts (css/js/gzip/snap)
 │   ├── gen_p*_vectors.py       # Deterministic test-vector generators (ffmpeg-validated)
-│   ├── p*_host_test.c          # Host-side harnesses for C modules
+│   ├── *_host_test.c           # Host-side harnesses per C module
 │   ├── lua_reference/          # Per-phase Lua reference outputs used to diff the C port
 │   └── logs/                   # Simulator & device run logs
 └── Source/                     # Full C codebase & assets
@@ -237,6 +239,8 @@ PlutoBrowser/
     │   │                       # Per-engine bindings (stock engines, never modified)
     │   ├── jsbridge_xs.c / jsbridge_xs_nr.c  # Stock XS + No-Recursion fork: time-sliced bundler, stepwise parse, resumable mounts
     │   ├── jsbridge_bundler.c        # General-purpose bundler monolith splitter (see jsbridge_bundler.h)
+    │   ├── jsext.c                   # External <script src> slots: page-order execution for Full mode
+    │   ├── qjs_shim_*.c + qjs_pthread_stubs.c  # QuickJS adapters: renamed-symbol includes of the stock sources + single-thread stubs (engines never modified)
     │   └── jsbridge.h          # Bridge API + device resource limits (run limit, call budget, script caps)
     │
     ├── render/                 # Layout & visual rendering
@@ -267,14 +271,14 @@ PlutoBrowser/
     │       └── scale.c         # Image scaling utilities
     │
     ├── ui/                     # User interface components
-    │   ├── chrome.c            # Top toolbar (URL, SSL lock, page title, progress, WiFi, battery)
+    │   ├── chrome.c            # Top toolbar (URL, SSL lock, page title, progress, local-time clock, WiFi, battery)
     │   ├── address_bar.c       # URL entry & search bar with on-screen keyboard
     │   ├── home_page.c         # Speed dial grid start page
     │   ├── hud.c               # Scrollbar, link preview bar, URL hover status bar
     │   ├── error_page.c        # Error page with retry / search / home options
     │   ├── bookmarks_page.c    # Bookmarks list & management
     │   ├── history_page.c      # Browsing history viewer
-    │   └── settings_page.c     # Settings overlay (JS execution/engine, display FPS, image mode, compression, website cache, search engine, browse mode, invert crank, clear cookies)
+    │   └── settings_page.c     # Settings overlay (JS execution/engine, display FPS, image mode, compression, website cache, clock format, search engine, browse mode, invert crank, clear cookies)
     │
     ├── keyboard/               # On-screen keyboard component
     │   └── keyboard.c          # Full QWERTY input for address bar & form fields
@@ -287,16 +291,20 @@ PlutoBrowser/
     │
     ├── js/                     # Vendored stock engines (never modified): muJS 1.3.10, Duktape 2.7.0, QuickJS 2026-06-04, XS (Moddable) + XS No-Recursion fork
     │
-    ├── fonts/                  # Roobert font family (Playdate .fnt format)
-    │   ├── Roobert-20-Medium.fnt
-    │   ├── Roobert-20-Medium-extended.fnt
-    │   ├── Roobert-11-Medium.fnt
-    │   ├── Roobert-11-Medium-Halved.fnt
-    │   ├── Roobert-11-Medium-Numerals.fnt
-    │   ├── Roobert-11-Medium-extended.fnt
-    │   ├── Roobert-11-Mono-Condensed.fnt
-    │   ├── Roobert-10-Bold.fnt
-    │   └── Roobert-10-Bold-Halved.fnt
+    ├── fonts/                  # Roobert font family (Playdate .fnt + table .png pairs)
+    │   ├── Roobert-20-Medium(.fnt)
+    │   ├── Roobert-20-Medium-extended(.fnt)
+    │   ├── Roobert-11-Medium(.fnt)
+    │   ├── Roobert-11-Medium-Halved(.fnt)
+    │   ├── Roobert-11-Medium-Numerals(.fnt)
+    │   ├── Roobert-11-Medium-extended(.fnt)
+    │   ├── Roobert-11-Mono-Condensed(.fnt)
+    │   ├── Roobert-10-Bold(.fnt)
+    │   └── Roobert-10-Bold-Halved(.fnt)
+    │
+    ├── CoreLibs/                 # Bundled Playdate CoreLibs assets (crank notice, keyboard, sfx)
+    │   ├── crank-frames-table-52-38.png / crank-notice-*.png
+    │   └── assets/{crank,keyboard,sfx}/
     │
     ├── images/                 # UI images
     │   └── home_banner.png     # Home page banner graphic
