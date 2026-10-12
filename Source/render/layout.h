@@ -56,7 +56,8 @@ typedef enum
     LRI_HIDDEN_FIELD,
     LRI_PLACEHOLDER,
     LRI_METER,
-    LRI_BOX_FRAME
+    LRI_BOX_FRAME,
+    LRI_SHADE /* CSS gray background: line-dithered fill (x,y,w,h + shade) */
 } LayoutItemType;
 
 /* Per-rect metadata the reference attached to LinkManager rect tables
@@ -121,6 +122,9 @@ typedef struct LayoutItem
     /* LRI_BOX_FRAME (uses x1..y2 above) */
     const char *toggleKey; /* borrowed or NULL */
     int toggleOpen;
+
+    /* LRI_SHADE */
+    int shade; /* 1 = 25% lines, 2 = 50% lines */
 
     /* Back-pointer to the source DocBlock for input items (Lua items alias
      * the block table; form interaction mutates block.value/checked/

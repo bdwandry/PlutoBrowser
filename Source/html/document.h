@@ -38,6 +38,16 @@ typedef struct
     int top, bottom, left, right;
 } DocBoxSpacing;
 
+/* Split an over-wide word into maxW-fitting pieces (UTF-8 safe: never
+ * inside a multibyte sequence; an oversize glyph emits whole). mf(ctx, s)
+ * measures NUL-terminated candidates; emit(ectx, start, n, px, isLast)
+ * fires per piece (start points INTO word — copy it). Single glyphs wider
+ * than maxW emit whole (progress guaranteed). Returns piece count. */
+int doc_split_long_word(const char *word, int maxW,
+                        int (*mf)(void *ctx, const char *s), void *mctx,
+                        void (*emit)(void *ectx, const char *pc, size_t n,
+                                     int w, int isLast),
+                        void *ectx);
 /* ── Meta refresh (port of the metaRefresh table) ────────────────────────── */
 typedef struct
 {
@@ -64,6 +74,17 @@ typedef struct
 #define DOC_INF_STRIKE 0x0200
 #define DOC_INF_INVERT 0x0400
 #define DOC_INF_INERT 0x0800
+/* CSS text controls (css.h CSS_F_* aliases, static-asserted in document.c).
+ * Ride w->flags like all inline flags: inherited through WX_CSS_END
+ * scoping, stamped onto inlines at emission, read by the layout breaker
+ * (PRE newlines force breaks, NOWRAP suppresses wraps). */
+#define DOC_INF_UPPER 0x1000
+#define DOC_INF_LOWER 0x2000
+#define DOC_INF_CAP 0x4000
+#define DOC_INF_PRE 0x8000
+#define DOC_INF_PRELINE 0x10000
+#define DOC_INF_NOWRAP 0x20000
+#define DOC_INF_BREAKWORD 0x40000
 
 typedef struct
 {
@@ -108,6 +129,7 @@ typedef struct
     int header; /* th */
     int colspan;
     int rowspan;
+    int pad; /* CSS cell padding px (halved, snapshot-serialized) */
     char *abbr; /* arena string (may be "") */
     const char *align; /* "center"/"right"/"left" or NULL */
 } DocCell;
@@ -136,6 +158,7 @@ typedef struct
     char *caption; /* arena string ("" when absent) */
     const char *align; /* or NULL */
     int border; /* border attr present and != "0" */
+    int collapse; /* 0 = legacy separators, 1 = collapse, 2 = separate */
     char *width; /* arena string or NULL */
     DocCol **cols; /* heap array of column defs (NULL when no <colgroup>) */
     int colCount;
@@ -195,6 +218,8 @@ typedef struct
     int hasSpacing; /* Lua parity: element blocks carry spacing keys (printed
                      * even when 0); implicit stray-text paragraphs don't. */
     int invert;
+    int border; /* CSS border width px, 0 = none (snapshot-serialized) */
+    int bgGray; /* CSS background luminance, -1 = none (new_block inits) */
     DocInline **inlines; /* heap array */
     int inlineCount;
     int inlineCap;
@@ -202,7 +227,8 @@ typedef struct
     int isOrdered;
     int hasNumber; /* dt/dd have none */
     int number;
-    char markerType; /* '1','a','A','i','I' */
+    char markerType; /* '1','a','A','i','I' + CSS 'd' disc,'c' circle,
+                        's' square,'n' none (layout skips the marker) */
     int depth;
     int dt, dd;
     /* image */

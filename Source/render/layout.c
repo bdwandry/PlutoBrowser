@@ -551,6 +551,53 @@ typedef struct BreakOpts
     int bold;
 } BreakOpts;
 
+/* overflow-wrap:break-word piece emission (one FlowWord per piece, with
+ * the normal wrap check between pieces; the trailing gap lands on the
+ * last piece only). */
+typedef struct
+{
+    FlowLines *fl;
+    FlowLine *cur;
+    LCDFont *font;
+    const DocInline *inl;
+    int maxW;
+    int gap;
+    int *firstWord;
+} BreakPieceCtx;
+
+static int break_piece_measure(void *ctx, const char *s)
+{
+    return measure((LCDFont *)ctx, s);
+}
+
+static void break_piece_emit(void *ectx, const char *pc, size_t n, int w,
+                             int isLast)
+{
+    BreakPieceCtx *c = (BreakPieceCtx *)ectx;
+    char tmp[256];
+    if (n >= sizeof(tmp))
+    {
+        n = sizeof(tmp) - 1;
+    }
+    memcpy(tmp, pc, n);
+    tmp[n] = '\0';
+    int aw = w + (isLast ? c->gap : 0);
+    if (c->cur->width + aw > c->maxW && !*c->firstWord)
+    {
+        flow_push_line(c->fl, c->cur);
+        *c->firstWord = 1;
+        aw = w;
+    }
+    FlowWord fw;
+    fw.text = arena_word(tmp);
+    fw.font = c->font;
+    fw.w = w;
+    fw.advance = aw;
+    fw.inl = c->inl;
+    flow_add_word(c->cur, &fw);
+    *c->firstWord = 0;
+}
+
 static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
                        const BreakOpts *opts, FlowLines *fl)
 {
@@ -619,13 +666,41 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         int n = (int)strlen(text);
         while (pos <= n)
         {
+            /* Newlines survive the walker only from PRE content (<pre> or
+             * CSS white-space:pre/pre-line): they force a line break here.
+             * Normal-mode text never contains \n (collapsed upstream), so
+             * this changes nothing outside pre. Blank lines come from
+             * back-to-back breaks pushing an empty line; a trailing break
+             * with nothing after it is dropped (browser parity). */
+            int sawNL = 0;
             while (pos <= n && is_space_char(text[pos - 1]))
             {
+                if (text[pos - 1] == '\n')
+                {
+                    sawNL = 1;
+                }
                 pos++;
             }
             if (pos > n)
             {
                 break;
+            }
+            if (sawNL && (cur.count > 0 || fl->count > 0))
+            {
+                if (cur.count == 0)
+                {
+                    /* Blank line: the pusher drops empty lines, so plant
+                     * one zero-width word (valid font, empty text draws
+                     * nothing) to hold the line open. */
+                    FlowWord bw;
+                    memset(&bw, 0, sizeof(bw));
+                    bw.text = "";
+                    bw.font = font;
+                    bw.inl = inl;
+                    flow_add_word(&cur, &bw);
+                }
+                flow_push_line(fl, &cur);
+                firstWord = 1;
             }
             int ws = pos; /* word end scan (Lua string.match "^%S+") */
             while (ws <= n && !is_space_char(text[ws - 1]))
@@ -658,7 +733,29 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
             }
 
             int aw = ww + gap;
-            if (cur.width + aw > maxW && !firstWord)
+            /* CSS white-space:nowrap rides the inline flags: suppress the
+             * wrap (the line overflows instead). Explicit <br> still
+             * breaks (handled above, unconditional). */
+            if ((inl->flags & DOC_INF_BREAKWORD) &&
+                !(inl->flags & DOC_INF_NOWRAP) && ww > maxW && maxW > 0)
+            {
+                /* overflow-wrap:break-word — chop the over-wide word;
+                 * nowrap wins over breaking when both are set. */
+                BreakPieceCtx pctx;
+                pctx.fl = fl;
+                pctx.cur = &cur;
+                pctx.font = font;
+                pctx.inl = inl;
+                pctx.maxW = maxW;
+                pctx.gap = gap;
+                pctx.firstWord = &firstWord;
+                doc_split_long_word(word, maxW, break_piece_measure, font,
+                                    break_piece_emit, &pctx);
+                pos = wsEnd;
+                continue;
+            }
+            if (cur.width + aw > maxW && !firstWord &&
+                !(inl->flags & DOC_INF_NOWRAP))
             {
                 flow_push_line(fl, &cur);
                 firstWord = 1;
@@ -838,6 +935,10 @@ void layout_build(DocParseResult *doc)
          * budget check is a no-op (build runs inside the navigation task on
          * device, which owns the frame budget). */
         tasks_report_progress(0.8f + 0.2f * ((float)(bi + 1) / (float)doc->blockCount));
+        /* CSS border top: captured before the branch adds its spacingTop
+         * (margin stays outside the box); the bottom inevitably includes
+         * the branch's spacingBottom (single post-pass point). */
+        int borderTop = currentY;
 
         /* 1. Reader Header Banner */
         if (block->type == DOC_BLOCK_READER_HEADER)
@@ -957,15 +1058,24 @@ void layout_build(DocParseResult *doc)
             int listMaxW = maxWidth - (textIndent - marginX) - 4;
             int lineH = 18;
 
-            if (!isDt && !isDd)
+            if (!isDt && !isDd && block->markerType != 'n')
             {
                 char bulletStr[48];
-                if (block->isOrdered)
+                if (block->isOrdered && block->markerType != 'd' &&
+                    block->markerType != 'c' && block->markerType != 's')
                 {
                     char marker[40];
                     layout_ordered_marker(block->number, block->markerType,
                                           marker, sizeof(marker));
                     snprintf(bulletStr, sizeof(bulletStr), "%s.", marker);
+                }
+                else if (block->markerType == 'c')
+                {
+                    snprintf(bulletStr, sizeof(bulletStr), "o");
+                }
+                else if (block->markerType == 's')
+                {
+                    snprintf(bulletStr, sizeof(bulletStr), "+");
                 }
                 else
                 {
@@ -1693,6 +1803,52 @@ void layout_build(DocParseResult *doc)
             }
             currentY += 8;
         }
+        /* CSS borders (roadmap #2): outline the block's laid-out span
+         * with nested 1px frames (LRI_BOX_FRAME draws square corners —
+         * the spec default; round stays table-only). Widths that would
+         * go degenerate simply stop (no partial frames). */
+        if (block->border > 0 && currentY > borderTop)
+        {
+            int bw = block->border > 3 ? 3 : block->border;
+            for (int k = 0; k < bw; k++)
+            {
+                int fx = marginX + k;
+                int fy = borderTop + k;
+                int fw = maxWidth - 2 * k;
+                int fy2 = currentY - k;
+                if (fw < 1 || fy2 <= fy)
+                {
+                    break;
+                }
+                LayoutItem *bi = item_new(LRI_BOX_FRAME);
+                if (!bi)
+                {
+                    return;
+                }
+                bi->x = fx;
+                bi->y = fy;
+                bi->w = fw;
+                bi->y2 = fy2;
+            }
+        }
+        /* CSS gray backgrounds: one shade item over the block's span.
+         * layout_draw paints shades in a first pass (under content), so
+         * emission order here is irrelevant. Density from luminance:
+         * <160 → 50% lines, else 25%. */
+        if (block->bgGray >= 96 && block->bgGray <= 215 &&
+            currentY > borderTop)
+        {
+            LayoutItem *si = item_new(LRI_SHADE);
+            if (!si)
+            {
+                return;
+            }
+            si->x = marginX;
+            si->y = borderTop;
+            si->w = maxWidth;
+            si->h = currentY - borderTop;
+            si->shade = (block->bgGray < 160) ? 2 : 1;
+        }
     }
 
     int th = currentY + 20;
@@ -2045,7 +2201,19 @@ static void draw_table_box(LayoutItem *item, int drawY)
                 LCDFont *font = cell->header ? style_font(PLUTO_FONT_BODY_BOLD)
                                              : style_font(PLUTO_FONT_SMALL);
                 g_pd->graphics->setFont(font);
-                int maxChars = cw / 7;
+                /* CSS cell padding: inset text, shrink the measure width. */
+                int pad = cell->pad;
+                if (pad < 0)
+                {
+                    pad = 0;
+                }
+                int tcw = cw - pad;
+                if (tcw < 8)
+                {
+                    pad = 0;
+                    tcw = cw;
+                }
+                int maxChars = tcw / 7;
                 if (maxChars < 2)
                 {
                     maxChars = 2;
@@ -2063,14 +2231,14 @@ static void draw_table_box(LayoutItem *item, int drawY)
                 int tw = measure(font, txt);
                 const char *cellAlign =
                     cell->align ? layout_normalize_align(cell->align) : NULL;
-                int tx = cellX;
+                int tx = cellX + pad;
                 if (cellAlign && strcmp(cellAlign, "center") == 0)
                 {
-                    tx = cellX + (cw - tw) / 2;
+                    tx = cellX + pad + (tcw - tw) / 2;
                 }
                 else if (cellAlign && strcmp(cellAlign, "right") == 0)
                 {
-                    tx = cellX + (cw - tw > 0 ? cw - tw : 0);
+                    tx = cellX + pad + (tcw - tw > 0 ? tcw - tw : 0);
                 }
                 g_pd->graphics->drawText(txt, strlen(txt), kUTF8Encoding, tx, rowY);
 
@@ -2105,7 +2273,9 @@ static void draw_table_box(LayoutItem *item, int drawY)
             }
         }
         rowY += 18;
-        if (rowY < drawY + item->h - 4)
+        /* CSS border-collapse: separate (2) skips the row separators;
+         * legacy (0) and collapse (1) draw them. */
+        if (tbl->collapse != 2 && rowY < drawY + item->h - 4)
         {
             g_pd->graphics->drawLine(item->x, rowY - 2, item->x + item->w, rowY - 2,
                                      1, kColorBlack);
@@ -2127,12 +2297,45 @@ void layout_draw(int scrollY)
     g_pd->graphics->fillRect(0, CONTENT_Y, SCREEN_WIDTH, CONTENT_HEIGHT, kColorWhite);
     g_pd->graphics->setClipRect(0, CONTENT_Y, CONTENT_WIDTH, CONTENT_HEIGHT);
 
-    for (int i = 0; i < g_itemCount; i++)
+    /* Two passes: gray shades first (under content), then everything
+     * else. Shades must sit under text — emission order can't do it
+     * (the span is only known post-layout). */
+    for (int pass = 0; pass < 2; pass++)
     {
-        LayoutItem *item = g_items[i];
-        int drawY;
-        switch (item->type)
+        for (int i = 0; i < g_itemCount; i++)
         {
+            LayoutItem *item = g_items[i];
+            int isShade = (item->type == LRI_SHADE);
+            if ((pass == 0) != isShade)
+            {
+                continue;
+            }
+            int drawY;
+            switch (item->type)
+            {
+            case LRI_SHADE:
+            {
+                /* Line-dithered gray: 25% = every 4th row, 50% = every
+                 * other row. Phase-locked to the block top (no scroll
+                 * shimmer). Clipped to the content area like all items. */
+                int y0 = item->y - scrollY;
+                int y1 = y0 + item->h;
+                int step = (item->shade == 2) ? 2 : 4;
+                for (int yy = y0; yy < y1; yy++)
+                {
+                    if (yy < CONTENT_Y || yy > SCREEN_HEIGHT)
+                    {
+                        continue;
+                    }
+                    if (((yy - (item->y - scrollY)) % step) == 0)
+                    {
+                        g_pd->graphics->drawLine(item->x, yy,
+                                                 item->x + item->w, yy, 1,
+                                                 kColorBlack);
+                    }
+                }
+                break;
+            }
         case LRI_TEXT:
         {
             drawY = item->y - scrollY;
@@ -2662,7 +2865,8 @@ void layout_draw(int scrollY)
         default:
             break;
         }
-    }
+        } /* per-item loop */
+    } /* pass loop: shades, then content */
 
     lm_draw_selected_highlight(scrollY);
 

@@ -1135,6 +1135,13 @@ _Static_assert(CSS_F_ITALIC == DOC_INF_ITALIC, "css/doc flag ABI");
 _Static_assert(CSS_F_UNDERLINE == DOC_INF_UNDERLINE, "css/doc flag ABI");
 _Static_assert(CSS_F_STRIKE == DOC_INF_STRIKE, "css/doc flag ABI");
 _Static_assert(CSS_F_INVERT == DOC_INF_INVERT, "css/doc flag ABI");
+_Static_assert(CSS_F_UPPER == DOC_INF_UPPER, "css/doc flag ABI");
+_Static_assert(CSS_F_LOWER == DOC_INF_LOWER, "css/doc flag ABI");
+_Static_assert(CSS_F_CAP == DOC_INF_CAP, "css/doc flag ABI");
+_Static_assert(CSS_F_PRE == DOC_INF_PRE, "css/doc flag ABI");
+_Static_assert(CSS_F_PRELINE == DOC_INF_PRELINE, "css/doc flag ABI");
+_Static_assert(CSS_F_NOWRAP == DOC_INF_NOWRAP, "css/doc flag ABI");
+_Static_assert(CSS_F_BREAKWORD == DOC_INF_BREAKWORD, "css/doc flag ABI");
 
 /* Exit-frame actions (post-children work the Lua handler does inline). */
 enum
@@ -1157,7 +1164,8 @@ enum
     WX_SPAN_END,     /* span/font/time/data/…: fallback + restore style */
     WX_FIGCAP_END,   /* figcaption: restore figureCaptionDone */
     WX_INERT_END,    /* inert attribute: restore state.inert after the subtree */
-    WX_CSS_END       /* CSS-inherited inline flags: restore pre-CSS state */
+    WX_CSS_END,      /* CSS-inherited inline flags: restore pre-CSS state */
+    WX_PSEUDO_END    /* CSS ::after content: emit after the subtree */
 };
 
 typedef struct ExitCtx
@@ -1182,6 +1190,8 @@ typedef struct ExitCtx
     char *formMethod;
     int inertSaved; /* inert attribute: state.inert at entry */
     unsigned cssFlags; /* CSS-inherited inline bits added at entry (restore) */
+    char *pseudoText; /* ::after text (arena), NULL when none */
+    int pseudoBlock; /* ::after renders as a sibling block (not inline) */
 } ExitCtx;
 
 typedef struct WFrame
@@ -1508,6 +1518,7 @@ static DocBlock *new_block(Walker *w, int type)
     }
     memset(b, 0, sizeof(*b));
     b->type = type;
+    b->bgGray = -1; /* no background fill unless CSS sets one */
     b->maxlength = -1;  /* Lua-nil sentinel: absent maxlength prints nothing */
     b->fieldWidth = -1; /* Lua-nil sentinel */
     b->fieldRows = -1;  /* Lua-nil sentinel */
@@ -1594,6 +1605,17 @@ static DocInline *make_text_inline(Walker *w, const char *text, size_t len)
     }
     inl->text = doc_arena_strn(w, text, len);
     inl->flags = w->flags;
+    /* CSS font-size buckets translate to the render flags here (their
+     * CSS_F_* values are deliberately NOT the DOC_INF_SMALL/BIG values
+     * — those collide with the align bits in cssBits). */
+    if (w->flags & CSS_F_FSMALL)
+    {
+        inl->flags |= DOC_INF_SMALL;
+    }
+    if (w->flags & CSS_F_FBIG)
+    {
+        inl->flags |= DOC_INF_BIG;
+    }
     inl->anchorIndex = w->currentAnchorIndex;
     if (w->currentHref)
     {
@@ -1607,8 +1629,12 @@ static DocInline *make_text_inline(Walker *w, const char *text, size_t len)
     return inl;
 }
 
-/* addInlineText (document.lua): collapse [\r\n\t]+ to space unless inPre;
- * skip empty / all-whitespace runs; append to linkText inside a link. */
+/* addInlineText (document.lua): whitespace handling follows the CSS
+ * white-space value in w->flags (inherited): PRE keeps everything,
+ * PRELINE collapses [ \t] runs but keeps newlines, otherwise (normal /
+ * nowrap) [\r\n\t]+ collapse to space. <pre> sets w->inPre, which acts
+ * as PRE. text-transform (UPPER/LOWER/CAP, ASCII-only) applies after
+ * collapsing. Skip empty / all-whitespace runs; append to linkText. */
 static void add_inline_text(Walker *w, const char *raw)
 {
     if (!raw || raw[0] == '\0')
@@ -1616,32 +1642,88 @@ static void add_inline_text(Walker *w, const char *raw)
         return;
     }
     char tmp[512];
-    const char *text = raw;
-    if (!w->inPre)
+    unsigned tflags = w->flags &
+                      (DOC_INF_UPPER | DOC_INF_LOWER | DOC_INF_CAP |
+                       DOC_INF_PRE | DOC_INF_PRELINE);
+    int pre = w->inPre || (tflags & DOC_INF_PRE);
+    int preline = !pre && (tflags & DOC_INF_PRELINE);
+    size_t o = 0;
+    size_t i = 0;
+    int wordStart = 1; /* text-transform: capitalize tracks word starts */
+    while (raw[i] && o + 1 < sizeof(tmp))
     {
-        size_t o = 0;
-        size_t i = 0;
-        while (raw[i] && o + 1 < sizeof(tmp))
+        char c = raw[i];
+        int isNL = (c == '\r' || c == '\n');
+        int isTab = (c == '\t');
+        if (!pre && (isNL || isTab))
         {
-            if (raw[i] == '\r' || raw[i] == '\n' || raw[i] == '\t')
+            if (preline && isNL)
             {
+                /* pre-line keeps the newline (CR or CRLF → one \n). */
+                tmp[o++] = '\n';
+                if (c == '\r' && raw[i + 1] == '\n')
+                {
+                    i++;
+                }
+                wordStart = 1;
+            }
+            else
+            {
+                /* normal/nowrap: run → one space; pre-line tabs/spaces. */
                 tmp[o++] = ' ';
                 while ((raw[i + 1] == '\r' || raw[i + 1] == '\n' ||
-                        raw[i + 1] == '\t') &&
+                        raw[i + 1] == '\t' || raw[i + 1] == ' ') &&
                        i + 2 < sizeof(tmp))
+                {
+                    if (preline && raw[i + 1] == '\n')
+                    {
+                        break; /* a newline ends the spaces run */
+                    }
+                    i++;
+                }
+                wordStart = 1;
+            }
+        }
+        else
+        {
+            /* PRE normalizes CRLF/lone CR to \n (the breaker only breaks
+             * \n; \r is a plain space to it). */
+            if (pre && c == '\r')
+            {
+                c = '\n';
+                if (raw[i + 1] == '\n')
                 {
                     i++;
                 }
             }
-            else
+            if ((tflags & DOC_INF_UPPER) && c >= 'a' && c <= 'z')
             {
-                tmp[o++] = raw[i];
+                c = (char)(c - 32);
             }
-            i++;
+            else if ((tflags & DOC_INF_LOWER) && c >= 'A' && c <= 'Z')
+            {
+                c = (char)(c + 32);
+            }
+            else if ((tflags & DOC_INF_CAP) && wordStart && c >= 'a' &&
+                     c <= 'z')
+            {
+                c = (char)(c - 32);
+            }
+            tmp[o++] = c;
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+            {
+                wordStart = 1;
+            }
+            else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9'))
+            {
+                wordStart = 0;
+            }
         }
-        tmp[o] = '\0';
-        text = tmp;
+        i++;
     }
+    tmp[o] = '\0';
+    const char *text = tmp;
     if (text[0] == '\0')
     {
         return;
@@ -1704,13 +1786,374 @@ static const char *walk_align(Walker *w, AttrList a)
     return NULL;
 }
 
-static int walk_display_none(AttrList a)
+/* CSS list-style-type value → marker code (0 = unknown, keep HTML value).
+ * Codes: '1' decimal, 'a/A' alpha, 'i/I' roman, 'd' disc (*), 'c' circle
+ * (o), 's' square (+), 'n' none (no marker). Only the FIRST token counts
+ * (list-style shorthand: type comes first). */
+static char walk_list_marker(const char *v, size_t vlen)
 {
+    if (!v || vlen == 0)
+    {
+        return 0;
+    }
+    /* first token only */
+    size_t n = 0;
+    while (n < vlen && v[n] != ' ' && v[n] != '\t')
+    {
+        n++;
+    }
+    if (css_val_has(v, n, "lower-roman"))
+    {
+        return 'i';
+    }
+    if (css_val_has(v, n, "upper-roman"))
+    {
+        return 'I';
+    }
+    if (css_val_has(v, n, "lower-alpha"))
+    {
+        return 'a';
+    }
+    if (css_val_has(v, n, "upper-alpha"))
+    {
+        return 'A';
+    }
+    if (css_val_has(v, n, "decimal"))
+    {
+        return '1';
+    }
+    if (css_val_has(v, n, "none"))
+    {
+        return 'n';
+    }
+    if (css_val_has(v, n, "circle"))
+    {
+        return 'c';
+    }
+    if (css_val_has(v, n, "square"))
+    {
+        return 's';
+    }
+    if (css_val_has(v, n, "disc"))
+    {
+        return 'd';
+    }
+    return 0;
+}
+
+/* ── CSS ::before/::after (roadmap #2) ────────────────────────────────────
+ * Generated content renders from the winning `content` declaration among
+ * ::before/::after rules (css_pseudo_content). Value language: quoted
+ * strings plus attr(name) lookups, concatenated ("[" attr(href) "]"
+ * prints link destinations — the killer 1-bit use case). counters,
+ * url(), quote keywords, and bare identifiers (other than none/normal)
+ * drop the WHOLE content (never half-rendered).
+ * Placement: block-level tags get anonymous sibling blocks (order-safe,
+ * never leaks into a parent block); inline tags inject inlines into the
+ * live block. Void/replaced elements (br/hr/img/input/…) and table
+ * internals take no pseudo content (spec + structural safety). */
+
+/* Block-level for pseudo placement (superset of the WX_FLUSH family). */
+static int walk_pseudo_block_tag(const char *tag)
+{
+    static const char *kBlocks[] = {
+        "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote",
+        "pre", "li", "ul", "ol", "dl", "dt", "dd", "form", "section",
+        "article", "aside", "nav", "header", "footer", "main", "figure",
+        "figcaption", "fieldset", "details", "dialog", "center",
+        "marquee", "address", "table", NULL};
+    if (!tag)
+    {
+        return 0;
+    }
+    for (int i = 0; kBlocks[i]; i++)
+    {
+        if (strcmp(tag, kBlocks[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* No generated content here: void/replaced elements plus table internals
+ * (a sibling block would corrupt table structure; inline injection has
+ * no cell-text home). */
+static int walk_pseudo_skip_tag(const char *tag)
+{
+    static const char *kSkip[] = {
+        "br", "hr", "img", "input", "embed", "source", "wbr", "base",
+        "link", "meta", "col", "colgroup", "table", "thead", "tbody",
+        "tfoot", "tr", "td", "th", "caption", "select", "option",
+        "optgroup", "textarea", NULL};
+    if (!tag)
+    {
+        return 1;
+    }
+    for (int i = 0; kSkip[i]; i++)
+    {
+        if (strcmp(tag, kSkip[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Resolve one content value into text. Returns the length (0 = none /
+ * unusable). attr() reads the SUBJECT's walker attrs. */
+static int walk_pseudo_text(AttrList a, const char *v, size_t vlen, char *out,
+                            size_t cap)
+{
+    size_t o = 0;
+    size_t i = 0;
+    while (i < vlen)
+    {
+        while (i < vlen &&
+               (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\r'))
+        {
+            i++;
+        }
+        if (i >= vlen)
+        {
+            break;
+        }
+        if (v[i] == '"' || v[i] == '\'')
+        {
+            char q = v[i++];
+            while (i < vlen && v[i] != q && o + 1 < cap)
+            {
+                out[o++] = v[i++];
+            }
+            if (i < vlen && v[i] == q)
+            {
+                i++;
+            }
+        }
+        else if (i + 5 <= vlen && memcmp(v + i, "attr(", 5) == 0)
+        {
+            i += 5;
+            while (i < vlen && (v[i] == ' ' || v[i] == '\t'))
+            {
+                i++;
+            }
+            size_t ns = i;
+            while (i < vlen && v[i] != ')' && v[i] != ' ' && v[i] != '\t')
+            {
+                i++;
+            }
+            size_t ke = i;
+            while (i < vlen && (v[i] == ' ' || v[i] == '\t'))
+            {
+                i++;
+            }
+            if (i >= vlen || v[i] != ')' || ke == ns)
+            {
+                return 0;
+            }
+            i++; /* ')' */
+            size_t kn = ke - ns;
+            if (kn >= 64)
+            {
+                return 0;
+            }
+            /* bounded NUL copy for the exact-key lookup */
+            char key[64];
+            memcpy(key, v + ns, kn);
+            key[kn] = '\0';
+            /* DOM keys are lowercase; selector authors write lowercase. */
+            for (size_t k = 0; k < kn; k++)
+            {
+                if (key[k] >= 'A' && key[k] <= 'Z')
+                {
+                    key[k] = (char)(key[k] + 32);
+                }
+            }
+            const char *av = attr_val(a, key);
+            if (av)
+            {
+                while (*av && o + 1 < cap)
+                {
+                    out[o++] = *av++;
+                }
+            }
+        }
+        else
+        {
+            /* bare identifier: none/normal = empty content, anything else
+             * (counter(), url(), quotes…) voids the whole value. */
+            size_t ns = i;
+            while (i < vlen && v[i] != ' ' && v[i] != '\t' && v[i] != '\n' &&
+                   v[i] != '\r')
+            {
+                i++;
+            }
+            size_t n = i - ns;
+            if ((n == 4 && memcmp(v + ns, "none", 4) == 0) ||
+                (n == 6 && memcmp(v + ns, "normal", 6) == 0))
+            {
+                /* empty contribution */
+            }
+            else
+            {
+                return 0;
+            }
+        }
+    }
+    if (o < cap)
+    {
+        out[o] = '\0';
+    }
+    return (int)o;
+}
+
+/* Emit generated text: sibling block (flush/emit/seal) or live inline. */
+static void walk_pseudo_emit(Walker *w, const char *text, int asBlock)
+{
+    if (!text || !text[0])
+    {
+        return;
+    }
+    if (asBlock)
+    {
+        flush_current_block(w);
+    }
+    add_inline_text(w, text);
+    if (asBlock)
+    {
+        flush_current_block(w);
+    }
+}
+
+/* CSS border-width value → px (0-3). -1 when absent (v NULL). */
+static int walk_border_width(const char *v, size_t vlen)
+{
+    if (!v)
+    {
+        return -1;
+    }
+    if (css_val_has(v, vlen, "none"))
+    {
+        return 0;
+    }
+    int px = css_px_value(v, vlen);
+    if (px >= 0)
+    {
+        return px > 3 ? 3 : px;
+    }
+    /* bare 0 */
+    const char *t = v;
+    const char *z = v + vlen;
+    while (t < z && (*t == ' ' || *t == '\t'))
+    {
+        t++;
+    }
+    if (t < z && *t == '0' &&
+        (t + 1 >= z || *(t + 1) == ' ' || *(t + 1) == '\t'))
+    {
+        return 0;
+    }
+    if (css_val_has(v, vlen, "thin"))
+    {
+        return 1;
+    }
+    if (css_val_has(v, vlen, "thick"))
+    {
+        return 3;
+    }
+    if (css_val_has(v, vlen, "medium"))
+    {
+        return 2;
+    }
+    return 2; /* style-only border (solid black) reads as medium */
+}
+
+/* Combine winning border-width + border-style into a final px width
+ * (-1 = neither declared). A none/hidden style suppresses unconditionally. */
+static int walk_border_final(const char *wv, size_t wl, const char *sv,
+                             size_t sl)
+{
+    int bw = walk_border_width(wv, wl);
+    if (sv)
+    {
+        if (css_val_has(sv, sl, "none") || css_val_has(sv, sl, "hidden"))
+        {
+            return 0;
+        }
+        if (bw < 0)
+        {
+            bw = 2; /* style-only declaration still draws */
+        }
+    }
+    return bw;
+}
+
+/* CSS display/float box mode for div/span (1-bit subset): 0 = native
+ * box (fall through to the tag handler), 1 = flow (boxless children
+ * into the live block), 2 = fresh paragraph block. Everything
+ * two-dimensional linearizes: flex/grid/table/float all mean "children
+ * in order", which a block already is. inline-block simplifies to block
+ * (full-width 1-bit); table-* flattens (no anonymous table objects);
+ * list-item takes the block (numbering needs ol/ul context). */
+static int walk_display_mode(const char *v, size_t vlen, const char *f,
+                             size_t flen, int isDiv)
+{
+    if (v && vlen > 0)
+    {
+        if (css_val_eq(v, vlen, "inline") || css_val_eq(v, vlen, "contents"))
+        {
+            return isDiv ? 1 : 0;
+        }
+        if (css_val_eq(v, vlen, "block") || css_val_eq(v, vlen, "flow-root") ||
+            css_val_eq(v, vlen, "list-item") || css_val_eq(v, vlen, "flex") ||
+            css_val_eq(v, vlen, "inline-flex") ||
+            css_val_eq(v, vlen, "grid") ||
+            css_val_eq(v, vlen, "inline-grid") ||
+            css_val_eq(v, vlen, "table") ||
+            css_val_eq(v, vlen, "inline-table") ||
+            css_val_eq(v, vlen, "inline-block"))
+        {
+            return isDiv ? 0 : 2;
+        }
+        if (vlen > 6 && vlen <= 20 && (v[0] == 't' || v[0] == 'T') &&
+            (v[1] == 'a' || v[1] == 'A') && (v[2] == 'b' || v[2] == 'B') &&
+            (v[3] == 'l' || v[3] == 'L') && v[4] == '-')
+        {
+            return isDiv ? 0 : 2; /* table-row/cell/caption/…: flatten */
+        }
+    }
+    /* float parallels display (left/right linearize as blocks). */
+    if (f && (css_val_eq(f, flen, "left") || css_val_eq(f, flen, "right")))
+    {
+        return isDiv ? 0 : 2;
+    }
+    return 0;
+}
+
+/* Inline display value (or NULL when the style attribute sets none).
+ * Pointer dangles at the next doc_parse_style call — use immediately. */
+static const char *walk_inline_display(AttrList a)
+{
+    const char *styleStr = attr_val(a, "style");
+    if (!styleStr)
+    {
+        return NULL;
+    }
+    static DocStyle st;
+    doc_parse_style(styleStr, &st);
+    return style_get(&st, "display");
+}
+
+static int walk_display_none(AttrList a){
     if (a.count == 0)
     {
         return 0;
     }
-    if (attr_has(a, "hidden") || attr_has(a, "popover"))
+    /* NOTE: the hidden attribute is NOT handled here — it flows through
+     * the CSS channel (UA-origin display:none, re-showable by author or
+     * inline display; see walk_node). popover stays native: no CSS story
+     * for toggle-part visibility yet. */
+    if (attr_has(a, "popover"))
     {
         return 1;
     }
@@ -1760,7 +2203,17 @@ static int walk_inverted(AttrList a)
     return 0;
 }
 
-static DocBoxSpacing walk_box_spacing(AttrList a)
+/* Forward declarations (walk_box_spacing precedes their definitions). */
+static void walk_class_id(AttrList a, const char **classAttr,
+                          const char **idAttr);
+static int walk_box_px(const char *v, size_t vlen);
+static const void *css_dom_ancestor(const void *node, int i,
+                                    const char **tagLower,
+                                    const char **classAttr,
+                                    const char **idAttr);
+
+static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
+                                      const char *tag, AttrList a)
 {
     DocBoxSpacing out = {0, 0, 0, 0};
     if (a.count == 0)
@@ -1852,7 +2305,170 @@ static DocBoxSpacing walk_box_spacing(AttrList a)
             out.left += box_num(pl);
         }
     }
+    /* CSS margin/padding longhands override the inline hints (author
+     * origin wins). Margin preferred; padding fills sides with no margin
+     * winner (single spacing channel until backgrounds distinguish).
+     * Halved like box_num's Lua-parity scale; negatives clamp to 0. */
+    if (w->doc && w->doc->_css && node && tag)
+    {
+        const char *classAttr = NULL;
+        const char *idAttr = NULL;
+        walk_class_id(a, &classAttr, &idAttr);
+        CssDom sdom;
+        dom_css_dom(&sdom, css_dom_ancestor);
+        static const char *kM[4] = {"margin-top", "margin-right",
+                                    "margin-bottom", "margin-left"};
+        static const char *kP[4] = {"padding-top", "padding-right",
+                                    "padding-bottom", "padding-left"};
+        int *dst[4] = {&out.top, &out.right, &out.bottom, &out.left};
+        CssEngine *eng = (CssEngine *)w->doc->_css;
+        for (int side = 0; side < 4; side++)
+        {
+            size_t vl = 0;
+            const char *v = css_winning_value(eng, tag, classAttr, idAttr,
+                                              &sdom, node, kM[side], &vl);
+            int px = walk_box_px(v, vl);
+            if (px < 0)
+            {
+                vl = 0;
+                v = css_winning_value(eng, tag, classAttr, idAttr, &sdom,
+                                      node, kP[side], &vl);
+                px = walk_box_px(v, vl);
+            }
+            if (px >= 0)
+            {
+                *dst[side] = px;
+            }
+        }
+    }
     return out;
+}
+
+/* CSS box length → halved px (Lua-parity scale). -1 when absent/unparsable
+ * (%/em/trailing junk are not lengths here). */
+static int walk_box_px(const char *v, size_t vlen)
+{
+    if (!v)
+    {
+        return -1;
+    }
+    int px = css_px_value(v, vlen);
+    if (px < 0)
+    {
+        /* bare-number fallback ("10" = 10px) */
+        const char *p = v;
+        const char *z = v + vlen;
+        while (p < z && (*p == ' ' || *p == '\t'))
+        {
+            p++;
+        }
+        int neg = 0;
+        if (p < z && (*p == '-' || *p == '+'))
+        {
+            neg = (*p == '-');
+            p++;
+        }
+        if (p >= z || *p < '0' || *p > '9')
+        {
+            return -1;
+        }
+        int n = 0;
+        while (p < z && *p >= '0' && *p <= '9')
+        {
+            n = n * 10 + (*p - '0');
+            p++;
+        }
+        while (p < z && (*p == ' ' || *p == '\t'))
+        {
+            p++;
+        }
+        if (p != z)
+        {
+            return -1;
+        }
+        px = neg ? -n : n;
+    }
+    if (px < 0)
+    {
+        px = 0;
+    }
+    return px / 2;
+}
+/* Split an over-wide word for overflow-wrap:break-word (see document.h).
+ * Device-stack note: the 256B candidate buffer is transient per call. */
+int doc_split_long_word(const char *word, int maxW,
+                        int (*mf)(void *ctx, const char *s), void *mctx,
+                        void (*emit)(void *ectx, const char *pc, size_t n,
+                                     int w, int isLast),
+                        void *ectx)
+{
+    char tmp[256];
+    int count = 0;
+    size_t segStart = 0;
+    size_t tlen = 0;
+    size_t i = 0;
+    size_t wlen = word ? strlen(word) : 0;
+    tmp[0] = '\0';
+    if (!word || !mf || !emit || maxW <= 0)
+    {
+        return 0;
+    }
+    while (i < wlen)
+    {
+        unsigned char c = (unsigned char)word[i];
+        size_t cl = 1;
+        if ((c & 0x80) == 0)
+        {
+            cl = 1;
+        }
+        else if ((c & 0xE0) == 0xC0)
+        {
+            cl = 2;
+        }
+        else if ((c & 0xF0) == 0xE0)
+        {
+            cl = 3;
+        }
+        else if ((c & 0xF8) == 0xF0)
+        {
+            cl = 4;
+        }
+        if (i + cl > wlen)
+        {
+            cl = wlen - i; /* truncated tail: copy raw */
+        }
+        if (tlen + cl >= sizeof(tmp))
+        {
+            /* Safety flush (pathological glyph widths). */
+            emit(ectx, word + segStart, tlen, mf(mctx, tmp), 0);
+            count++;
+            segStart = i;
+            tlen = 0;
+            tmp[0] = '\0';
+        }
+        memcpy(tmp + tlen, word + i, cl);
+        tlen += cl;
+        tmp[tlen] = '\0';
+        if (mf(mctx, tmp) > maxW && tlen > cl)
+        {
+            /* Back off one codepoint; emit; restart from it. */
+            tlen -= cl;
+            tmp[tlen] = '\0';
+            emit(ectx, word + segStart, tlen, mf(mctx, tmp), 0);
+            count++;
+            segStart = i;
+            memcpy(tmp, word + i, cl);
+            tlen = cl;
+            tmp[tlen] = '\0';
+        }
+        i += cl;
+    }
+    if (tlen > 0)
+    {
+        emit(ectx, word + segStart, tlen, mf(mctx, tmp), 1);
+        count++;
+    }
+    return count;
 }
 
 /* ── Text node ─────────────────────────────────────────────────────────────── */
@@ -1916,6 +2532,14 @@ static void handle_text_node(Walker *w, const DomNode *node)
                     inl->text = doc_arena_str(w, tmp);
                     inl->flags = w->flags & (DOC_INF_BOLD | DOC_INF_ITALIC |
                                              DOC_INF_CODE | DOC_INF_INVERT);
+                    if (w->flags & CSS_F_FSMALL)
+                    {
+                        inl->flags |= DOC_INF_SMALL;
+                    }
+                    if (w->flags & CSS_F_FBIG)
+                    {
+                        inl->flags |= DOC_INF_BIG;
+                    }
                     if (w->currentHref)
                     {
                         inl->flags |= DOC_INF_UNDERLINE;
@@ -2345,6 +2969,25 @@ static const void *css_dom_ancestor(const void *node, int i,
     return n;
 }
 
+/* class/id attributes out of a walker AttrList (CSS matching inputs). */
+static void walk_class_id(AttrList a, const char **classAttr,
+                          const char **idAttr)
+{
+    *classAttr = NULL;
+    *idAttr = NULL;
+    for (int k = 0; k < a.count; k++)
+    {
+        if (!*classAttr && strcmp(a.items[k].key, "class") == 0)
+        {
+            *classAttr = a.items[k].value;
+        }
+        else if (!*idAttr && strcmp(a.items[k].key, "id") == 0)
+        {
+            *idAttr = a.items[k].value;
+        }
+    }
+}
+
 /* Run CSS resolution for one element; returns CSS_F_* bits (0 when the
  * page has no engine). */
 static unsigned walk_css_compute(Walker *w, const DomNode *node,
@@ -2356,19 +2999,9 @@ static unsigned walk_css_compute(Walker *w, const DomNode *node,
     }
     const char *classAttr = NULL;
     const char *idAttr = NULL;
-    for (int k = 0; k < a.count; k++)
-    {
-        if (!classAttr && strcmp(a.items[k].key, "class") == 0)
-        {
-            classAttr = a.items[k].value;
-        }
-        else if (!idAttr && strcmp(a.items[k].key, "id") == 0)
-        {
-            idAttr = a.items[k].value;
-        }
-    }
+    walk_class_id(a, &classAttr, &idAttr);
     CssDom dom;
-    dom.ancestor = css_dom_ancestor;
+    dom_css_dom(&dom, css_dom_ancestor);
     return css_compute((CssEngine *)w->doc->_css, tagLower, classAttr,
                        idAttr, &dom, node);
 }
@@ -2401,7 +3034,7 @@ static void handle_element(Walker *w, const DomNode *node)
             push_children(w, node);
             return;
         }
-        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBoxSpacing sp = walk_box_spacing(w, node, tag, a);
         DocBlock *b = new_block(w, DOC_BLOCK_HEADING);
         if (!b)
         {
@@ -2433,7 +3066,7 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         flush_current_block(w);
-        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBoxSpacing sp = walk_box_spacing(w, node, tag, a);
         DocBlock *b = new_block(w, DOC_BLOCK_PARAGRAPH);
         if (!b)
         {
@@ -2457,7 +3090,7 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         flush_current_block(w);
-        DocBoxSpacing sp = walk_box_spacing(a);
+        DocBoxSpacing sp = walk_box_spacing(w, node, tag, a);
         DocBlock *b = new_block(w, DOC_BLOCK_BLOCKQUOTE);
         if (!b)
         {
@@ -2938,6 +3571,27 @@ static void handle_element(Walker *w, const DomNode *node)
             nc->reversed = 0;
             nc->markerType = '1';
         }
+        /* CSS list-style-type overrides the HTML type attribute (author
+         * origin beats presentational hints). Only the list's OWN rules
+         * apply — nested plain lists keep UA disc/decimal, matching
+         * browsers (UA ul{disc}/ol{decimal} beats inheritance). */
+        if (w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(a, &classAttr, &idAttr);
+            CssDom ldom;
+            dom_css_dom(&ldom, css_dom_ancestor);
+            size_t vlen = 0;
+            const char *v = css_winning_value(
+                (CssEngine *)w->doc->_css, tag, classAttr, idAttr, &ldom,
+                node, "list-style-type", &vlen);
+            char cssMt = walk_list_marker(v, vlen);
+            if (cssMt)
+            {
+                nc->markerType = cssMt;
+            }
+        }
         w->listCtx = nc;
     }
     else if (strcmp(tag, "li") == 0)
@@ -2993,6 +3647,24 @@ static void handle_element(Walker *w, const DomNode *node)
         b->hasNumber = 1;
         b->number = (int)number;
         b->markerType = ctx->markerType ? ctx->markerType : '1';
+        /* list-style-type directly on the li beats the list default. */
+        if (w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(a, &classAttr, &idAttr);
+            CssDom ldom;
+            dom_css_dom(&ldom, css_dom_ancestor);
+            size_t vlen = 0;
+            const char *v = css_winning_value(
+                (CssEngine *)w->doc->_css, tag, classAttr, idAttr, &ldom,
+                node, "list-style-type", &vlen);
+            char cssMt = walk_list_marker(v, vlen);
+            if (cssMt)
+            {
+                b->markerType = cssMt;
+            }
+        }
         b->depth = ctx->depth;
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
@@ -3174,8 +3846,68 @@ static void handle_element(Walker *w, const DomNode *node)
         tbl->gridCount = 0;
         const char *bord = attr_val(a, "border");
         tbl->border = (bord != NULL && strcmp(bord, "0") != 0);
+        /* CSS border overrides the presentational hint (author wins). */
+        if (w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(a, &classAttr, &idAttr);
+            CssDom tdom;
+            dom_css_dom(&tdom, css_dom_ancestor);
+            size_t wl = 0, sl = 0;
+            const char *wv = css_winning_value(
+                (CssEngine *)w->doc->_css, "table", classAttr, idAttr,
+                &tdom, node, "border-width", &wl);
+            const char *sv = css_winning_value(
+                (CssEngine *)w->doc->_css, "table", classAttr, idAttr,
+                &tdom, node, "border-style", &sl);
+            int bw = walk_border_final(wv, wl, sv, sl);
+            if (bw >= 0)
+            {
+                tbl->border = (bw > 0);
+            }
+            /* CSS border-collapse: collapse draws row separators merged
+             * with the outer border; separate skips them. Absent = legacy
+             * (separators drawn, back-compat). */
+            {
+                size_t xcl = 0;
+                const char *xc = css_winning_value(
+                    (CssEngine *)w->doc->_css, "table", classAttr, idAttr,
+                    &tdom, node, "border-collapse", &xcl);
+                if (xc && css_val_has(xc, xcl, "separate"))
+                {
+                    tbl->collapse = 2;
+                }
+                else if (xc && css_val_has(xc, xcl, "collapse"))
+                {
+                    tbl->collapse = 1;
+                }
+            }
+        }
         const char *tw = attr_val(a, "width");
         tbl->width = tw ? doc_arena_str(w, tw) : NULL;
+        /* CSS width AFTER the attribute (author beats the hint; same
+         * string format, so layout consumes it transparently). */
+        if (w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(a, &classAttr, &idAttr);
+            CssDom tdom;
+            dom_css_dom(&tdom, css_dom_ancestor);
+            size_t xwl = 0;
+            const char *xw = css_winning_value(
+                (CssEngine *)w->doc->_css, "table", classAttr, idAttr,
+                &tdom, node, "width", &xwl);
+            if (xw && xwl > 0 && xwl < 64)
+            {
+                char *ws = doc_arena_strn(w, xw, xwl);
+                if (ws)
+                {
+                    tbl->width = ws;
+                }
+            }
+        }
         w->table = tbl;
         for (int i = 0; i < node->childCount; i++)
         {
@@ -4516,6 +5248,14 @@ static void run_exit(Walker *w, ExitCtx *x)
             w->flags = x->flags;
         }
         break;
+    case WX_PSEUDO_END:
+        /* CSS ::after: the element's CSS scope is still live (this frame
+         * runs before WX_CSS_END), so the text inherits element styling. */
+        if (x->pseudoText)
+        {
+            walk_pseudo_emit(w, x->pseudoText, x->pseudoBlock);
+        }
+        break;
     case WX_SPAN_END:
         if (x->fallback &&
             (x->hadInlines < 0 ||
@@ -4579,7 +5319,42 @@ static void walk_node(Walker *w, const DomNode *node)
     {
         return;
     }
-    if (cssHidden)
+    /* Native hidden attribute: fully resolved HERE (before the cssHidden
+     * gate below) because the UA-origin seed sets cssHidden for every
+     * hidden element — including ones CSS re-shows. Show iff an inline
+     * display that is not none beats everything, else iff the author
+     * display winner is not none (any specificity beats the UA seed;
+     * absent author display = the seed stands = hidden). */
+    if (attr_has(a, "hidden"))
+    {
+        int shown = 0;
+        const char *inl = walk_inline_display(a);
+        if (inl && !css_val_has(inl, strlen(inl), "none"))
+        {
+            shown = 1;
+        }
+        if (!shown && w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(a, &classAttr, &idAttr);
+            CssDom dom;
+            dom_css_dom(&dom, css_dom_ancestor);
+            size_t vlen = 0;
+            const char *v = css_winning_value(
+                (CssEngine *)w->doc->_css, node->tag ? node->tag : "",
+                classAttr, idAttr, &dom, node, "display", &vlen);
+            if (v && !css_val_has(v, vlen, "none"))
+            {
+                shown = 1;
+            }
+        }
+        if (!shown)
+        {
+            return;
+        }
+    }
+    else if (cssHidden)
     {
         return;
     }
@@ -4610,7 +5385,116 @@ static void walk_node(Walker *w, const DomNode *node)
             walk_css_apply(w, cssBits);
         }
     }
-    handle_element(w, node);
+    /* CSS ::before/::after generated content (roadmap #2). Runs here so
+     * the element's own CSS flags are live for the before-text; the
+     * after-text rides an exit frame (runs after the children, before
+     * the CSS scope restore). Skipped with no engine. */
+    if (w->doc && w->doc->_css && !walk_pseudo_skip_tag(node->tag))
+    {
+        const char *classAttr = NULL;
+        const char *idAttr = NULL;
+        walk_class_id(a, &classAttr, &idAttr);
+        CssDom pdom;
+        dom_css_dom(&pdom, css_dom_ancestor);
+        const char *ptag = node->tag ? node->tag : "";
+        int asBlock = walk_pseudo_block_tag(ptag);
+        size_t vlen = 0;
+        const char *bv = css_pseudo_content((CssEngine *)w->doc->_css,
+                                            ptag, classAttr, idAttr, &pdom,
+                                            node, 1, &vlen);
+        if (bv && vlen > 0)
+        {
+            char pbuf[256];
+            if (walk_pseudo_text(a, bv, vlen, pbuf, sizeof(pbuf)) > 0)
+            {
+                walk_pseudo_emit(w, pbuf, asBlock);
+            }
+        }
+        const char *av = css_pseudo_content((CssEngine *)w->doc->_css,
+                                            ptag, classAttr, idAttr, &pdom,
+                                            node, 0, &vlen);
+        if (av && vlen > 0)
+        {
+            char abuf[256];
+            if (walk_pseudo_text(a, av, vlen, abuf, sizeof(abuf)) > 0)
+            {
+                ExitCtx *px = push_exit(w, WX_PSEUDO_END);
+                if (px)
+                {
+                    size_t alen = strlen(abuf);
+                    char *acopy =
+                        (char *)doc_arena_alloc(&w->arena, alen + 1);
+                    if (acopy)
+                    {
+                        memcpy(acopy, abuf, alen + 1);
+                        px->pseudoText = acopy;
+                        px->pseudoBlock = asBlock;
+                    }
+                }
+            }
+        }
+    }
+    /* CSS display box-switching for the presentational containers
+     * (roadmap #2 HARD): div/span honor block/inline/flex/grid/table/
+     * contents/float where those differ from the native box. Semantic
+     * tags keep tag behavior (a keeps its link, li its numbering…);
+     * every other tag already linearizes by flowing normally. Handled
+     * here (not in handle_element) so the post-handler CSS below still
+     * attaches to the synthetic block uniformly. */
+    int dispHandled = 0;
+    if (w->doc && w->doc->_css && !w->cell &&
+        ((node->tag && strcmp(node->tag, "div") == 0) ||
+         (node->tag && strcmp(node->tag, "span") == 0)))
+    {
+        const char *ptag = node->tag ? node->tag : "";
+        int isDiv = (ptag[0] == 'd');
+        const char *classAttr = NULL;
+        const char *idAttr = NULL;
+        walk_class_id(a, &classAttr, &idAttr);
+        CssDom ddom;
+        dom_css_dom(&ddom, css_dom_ancestor);
+        CssEngine *deng = (CssEngine *)w->doc->_css;
+        size_t dl = 0, fl = 0;
+        const char *dv = css_winning_value(deng, ptag, classAttr, idAttr,
+                                           &ddom, node, "display", &dl);
+        const char *fv = css_winning_value(deng, ptag, classAttr, idAttr,
+                                           &ddom, node, "float", &fl);
+        int mode = walk_display_mode(dv, dl, fv, fl, isDiv);
+        if (mode == 1)
+        {
+            /* Flow: boxless children into the live block (div goes
+             * inline; span is natively inline). */
+            push_children(w, node);
+            dispHandled = 1;
+        }
+        else if (mode == 2)
+        {
+            /* Fresh block, mirroring the div branch (align/invert/
+             * spacing from inline hints; stylesheet CSS attaches below
+             * through the shared post-handler path). */
+            flush_current_block(w);
+            DocBoxSpacing dsp = walk_box_spacing(w, node, ptag, a);
+            DocBlock *db = new_block(w, DOC_BLOCK_PARAGRAPH);
+            if (!db)
+            {
+                return;
+            }
+            db->align = walk_align(w, a);
+            db->spacingTop = dsp.top;
+            db->spacingBottom = dsp.bottom;
+            db->indent = dsp.left;
+            db->hasSpacing = 1;
+            db->invert = walk_inverted(a);
+            w->currentBlock = db;
+            push_exit(w, WX_FLUSH);
+            push_children(w, node);
+            dispHandled = 1;
+        }
+    }
+    if (!dispHandled)
+    {
+        handle_element(w, node);
+    }
     /* CSS block-level effects (align / invert) — applied AFTER the handler
      * ran so they attach to the block THIS element created (if any), and
      * inline style wins: CSS fills only when the handler left align unset. */
@@ -4632,6 +5516,62 @@ static void walk_node(Walker *w, const DomNode *node)
         if (cssBits & CSS_F_INVERT)
         {
             b->invert = 1;
+        }
+    }
+    /* CSS borders: same attachment point (the handler's fresh block). */
+    if (w->doc && w->doc->_css && w->currentBlock)
+    {
+        const char *classAttr = NULL;
+        const char *idAttr = NULL;
+        walk_class_id(a, &classAttr, &idAttr);
+        CssDom bdom;
+        dom_css_dom(&bdom, css_dom_ancestor);
+        size_t wl = 0, sl = 0;
+        const char *wv = css_winning_value(
+            (CssEngine *)w->doc->_css, node->tag ? node->tag : "",
+            classAttr, idAttr, &bdom, node, "border-width", &wl);
+        const char *sv = css_winning_value(
+            (CssEngine *)w->doc->_css, node->tag ? node->tag : "",
+            classAttr, idAttr, &bdom, node, "border-style", &sl);
+        int bw = walk_border_final(wv, wl, sv, sl);
+        if (bw >= 0)
+        {
+            w->currentBlock->border = bw > 3 ? 3 : bw;
+        }
+        /* CSS backgrounds (walker-owned; the bit channel can't carry
+         * gray bands). Dark (<96) inverts like the old bit mapping;
+         * mid grays fill dithered (layout); light is paper (nothing). */
+        {
+            size_t gl = 0;
+            const char *gv = css_winning_value(
+                (CssEngine *)w->doc->_css, node->tag ? node->tag : "",
+                classAttr, idAttr, &bdom, node, "background-color", &gl);
+            if (gv)
+            {
+                int lum = css_color_luminance(gv, gl);
+                if (lum >= 0 && lum < 96)
+                {
+                    w->currentBlock->invert = 1;
+                }
+                else if (lum >= 96 && lum <= 215)
+                {
+                    w->currentBlock->bgGray = lum;
+                }
+            }
+        }
+        /* CSS text-indent: first-line indent. Single indent channel, so
+         * structural left spacing (margin/padding) wins when set. */
+        if (w->currentBlock->indent == 0)
+        {
+            size_t il = 0;
+            const char *iv = css_winning_value(
+                (CssEngine *)w->doc->_css, node->tag ? node->tag : "",
+                classAttr, idAttr, &bdom, node, "text-indent", &il);
+            int ipx = walk_box_px(iv, il);
+            if (ipx > 0)
+            {
+                w->currentBlock->indent = ipx;
+            }
         }
     }
 }
@@ -5056,6 +5996,33 @@ static void handle_row(Walker *w, const DomNode *trNode, DocTable *tbl)
         }
         cell->abbr = doc_arena_str(w, ab ? ab : "");
         cell->align = walk_align(w, ca);
+        /* CSS cell padding (shorthand, else padding-left; halved px). */
+        if (w->doc && w->doc->_css)
+        {
+            const char *classAttr = NULL;
+            const char *idAttr = NULL;
+            walk_class_id(ca, &classAttr, &idAttr);
+            CssDom cdom;
+            dom_css_dom(&cdom, css_dom_ancestor);
+            CssEngine *ceng = (CssEngine *)w->doc->_css;
+            size_t vl = 0;
+            const char *v = css_winning_value(
+                ceng, cellNode->tag ? cellNode->tag : "", classAttr, idAttr,
+                &cdom, cellNode, "padding", &vl);
+            int px = walk_box_px(v, vl);
+            if (px < 0)
+            {
+                vl = 0;
+                v = css_winning_value(ceng, cellNode->tag ? cellNode->tag : "",
+                                      classAttr, idAttr, &cdom, cellNode,
+                                      "padding-left", &vl);
+                px = walk_box_px(v, vl);
+            }
+            if (px >= 0)
+            {
+                cell->pad = px;
+            }
+        }
 
         w->cell = cell;
         w->cellFirstText = 1;

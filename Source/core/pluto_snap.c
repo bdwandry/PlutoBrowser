@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 1
+#define SNAP_VERSION 2 /* v2: DocBlock.border (CSS borders) */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0
@@ -238,6 +238,7 @@ static void w_cell(SnapWriter *w, const DocCell *c)
     w_i32(w, c->header);
     w_i32(w, c->colspan);
     w_i32(w, c->rowspan);
+    w_i32(w, c->pad); /* SNAP v2 */
     w_str(w, c->abbr);
     w_str(w, c->align);
     for (int i = 0; i < c->inlineCount; i++)
@@ -253,6 +254,7 @@ static int r_cell(SnapReader *r, DocArena *arena, DocCell *c)
     c->header = (int)r_i32(r);
     c->colspan = (int)r_i32(r);
     c->rowspan = (int)r_i32(r);
+    c->pad = (int)r_i32(r); /* SNAP v2 */
     c->abbr = r_str(r, arena);
     c->align = r_str(r, arena);
     if (c->align[0] == '\0')
@@ -330,6 +332,7 @@ static void w_table(SnapWriter *w, const DocTable *t)
     w_str(w, t->caption);
     w_str(w, t->align);
     w_i32(w, t->border);
+    w_i32(w, t->collapse); /* SNAP v2 */
     w_i32(w, t->width ? 1 : 0);
     if (t->width)
     {
@@ -362,6 +365,7 @@ static int r_table(SnapReader *r, DocArena *arena, DocTable *t)
         t->align = NULL;
     }
     t->border = (int)r_i32(r);
+    t->collapse = (int)r_i32(r); /* SNAP v2 */
     int hasWidth = (int)r_i32(r);
     t->width = hasWidth ? r_str(r, arena) : NULL;
     if (t->colCount < 0 || t->colCount > 64 ||
@@ -452,6 +456,8 @@ static void w_block(SnapWriter *w, const DocBlock *b)
     w_i32(w, b->indent);
     w_i32(w, b->hasSpacing);
     w_i32(w, b->invert);
+    w_i32(w, b->border); /* SNAP v2: CSS border width px */
+    w_i32(w, b->bgGray); /* SNAP v2: CSS background luminance */
     w_i32(w, b->inlineCount);
     for (int i = 0; i < b->inlineCount; i++)
     {
@@ -564,6 +570,8 @@ static int r_block(SnapReader *r, DocArena *arena, DocBlock *b)
     b->indent = (int)r_i32(r);
     b->hasSpacing = (int)r_i32(r);
     b->invert = (int)r_i32(r);
+    b->border = (int)r_i32(r); /* SNAP v2 (v1 streams rejected by version) */
+    b->bgGray = (int)r_i32(r); /* SNAP v2 */
     b->inlineCount = (int)r_i32(r);
     if (b->inlineCount < 0 || b->inlineCount > DOC_MAX_INLINES)
     {

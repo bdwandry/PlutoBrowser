@@ -791,6 +791,70 @@ const char *dom_get_attr(const DomNode *node, const char *key)
     return NULL;
 }
 
+const char *dom_css_attr(const void *node, const char *name, size_t namelen)
+{
+    const DomNode *n = (const DomNode *)node;
+    char key[64];
+    if (!n || !name || namelen == 0 || namelen >= sizeof(key))
+    {
+        return NULL;
+    }
+    for (size_t i = 0; i < namelen; i++)
+    {
+        char c = name[i];
+        key[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    key[namelen] = '\0';
+    return dom_get_attr(n, key);
+}
+
+const void *dom_css_sibling(const void *node, int dir)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n || !n->parent || (dir != -1 && dir != 1))
+    {
+        return NULL;
+    }
+    const DomNode *par = n->parent;
+    int idx = -1;
+    for (int i = 0; i < par->childCount; i++)
+    {
+        if (par->children[i] == n)
+        {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0)
+    {
+        return NULL; /* detached (should not happen) */
+    }
+    for (int i = idx + dir; i >= 0 && i < par->childCount; i += dir)
+    {
+        const DomNode *s = par->children[i];
+        if (s && s->kind == DOM_ELEMENT)
+        {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+void dom_css_dom(CssDom *d,
+                 const void *(*ancestor)(const void *node, int i,
+                                         const char **tagLower,
+                                         const char **classAttr,
+                                         const char **idAttr))
+{
+    if (!d)
+    {
+        return;
+    }
+    d->ancestor = ancestor;
+    d->attr = dom_css_attr;
+    d->sibling = dom_css_sibling;
+}
+
 /* ── Runtime DOM mutation API (JavaScript bridge) ────────────────────────── */
 
 int dom_node_id(const DomResult *dom, DomNode *node)
@@ -1374,46 +1438,54 @@ static int qs_compound_of(const DomNode *n, const char **tagLower,
     return 1;
 }
 
-static int qs_matches(const CssSimple *parts, int np, const DomNode *el)
+/* nth-element-ancestor adapter for the shared chain walk. i=0 → parent. */
+static const void *qs_ancestor(const void *node, int i, const char **tagLower,
+                               const char **classAttr, const char **idAttr);
+
+static int qs_matches(const CssSimple *parts, const unsigned char *combs,
+                      int np, const DomNode *el)
 {
     const char *tag = NULL;
     const char *cls = NULL;
     const char *id = NULL;
     qs_compound_of(el, &tag, &cls, &id);
-    if (np == 1)
+    /* One shared ancestor walk with the stylesheet engine
+     * (css_chain_matches) — QS and CSS can never disagree on
+     * descendant/child semantics. */
+    CssDom qsDom;
+    dom_css_dom(&qsDom, qs_ancestor);
+    return css_chain_matches(parts, combs, np, tag, cls, id, &qsDom, el);
+}
+
+/* nth-element-ancestor adapter for the shared chain walk. i=0 → parent. */
+static const void *qs_ancestor(const void *node, int i, const char **tagLower,
+                               const char **classAttr, const char **idAttr)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n)
     {
-        return css_compound_matches_attrs(&parts[0], tag, cls, id);
+        return NULL;
     }
-    /* descendant: subject is the last compound; walk element ancestors
-     * nearest-first consuming compounds right-to-left (css_rule_matches
-     * semantics). */
-    if (!css_compound_matches_attrs(&parts[np - 1], tag, cls, id))
+    for (int d = 0; d <= i; d++)
     {
-        return 0;
-    }
-    int want = np - 2;
-    const DomNode *a = el->parent;
-    while (a && want >= 0)
-    {
-        if (a->kind == DOM_ELEMENT)
+        n = n->parent;
+        if (!n || n->kind != DOM_ELEMENT)
         {
-            const char *atag = NULL;
-            const char *acls = NULL;
-            const char *aid = NULL;
-            qs_compound_of(a, &atag, &acls, &aid);
-            if (css_compound_matches_attrs(&parts[want], atag, acls, aid))
+            if (!n)
             {
-                want--;
+                return NULL;
             }
+            d--; /* non-element ancestor: don't count it */
         }
-        a = a->parent;
     }
-    return want < 0;
+    qs_compound_of(n, tagLower, classAttr, idAttr);
+    return n;
 }
 
 typedef struct
 {
     const CssSimple *parts;
+    const unsigned char *combs; /* combinator before each compound */
     int np;
     int (*emit)(DomNode *el, void *ud);
     void *ud;
@@ -1440,7 +1512,7 @@ static void qs_walk(QsCtx *q, DomNode *n)
         QsFrame *f = &stack[top - 1];
         if (f->nextChild == 0 && f->node->kind == DOM_ELEMENT)
         {
-            if (qs_matches(q->parts, q->np, f->node))
+            if (qs_matches(q->parts, q->combs, q->np, f->node))
             {
                 q->count++;
                 if (!q->found)
@@ -1485,13 +1557,15 @@ int dom_query_selector_all(const DomResult *dom, const DomNode *scope,
         return -1;
     }
     CssSimple parts[CSS_QS_MAX_COMPOUNDS];
-    int np = css_parse_selector(sel, scratch, scratchSize, parts);
+    unsigned char combs[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts, combs);
     if (np <= 0)
     {
         return -1; /* unusable selector → null result, never an exception */
     }
     QsCtx q;
     q.parts = parts;
+    q.combs = combs;
     q.np = np;
     q.emit = emit;
     q.ud = ud;
@@ -1511,13 +1585,15 @@ DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
         return NULL;
     }
     CssSimple parts[CSS_QS_MAX_COMPOUNDS];
-    int np = css_parse_selector(sel, scratch, scratchSize, parts);
+    unsigned char combs[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts, combs);
     if (np <= 0)
     {
         return NULL;
     }
     QsCtx q;
     q.parts = parts;
+    q.combs = combs;
     q.np = np;
     q.emit = NULL; /* NULL emit = stop-at-first mode */
     q.ud = NULL;

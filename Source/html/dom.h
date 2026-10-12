@@ -24,6 +24,7 @@
 
 #include "core/pluto_mem.h"
 #include "html/tokenizer.h"
+#include "html/css.h"
 
 /* Depth cap for the iterative id lookup (dom_node_by_id). Real-world pages
  * nest far shallower; the builder itself has no depth limit, so lookups on
@@ -101,6 +102,25 @@ const DomNode *dom_find_child(const DomNode *node, const char *tag);
 /* Look up an attribute value; returns "" for boolean attributes present,
  * NULL when the attribute does not exist. */
 const char *dom_get_attr(const DomNode *node, const char *key);
+
+/* CSS-engine adapter: length-delimited, case-insensitive attribute lookup
+ * for CssDom.attr. DOM keys are stored lowercased (tokenizer), so the name
+ * is lowered into a bounded stack buffer first; over-long names never
+ * match. Returns the value ("" ok) or NULL when absent. */
+const char *dom_css_attr(const void *node, const char *name, size_t namelen);
+
+/* CSS-engine adapter for structural pseudo-classes: the nearest ELEMENT
+ * sibling in direction dir (-1 = previous, +1 = next), or NULL when none.
+ * Text/comment siblings never count (CSS element-sibling semantics). */
+const void *dom_css_sibling(const void *node, int dir);
+
+/* Fill a CssDom with the shared hooks (attribute + sibling) plus the
+ * caller's ancestor hook — one place so the three never drift. */
+void dom_css_dom(CssDom *d,
+                 const void *(*ancestor)(const void *node, int i,
+                                         const char **tagLower,
+                                         const char **classAttr,
+                                         const char **idAttr));
 
 /* ── Runtime DOM mutation API (JavaScript bridge) ─────────────────────────
  * All allocations come from the DomResult's string arena (or the existing
