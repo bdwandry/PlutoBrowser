@@ -4598,8 +4598,13 @@ static int xs_parse_and_run_mount(JsBridge *b, xsMachine *m, int index,
     {
         unsigned long live0 = pluto_mem_live();
         unsigned long head = pluto_mem_headroom_bytes();
+        unsigned long gc0 = xs_mount_now_ms();
         fxCollectGarbage(m);
         pluto_mem_resync_live();
+        /* Watchdog attribution: a compact collect on a multi-MB heap can
+         * take seconds on the main thread. The logger is synchronous, so
+         * a >3s collect lands on disk even if the OS kills us at 10s. */
+        unsigned long gcMs = xs_mount_now_ms() - gc0;
         /* Host harnesses run without a funnel budget (headroom = SIZE_MAX
          * sentinel) — print "unbounded" instead of 9e15 KB. */
         if (head > (1024UL * 1024UL * 1024UL))
@@ -4613,6 +4618,10 @@ static int xs_parse_and_run_mount(JsBridge *b, xsMachine *m, int index,
             logger_log("[js] mount seg %d: pre-mount squeeze "
                        "live=%luKB->%luKB headroom=%luKB",
                        seg, live0 >> 10, pluto_mem_live() >> 10, head >> 10);
+        }
+        if (gcMs > 3000UL)
+        {
+            logger_log("[watchdog] pre-mount collect took %lums", gcMs);
         }
     }
     /* R29: session alive → the engine must not compact (fxCollect routes
@@ -6321,12 +6330,19 @@ admitted:;
             pluto_mem_headroom_bytes() < (1536UL * 1024UL))
         {
             unsigned long liveBefore = pluto_mem_live();
+            unsigned long gc0b = xs_mount_now_ms();
             fxCollectGarbage(m);
             pluto_mem_resync_live();
+            unsigned long gcMsb = xs_mount_now_ms() - gc0b;
             logger_log("[js] bundle %d seg %d/%d: pre-run compact collect "
                        "live=%luKB→%luKB",
                        index, seg, lastSeg, liveBefore >> 10,
                        pluto_mem_live() >> 10);
+            if (gcMsb > 3000UL)
+            {
+                logger_log("[watchdog] pre-run collect took %lums "
+                           "(seg %d/%d)", gcMsb, seg, lastSeg);
+            }
         }
 #endif
         logger_log("[js] bundle %d seg %d/%d: %ldB — running live=%luKB "

@@ -947,7 +947,8 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
      * path then replays "(Empty Web Page)" forever and the site becomes
      * unreachable from this browser. General-purpose contract, no site
      * hard-coding: doc_is_empty_render() matches the walker's placeholder
-     * shape (a doc with any real content never matches; NOTE the raw
+     * shape — "(Empty Web Page)" or the script-page "Loading..." — (a doc
+     * with any real content never matches; NOTE the raw
      * blockCount==0 case never exists — the walker always inserts the
      * placeholder paragraph, so blockCount is ≥1 by construction). */
     if (doc_is_empty_render(doc))

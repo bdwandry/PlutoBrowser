@@ -335,6 +335,12 @@ typedef struct
      * document_parse_ex after the script policy is known; document_rewalk
      * copies it onto the walker (the browser never sets it by hand). */
     int suppressNoscript;
+    /* Sticky: set when the walker meets a <script> tag (inline or src).
+     * A script page that walks to zero blocks is still loading (its
+     * content arrives when the code runs), so the walker emits a
+     * "Loading..." placeholder instead of "(Empty Web Page)". Never
+     * cleared: memset-0 at doc creation, survives rewalks like the DOM. */
+    int sawScripts;
     /* ── CSS engine (html/css.h; roadmap #2) ──
      * _css owns the parsed <style> rules for this page; heap-allocated,
      * freed by document_free. NULL when the page has no stylesheets.
@@ -425,13 +431,12 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
 int doc_is_noscript_warning(const char *text);
 
 /* R29: True when a walk output is an EMPTY RENDER — the generic
- * "(Empty Web Page)" placeholder paragraph and nothing else (the exact
- * shape the walker inserts in document.c when a page yields no
- * renderable blocks; a page with any real content never matches).
- * pluto_snap_save refuses to persist such a doc and pluto_snap_load
- * treats a persisted one as a MISS, so a server bot-block or a failed
- * first visit can never be immortalized by the fast-path cache.
- * Site-agnostic by construction. */
+ * "(Empty Web Page)" placeholder paragraph (or the "Loading..."
+ * placeholder a script page shows while its content has not arrived yet)
+ * and nothing else. pluto_snap_save refuses to persist such a doc and
+ * pluto_snap_load treats a persisted one as a MISS, so a server bot-block,
+ * a failed first visit, or a mid-load snapshot can never be immortalized
+ * by the fast-path cache. Site-agnostic by construction. */
 int doc_is_empty_render(const DocParseResult *doc);
 
 /* Re-run ONLY the element walker over the (possibly JS-mutated) live DOM

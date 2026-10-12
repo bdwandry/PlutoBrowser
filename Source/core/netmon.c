@@ -136,6 +136,7 @@ int netmon_poll(void)
 {
     static unsigned int g_lastPollMs = 0;
     static unsigned g_lastKickMs = 0;
+    static unsigned g_kickStreak = 0; /* consecutive kicks, no connect seen */
     static int g_lastVisible = -1; /* 0..3 level as last reported */
     PlaydateAPI *pd = pluto_pd();
     if (!pd || !pd->system)
@@ -164,13 +165,26 @@ int netmon_poll(void)
     if ((st == (int)kWifiNotConnected || st == (int)kWifiNotAvailable) &&
         pd->network->setEnabled != NULL)
     {
+        /* Overnight run: wifi flapped every ~30s for 2+ hours and this
+         * kicked the radio every 15s the whole time (298 kicks) — an
+         * all-night setEnabled storm that hammers the radio and the
+         * battery for zero gain. Back off: after 10 unanswered kicks,
+         * drop to one kick per 5 minutes until a connection is seen. */
+        unsigned interval = (g_kickStreak >= 10) ? 300000u
+                                                : RADIO_KICK_INTERVAL_MS;
         unsigned int nowMs = (unsigned int)now;
-        if (g_lastKickMs == 0 || nowMs - g_lastKickMs > RADIO_KICK_INTERVAL_MS)
+        if (g_lastKickMs == 0 || nowMs - g_lastKickMs > interval)
         {
             g_lastKickMs = nowMs;
+            g_kickStreak++;
             pd->network->setEnabled(1, netmon_kick_cb);
-            logger_log("[netmon] radio kick at boot (os status=%d)", st);
+            logger_log("[netmon] radio kick at boot (os status=%d, streak=%u)",
+                       st, g_kickStreak);
         }
+    }
+    else if (st == (int)kWifiConnected)
+    {
+        g_kickStreak = 0; /* a connection answers all outstanding kicks */
     }
 
     /* os_status() lives below; direct call keeps this self-contained. */

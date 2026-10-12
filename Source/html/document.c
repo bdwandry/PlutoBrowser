@@ -695,8 +695,10 @@ static int ns_tail_match(const char *buf, size_t L, const char *tail,
 }
 
 /* R29: the walker's empty-render placeholder, verbatim (document.c
- * inserts it as a single italic paragraph when blockCount would be 0). */
+ * inserts it as a single italic paragraph when blockCount would be 0).
+ * Script pages show DOC_LOADING_TEXT instead while content arrives. */
 #define DOC_EMPTY_RENDER_TEXT "(Empty Web Page)"
+#define DOC_LOADING_TEXT "Loading..."
 
 int doc_is_empty_render(const DocParseResult *doc)
 {
@@ -708,7 +710,10 @@ int doc_is_empty_render(const DocParseResult *doc)
     const DocInline *inl = b->inlines[0];
     if (!inl || inl->type != DOC_INLINE_TEXT || !inl->text)
         return 0;
-    return strcmp(inl->text, DOC_EMPTY_RENDER_TEXT) == 0;
+    /* Both placeholders are uncacheable: a mid-load snapshot must never
+     * be served as page content. */
+    return strcmp(inl->text, DOC_EMPTY_RENDER_TEXT) == 0 ||
+           strcmp(inl->text, DOC_LOADING_TEXT) == 0;
 }
 
 int doc_is_noscript_warning(const char *text)
@@ -4999,6 +5004,10 @@ static void handle_element(Walker *w, const DomNode *node)
              strcmp(tag, "title") == 0)
     {
         /* Non-rendered: content stripped by the tokenizer; must not walk. */
+        if (strcmp(tag, "script") == 0 && w->doc)
+        {
+            w->doc->sawScripts = 1; /* sticky: page runs code (see doc.h) */
+        }
         if (strcmp(tag, "title") == 0)
         {
             /* Post-JS title capture (browser parity): CSR apps set
@@ -5686,7 +5695,16 @@ static void walker_finish(Walker *w)
             DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
             if (inl)
             {
-                inl->text = doc_arena_str(w, "(Empty Web Page)");
+                /* Script pages walk to zero blocks while their content is
+                 * still arriving (bundle downloading/evaluating, framework
+                 * render pending) — say so instead of crying empty. Only
+                 * when scripting is actually on (suppressNoscript): with
+                 * JavaScript off, no content is coming and Empty is true. */
+                int loading = w->doc->suppressNoscript &&
+                              (w->doc->sawScripts ||
+                               w->doc->extScriptCount > 0);
+                inl->text = doc_arena_str(w, loading ? "Loading..."
+                                                     : "(Empty Web Page)");
                 inl->flags = DOC_INF_ITALIC;
                 if (doc_ptrarr_push((void ***)&b->inlines, &b->inlineCount,
                                     &b->inlineCap, inl))

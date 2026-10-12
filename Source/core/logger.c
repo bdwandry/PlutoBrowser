@@ -67,16 +67,68 @@ static void nowString(char *out, size_t outLen)
     snprintf(out, outLen, "%02d:%02d:%02d", (int)t.hour, (int)t.minute, (int)t.second);
 }
 
+/* Previous-run tail preservation: logger_init used to truncate the log on
+ * every boot, destroying exactly the evidence a watchdog kill needs (the
+ * lines written just before death). Keep the last 8KB under a marker.
+ * Bounded: the old tail is re-truncated every boot, never accumulates.
+ * BSS buffer: the device game-task stack is tiny, no 8KB locals. */
+#define LOG_TAIL_KEEP (8 * 1024)
+static char g_logTail[LOG_TAIL_KEEP];
+static int g_logTailLen = 0;
+
+static void logger_read_tail(void)
+{
+    g_logTailLen = 0;
+    if (!g_pd || !g_pd->file)
+    {
+        return;
+    }
+    SDFile *f = g_pd->file->open(LOG_PATH, kFileReadData);
+    if (!f)
+    {
+        return; /* first boot: no previous log */
+    }
+    /* Sliding window: keep only the last LOG_TAIL_KEEP bytes. */
+    char chunk[1024];
+    int n;
+    while ((n = g_pd->file->read(f, chunk, sizeof(chunk))) > 0)
+    {
+        if (g_logTailLen + n <= LOG_TAIL_KEEP)
+        {
+            memcpy(g_logTail + g_logTailLen, chunk, (size_t)n);
+            g_logTailLen += n;
+        }
+        else
+        {
+            int over = g_logTailLen + n - LOG_TAIL_KEEP;
+            memmove(g_logTail, g_logTail + over, (size_t)(g_logTailLen - over));
+            g_logTailLen = LOG_TAIL_KEEP - n;
+            memcpy(g_logTail + g_logTailLen, chunk, (size_t)n);
+            g_logTailLen = LOG_TAIL_KEEP;
+        }
+    }
+    g_pd->file->close(f);
+}
+
 void logger_init(PlaydateAPI *playdate)
 {
     g_pd = playdate;
     g_seq = 0;
 
+    logger_read_tail();
     SDFile *f = g_pd->file->open(LOG_PATH, kFileWrite);
     if (f)
     {
         g_pd->file->write(f, "=== PlutoBrowser crash log ===\n", 31);
         g_pd->file->write(f, "gamePath: com.bryanwandrych.plutobrowser\n", 41);
+        if (g_logTailLen > 0)
+        {
+            const char *mark = "--- previous run tail (truncated to 8KB) ---\n";
+            g_pd->file->write(f, mark, (unsigned int)strlen(mark));
+            g_pd->file->write(f, g_logTail, (unsigned int)g_logTailLen);
+            const char *end = "--- end previous tail / new boot ---\n";
+            g_pd->file->write(f, end, (unsigned int)strlen(end));
+        }
         g_pd->file->close(f);
     }
 }

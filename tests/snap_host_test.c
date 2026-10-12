@@ -509,6 +509,30 @@ int main(void)
               "empty render is not cached");
         free_fake_doc(empty);
     }
+    /* 5c. The "Loading..." placeholder (script pages awaiting content)
+     * matches too: a mid-load snapshot must never be served as content. */
+    {
+        DocParseResult *loading = build_fake_doc();
+        for (int i = 0; i < loading->blockCount; i++)
+        {
+            loading->blocks[i] = NULL;
+        }
+        loading->blockCount = 0;
+        DocBlock *p = add_block(loading, DOC_BLOCK_PARAGRAPH);
+        {
+            DocInline *in = mk_inline(g_a, DOC_INLINE_TEXT,
+                                      "Loading...", DOC_INF_ITALIC,
+                                      NULL);
+            push_ptr((void ***)&p->inlines, &p->inlineCount, &p->inlineCap,
+                     in);
+        }
+        CHECK(doc_is_empty_render(loading) == 1,
+              "loading placeholder detected as empty render");
+        CHECK(pluto_snap_save(loading, "https://example.com/loading",
+                              MODE_RAW_HTML, 1000003UL) == 0,
+              "loading render refuses to save");
+        free_fake_doc(loading);
+    }
 
     /* 6. re-save for the LRU test + a second url */
     CHECK(pluto_snap_save(orig, URL, MODE_RAW_HTML, 1000000UL) > 0, "re-save ok");
