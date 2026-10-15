@@ -1928,7 +1928,126 @@ static int walk_pseudo_text(AttrList a, const char *v, size_t vlen, char *out,
             char q = v[i++];
             while (i < vlen && v[i] != q && o + 1 < cap)
             {
-                out[o++] = v[i++];
+                if (v[i] == '\\' && i + 1 < vlen)
+                {
+                    /* CSS escape inside content strings (CSS Syntax §4.3.7):
+                     * \[1-6 hex digits][optional whitespace] is the code
+                     * point; backslash-newline vanishes; any other escaped
+                     * char is itself. Without this, Wikipedia's hlist
+                     * separators ("\a0 · ") render as literal "\a0" garbage.
+                     * Unrepresentable code points follow the entities.c
+                     * convention (NBSP → space, middot → '*'; our fonts
+                     * lack both glyphs), everything else goes out UTF-8. */
+                    size_t j = i + 1;
+                    unsigned cp = 0;
+                    int ndig = 0;
+                    while (j < vlen && ndig < 6)
+                    {
+                        char h = v[j];
+                        int hv = -1;
+                        if (h >= '0' && h <= '9')
+                        {
+                            hv = h - '0';
+                        }
+                        else if (h >= 'a' && h <= 'f')
+                        {
+                            hv = h - 'a' + 10;
+                        }
+                        else if (h >= 'A' && h <= 'F')
+                        {
+                            hv = h - 'A' + 10;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                        cp = cp * 16 + (unsigned)hv;
+                        j++;
+                        ndig++;
+                    }
+                    if (ndig > 0)
+                    {
+                        /* One trailing whitespace terminates the escape
+                         * (consumed, not content). */
+                        if (j < vlen && (v[j] == ' ' || v[j] == '\t' ||
+                                         v[j] == '\n' || v[j] == '\r'))
+                        {
+                            j++;
+                        }
+                        i = j;
+                        if (cp == 0xA0)
+                        {
+                            out[o++] = ' ';
+                        }
+                        else if (cp == 0xB7)
+                        {
+                            out[o++] = '*';
+                        }
+                        else if (cp != 0 && o + 4 < cap)
+                        {
+                            if (cp < 0x80)
+                            {
+                                out[o++] = (char)cp;
+                            }
+                            else if (cp < 0x800)
+                            {
+                                out[o++] = (char)(0xC0 | (cp >> 6));
+                                out[o++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                            else if (cp < 0x10000)
+                            {
+                                out[o++] = (char)(0xE0 | (cp >> 12));
+                                out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                out[o++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                            else if (cp <= 0x10FFFF)
+                            {
+                                out[o++] = (char)(0xF0 | (cp >> 18));
+                                out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                                out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                out[o++] = (char)(0x80 | (cp & 0x3F));
+                            }
+                        }
+                    }
+                    else if (v[j] == '\n')
+                    {
+                        i = j + 1; /* escaped newline vanishes */
+                    }
+                    else
+                    {
+                        /* \" → ", \\ → \, etc. */
+                        if (o + 1 < cap)
+                        {
+                            out[o++] = v[j];
+                        }
+                        i = j + 1;
+                    }
+                }
+                else if ((unsigned char)v[i] == 0xC2 && i + 1 < vlen &&
+                         o + 1 < cap)
+                {
+                    /* Literal U+00A0/U+00B7 bytes: same transliteration
+                     * (sheets use both the escape and literal forms). */
+                    unsigned char c2 = (unsigned char)v[i + 1];
+                    if (c2 == 0xA0)
+                    {
+                        out[o++] = ' ';
+                        i += 2;
+                    }
+                    else if (c2 == 0xB7)
+                    {
+                        out[o++] = '*';
+                        i += 2;
+                    }
+                    else
+                    {
+                        out[o++] = v[i++];
+                    }
+                }
+                else
+                {
+                    out[o++] = v[i++];
+                }
             }
             if (i < vlen && v[i] == q)
             {
@@ -2018,6 +2137,28 @@ static void walk_pseudo_emit(Walker *w, const char *text, int asBlock)
     if (!text || !text[0])
     {
         return;
+    }
+    /* Pure-ASCII-punctuation generated content (hlist separators like
+     * " * ", parens) renders as stray star-only lines in vertical flow —
+     * desktop shows them inline between items, we have no inline home
+     * for sibling blocks. Drop them (real generated content always
+     * carries alphanumerics or non-ASCII text, which is kept). */
+    {
+        int hasContent = 0;
+        for (const char *p = text; *p; p++)
+        {
+            unsigned char c = (unsigned char)*p;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') || c >= 0x80)
+            {
+                hasContent = 1;
+                break;
+            }
+        }
+        if (!hasContent)
+        {
+            return;
+        }
     }
     if (asBlock)
     {

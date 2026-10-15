@@ -1049,6 +1049,22 @@ void layout_build(DocParseResult *doc)
         /* 4. Lists (ul / ol / dl) */
         else if (block->type == DOC_BLOCK_LIST_ITEM)
         {
+            /* Empty list items (no inlines, no image/table of their own)
+             * render nothing: skip the bullet AND the vertical advance,
+             * then continue with the next block (NOT return — this branch
+             * runs inside layout's per-block loop, and returning would
+             * abandon the rest of the page: no scroll, missing content).
+             * These are split artifacts — <li><a><img></a></li> emits the
+             * image as its own block (which already carries the link
+             * target for tapping), leaving the li shell empty. Genuine
+             * contentless <li></li> is vanishingly rare; desktop parity
+             * for it is not worth phantom bullets site-wide. */
+            if (block->inlineCount == 0 && !block->src && !block->table)
+            {
+                /* fall through without emitting: no bullet, no advance */
+            }
+            else
+            {
             int depth = block->depth ? block->depth : 1;
             int isDt = block->dt;
             int isDd = block->dd;
@@ -1105,6 +1121,7 @@ void layout_build(DocParseResult *doc)
             emit_flow(&fl, lh, textIndent, listMaxW, align, currentY, 0);
             currentY = currentY + lh * fl.count + 6;
             flow_free(&fl);
+            } /* end non-empty list item */
         }
         /* 5. Code Blocks */
         else if (block->type == DOC_BLOCK_CODE_BLOCK)
