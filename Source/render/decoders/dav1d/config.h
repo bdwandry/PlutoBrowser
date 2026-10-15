@@ -43,8 +43,19 @@
 
 #define HAVE_ALIGNED_ALLOC 0 /* newlib's aligned_alloc links against a
  * missing posix_memalign on bare metal (link failure) — do not enable. */
-#define HAVE_MEMALIGN 1 /* newlib memalign (declared in malloc.h, freed by
- * plain free) covers dav1d's 32/64B frame-buffer alignment. */
+/* Aligned allocation is selected PER TARGET (command line overrides this
+ * default; the #ifndef guards make the -D win without redefine warnings):
+ * device (DAV1D_CPFLAGS): -DHAVE_MEMALIGN=1 — newlib memalign, freed by
+ *   plain free, covers dav1d's 32/64B frame-buffer alignment.
+ * sim (DYLIB_FLAGS): -DHAVE_POSIX_MEMALIGN=1 — macOS has no memalign(3)
+ *   (and no <malloc.h>, which mem.h includes when HAVE_MEMALIGN is set),
+ *   but does have posix_memalign. */
+#ifndef HAVE_MEMALIGN
+#define HAVE_MEMALIGN 0
+#endif
+#ifndef HAVE_POSIX_MEMALIGN
+#define HAVE_POSIX_MEMALIGN 0
+#endif
 #define HAVE_ASM 0
 #define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0
 #define HAVE_AS_ARCHEXT_I8MM_DIRECTIVE 0
@@ -60,7 +71,6 @@
 #define HAVE_GETAUXVAL 0
 #define HAVE_I8MM 0
 #define HAVE_IO_H 0
-#define HAVE_POSIX_MEMALIGN 0
 #define HAVE_PTHREAD_GETAFFINITY_NP 0
 #define HAVE_PTHREAD_NP_H 0
 #define HAVE_PTHREAD_SETAFFINITY_NP 0

@@ -236,4 +236,7 @@ int dom_is_paged(const DomNode *node);
  * exposed for tests). Strings live in the doc's arena — they die with it. */
 void dom_page_free_subtree(DomNode *n);
 
+/* TEMP INSTRUMENTATION (Wikipedia stall hunt — REMOVE after diagnosis). */
+void dom_log_qs_stats(void);
+
 #endif /* PLUTO_DOM_H */

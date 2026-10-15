@@ -290,7 +290,14 @@ int css_val_eq(const char *val, size_t vlen, const char *lit);
 int css_px_value(const char *val, size_t vlen);
 
 /* Color → 0-255 luminance (#rgb/#rrggbb/named/rgb(); non-gray colors by
- * luminance — the 1-bit approximation). -1 when no color found. */
+ * luminance — the 1-bit approximation). -1 when absent. */
 int css_color_luminance(const char *val, size_t vlen);
+
+/* TEMP INSTRUMENTATION (Wikipedia stall hunt — REMOVE after diagnosis). */
+void css_log_stats(void);
+
+/* Per-element match-mask memo generation: bump at each top-level walk
+ * (parse + rewalk); consult/fill is internal to css_compute/winning. */
+void css_match_cache_bump(void);
 
 #endif /* PLUTO_CSS_H */

@@ -17,7 +17,127 @@
  */
 #include "css.h"
 
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
+
+#include "core/logger.h"
+
+/* TEMP INSTRUMENTATION (Wikipedia stall hunt — REMOVE after diagnosis):
+ * workload counters for the style-matching phase. */
+static unsigned long g_cssComputeCalls = 0;
+static unsigned long g_cssRuleTests = 0;
+static unsigned long g_cssChainCalls = 0;
+static unsigned long g_cssSibSteps = 0;
+static unsigned long g_cssAncSteps = 0;
+static clock_t g_cssTicks = 0;
+static clock_t g_cssWinTicks = 0;
+static clock_t g_cssWinTicks0 = 0;
+static clock_t g_cssWinTicks12 = 0;
+
+void css_log_stats(void)
+{
+    logger_log("[css-stats] compute=%lu rules=%lu chain=%lu sib=%lu anc=%lu ms=%lu winms=%lu w0=%lu w12=%lu",
+               g_cssComputeCalls, g_cssRuleTests, g_cssChainCalls,
+               g_cssSibSteps, g_cssAncSteps,
+               (unsigned long)(g_cssTicks * 1000 / CLOCKS_PER_SEC),
+               (unsigned long)(g_cssWinTicks * 1000 / CLOCKS_PER_SEC),
+               (unsigned long)(g_cssWinTicks0 * 1000 / CLOCKS_PER_SEC),
+               (unsigned long)(g_cssWinTicks12 * 1000 / CLOCKS_PER_SEC));
+}
+
+/* ── Per-element match-mask memo ───────────────────────────────────────
+ * css_compute tests every rule once per element; css_winning_value (and
+ * pseudo content) for the SAME element then re-test the same rules. The
+ * mask records each rule's outcome so later lookups skip re-matching and
+ * only re-run the cascade for matching rules (few). Pure memoization:
+ * DOM + engine are frozen mid-walk, so reuse is exact. Keyed by
+ * (node, engine, generation, pseudo-lane): engine guards arena-reused
+ * pointers across documents; generation (bumped at each top-level walk)
+ * guards JS mutations between walks. Direct-mapped collisions just
+ * recompute. ruleCount never exceeds CSS_MAX_RULES (128): bits beyond
+ * the mask always re-test. */
+#define CSS_MASK_SIZE 128
+typedef struct
+{
+    const void *node;
+    const void *eng;
+    unsigned gen;
+    unsigned char pseudo;
+    unsigned char pad[3];
+    uint64_t lo;
+    uint64_t hi;
+    /* Winning specificity per matching rule (max over the rule's MATCHING
+     * selectors, exactly as the cascade computes it). Lets consults skip
+     * chain re-matching entirely: spec comes from storage, values from
+     * the (static) rule. Rules that didn't match read 0 here AND have a
+     * clear bit — belt and suspenders against stale reuse. */
+    unsigned short spec[CSS_MAX_RULES];
+} CssMaskEntry;
+static CssMaskEntry g_maskCache[CSS_MASK_SIZE];
+static unsigned g_maskGen = 1;
+
+void css_match_cache_bump(void)
+{
+    g_maskGen++;
+    if (g_maskGen == 0)
+    {
+        g_maskGen = 1;
+        memset(g_maskCache, 0, sizeof(g_maskCache));
+    }
+}
+
+/* Fetch: 1 + entry borrowed (spec array read-only through the call;
+ * single thread, no mutation mid-lookup). */
+static int css_mask_fetch(const void *node, const void *eng,
+                          unsigned char pseudo, uint64_t *lo, uint64_t *hi,
+                          const unsigned short **spec)
+{
+    CssMaskEntry *e;
+    if (!node)
+    {
+        return 0;
+    }
+    e = &g_maskCache[(((uintptr_t)node) >> 3) & (CSS_MASK_SIZE - 1)];
+    if (e->node == node && e->eng == eng && e->gen == g_maskGen &&
+        e->pseudo == pseudo)
+    {
+        *lo = e->lo;
+        *hi = e->hi;
+        if (spec)
+        {
+            *spec = e->spec;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static void css_mask_store(const void *node, const void *eng,
+                           unsigned char pseudo, uint64_t lo, uint64_t hi,
+                           const unsigned short *spec)
+{
+    CssMaskEntry *e;
+    if (!node)
+    {
+        return;
+    }
+    e = &g_maskCache[(((uintptr_t)node) >> 3) & (CSS_MASK_SIZE - 1)];
+    e->node = node;
+    e->eng = eng;
+    e->gen = g_maskGen;
+    e->pseudo = pseudo;
+    e->lo = lo;
+    e->hi = hi;
+    if (spec)
+    {
+        memcpy(e->spec, spec, sizeof(e->spec));
+    }
+    else
+    {
+        memset(e->spec, 0, sizeof(e->spec));
+    }
+}
 
 /* ── tiny utils ───────────────────────────────────────────────────────────── */
 static int css_isspace(char c)
@@ -1813,36 +1933,47 @@ int css_compound_matches(const CssSimple *c, const char *tagLower,
                 return 0;
             }
         }
+        else if (c->pclass == 1)
+        {
+            /* :first-child = no previous ELEMENT sibling. One hook call
+             * with early exit — NOT a full backward count. The old code
+             * walked to the start (O(position) hook calls, each O(siblings)
+             * internally = O(n^3) per sibling list), which stalled the
+             * 10s run-loop watchdog on list-heavy pages (Wikipedia main).
+             * dom->sibling skips non-elements, so existence ⟺ idx != 1. */
+            if (dom->sibling(node, -1) != NULL)
+            {
+                return 0;
+            }
+        }
+        else if (c->pclass == 2)
+        {
+            if (dom->sibling(node, 1) != NULL)
+            {
+                return 0;
+            }
+        }
+        else if (c->pclass == 3)
+        {
+            /* :only-child = neither direction has an element sibling. */
+            if (dom->sibling(node, -1) != NULL ||
+                dom->sibling(node, 1) != NULL)
+            {
+                return 0;
+            }
+        }
         else
         {
+            /* :nth-child and anything future: full 1-based element
+             * position (the only branch that needs the count). */
             int idx = 1;
             const void *s = node;
             while ((s = dom->sibling(s, -1)) != NULL)
             {
+                g_cssSibSteps++; /* TEMP stall stats */
                 idx++;
             }
-            if (c->pclass == 1)
-            {
-                if (idx != 1)
-                {
-                    return 0;
-                }
-            }
-            else if (c->pclass == 2)
-            {
-                if (dom->sibling(node, 1) != NULL)
-                {
-                    return 0;
-                }
-            }
-            else if (c->pclass == 3)
-            {
-                if (idx != 1 || dom->sibling(node, 1) != NULL)
-                {
-                    return 0;
-                }
-            }
-            else if (c->pclass == 5)
+            if (c->pclass == 5)
             {
                 int na = c->nthA;
                 int nb = c->nthB;
@@ -1862,6 +1993,8 @@ int css_compound_matches(const CssSimple *c, const char *tagLower,
                     }
                 }
             }
+            /* Unknown pclass values: no constraint (match), exactly as
+             * before — only 1,2,4,5 are assigned by the parser. */
         }
     }
     if (!c->typeLen && !c->clsLen && !c->idLen && !c->universal &&
@@ -1877,6 +2010,7 @@ int css_chain_matches(const CssSimple *parts, const unsigned char *combs,
                       const char *idAttr, const CssDom *dom, const void *node)
 {
     static const unsigned char kDesc[CSS_COMPOUND_MAX] = {0};
+    g_cssChainCalls++; /* TEMP stall stats */
     if (!parts || np <= 0 || np > CSS_COMPOUND_MAX)
     {
         return 0;
@@ -1912,6 +2046,7 @@ int css_chain_matches(const CssSimple *parts, const unsigned char *combs,
             const char *atag = NULL;
             const char *acls = NULL;
             const char *aid = NULL;
+            g_cssAncSteps++; /* TEMP stall stats */
             const void *a = dom->ancestor(node, ai, &atag, &acls, &aid);
             if (!a)
             {
@@ -2351,33 +2486,92 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
         have = 1;
     }
 
+    /* Mask consult: a previous lookup for this (element, pseudo-lane)
+     * already tested every rule. Hit: only matching rules reach the
+     * cascade below, with their stored winning specificity (no chains). */
+    uint64_t mlo = 0, mhi = 0;
+    const unsigned short *storedSpec = NULL;
+    unsigned short fillSpec[CSS_MAX_RULES];
+    clock_t wt0 = clock(); /* TEMP stall stats */
+    int useMask = css_mask_fetch(node, eng, (unsigned char)wantPseudo,
+                                 &mlo, &mhi, &storedSpec);
+    if (!useMask)
+    {
+        memset(fillSpec, 0, sizeof(fillSpec));
+    }
+
     for (int ri = 0; ri < eng->ruleCount; ri++)
     {
         const CssRule *r = &eng->rules[ri];
-        if (r->pseudo != wantPseudo)
-        {
-            continue;
-        }
-        /* Matching selector's specificity (max over MATCHING selectors —
-         * a non-matching group member must not inflate the win). */
+        g_cssRuleTests++; /* TEMP stall stats */
         unsigned spec = 0;
-        int hit = 0;
-        for (unsigned char si = 0; si < r->selCount; si++)
+        if (useMask)
         {
-            if (css_chain_matches(r->sel[si], r->selComb[si],
-                                  r->selParts[si], tagLower, classAttr,
-                                  idAttr, dom, node))
+            int bit = 0;
+            if (ri < 64)
             {
-                hit = 1;
-                if (r->spec[si] > spec)
-                {
-                    spec = r->spec[si];
-                }
+                bit = (int)((mlo >> ri) & 1ULL);
+            }
+            else if (ri < 128)
+            {
+                bit = (int)((mhi >> (ri - 64)) & 1ULL);
+            }
+            if (!bit)
+            {
+                continue;
+            }
+            /* Winning specificity comes from storage (computed with the
+             * same max-over-matching rule during fill). */
+            if (ri < CSS_MAX_RULES)
+            {
+                spec = storedSpec[ri];
+            }
+            if (r->pseudo != wantPseudo)
+            {
+                continue;
             }
         }
-        if (!hit)
+        else
         {
-            continue;
+            if (r->pseudo != wantPseudo)
+            {
+                continue;
+            }
+            /* Matching selector's specificity (max over MATCHING
+             * selectors — a non-matching group member must not inflate
+             * the win). */
+            int hit = 0;
+            for (unsigned char si = 0; si < r->selCount; si++)
+            {
+                if (css_chain_matches(r->sel[si], r->selComb[si],
+                                      r->selParts[si], tagLower, classAttr,
+                                      idAttr, dom, node))
+                {
+                    hit = 1;
+                    if (r->spec[si] > spec)
+                    {
+                        spec = r->spec[si];
+                    }
+                }
+            }
+            if (!hit)
+            {
+                continue;
+            }
+            /* Record the outcome for later lookups of this element. */
+            if (ri < 64)
+            {
+                mlo |= 1ULL << ri;
+            }
+            else if (ri < 128)
+            {
+                mhi |= 1ULL << (ri - 64);
+            }
+            if (ri < CSS_MAX_RULES)
+            {
+                fillSpec[ri] = (unsigned short)(spec > 0xFFFF ? 0xFFFF
+                                                              : spec);
+            }
         }
         for (unsigned char pj = 0; pj < r->propCount; pj++)
         {
@@ -2404,6 +2598,20 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
             have = 1;
         }
     }
+    if (!useMask)
+    {
+        css_mask_store(node, eng, (unsigned char)wantPseudo, mlo, mhi,
+                       fillSpec);
+    }
+    if (wantPseudo == 0)
+    {
+        g_cssWinTicks0 += clock() - wt0; /* TEMP stall stats */
+    }
+    else
+    {
+        g_cssWinTicks12 += clock() - wt0; /* TEMP stall stats */
+    }
+    g_cssWinTicks += clock() - wt0; /* TEMP stall stats */
     if (have && vlenOut)
     {
         *vlenOut = blen;
@@ -2664,10 +2872,21 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
                      const CssDom *dom, const void *node)
 {
     unsigned out = 0;
+    clock_t t0 = clock(); /* TEMP stall stats */
     if (!eng)
     {
+        g_cssTicks += clock() - t0; /* TEMP stall stats */
         return out;
     }
+    g_cssComputeCalls++; /* TEMP stall stats */
+    /* Mask fill: record this element's rule outcomes for later
+     * css_winning_value lookups (pseudo-0 lane). Specificity is max over
+     * MATCHING selectors (winning_core semantics — a non-matching group
+     * member must not inflate the win; this also fixes the old max-over-
+     * all behavior for mixed-specificity groups). */
+    uint64_t cmlo = 0, cmhi = 0;
+    unsigned short cspec[CSS_MAX_RULES];
+    memset(cspec, 0, sizeof(cspec));
     /* Per property, find the winning declaration among matching rules. */
     const char *bestProp[CSS_MAX_PROPS];
     const char *bestVal[CSS_MAX_PROPS];
@@ -2699,17 +2918,41 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
     for (int ri = 0; ri < eng->ruleCount; ri++)
     {
         const CssRule *r = &eng->rules[ri];
-        if (!css_rule_matches(r, tagLower, classAttr, idAttr, dom, node))
+        g_cssRuleTests++; /* TEMP stall stats */
+        if (r->pseudo != 0)
         {
             continue;
         }
         unsigned spec = 0;
+        int hit = 0;
         for (unsigned char si = 0; si < r->selCount; si++)
         {
-            if (r->spec[si] > spec)
+            if (css_chain_matches(r->sel[si], r->selComb[si],
+                                  r->selParts[si], tagLower, classAttr,
+                                  idAttr, dom, node))
             {
-                spec = r->spec[si];
+                hit = 1;
+                if (r->spec[si] > spec)
+                {
+                    spec = r->spec[si];
+                }
             }
+        }
+        if (!hit)
+        {
+            continue;
+        }
+        if (ri < 64)
+        {
+            cmlo |= 1ULL << ri;
+        }
+        else if (ri < 128)
+        {
+            cmhi |= 1ULL << (ri - 64);
+        }
+        if (ri < CSS_MAX_RULES)
+        {
+            cspec[ri] = (unsigned short)(spec > 0xFFFF ? 0xFFFF : spec);
         }
         for (unsigned char pj = 0; pj < r->propCount; pj++)
         {
@@ -2762,6 +3005,7 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
             bestUa[bi] = 0;
         }
     }
+    css_mask_store(node, eng, 0, cmlo, cmhi, cspec);
     for (unsigned char bi = 0; bi < bestCount; bi++)
     {
         if (bestVal[bi])
@@ -2774,5 +3018,6 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
                        bestVlen[bi]);
         }
     }
+    g_cssTicks += clock() - t0; /* TEMP stall stats */
     return out;
 }

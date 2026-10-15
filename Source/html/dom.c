@@ -1494,9 +1494,18 @@ typedef struct
     int stop; /* set by emit() < 0 (qs_first) */
 } QsCtx;
 
-static void qs_walk(QsCtx *q, DomNode *n)
+/* TEMP INSTRUMENTATION (Wikipedia stall hunt — REMOVE after diagnosis). */
+unsigned long g_qsCalls = 0;
+unsigned long g_qsVisits = 0;
+unsigned long g_qsLogged = 0;
+
+void dom_log_qs_stats(void)
 {
-    /* Bounded iterative DFS with an explicit stack (device stack rule). */
+    logger_log("[qs-stats] calls=%lu visits=%lu", g_qsCalls, g_qsVisits);
+}
+
+static void qs_walk(QsCtx *q, DomNode *n)
+{    /* Bounded iterative DFS with an explicit stack (device stack rule). */
     typedef struct
     {
         DomNode *node;
@@ -1512,6 +1521,7 @@ static void qs_walk(QsCtx *q, DomNode *n)
         QsFrame *f = &stack[top - 1];
         if (f->nextChild == 0 && f->node->kind == DOM_ELEMENT)
         {
+            g_qsVisits++; /* TEMP stall stats */
             if (qs_matches(q->parts, q->combs, q->np, f->node))
             {
                 q->count++;
@@ -1552,6 +1562,12 @@ int dom_query_selector_all(const DomResult *dom, const DomNode *scope,
                            const char *sel, char *scratch, size_t scratchSize,
                            int (*emit)(DomNode *el, void *ud), void *ud)
 {
+    g_qsCalls++; /* TEMP stall stats (globals below, near qs_walk) */
+    if (g_qsLogged < 12)
+    {
+        g_qsLogged++;
+        logger_log("[qs] call %lu: %.120s", g_qsCalls, sel ? sel : "?");
+    }
     if (!dom || !scope || !sel || !scratch || scratchSize == 0 || !emit)
     {
         return -1;

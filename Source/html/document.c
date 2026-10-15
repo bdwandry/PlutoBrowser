@@ -2932,7 +2932,24 @@ static const DomNode *first_child_tag(const DomNode *node, const char *tag)
  * w->flags, and display:none suppresses the subtree (checked in walk_node). */
 
 /* nth-ancestor DOM adapter for css.c descendant matching. i=0 → parent.
- * Element ancestors only (text nodes can't match selectors anyway). */
+ * Element ancestors only (text nodes can't match selectors anyway).
+ *
+ * Sequential-run cache (1 entry): css_chain_matches advances i as
+ * 0,1,2… for the SAME node, and the naive adapter re-walks from node
+ * every call (O(depth^2) pointer chases + attr scans per chain). The entry
+ * remembers the last (node, i, result); a call for (same node, i+1)
+ * advances one parent pointer, (same node, i) replays. ANY other call
+ * invalidates (fresh walk) — so interleaved nodes, nested walks, and JS
+ * querySelector phases (which mutate between operations, never mid-chain:
+ * single thread, no reentrancy inside the matcher) stay correct by
+ * construction. Pure memoization: zero behavior change. */
+static const void *g_ancCacheNode = NULL;
+static int g_ancCacheI = -1;
+static const void *g_ancCacheRes = NULL;
+static const char *g_ancCacheTag = NULL;
+static const char *g_ancCacheCls = NULL;
+static const char *g_ancCacheId = NULL;
+
 static const void *css_dom_ancestor(const void *node, int i,
                                     const char **tagLower,
                                     const char **classAttr,
@@ -2943,16 +2960,51 @@ static const void *css_dom_ancestor(const void *node, int i,
     {
         return NULL;
     }
-    for (int d = 0; d <= i; d++)
+    /* Sequential-run cache hit: same node as last call, i advanced by
+     * exactly one (or replayed). Advance a single parent pointer and skip
+     * the O(depth) re-walk. Cached results are always ELEMENTs (or the
+     * entry is cleared on exhaustion), so parent-of-cached is the correct
+     * next step, with the same non-element skipping as the slow path. */
+    if (node == g_ancCacheNode && g_ancCacheRes != NULL && i == g_ancCacheI + 1)
     {
+        n = (const DomNode *)g_ancCacheRes;
         n = n->parent;
-        if (!n || n->kind != DOM_ELEMENT)
+        while (n && n->kind != DOM_ELEMENT)
         {
-            if (!n)
+            n = n->parent;
+        }
+        if (!n)
+        {
+            g_ancCacheNode = NULL; /* invalidate: exhausted */
+            g_ancCacheI = -1;
+            g_ancCacheRes = NULL;
+            return NULL;
+        }
+    }
+    else if (node == g_ancCacheNode && i == g_ancCacheI &&
+             g_ancCacheRes != NULL)
+    {
+        *tagLower = g_ancCacheTag;
+        *classAttr = g_ancCacheCls;
+        *idAttr = g_ancCacheId;
+        return g_ancCacheRes;
+    }
+    else
+    {
+        for (int d = 0; d <= i; d++)
+        {
+            n = n->parent;
+            if (!n || n->kind != DOM_ELEMENT)
             {
-                return NULL;
+                if (!n)
+                {
+                    g_ancCacheNode = NULL; /* invalidate: exhausted */
+                    g_ancCacheI = -1;
+                    g_ancCacheRes = NULL;
+                    return NULL;
+                }
+                d--; /* non-element ancestor: don't count it */
             }
-            d--; /* non-element ancestor: don't count it */
         }
     }
     *tagLower = n->tag ? n->tag : "";
@@ -2971,6 +3023,15 @@ static const void *css_dom_ancestor(const void *node, int i,
     }
     *classAttr = ca ? ca->value : NULL;
     *idAttr = ia ? ia->value : NULL;
+    /* Prime the cache for the sequential next step. Strings point into
+     * stable DOM storage (valid until mutation, which never happens
+     * mid-chain: single thread, matcher never mutates). */
+    g_ancCacheNode = node;
+    g_ancCacheI = i;
+    g_ancCacheRes = n;
+    g_ancCacheTag = *tagLower;
+    g_ancCacheCls = *classAttr;
+    g_ancCacheId = *idAttr;
     return n;
 }
 
@@ -5719,6 +5780,9 @@ static void walker_finish(Walker *w)
             }
         }
     }
+    /* TEMP INSTRUMENTATION (Wikipedia stall hunt — REMOVE after diagnosis). */
+    css_log_stats();
+    dom_log_qs_stats();
 }
 
 /* ── Free helpers ──────────────────────────────────────────────────────────── */
@@ -6383,6 +6447,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     int werr = sbFail;
 
     /* formMethod default: "get" (reference state.formMethod = "get"). */
+    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
     if (!werr && walk_children(&w, dom.root) != 0)
     {
         werr = 1;
@@ -6486,6 +6551,7 @@ int document_rewalk(DocParseResult *doc)
     int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
                  strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
     int werr = sbFail;
+    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
     if (!werr && walk_children(&w, dom->root) != 0)
     {
         werr = 1;

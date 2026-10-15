@@ -345,6 +345,9 @@ SRC := $(SRC) $(patsubst Source/js/xs_moddable_no_recursion/%,Source/js/xs_modda
 # dav1d single-thread pthread stubs (device-only: the sim links macOS
 # pthreads; a shared TU would collide at link). See dav1d_pthread_shim.c.
 SRC := $(SRC) Source/render/decoders/dav1d_pthread_shim.c
+# newlib clock() syscall stub (device-only): TEMP CSS instrumentation uses
+# clock(); firmware lacks _times. See pluto_times_stub.c.
+SRC := $(SRC) Source/core/pluto_times_stub.c
 endif
 
 include $(SDK)/C_API/buildsupport/common.mk
@@ -376,6 +379,17 @@ endif
 # explicitly for the simulator dylib (the device toolchain links newlib's
 # libm by default).
 DYLIB_FLAGS += -lm
+
+# Homebrew clang ≥16 turns -Wincompatible-pointer-types into a default
+# ERROR, which breaks the sim build inside third-party C (XS-NR fork's
+# xsScope.c) without any behavior change. Demote it for the sim dylib
+# only — the device gcc merely warns.
+DYLIB_FLAGS += -Wno-incompatible-pointer-types
+
+# dav1d aligned allocation, sim side (device side is -DHAVE_MEMALIGN=1 in
+# DAV1D_CPFLAGS): macOS has no memalign(3)/<malloc.h> but does have
+# posix_memalign. See Source/render/decoders/dav1d/config.h.
+DYLIB_FLAGS += -DHAVE_POSIX_MEMALIGN=1
 
 # Optional extra flags for the device binary (mirrors SIMDEFS), e.g.
 # make device DEVICEDEFS="-DPLUTO_JSEXT_AUTOTEST" for a self-testing deploy.
@@ -421,7 +435,7 @@ build/Source/js/xs_moddable_no_recursion/sources/%.o: CPFLAGS = $(XS_NR_CPFLAGS)
 # never touches. No other TU is affected, and the simulator build never
 # uses this rule (monolithic dylib keeps macOS pthreads). Dependency
 # tracking re-added so incremental builds stay correct.
-DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage -D_POSIX_THREADS -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
+DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage -D_POSIX_THREADS -DHAVE_MEMALIGN=1 -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
 build/Source/render/decoders/dav1d/src/%.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 

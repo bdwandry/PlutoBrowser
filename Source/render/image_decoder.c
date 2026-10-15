@@ -607,7 +607,10 @@ void imgdec_draw(int x, int y, int w, int h, const char *altText,
         int lw = style_get_text_width(PLUTO_FONT_SMALL, label);
         int lx = x + (w - lw) / 2;
         int ly = iconY + 14;
-        if (ly + 10 <= y + h - 2)
+        /* Only draw the label when it fits INSIDE the card: an over-wide
+         * label would spill onto neighboring content with no clipping
+         * (seen as garbage glyphs around small/loading images). */
+        if (lw <= w && ly + 10 <= y + h - 2)
         {
             pd->graphics->setFont(font);
             pd->graphics->drawText(label, (size_t)strlen(label), kUTF8Encoding, lx, ly);
