@@ -683,8 +683,10 @@ static void sgr_3x3_c(pixel *dst, const ptrdiff_t stride,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
 #define BUF_STRIDE (384 + 16)
-    ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 3 + 16,);
+    /* PLAYDATE PORT DELTA (develop_avif_decoder): `static` added (same
+     * rationale as sgr_mix_c above; ~14KB combined). Upstream untouched. */
+    static ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 3 + 16,);
+    static ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 3 + 16,);
     int32_t *sumsq_ptrs[3], *sumsq_rows[3];
     coef *sum_ptrs[3], *sum_rows[3];
     for (int i = 0; i < 3; i++) {
@@ -692,8 +694,8 @@ static void sgr_3x3_c(pixel *dst, const ptrdiff_t stride,
         sum_rows[i] = &sum_buf[i * BUF_STRIDE];
     }
 
-    ALIGN_STK_16(int32_t, A_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, B_buf, BUF_STRIDE * 3 + 16,);
+    static ALIGN_STK_16(int32_t, A_buf, BUF_STRIDE * 3 + 16,);
+    static ALIGN_STK_16(coef, B_buf, BUF_STRIDE * 3 + 16,);
     int32_t *A_ptrs[3];
     coef *B_ptrs[3];
     for (int i = 0; i < 3; i++) {
@@ -828,8 +830,10 @@ static void sgr_5x5_c(pixel *dst, const ptrdiff_t stride,
                       const LooprestorationParams *const params,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
-    ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 5 + 16,);
-    ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 5 + 16,);
+    /* PLAYDATE PORT DELTA (develop_avif_decoder): `static` added (same
+     * rationale as sgr_mix_c above; ~12KB combined). Upstream untouched. */
+    static ALIGN_STK_16(int32_t, sumsq_buf, BUF_STRIDE * 5 + 16,);
+    static ALIGN_STK_16(coef, sum_buf, BUF_STRIDE * 5 + 16,);
     int32_t *sumsq_ptrs[5], *sumsq_rows[5];
     coef *sum_ptrs[5], *sum_rows[5];
     for (int i = 0; i < 5; i++) {
@@ -1030,16 +1034,24 @@ static void sgr_mix_c(pixel *dst, const ptrdiff_t stride,
                       const LooprestorationParams *const params,
                       const enum LrEdgeFlags edges HIGHBD_DECL_SUFFIX)
 {
-    ALIGN_STK_16(int32_t, sumsq5_buf, BUF_STRIDE * 5 + 16,);
-    ALIGN_STK_16(coef, sum5_buf, BUF_STRIDE * 5 + 16,);
+    /* PLAYDATE PORT DELTA (develop_avif_decoder): `static` added to the
+     * four scratch buffers below (~26KB combined). Same finding as
+     * wedge.c/itx_tmpl.c: the frames kill the 61.8KB game task on
+     * hardware (gallery test_pattern.avif uses loop restoration and
+     * hard-faulted here). Scratch is rebuilt from scratch on every call
+     * (see the ptrs/rows loops) and these functions never reenter
+     * themselves, so static is safe under single-threaded decode.
+     * Upstream dav1d 1.5.1 is otherwise untouched. */
+    static ALIGN_STK_16(int32_t, sumsq5_buf, BUF_STRIDE * 5 + 16,);
+    static ALIGN_STK_16(coef, sum5_buf, BUF_STRIDE * 5 + 16,);
     int32_t *sumsq5_ptrs[5], *sumsq5_rows[5];
     coef *sum5_ptrs[5], *sum5_rows[5];
     for (int i = 0; i < 5; i++) {
         sumsq5_rows[i] = &sumsq5_buf[i * BUF_STRIDE];
         sum5_rows[i] = &sum5_buf[i * BUF_STRIDE];
     }
-    ALIGN_STK_16(int32_t, sumsq3_buf, BUF_STRIDE * 3 + 16,);
-    ALIGN_STK_16(coef, sum3_buf, BUF_STRIDE * 3 + 16,);
+    static ALIGN_STK_16(int32_t, sumsq3_buf, BUF_STRIDE * 3 + 16,);
+    static ALIGN_STK_16(coef, sum3_buf, BUF_STRIDE * 3 + 16,);
     int32_t *sumsq3_ptrs[3], *sumsq3_rows[3];
     coef *sum3_ptrs[3], *sum3_rows[3];
     for (int i = 0; i < 3; i++) {
@@ -1047,16 +1059,20 @@ static void sgr_mix_c(pixel *dst, const ptrdiff_t stride,
         sum3_rows[i] = &sum3_buf[i * BUF_STRIDE];
     }
 
-    ALIGN_STK_16(int32_t, A5_buf, BUF_STRIDE * 2 + 16,);
-    ALIGN_STK_16(coef, B5_buf, BUF_STRIDE * 2 + 16,);
+    /* PLAYDATE PORT DELTA: `static` added (same rationale; ~14KB
+     * combined). Upstream untouched. */
+    static ALIGN_STK_16(int32_t, A5_buf, BUF_STRIDE * 2 + 16,);
+    static ALIGN_STK_16(coef, B5_buf, BUF_STRIDE * 2 + 16,);
     int32_t *A5_ptrs[2];
     coef *B5_ptrs[2];
     for (int i = 0; i < 2; i++) {
         A5_ptrs[i] = &A5_buf[i * BUF_STRIDE];
         B5_ptrs[i] = &B5_buf[i * BUF_STRIDE];
     }
-    ALIGN_STK_16(int32_t, A3_buf, BUF_STRIDE * 4 + 16,);
-    ALIGN_STK_16(coef, B3_buf, BUF_STRIDE * 4 + 16,);
+    /* PLAYDATE PORT DELTA: `static` added (same rationale). Upstream
+     * untouched. */
+    static ALIGN_STK_16(int32_t, A3_buf, BUF_STRIDE * 4 + 16,);
+    static ALIGN_STK_16(coef, B3_buf, BUF_STRIDE * 4 + 16,);
     int32_t *A3_ptrs[4];
     coef *B3_ptrs[4];
     for (int i = 0; i < 4; i++) {
