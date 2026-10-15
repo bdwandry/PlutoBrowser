@@ -62,6 +62,45 @@ SRC_DEVICE = \
 	Source/render/decoders/webp_vp8_data.c \
 	Source/render/decoders/webp_vp8.c \
 	Source/render/decoders/webp_container.c \
+	Source/render/decoders/avif.c \
+	Source/render/decoders/dav1d/src/cdef_apply_tmpl.c \
+	Source/render/decoders/dav1d/src/cdef_tmpl.c \
+	Source/render/decoders/dav1d/src/cdf.c \
+	Source/render/decoders/dav1d/src/cpu.c \
+	Source/render/decoders/dav1d/src/ctx.c \
+	Source/render/decoders/dav1d/src/data.c \
+	Source/render/decoders/dav1d/src/decode.c \
+	Source/render/decoders/dav1d/src/dequant_tables.c \
+	Source/render/decoders/dav1d/src/fg_apply_tmpl.c \
+	Source/render/decoders/dav1d/src/filmgrain_tmpl.c \
+	Source/render/decoders/dav1d/src/getbits.c \
+	Source/render/decoders/dav1d/src/intra_edge.c \
+	Source/render/decoders/dav1d/src/ipred_prepare_tmpl.c \
+	Source/render/decoders/dav1d/src/ipred_tmpl.c \
+	Source/render/decoders/dav1d/src/itx_1d.c \
+	Source/render/decoders/dav1d/src/itx_tmpl.c \
+	Source/render/decoders/dav1d/src/lf_apply_tmpl.c \
+	Source/render/decoders/dav1d/src/lf_mask.c \
+	Source/render/decoders/dav1d/src/lib.c \
+	Source/render/decoders/dav1d/src/log.c \
+	Source/render/decoders/dav1d/src/loopfilter_tmpl.c \
+	Source/render/decoders/dav1d/src/looprestoration_tmpl.c \
+	Source/render/decoders/dav1d/src/lr_apply_tmpl.c \
+	Source/render/decoders/dav1d/src/mc_tmpl.c \
+	Source/render/decoders/dav1d/src/mem.c \
+	Source/render/decoders/dav1d/src/msac.c \
+	Source/render/decoders/dav1d/src/obu.c \
+	Source/render/decoders/dav1d/src/pal.c \
+	Source/render/decoders/dav1d/src/picture.c \
+	Source/render/decoders/dav1d/src/qm.c \
+	Source/render/decoders/dav1d/src/recon_tmpl.c \
+	Source/render/decoders/dav1d/src/ref.c \
+	Source/render/decoders/dav1d/src/refmvs.c \
+	Source/render/decoders/dav1d/src/scan.c \
+	Source/render/decoders/dav1d/src/tables.c \
+	Source/render/decoders/dav1d/src/thread_task.c \
+	Source/render/decoders/dav1d/src/warpmv.c \
+	Source/render/decoders/dav1d/src/wedge.c \
 	Source/ui/chrome.c \
 	Source/ui/hud.c \
 	Source/ui/error_page.c \
@@ -177,7 +216,7 @@ SRC_DEVICE = \
 SRC = $(patsubst Source/js/xs_moddable/%,Source/js/xs_moddable_no_recursion/%,$(SRC_DEVICE)) Source/html/jsbridge_xs_nr.c
 
 # List all user directories here
-UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS Source/js/xs_moddable/sources Source/js/xs_moddable/platforms Source/js/xs_moddable_no_recursion/sources Source/js/xs_moddable_no_recursion/platforms
+UINCDIR = Source Source/core Source/util Source/html Source/render Source/render/decoders Source/render/decoders/dav1d Source/render/decoders/dav1d/include Source/ui Source/keyboard Source/js/muJS Source/js/duktape Source/js/QuickJS Source/js/xs_moddable/sources Source/js/xs_moddable/platforms Source/js/xs_moddable_no_recursion/sources Source/js/xs_moddable_no_recursion/platforms
 
 # List all user C define here, like -D_DEBUG=1
 UDEFS =
@@ -272,6 +311,16 @@ UDEFS += -DJS_ASTLIMIT=48 \
 # itself is stopped by JS_ENVLIMIT above).
 UDEFS += -DJS_STACKSIZE=2048
 
+# ── dav1d 1.5.1 (vendored C-only subset under Source/render/decoders/dav1d
+# — upstream files never modified except the hand-written config.h, which
+# stands in for the Meson-generated file): the 13 *_tmpl.c DSP files each
+# compile for ONE bitdepth, selected by BITDEPTH (upstream builds them 4x;
+# our monolithic sim link and flat device SRC list compile them 1x).
+# NOTHING else in the tree reads BITDEPTH (verified), so this global
+# define is contained to dav1d. 8-bit stills only; 10/12-bit AVIFs are
+# refused cleanly by the wrapper (NULL → placeholder card).
+UDEFS += -DBITDEPTH=8
+
 # List the user directory to look for the libraries here
 ULIBDIR =
 
@@ -293,6 +342,9 @@ override PDCFLAGS += -k -s
 # "No such file" for objects make never planned to compile).
 ifeq ($(MAKECMDGOALS),device)
 SRC := $(SRC) $(patsubst Source/js/xs_moddable_no_recursion/%,Source/js/xs_moddable/%,$(filter Source/js/xs_moddable_no_recursion/%,$(SRC))) Source/html/jsbridge_xs.c
+# dav1d single-thread pthread stubs (device-only: the sim links macOS
+# pthreads; a shared TU would collide at link). See dav1d_pthread_shim.c.
+SRC := $(SRC) Source/render/decoders/dav1d_pthread_shim.c
 endif
 
 include $(SDK)/C_API/buildsupport/common.mk
@@ -359,4 +411,17 @@ build/Source/js/xs_moddable/sources/%.o: CPFLAGS = $(XS_CPFLAGS) -MD -MP -MF $(D
 # (every engine symbol compiles to its _nr twin, verified zero overlap).
 XS_NR_CPFLAGS = $(XS_CPFLAGS)
 build/Source/js/xs_moddable_no_recursion/sources/%.o: CPFLAGS = $(XS_NR_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+
+# Same treatment for vendored dav1d (Source/render/decoders/dav1d/src).
+# Two dav1d-only additions: -D_POSIX_THREADS exposes newlib's full pthread
+# declarations (types + functions) for these objects only — bare metal
+# leaves them guarded out by default. Bodies come from
+# Source/render/decoders/dav1d_pthread_shim.c (also device-only): real
+# pthread_once/attr, link-only noops for everything the n_threads=1 path
+# never touches. No other TU is affected, and the simulator build never
+# uses this rule (monolithic dylib keeps macOS pthreads). Dependency
+# tracking re-added so incremental builds stay correct.
+DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage -D_POSIX_THREADS -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
+build/Source/render/decoders/dav1d/src/%.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 

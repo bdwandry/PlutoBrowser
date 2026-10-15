@@ -35,6 +35,7 @@ static int g_seq = 0;
 #if defined(TARGET_SIMULATOR) || !defined(__arm__)
 void logger_stack_touch(void) {}
 unsigned logger_stack_peak(void) { return 0; }
+unsigned logger_stack_depth(void) { return 0; }
 #else
 static uintptr_t g_stackTop = 0;
 static uintptr_t g_stackFloor = UINTPTR_MAX;
@@ -56,6 +57,16 @@ unsigned logger_stack_peak(void)
     return (g_stackTop && g_stackFloor != UINTPTR_MAX && g_stackTop > g_stackFloor)
                ? (unsigned)(g_stackTop - g_stackFloor)
                : 0;
+}
+
+/* Current depth, not high-water (see logger_stack_touch above). */
+unsigned logger_stack_depth(void)
+{
+    uintptr_t sp;
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    if (!g_stackTop || sp > g_stackTop)
+        return 0;
+    return (unsigned)(g_stackTop - sp);
 }
 #endif
 

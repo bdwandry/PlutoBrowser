@@ -30,5 +30,8 @@ void logger_error_at(const char *file, int line, const char *fmt, ...);
  * the deepest observed game-task stack usage in bytes (0 on simulator). */
 void logger_stack_touch(void);
 unsigned logger_stack_peak(void);
+/* Current game-task stack depth in bytes (0 on simulator). Diagnostic
+ * for stack-budget work (added during AVIF device port). */
+unsigned logger_stack_depth(void);
 
 #endif /* PLUTO_LOGGER_H */

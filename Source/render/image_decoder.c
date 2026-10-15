@@ -43,6 +43,7 @@
 #include "render/decoders/jpeg.h"
 #include "render/decoders/ico.h"
 #include "render/decoders/webp.h"
+#include "render/decoders/avif.h"
 
 static PlaydateAPI *pd = NULL;
 
@@ -150,7 +151,8 @@ static int async_decode_step(TaskCtx *ctx)
     case 0: st->result = jpeg_decode(st->data, st->len, 360, 200); break;
     case 1: st->result = png_decode(st->data, st->len, 360, 200); break;
     case 2: st->result = webp_decode(st->data, st->len, 360, 200); break;
-    default: st->result = gif_decode(st->data, st->len, 360, 200); break;
+    case 3: st->result = gif_decode(st->data, st->len, 360, 200); break;
+    default: st->result = avif_decode(st->data, st->len); break;
     }
 
     st->phase = 1;
@@ -219,6 +221,10 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
         kind = 2; /* WebP */
     else if (memcmp(data, "GIF87a", 6) == 0 || memcmp(data, "GIF89a", 6) == 0)
         kind = 3; /* GIF */
+    else if (len >= 12 && memcmp(data + 4, "ftyp", 4) == 0 &&
+             (memcmp(data + 8, "avif", 4) == 0 ||
+              memcmp(data + 8, "avis", 4) == 0))
+        kind = 4; /* AVIF stills (mif1 alone may be HEIC: not claimed) */
 
     if (kind >= 0)
     {

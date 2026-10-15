@@ -5468,6 +5468,16 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
     #endif
 #endif /* TARGET_SIMULATOR guard above */
 
+#if defined(PLUTO_ABOUT_AUTOTEST)
+        /* TEMPORARY (PLUTO_ABOUT_AUTOTEST builds, sim + device): navigate
+         * straight to the about page to repro the bottom-images issue.
+         * Touches nothing else (no engine/JS forcing). */
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 "https://bryanwandrych.com/about");
+        logger_log("[about-autotest] navigating to https://bryanwandrych.com/about");
+#endif
+
 #if defined(PLUTO_NR_AUTOTEST)
 #ifndef PLUTO_NR_AUTOTEST_URL
 #define PLUTO_NR_AUTOTEST_URL "https://bryanwandrych.com"
