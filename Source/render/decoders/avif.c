@@ -14,6 +14,7 @@
  */
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "avif.h"
 #include "dither.h"
 #include "dav1d/include/dav1d/dav1d.h"
@@ -248,6 +249,98 @@ static void avif_noop_free(const uint8_t *data, void *cookie)
     (void)cookie;
 }
 
+/* ── Picture bump arena ───────────────────────────────────────────────
+ * dav1d's default picture allocator mallocs multi-hundred-KB frame
+ * buffers per picture; under device heap pressure (multi-MB pages) those
+ * large first-fit allocs stall for seconds (measured: same 640px AVIF
+ * decodes in ~6s lean vs 10s+ pressured, tripping the run-loop
+ * watchdog). This arena serves picture buffers O(1) from one chunk,
+ * reset per decode (single-flight queue: at most one decode owns it).
+ * Layout math mirrors dav1d_default_picture_alloc exactly (128-px
+ * alignment, 1024-stride padding, shared chroma stride). Release is a
+ * noop; the arena resets at each decode start. malloc failure (or an
+ * oversize picture) returns ENOMEM: clean failure → placeholder card,
+ * never a stall. Upstream dav1d untouched. */
+#define AVIF_ARENA_SIZE (4 * 1024 * 1024)
+static uint8_t *g_picArena = NULL;
+static size_t g_picArenaOff = 0;
+
+static int avif_pic_alloc(Dav1dPicture *pic, void *cookie)
+{
+    int hbd, aligned_w, aligned_h, has_chroma, ss_ver, ss_hor;
+    ptrdiff_t y_stride, uv_stride;
+    size_t y_sz, uv_sz, need, off;
+    uint8_t *base;
+    (void)cookie;
+    if (!pic)
+    {
+        return DAV1D_ERR(EINVAL);
+    }
+    hbd = pic->p.bpc > 8;
+    aligned_w = (pic->p.w + 127) & ~127;
+    aligned_h = (pic->p.h + 127) & ~127;
+    has_chroma = pic->p.layout != DAV1D_PIXEL_LAYOUT_I400;
+    ss_ver = pic->p.layout == DAV1D_PIXEL_LAYOUT_I420;
+    ss_hor = pic->p.layout != DAV1D_PIXEL_LAYOUT_I444;
+    y_stride = aligned_w << hbd;
+    uv_stride = has_chroma ? y_stride >> ss_hor : 0;
+    if (!(y_stride & 1023))
+    {
+        y_stride += DAV1D_PICTURE_ALIGNMENT;
+    }
+    if (!(uv_stride & 1023) && has_chroma)
+    {
+        uv_stride += DAV1D_PICTURE_ALIGNMENT;
+    }
+    /* Overflow-safe size math (hostile headers reach this callback). */
+    y_sz = (size_t)y_stride * (size_t)aligned_h;
+    uv_sz = (size_t)uv_stride * (size_t)(aligned_h >> ss_ver);
+    if (y_stride <= 0 || (has_chroma && uv_stride <= 0) ||
+        y_sz / (size_t)(aligned_h ? aligned_h : 1) != (size_t)y_stride ||
+        (has_chroma &&
+         uv_sz / (size_t)((aligned_h >> ss_ver) ? (aligned_h >> ss_ver) : 1) !=
+             (size_t)uv_stride))
+    {
+        return DAV1D_ERR(EINVAL);
+    }
+    need = y_sz + 2 * uv_sz;
+    if (need < y_sz || need + DAV1D_PICTURE_ALIGNMENT < need)
+    {
+        return DAV1D_ERR(EINVAL);
+    }
+    need += DAV1D_PICTURE_ALIGNMENT;
+    if (!g_picArena || g_picArenaOff + need < g_picArenaOff ||
+        g_picArenaOff + need > AVIF_ARENA_SIZE)
+    {
+        return DAV1D_ERR(ENOMEM);
+    }
+    off = (g_picArenaOff + DAV1D_PICTURE_ALIGNMENT - 1) &
+          ~(size_t)(DAV1D_PICTURE_ALIGNMENT - 1);
+    /* TEMP: prove the arena path runs on device (else the default
+     * allocator's fragmentation drag remains). */
+    logger_log("[avif] arena alloc %zu bytes", need);
+    if (off + need < off || off + need > AVIF_ARENA_SIZE)
+    {
+        return DAV1D_ERR(ENOMEM);
+    }
+    base = g_picArena + off;
+    g_picArenaOff = off + need;
+    pic->stride[0] = y_stride;
+    pic->stride[1] = uv_stride;
+    pic->data[0] = base;
+    pic->data[1] = has_chroma ? base + y_sz : NULL;
+    pic->data[2] = has_chroma ? base + y_sz + uv_sz : NULL;
+    pic->allocator_data = NULL;
+    return 0;
+}
+
+static void avif_pic_release(Dav1dPicture *pic, void *cookie)
+{
+    (void)pic;
+    (void)cookie;
+    /* No-op: the arena resets per decode (single-flight). */
+}
+
 /* BT.601 full-range YUV→gray via integer math (matches dither's style:
  * (r*306 + g*601 + b*117) >> 10). Subsampled chroma is nearest-held. */
 typedef struct
@@ -273,7 +366,43 @@ static uint8_t avif_pixel_gray(void *userdata, int x, int y)
     return p->rows[(size_t)sy * p->width + sx];
 }
 
-LCDBitmap *avif_decode(const uint8_t *data, size_t len)
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+/* ── Heap-backed scratch stack (fiber) ────────────────────────────────
+ * The 61.8KB game task cannot hold dav1d's worst frames (24KB init,
+ * 34KB restoration, 16KB transforms + call chain), and moving those
+ * temps to static storage CORRUPTS pixels (bisected file-by-file: the
+ * scratch carries state that must not persist). So the whole decode runs
+ * on 64KB of heap with EXACT stack semantics (SP reset per call: nothing
+ * persists, exactly like a bigger task stack). Upstream dav1d stays 100%
+ * pristine. Simulator/host builds take the direct path (8MB stacks). */
+#define AVIF_FIBER_STACK (64 * 1024)
+#define AVIF_FIBER_CANARY 0xA5F1C3E7u
+
+__asm__(
+    ".syntax unified\n"
+    ".thumb\n"
+    ".global avif_fiber_call\n"
+    ".type avif_fiber_call, %function\n"
+    "avif_fiber_call:\n"
+    "    push {r4-r6, lr}\n"
+    "    mov r4, sp\n"
+    "    mov r5, r1\n"
+    "    mov sp, r0\n"
+    "    mov r0, r2\n"
+    "    mov r1, r3\n"
+    "    blx r5\n"
+    "    mov r6, r0\n"
+    "    mov sp, r4\n"
+    "    mov r0, r6\n"
+    "    pop {r4-r6, pc}\n");
+
+static void *avif_fiber_call(void *stackTop,
+                             void *(*fn)(const uint8_t *, size_t),
+                             const uint8_t *data, size_t len);
+static uint8_t *g_fiberStack = NULL;
+#endif
+
+static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
 {
     AvifMeta m;
     uint8_t *obu = NULL;
@@ -331,7 +460,36 @@ LCDBitmap *avif_decode(const uint8_t *data, size_t len)
     s.max_frame_delay = 1;  /* stills: no frame threading either */
     s.apply_grain = 0;      /* skip film-grain synthesis (1-bit output) */
     s.frame_size_limit = AVIF_MAX_PIXELS;
+    /* Watchdog survival: full AV1 decode of a 546K-px still exceeds the
+     * 10s run-loop budget on the M7 (sampled in loopfilter, decode_b,
+     * and idct across runs). Post-filters are ~1/3 of the work and the
+     * least visible at thumbnail scale, so big inputs keep edge
+     * deblocking only and skip CDEF + restoration. Small inputs (fast
+     * either way) keep ALL for pixel-exactness. Threshold is input
+     * bytes (proxy for frame area; dims aren't known pre-open). */
+    s.inloop_filters = (total > 8192) ? DAV1D_INLOOPFILTER_DEBLOCK
+                                      : DAV1D_INLOOPFILTER_ALL;
+    logger_log("[avif] filters=%s (%zu bytes)",
+               (total > 8192) ? "deblock-only" : "all", total);
     s.logger.callback = NULL; /* dav1d logging off; we log our own lines */
+    /* Picture arena (see above): one malloc reused across decodes; on
+     * failure the default allocator stays (slower under pressure, but
+     * functional). Reset per decode: single-flight owns it. */
+    if (!g_picArena)
+    {
+        g_picArena = (uint8_t *)malloc(AVIF_ARENA_SIZE);
+        if (!g_picArena)
+        {
+            logger_log("[avif] no arena (using default allocator)");
+        }
+    }
+    if (g_picArena)
+    {
+        g_picArenaOff = 0;
+        s.allocator.cookie = NULL;
+        s.allocator.alloc_picture_callback = avif_pic_alloc;
+        s.allocator.release_picture_callback = avif_pic_release;
+    }
     logger_log("[avif] container ok (peak=%u)", logger_stack_peak());
     if (dav1d_open(&c, &s) < 0)
     {
@@ -393,21 +551,38 @@ LCDBitmap *avif_decode(const uint8_t *data, size_t len)
         rows = (uint8_t *)malloc((size_t)W * H);
         if (!rows)
             goto done;
-        for (int y = 0; y < H; y++)
+        /* Coordinate maps (exact same math as the inline version below,
+         * hoisted out of the hot loop: integer division on the M7 has no
+         * hardware support, and 2 divs × 546K pixels dominated conversion
+         * time). NULL map = fall back to inline math (always correct). */
         {
-            for (int x = 0; x < W; x++)
+            int *xmap = (int *)malloc((size_t)W * sizeof(int));
+            int *ymap = (int *)malloc((size_t)H * sizeof(int));
+            int useMap = (xmap && ymap);
+            int xi, yi;
+            if (useMap)
             {
-                int yy = Y[(size_t)y * ys + x];
-                int g;
-                if (mono)
+                for (xi = 0; xi < W; xi++)
+                    xmap[xi] = (int)((long long)xi * cw / W);
+                for (yi = 0; yi < H; yi++)
+                    ymap[yi] = (int)((long long)yi * ch / H);
+            }
+            for (int y = 0; y < H; y++)
+            {
+                int cy = useMap ? ymap[y] : (int)((long long)y * ch / H);
+                for (int x = 0; x < W; x++)
                 {
-                    g = yy;
-                }
-                else
-                {
-                    int cx = (int)((long long)x * cw / W);
-                    int cy = (int)((long long)y * ch / H);
-                    int u = U[(size_t)cy * us + cx] - 128;
+                    int yy = Y[(size_t)y * ys + x];
+                    int g;
+                    if (mono)
+                    {
+                        g = yy;
+                    }
+                    else
+                    {
+                        int cx = useMap ? xmap[x]
+                                        : (int)((long long)x * cw / W);
+                        int u = U[(size_t)cy * us + cx] - 128;
                     int v = V[(size_t)cy * us + cx] - 128;
                     int r = yy + ((359 * v) >> 8);
                     int gg = yy - ((88 * u + 183 * v) >> 8);
@@ -427,7 +602,12 @@ LCDBitmap *avif_decode(const uint8_t *data, size_t len)
                     g = (r * 306 + gg * 601 + b * 117) >> 10;
                 }
                 rows[(size_t)y * W + x] = (uint8_t)g;
+                }
             }
+            if (xmap)
+                free(xmap);
+            if (ymap)
+                free(ymap);
         }
         if (W > 360 || H > 200)
         {
@@ -468,4 +648,38 @@ done:
     if (obu)
         free(obu);
     return img;
+}
+
+/* Public entry (avif.h): fiber on device, direct everywhere else. */
+LCDBitmap *avif_decode(const uint8_t *data, size_t len)
+{
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    uint32_t *canary;
+    LCDBitmap *img;
+    int smashed;
+    if (!g_fiberStack)
+    {
+        g_fiberStack = (uint8_t *)malloc(AVIF_FIBER_STACK);
+        if (!g_fiberStack)
+        {
+            return NULL;
+        }
+    }
+    canary = (uint32_t *)g_fiberStack;
+    canary[0] = canary[1] = canary[2] = canary[3] = AVIF_FIBER_CANARY;
+    img = (LCDBitmap *)avif_fiber_call(g_fiberStack + AVIF_FIBER_STACK,
+                                      (void *(*)(const uint8_t *, size_t))avif_decode_inner,
+                                      data, len);
+    smashed = (canary[0] != AVIF_FIBER_CANARY ||
+               canary[1] != AVIF_FIBER_CANARY ||
+               canary[2] != AVIF_FIBER_CANARY ||
+               canary[3] != AVIF_FIBER_CANARY);
+    if (smashed)
+    {
+        logger_log("[avif] FIBER STACK OVERFLOW (64KB exceeded)");
+    }
+    return img;
+#else
+    return avif_decode_inner(data, len);
+#endif
 }

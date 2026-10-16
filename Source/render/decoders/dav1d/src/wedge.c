@@ -218,13 +218,7 @@ COLD void dav1d_init_ii_wedge_masks(void) {
         [WEDGE_MASTER_LINE_EVEN] = {  1,  4, 11, 27, 46, 58, 62, 63 },
         [WEDGE_MASTER_LINE_VERT] = {  0,  2,  7, 21, 43, 57, 62, 64 },
     };
-    /* PLAYDATE PORT DELTA (develop_avif_decoder): `static` added.
-     * The 24KB frame kills the 61.8KB game task (proven on hardware:
-     * boot dies with a bare 24KB frame, dav1d_open never returns).
-     * Single-threaded decode (n_threads=1, our only configuration) makes
-     * static scratch safe: this init runs once, never reentrantly. Upstream
-     * dav1d 1.5.1 is otherwise untouched. */
-    static uint8_t master[6][64 * 64];
+    uint8_t master[6][64 * 64];
 
     // create master templates
     for (int y = 0, off = 0; y < 64; y++, off += 64)

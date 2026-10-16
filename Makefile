@@ -438,4 +438,9 @@ build/Source/js/xs_moddable_no_recursion/sources/%.o: CPFLAGS = $(XS_NR_CPFLAGS)
 DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage -D_POSIX_THREADS -DHAVE_MEMALIGN=1 -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
 build/Source/render/decoders/dav1d/src/%.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
+# AV1 DSP loops are compute-bound on the M7 (a 640px still needs ~6s at
+# -O2, flirting with the 10s run-loop watchdog under heap pressure); -O3
+# buys back margin. Stack frames are unaffected (data arrays dominate, not
+# code motion). dav1d sources only — the rest of the tree stays -O2.
+build/Source/render/decoders/dav1d/src/%.o: OPT = -O3
 

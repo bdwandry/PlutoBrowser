@@ -341,6 +341,20 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
      * pre-P33 build truncated every PNG/JPEG/GIF/WebP at its first NUL). */
     if (body && bodyLen > 8)
     {
+        /* TEMP AVIF pixel hunt: hash the exact bytes being decoded. */
+        {
+            unsigned h = 2166136261u;
+            const uint8_t *bb = (const uint8_t *)body;
+            size_t hi;
+            for (hi = 0; hi < bodyLen; hi++)
+            {
+                h ^= bb[hi];
+                h *= 16777619u;
+            }
+            logger_log("[imgbytes] %s len=%zu fnv=%08x head=%02x%02x%02x%02x%02x%02x%02x%02x",
+                       g_currentUrl, bodyLen, h, bb[0], bb[1], bb[2], bb[3],
+                       bb[4], bb[5], bb[6], bb[7]);
+        }
         size_t blen = bodyLen;
         int async = 1;
         uint8_t b1 = (uint8_t)body[0];

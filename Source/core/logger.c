@@ -43,11 +43,16 @@ void logger_stack_touch(void)
 {
     uintptr_t sp;
     __asm__ volatile("mov %0, sp" : "=r"(sp));
-    if (!g_stackTop || sp > g_stackTop)
+    /* Ignore wild SP excursions (e.g. heap-backed fiber stacks, megabytes
+     * from the game stack): without this, one foreign-stack touch
+     * permanently corrupts top/floor and the peak reads gigabytes,
+     * masking real overflows for the rest of the session. A legitimate
+     * new shallow mark is always within a stack-size of the old top. */
+    if (!g_stackTop || (sp > g_stackTop && sp - g_stackTop < 65536))
     {
         g_stackTop = sp; /* shallowest SP seen ≈ stack top */
     }
-    if (sp < g_stackFloor)
+    if (sp < g_stackFloor && g_stackTop - sp < 262144)
     {
         g_stackFloor = sp;
     }

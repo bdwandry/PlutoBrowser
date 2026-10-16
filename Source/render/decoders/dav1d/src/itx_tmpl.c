@@ -83,13 +83,7 @@ inv_txfm_add_c(pixel *dst, const ptrdiff_t stride, coef *const coeff,
     const int row_clip_max = ~row_clip_min;
     const int col_clip_max = ~col_clip_min;
 
-    /* PLAYDATE PORT DELTA (develop_avif_decoder): `static` added.
-     * The 16KB frame plus its call chain overflows the 61.8KB game task
-     * on hardware (same finding as wedge.c). Scratch is fully consumed
-     * within each call and inv_txfm_add_c never reenters itself, so
-     * static is safe under our single-threaded decode. Upstream dav1d
-     * 1.5.1 is otherwise untouched. */
-    static int32_t tmp[64 * 64], *c = tmp;
+    int32_t tmp[64 * 64], *c = tmp;
     int last_nonzero_col; // in first 1d itx
     if (txtps[1] == IDENTITY && txtps[0] != IDENTITY) {
         last_nonzero_col = imin(sh - 1, eob);
