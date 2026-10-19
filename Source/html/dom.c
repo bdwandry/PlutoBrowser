@@ -112,6 +112,44 @@ char *dom_arena_dup(DomResult *dom, const char *s, int len)
     return arena_dup((Arena *)dom->_arena, s, (size_t)len);
 }
 
+/* ── Phase 10: animation-completion dedupe map ────────────────────────────
+ * One (node, name) pair per COMPLETED declared run, document-lifetime.
+ * Returns 1 when the pair was already recorded (dedupe held), 0 when
+ * newly recorded. Names copy into the doc string arena (≤24 chars —
+ * longer names never reach here; the registry refuses them, so an
+ * over-long animation is inert and never engages). */
+int dom_anim_end_report(DomResult *dom, const void *node,
+                        const char *name, int nameLen)
+{
+    if (!dom || !node || !name || nameLen <= 0 || nameLen > 24)
+    {
+        return 0; /* malformed: report "not recorded" (caller skips) */
+    }
+    for (int i = 0; i < dom->animFiredCount; i++)
+    {
+        if (dom->animFired[i].node == node &&
+            dom->animFired[i].nameLen == nameLen &&
+            memcmp(dom->animFired[i].name, name, (size_t)nameLen) == 0)
+        {
+            return 1;
+        }
+    }
+    if (dom->animFiredCount >= DOM_ANIMFIRED_MAX)
+    {
+        return 0; /* cap reached: record nothing (documented residual) */
+    }
+    char *copy = dom_arena_dup(dom, name, nameLen);
+    if (!copy)
+    {
+        return 0; /* arena exhaustion: record nothing */
+    }
+    dom->animFired[dom->animFiredCount].node = (void *)node;
+    dom->animFired[dom->animFiredCount].name = copy;
+    dom->animFired[dom->animFiredCount].nameLen = nameLen;
+    dom->animFiredCount++;
+    return 0;
+}
+
 /* ── Tag rule tables (Lua parity) ───────────────────────────────────────── */
 static int is_void(const char *tag)
 {
@@ -878,6 +916,51 @@ const void *dom_css_sibling(const void *node, int dir)
     return NULL;
 }
 
+/* Phase 1: nearest ELEMENT sibling WITH selector-relevant info filled
+ * (tag lowercased compare, class, id). Backs the '+' / '~' sibling
+ * combinators in css_chain_matches — same walk as dom_css_sibling,
+ * adding the qs_compound_of-style info extraction. */
+static int qs_compound_of(const DomNode *n, const char **tagLower,
+                          const char **classAttr, const char **idAttr);
+
+const void *dom_css_sibling_info(const void *node, int dir,
+                                 const char **tagLower,
+                                 const char **classAttr,
+                                 const char **idAttr)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n || !n->parent || (dir != -1 && dir != 1))
+    {
+        return NULL;
+    }
+    const DomNode *par = n->parent;
+    int idx = -1;
+    for (int i = 0; i < par->childCount; i++)
+    {
+        if (par->children[i] == n)
+        {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0)
+    {
+        return NULL; /* detached (should not happen) */
+    }
+    for (int i = idx + dir; i >= 0 && i < par->childCount; i += dir)
+    {
+        const DomNode *s = par->children[i];
+        if (s && s->kind == DOM_ELEMENT)
+        {
+            qs_compound_of(s, tagLower, classAttr, idAttr);
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static int dom_css_childless(const void *node); /* Phase 7 :empty truth */
+
 void dom_css_dom(CssDom *d,
                  const void *(*ancestor)(const void *node, int i,
                                          const char **tagLower,
@@ -891,6 +974,31 @@ void dom_css_dom(CssDom *d,
     d->ancestor = ancestor;
     d->attr = dom_css_attr;
     d->sibling = dom_css_sibling;
+    d->siblingInfo = dom_css_sibling_info;
+    d->childless = dom_css_childless;
+}
+
+/* Phase 7: spec :empty truth (CSS Selectors 4 §9.1): the node generates
+ * NO content — no element children and no text; comment children are
+ * transparent ("<p><!-- --></p>" IS :empty). Data/doc-type children
+ * (innerHTML blobs, raw data nodes) stay content — conservative true
+ * only for the comment-only case. */
+static int dom_css_childless(const void *node)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n)
+    {
+        return -1;
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        const DomNode *c = n->children[i];
+        if (c && c->kind != DOM_COMMENT)
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* ── Runtime DOM mutation API (JavaScript bridge) ────────────────────────── */

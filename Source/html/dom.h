@@ -85,6 +85,12 @@ struct DomNode
     DomNode *shadowHost; /* on the SHADOW ROOT node: owning element */
 };
 
+/* Phase 10 dedupe-map cap: 24 completed (element, animation-name) pairs per
+ * document. Beyond the cap the pair records nothing — that run may re-fire
+ * on a re-walk (deterministic, additive, bounded; real pages land far under
+ * the cap and the residual is documented in the scorecard). */
+#define DOM_ANIMFIRED_MAX 24
+
 typedef struct
 {
     DomNode *root;
@@ -99,10 +105,32 @@ typedef struct
     /* SW8 paging: stub shells left by dom_page_out stay LINKED in the live
      * tree (empty leaves carrying pagedKey), so the normal tree free pass
      * releases them — no separate bookkeeping needed. */
+
+    /* Phase 10: animation-completion dedupe map. The walker records one
+     * (node, name) pair per COMPLETED declared run, document-lifetime:
+     * a later walk of the SAME element with the SAME animation-name
+     * must not re-engage (the browser completes each run once until the
+     * declaration changes). Names live in the doc's own string arena
+     * (same lifetime as the nodes); nodes never free before the
+     * document — entries are plain pointers, safe across re-walks. */
+    struct
+    {
+        void *node;   /* the element that completed the run */
+        char *name;   /* arena copy (NUL-terminated, ≤24 chars) */
+        int nameLen;
+    } animFired[DOM_ANIMFIRED_MAX];
+    int animFiredCount;
 } DomResult;
 
 /* Duplicate (s,len) into the arena, NUL-terminated. NULL on exhaustion. */
 char *dom_arena_dup(DomResult *dom, const char *s, int len);
+
+/* ── Phase 10: record/consult one COMPLETED animation run ─────────────────
+ * Returns 1 when this (node, name) pair was already recorded (dedupe:
+ * the walker must NOT engage again); 0 when newly recorded. The name
+ * copies into the doc's own string arena (truncated at 24 chars). */
+int dom_anim_end_report(DomResult *dom, const void *node,
+                        const char *name, int nameLen);
 
 /* Build a DOM tree from tokenized input (tokenizer_tokenize output).
  * Returns 0 ok, -1 alloc failure. Consume with dom_free_result. */
@@ -134,6 +162,15 @@ const char *dom_css_attr(const void *node, const char *name, size_t namelen);
  * sibling in direction dir (-1 = previous, +1 = next), or NULL when none.
  * Text/comment siblings never count (CSS element-sibling semantics). */
 const void *dom_css_sibling(const void *node, int dir);
+
+/* Phase 1 sibling-COMBINATOR adapter: same nearest-ELEMENT walk as
+ * dom_css_sibling, filling *tagLower / *classAttr / *idAttr for that
+ * sibling (strings valid until the next call). Backs '+' / '~' in
+ * css_chain_matches. */
+const void *dom_css_sibling_info(const void *node, int dir,
+                                 const char **tagLower,
+                                 const char **classAttr,
+                                 const char **idAttr);
 
 /* Fill a CssDom with the shared hooks (attribute + sibling) plus the
  * caller's ancestor hook — one place so the three never drift. */
@@ -221,7 +258,9 @@ int dom_class_toggle(DomResult *dom, DomNode *el, const char *token);
 
 /* ── SW5: querySelector machinery (O3) ────────────────────────────────────
  * Selector strings come from the JS caller; parsing (compound grammar:
- * type/.class/#id/*, whitespace = descendant) is css_parse_selector with a
+ * type .class #id star attr-ops; combinators: whitespace = descendant,
+ * '>' child, '+' adjacent sibling, '~' general sibling) is
+ * css_parse_selector with a
  * CALLER-PROVIDED scratch buffer (the parsed compounds point into it — one
  * 256B buffer per call site, stack-safe on device). Matching walks the
  * subtree under `scope` (inclusive) iteratively; elements only. Both take

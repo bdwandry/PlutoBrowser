@@ -230,6 +230,17 @@ struct JsBridge
      * after each frame through jsbridge_take_dom_dirty(). */
     int domDirty;
 
+    /* Phase 10: DOM-mutation note ring (transition lane). The bridge
+     * marks WHICH element changed (see jsbridge_note_dom_mutation in
+     * jsbridge.h); the browser drains at render completion and fires
+     * transitionend for each noted node still armed with a transition.
+     * Frozen engines never note (the ring stays empty for them). */
+    struct
+    {
+        void *node;
+    } mutNotes[JSB_MUT_NOTES_MAX];
+    int mutNoteCount;
+
     /* R15: scripts skipped by the admission gate, waiting for memory
      * (JSBRIDGE_DEFERRED_MAX above). */
     struct

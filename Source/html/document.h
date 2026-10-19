@@ -36,6 +36,10 @@ typedef struct
 typedef struct
 {
     int top, bottom, left, right;
+    /* Phase 5: -webkit-line-clamp winning value parsed to a line count
+     * (0 = unlimited). Filled by walk_box_spacing (CSS hint query) for
+     * every block-open element, assigned to DocBlock.clampLines. */
+    int clamp;
 } DocBoxSpacing;
 
 /* Split an over-wide word into maxW-fitting pieces (UTF-8 safe: never
@@ -85,6 +89,12 @@ typedef struct
 #define DOC_INF_PRELINE 0x10000
 #define DOC_INF_NOWRAP 0x20000
 #define DOC_INF_BREAKWORD 0x40000
+/* Phase 5: text-overflow:ellipsis — == CSS_F_ELLIP (ABI-checked in
+ * document.c). NOT part of INHERIT_MASK: text-overflow is a non-
+ * inherited property, so the bit travels only within the declaring
+ * element's subtree (carried to w->flags at the element-open merge,
+ * restored by the same exit frame). */
+#define DOC_INF_ELLIP 0x1000000
 
 typedef struct
 {
@@ -179,6 +189,10 @@ typedef struct
     int group;
     int selected;
     int disabled;
+    /* Phase 8: the walk-time truth (selected attribute), so a tap on a
+     * reset button restores the option set the author shipped (taps on
+     * a multiple select accumulate into first-selected). */
+    int defaultSelected;
 } DocOption;
 
 /* ── Image maps (port of doc.maps[name] = { shape, coords, href, alt }) ──── */
@@ -215,6 +229,20 @@ typedef struct
     int level; /* heading */
     const char *align; /* "center"/"right"/"left" or NULL */
     int spacingTop, spacingBottom, indent;
+    /* Phase 5: -webkit-line-clamp line budget (0 = unlimited). Carried
+     * by the walker's box-hint query (DocBoxSpacing.clamp) at every
+     * text block open; consumed by render/layout.c (BreakOpts.maxLines). */
+    int clampLines;
+    /* Phase 6: the flex/grid container's row-gap mounted on a CHILD
+     * block (halved px; the first item skips — the gap rides BETWEEN
+     * items). Consumed by layout's per-block advances; inert on any
+     * block opened outside a flex/grid container. See css.h policy. */
+    int gapApplied;
+    /* Phase 7: the li's ::marker content text (the winning content
+     * among ::marker rules — walk_pseudo_text resolved; arena string).
+     * NULL = the default bullet glyph ("*" family/number). "" = the
+     * author REMOVED the bullet (content: ""), layout draws nothing. */
+    char *markerText;
     int hasSpacing; /* Lua parity: element blocks carry spacing keys (printed
                      * even when 0); implicit stray-text paragraphs don't. */
     int invert;
@@ -254,6 +282,29 @@ typedef struct
     int inert;
     int radio, checked;
     char *inputType; /* arena: "text","textarea","search",... */
+    /* Phase 8 resets + multi-select: the WALK-TIME control state, so a
+     * tap on type=reset restores what the author shipped (taps mutate
+     * the live fields; the defaults ride these captured copies).
+     * defaultChecked/defaultSelIndex = the walk's initial truth;
+     * defaultValue NULL = the control shipped empty. buttonType carries
+     * the button element's type for the tap dispatch (submit/button/
+     * reset) — a submit block never exposes its element type otherwise. */
+    char *defaultValue; /* arena, or NULL */
+    int defaultChecked;
+    int defaultSelIndex; /* -1 = unset */
+    char *buttonType;    /* arena: submit/button/reset/file/image */
+    /* Phase 9 transform lane: translate-only paint offsets (2-D
+     * rotation/scale/skew stay the documented 2-D-compositor policy
+     * non-feature). px = walk-resolved HALF px; pct = percent of the
+     * element's own drawn box at paint time (translateY(-50%) class).
+     * memset-0 = absent, so untouched elements shift by nothing. */
+    int tfXpx, tfYpx;
+    int tfXpct, tfYpct;
+    /* Phase 10 animation lane: the animation NAME this block's element
+     * resolved to a REGISTERED @keyframes run and COMPLETED (arena
+     * string; NULL = no completed animation — the probe asserts both
+     * sides: engaged mounts and refused windows). */
+    const char *animName;
     /* select_field */
     DocOption **options; /* heap array */
     int optionCount;
@@ -316,6 +367,9 @@ typedef enum
     DOC_SCRIPT_FULL = 3 /* inline + fetched external <script src> files */
 } DocScriptPolicy;
 
+/* Phase 10: end-event queue cap (animation lane nodes per walk). */
+#define DOC_PEND_END_MAX 16
+
 /* ── Document result ─────────────────────────────────────────────────────── */
 typedef struct
 {
@@ -336,6 +390,14 @@ typedef struct
     struct JsExtScript_ *extScripts; /* heap array; body owned here */
     int extScriptCount;              /* unique src= URLs stored */
     void *_extArena;                 /* jsext scratch arena (document.c frees) */
+    /* ── External <link rel="stylesheet"> sheets (Phase 1.5) ──
+     * Bodies fetched by the render task BEFORE parsing (pre-parse stage);
+     * the engine's rule text points into these buffers, so they live as
+     * long as the doc and are freed by document_free (with the engine,
+     * in that order). */
+    char **cssExtBody;   /* heap array: cssExtN malloc'd bodies (each owned) */
+    size_t *cssExtLen;   /* parallel body lengths */
+    int cssExtN;         /* external sheets fetched (0 = none) */
     /* <noscript> handling policy for this page (parsed and every rewalk):
      * 0 = render the fallback content (JavaScript setting Off, reader mode);
      * 1 = suppress it (an engine ran this page — browser parity: the
@@ -376,6 +438,20 @@ typedef struct
     int readingTimeWords;
     char *readingTimeStr; /* arena string (readability arena) */
     void *_arena; /* walker string/object arena (document.c internal) */
+
+    /* ── Phase 10: end-event queue (animation lane) ──
+     * Nodes whose declared CSS animation COMPLETED during the just-run
+     * walk (immediate-fire contract: the flat renderer has no animation
+     * timeline — a declared run finishes at the walk that first resolves
+     * it). Filled by the walker (walk_anim_engage), drained + cleared by
+     * the browser at render completion, reset at every walk start so the
+     * queue reflects exactly the current pass. Per-(node,name) dedupe
+     * persists on the DOM (dom_anim_end_report) across walks. */
+    struct
+    {
+        void *node; /* live DomNode that completed the run */
+    } pendEnd[DOC_PEND_END_MAX];
+    int pendEndCount;
 } DocParseResult;
 
 /* Inline <script> execution (attach/flush/close + click dispatch) lives in
@@ -480,5 +556,10 @@ char *doc_arena_alloc_str(DocArena *a, size_t n);
 char *doc_arena_strdup(DocArena *a, const char *str);
 
 void document_free(DocParseResult *doc);
+/* ── Phase 10: transition lane — is this live node's winning style armed
+ * with a transition (shorthand/longhand whose value is not `none`)? The
+ * browser consults it at end-event drain time for each node a script
+ * mutated. 1 = armed, 0 = inert. */
+int document_node_transition_hot(DocParseResult *doc, const void *node);
 
 #endif /* PLUTO_DOCUMENT_H */

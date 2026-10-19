@@ -252,8 +252,10 @@ int jsbridge_page_script(JsBridge *bridge, const char *src, size_t len);
  * Router-owned so every engine gets IDENTICAL semantics and caps:
  * innerHTML assignment parses real markup (16KB source cap, budgeted per
  * node); querySelector/All walk the live subtree with the #2 CSS compound
- * grammar (type/.class/#id/* + descendant; anything else = null result,
- * never an exception); classList mutates the class attribute token list.
+ * grammar (type .class #id star attr-ops + the four combinators:
+ * descendant, child, '+' adjacent sibling, '~' general sibling;
+ * anything unparseable = null result, never an exception); classList
+ * mutates the class attribute token list.
  * Engines only marshal arguments/results. All functions are safe on a
  * detached node (they operate on the node, not the tree position). */
 int jsbridge_el_set_inner_html(JsBridge *b, void *el, const char *html,
@@ -322,6 +324,22 @@ void jsbridge_engine_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
  * same way the timer/deferred pumps' mutationsOut does, so layout and
  * the tap-target stamps re-anchor to the fresh subtree. */
 int jsbridge_take_dom_dirty(JsBridge *bridge);
+
+/* ── Phase 10: DOM-mutation notes for the transition lane ─────────────────
+ * JS mutations that can CHANGE an element's computed style (attribute
+ * writes, classList methods, structural append/insert/remove,
+ * innerHTML, the style-object accessor) ALSO note the mutated element
+ * here. At render completion the browser consults the winner style of
+ * each noted node: one armed with a transition fires transitionend
+ * (the flat renderer completed it). Text-only writes (textContent/
+ * innerText, CharacterData) do NOT note: they cannot change computed
+ * style, so they must not re-fire a running transition (a listener
+ * self-write would loop the counter otherwise — browser parity). */
+#define JSB_MUT_NOTES_MAX 24
+void jsbridge_note_dom_mutation(JsBridge *b, void *node);
+/* Take the pending notes (out copies node pointers), clear the ring,
+ * returns the taken count; notes beyond max are dropped (documented). */
+int jsbridge_take_mut_notes(JsBridge *b, void **out, int max);
 /* R27: 1 while the engine's background eval (XS NR bundler split) is still
  * in flight — OR the R54 per-frame script queue still has entries. The
  * render pipeline gates the walk/snapshot on this so they observe the

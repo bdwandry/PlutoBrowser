@@ -54,6 +54,7 @@
 #include "html/tokenizer.h"
 #include "html/dom.h"
 #include "html/document.h"
+#include "html/css.h" /* Phase 1.5: stylesheet-scan API + caps */
 #include "html/jsbridge.h"
 #include "html/jsext.h"
 #include "html/readability.h"
@@ -466,6 +467,73 @@ static void update_system_menu(void)
 /* ── renderBody (port): parse + Layout.build as a cooperative task ───────── */
 static void render_body(const char *body, const char *url, int addToHistory);
 
+/* ── Phase 1.5: in-flight stylesheet fetch collector ──
+ * The HTTP client is single-flight and the render task is the only
+ * starter during this stage, so file-statics are safe (same pattern the
+ * nav task uses for its own collector). The client hands a RAM body on
+ * success (spill lane is skipped for CSS — bodies are tiny vs the spill
+ * threshold); bad status or error = sheet skipped (the page renders
+ * without it; containment by absence). */
+static char *g_cssBody = NULL; /* captured body (heap, transferred to rt) */
+static size_t g_cssLen = 0;
+static int g_cssStatus = 0;
+static int g_cssDone = 0;
+static int g_cssErr = 0;
+static int g_cssInFlight = 0; /* 1 = the done-flag has an owning slot */
+
+static void css_ext_on_success(int status, char **headerKeys,
+                               char **headerVals, int headerCount,
+                               const char *body, size_t bodyLen,
+                               const char *url)
+{
+    (void)headerKeys;
+    (void)headerVals;
+    (void)headerCount;
+    (void)url;
+    g_cssStatus = status;
+    if (status >= 200 && status < 300 && body && bodyLen > 0)
+    {
+        /* Copy ≤ the page cap (bodies beyond the envelope trim — a
+         * truncated sheet still parses the rules that made it). */
+        size_t want = bodyLen;
+        if (want > PLUTO_CSS_EXT_TOTAL_MAX)
+        {
+            want = PLUTO_CSS_EXT_TOTAL_MAX;
+        }
+        char *copy = (char *)pluto_mem_realloc(NULL, want + 1);
+        if (copy)
+        {
+            memcpy(copy, body, want);
+            copy[want] = '\0';
+            g_cssBody = copy;
+            g_cssLen = want;
+        }
+        /* else: allocation refused → sheet skipped via the error lane. */
+    }
+    g_cssDone = 1;
+}
+
+static void css_ext_on_spill(int status, SpillFile spill, size_t bodyLen,
+                             const char *url)
+{
+    (void)status;
+    (void)spill;
+    /* ≥ the client's spill threshold for a stylesheet is unusual; the
+     * disk lane stays script-only in v1 (96KB-class bodies never hit it). */
+    (void)bodyLen;
+    (void)url;
+    logger_log("[css-ext] sheet dropped: disk-spill body (v1 limit)");
+    g_cssErr = 1;
+    g_cssDone = 1;
+}
+
+static void css_ext_on_error(const char *message)
+{
+    (void)message;
+    g_cssErr = 1;
+    g_cssDone = 1;
+}
+
 /* renderBody task state (task-private continuation). */
 typedef struct RenderTask
 {
@@ -488,6 +556,18 @@ typedef struct RenderTask
     int parseExtedDoc;         /* 1 once the Stage-1 ext scan has been consumed */
     int parsed;                /* 1 once document_parse_ex has run (parse step done) */
     JsExtFetch *fetch;         /* jsext session (owned while prefetching) */
+    /* ── Phase 1.5: external <link rel="stylesheet"> fetch stage ──
+     * cssPhase 0 = not started, 1 = scanned → lists ready, 2 = fetching
+     * (_indices advance as sheets settle), 3 = done (bodies already moved
+     * onto rt->doc). Runs BEFORE the script prefetch so the stylesheet
+     * lane stays independent of the JS setting (JS-Off pages get CSS). */
+    int cssPhase;
+    int cssUrlN;                         /* hrefs resolved & queued */
+    int cssIdx;                          /* current fetch slot */
+    size_t cssBytes;                     /* RAM envelope (PLUTO_CSS_EXT_TOTAL_MAX) */
+    char *cssUrls[PLUTO_CSS_EXT_MAX];    /* resolved, still owned here */
+    char *cssBody[PLUTO_CSS_EXT_MAX];    /* captured bodies */
+    size_t cssLen[PLUTO_CSS_EXT_MAX];
 } RenderTask;
 
 /* JS bridge of the LIVE page (kept across the parse→layout→done sequence
@@ -1110,6 +1190,18 @@ static void nr_revisit_autotest_tick(void)
         {
             logger_log("[nr-autotest] FAIL: fast path fired on the boot visit "
                        "(hits=%d) — bypass lost", g_snapFastPathHits);
+            g_nrSnapPhase = 3;
+            return;
+        }
+        /* about: probe pages (about:cssprobe, about:jsext, about:javascript)
+         * are snap-bypassed BY DESIGN (snap_skip_url — every visit must
+         * freshly parse+render), so the snapshot-revisit phases below can
+         * never see a hit. End the autotest here for probe URLs: the probe
+         * page itself is the assertion (its own rows + the [css-skip] tally). */
+        if (strncmp(currentUrlObj->normalized, "about:", 6) == 0)
+        {
+            logger_log("[nr-autotest] about: probe page — snapshot-revisit "
+                       "phases skipped (snap_skip_url by design)");
             g_nrSnapPhase = 3;
             return;
         }
@@ -2126,12 +2218,14 @@ static void home_test_autotest_tick(void)
         {
             return;
         }
-        /* Target the 3rd test card (about:acidtest, index bmCount+3):
-         * card 1 is about:home, which special-cases back to STATE_HOME (not
-         * a page render), so it cannot verify the navigation path. Steer
-         * with the CRANK (one reading-order step per call, clamps at the
-         * last selectable item — no skipped indices, always terminates). */
-        int target = 1 + storage_bookmark_count() + 2;
+        /* Target the LAST test card (about:cssprobe, index bmCount+5):
+         * the full test-card sweep, with the PASS row naming the opened
+         * page. Card 1 is about:home, which special-cases back to
+         * STATE_HOME (not a page render), so it cannot verify the
+         * navigation path. Steer with the CRANK (one reading-order step
+         * per call, clamps at the last selectable item — no skipped
+         * indices, always terminates). */
+        int target = 1 + storage_bookmark_count() + 5;
         if (home_page_selected_index() != target && g_homeTestPresses < 40)
         {
             home_page_handle_crank(HOME_CRANK_STEP_PX);
@@ -2166,13 +2260,13 @@ static void home_test_autotest_tick(void)
         g_homeTestPhase = u ? 1 : 2;
         return;
     }
-    /* Phase 1: verify the navigation landed on the 3rd test page. */
+    /* Phase 1: verify the navigation landed on the LAST test page. */
     if (currentState == STATE_PAGE && currentDoc)
     {
         const HttpTestPage *pages = NULL;
         http_test_pages(&pages);
-        const char *want = (pages && pages[2].name) ? pages[2].name
-                                                    : "about:acidtest";
+        const char *want = (pages && pages[5].name) ? pages[5].name
+                                                    : "about:cssprobe";
         if (currentDoc->baseUrl && strcmp(currentDoc->baseUrl, want) == 0)
         {
             logger_log("[hometest-autotest] PASS: Test Cases card opened %s "
@@ -3140,6 +3234,952 @@ static void nav_autotest_tick(void)
 }
 #endif
 
+#if defined(PLUTO_NR_AUTOTEST) && !defined(TARGET_PLAYDATE)
+/* Phase-1 probe verifier (sim autotest builds only): about:cssprobe v2
+ * renders hide-based canaries. The [render-result] sample rows print at
+ * most 24 blocks, so this scans EVERY block text and logs [cssprobe]
+ * rows — absent-markers prove each Phase-1 feature MATCHED (the rule
+ * hid the element), present-markers prove the control stayed visible.
+ * Pass only when every check agrees. */
+/* Phase 10: compose a block's text the way the k[] battery does (code
+ * blocks carry .text, images print as src, everything else reads its
+ * inline runs). The anim battery reuses this so the marker→block find
+ * stays one idiom. */
+static void cssprobe_block_text(const DocBlock *blk, char *text, size_t cap)
+{
+    size_t off = 0;
+    text[0] = '\0';
+    if (blk->type == DOC_BLOCK_CODE_BLOCK && blk->text)
+    {
+        snprintf(text, cap, "%.190s", blk->text);
+        return;
+    }
+    if (blk->type == DOC_BLOCK_IMAGE && blk->src)
+    {
+        snprintf(text, cap, "<img src=%.40s>", blk->src);
+        return;
+    }
+    for (int ii = 0; ii < blk->inlineCount && off < cap - 1; ii++)
+    {
+        const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                            ? blk->inlines[ii]->text
+                            : "";
+        size_t tl = strlen(t);
+        if (tl > cap - 1 - off)
+        {
+            tl = cap - 1 - off;
+        }
+        memcpy(text + off, t, tl);
+        off += tl;
+    }
+    text[off] = '\0';
+}
+
+static void cssprobe_check(DocParseResult *doc)
+{
+    if (!doc || strncmp(doc->title, "CSS Probe", 9) != 0)
+    {
+        return;
+    }
+    static const struct
+    {
+        const char *mark;
+        unsigned char wantPresent;
+    } k[] = {
+        {"ADJ-HIT", 0},       {"ADJ-KEEP", 1},
+        {"GENSIB-HIT", 0},    {"GENSIB-A", 1},
+        {"ATTCARET-HIT", 0},  {"ATTCARET-KEEP", 1},
+        {"ATTDOLLAR-HIT", 0}, {"ATTDOLLAR-KEEP", 1},
+        {"ATTSTAR-HIT", 0},   {"ATTSTAR-KEEP", 1},
+        {"ATTTILDE-HIT", 0},  {"ATTTILDE-KEEP", 1},
+        {"ATTBAR-HIT", 0},    {"ATTBAR-KEEP", 1},
+        {"NOT-HIT", 0},       {"NOT-KEEP", 1},
+        {"STATE-HIT", 0},     {"STATE-KEEP", 1},
+        {"CANARY-DISPLAY-NONE", 0},
+        {"VAR-HIT", 0},       {"VAR-KEEP", 1},
+        {"VARFALL-HIT", 0},
+        {"MQ-HIT", 0},        {"MQ-KEEP", 1},
+        {"MQEM-HIT", 0},      {"MQAND-HIT", 0},
+        {"MQNOT-KEEP", 1},    {"MQOR-HIT", 0},
+        {"MQCOLOR-KEEP", 1},  {"MQCONTRAST-HIT", 0},
+        {"MQUNKNOWN-KEEP", 1},
+        {"FIXED-HIT", 0},     {"ABS-HIT", 0},
+        {"ABSOFF-HIT", 0},    {"ABSSTATIC-KEEP", 1},
+        {"ZKEEP", 1},         {"REL-KEEP", 1},
+        {"SROFF-HIT", 0},     {"SRTINY-HIT", 0},
+        {"SRKEEP", 1},        {"OVKEEP", 1},
+        {"ELLKEEP", 1},       {"CLAMPKEEP", 1},
+        {"FIXGAPA", 1},       {"FIXGAPB", 1},
+        {"FGAPC", 1},         {"FGAPD", 1},
+        {"FXROWA", 1},        {"FXROWB", 1},
+        {"FAICC", 1},         {"FAICD", 1},
+        {"FXNA", 1},          {"FXSB", 1},       {"FXNC", 1},
+        {"FGNPX", 1},         {"AINC", 1},
+        /* Phase 7 pseudo-element + truth-state canaries: the content
+         * cascade now LANDS (letters inline span PBEF/PAFT + block-lane
+         *anon BCARROW), attr(href) prints, ::marker feeds the doc
+         * field, and the truth states hide/stay via REAL matchers. */
+        {"PSBEF-SPMID-PSAFT", 1},
+        {"BCARROW", 1},
+        {"BCBODY", 1},
+        {"ARWDROP", 1},
+        {"AROWSTRAY", 0},
+        /* attr() prints via a cssprobe-LOCAL ::after canary (the
+         * acidtest page's [href] canary rides its own fixture —
+         * cross-page markers never asserted here) — data-url proves
+         * the attr() value language beyond href, brackets prove the
+         * quotes/concat grammar. */
+        {" [https://probe.example/beacon]", 1},
+        {"MARKORD bullet text", 1},
+        {"REMPT bullet-less", 1},
+        {"ROOTVARHIT", 0},
+        {"ROOTKEEP", 1},
+        {"CHKHIT", 0},
+        {"CHKKEEP", 1},
+        /* Button blocks carry their label as a form field (never block
+         * inlines), so button SELF-state is unassertable by text scan —
+         * the sibling-text canaries carry the :disabled/:enabled proof:
+         * DAFTGONE hidden (btnd:disabled + p), EAFTEL-enabled-sibling
+         * hidden (btnE:enabled + .afte), DSTKEEP visible (the
+         * un-disabled boundary — the rules hide only via a REAL match).
+         * BTNgone/btnkeep SELF rows removed (would never render as
+         * block text). */
+        {"DAFTGONE", 0},
+        {"EAFTEL enabled-sibling", 0},
+        {"DSTKEEP", 1},
+        {"PHELDGONE", 0},
+        {"FITHIT", 0},
+        {"TGTHIT", 1},
+        {"EMPHIT", 0},
+        {"EV2NOTEMPTY", 1},
+        {"EKKEEP", 1},
+        /* Phase 8 interactive set: template stays inert, dialog rides
+         * the open attr, the closed details keeps its body hidden (its
+         * default "> Details" summary line prints), and the srcset
+         * picks assert their URLs in the dedicated loops below. */
+        {"TMPLJUNK", 0},   {"TMPLKEEP", 1},
+        {"DLGCLOSED", 0},  {"DLGOPEN", 1},
+        {"DETBODY", 0},
+        /* Phase 9 transforms/units/gradients: presence rows only — the
+         * translate mounts assert EXACT field values in the tf battery
+         * below, the gradient hero's polarity reads its invert flag,
+         * the margin repairs assert spacing, and the 120vmin media rule
+         * consumes (VMINHIT hides; every clause rides KNOWN vocabulary,
+         * so the [css-skip] tally stays byte-stable). */
+        {"TFSHIFTX", 1},
+        {"TFSHIFTY", 1},
+        {"TFSHIFT pct", 1},
+        {"TFSHIFTR", 1},
+        {"TFSHIFTWIN", 1},
+        {"VMINHIT", 0},
+        {"GRADHERO", 1},
+        {"MRG2REM", 1},
+        {"MRG50PCT", 1},
+        /* Phase 10 animation/transition lanes: the engaged mount rides
+         * its registry name as a BLOCK FIELD (the an battery below
+         * asserts exact); the refusal windows (unregistered name /
+         * paused / infinite) keep NULL fields; the transition victim
+         * asserts via the direct winner query below (no text can
+         * express an arm). */
+        {"ANIMLIFT", 1},
+        {"ANFALLDOWN", 1},
+        {"ANIMPAUSE", 1},
+        {"ANIMINF", 1},
+        {"TRNVICTIM", 1},
+    };
+    int fails = 0;
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+    {
+        int found = 0;
+        for (int bi = 0; bi < doc->blockCount && !found; bi++)
+        {
+            DocBlock *blk = doc->blocks[bi];
+            if (!blk)
+            {
+                continue;
+            }
+            /* Block text lives in the inline runs (blk->text is for code
+             * blocks only) — mirror log_render_result's composition,
+             * with a bigger cap so markers farther in still match. */
+            char text[192];
+            size_t off = 0;
+            text[0] = '\0';
+            if (blk->type == DOC_BLOCK_CODE_BLOCK && blk->text)
+            {
+                snprintf(text, sizeof(text), "%.190s", blk->text);
+            }
+            else if (blk->type == DOC_BLOCK_IMAGE && blk->src)
+            {
+                snprintf(text, sizeof(text), "<img src=%.40s>", blk->src);
+            }
+            else
+            {
+                for (int ii = 0;
+                     ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+                {
+                    const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                                        ? blk->inlines[ii]->text
+                                        : "";
+                    size_t tl = strlen(t);
+                    if (tl > sizeof(text) - 1 - off)
+                    {
+                        tl = sizeof(text) - 1 - off;
+                    }
+                    memcpy(text + off, t, tl);
+                    off += tl;
+                }
+                text[off] = '\0';
+            }
+            if (strstr(text, k[i].mark))
+            {
+                found = 1;
+            }
+        }
+        int ok = (found == (int)k[i].wantPresent);
+        if (!ok)
+        {
+            fails++;
+        }
+        logger_log("[cssprobe] %s %s: %s",
+                   k[i].mark, k[i].wantPresent ? "(present?)" : "(absent?)",
+                   ok ? "OK" : "FAIL");
+    }
+    /* Phase 5: layout-side cut proofs. The ellipsis/line-clamp cuts are
+     * FILTERS the breaker applies at paint time — by design the doc
+     * objects keep the FULL text (a doc-level scan can never see the
+     * cut), so these rows run the canary block's OWN inline runs through
+     * the REAL breaker via the battery probe hook: the ell block must
+     * stay ONE line whose width fits the bond (the uncut nowrap line
+     * would overflow ~2x), and the clamp block must cap at exactly 3
+     * lines. 380 = the probe paragraph's production wrap width. */
+    {
+        int proofFails = 0;
+        for (int bi = 0; bi < doc->blockCount; bi++)
+        {
+            DocBlock *blk = doc->blocks[bi];
+            if (!blk ||
+                (blk->type != DOC_BLOCK_PARAGRAPH &&
+                 blk->type != DOC_BLOCK_HEADING))
+            {
+                continue;
+            }
+            char text[192];
+            size_t off = 0;
+            text[0] = '\0';
+            for (int ii = 0;
+                 ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+            {
+                const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                                    ? blk->inlines[ii]->text
+                                    : "";
+                size_t tl = strlen(t);
+                if (tl > sizeof(text) - 1 - off)
+                {
+                    tl = sizeof(text) - 1 - off;
+                }
+                memcpy(text + off, t, tl);
+                off += tl;
+            }
+            text[off] = '\0';
+            if (off < 8)
+            {
+                continue;
+            }
+            LayoutBreakProbe pr;
+            if (strstr(text, "ELLKEEP visible then") == text)
+            {
+                layout_test_probe_maxlines(
+                    (const DocInline **)blk->inlines, blk->inlineCount, 380,
+                    NULL, 0, 16, 0, &pr);
+                int ok = (pr.lineCount == 1 && pr.lineWidth[0] > 0 &&
+                          pr.lineWidth[0] <= 380);
+                logger_log("[cssprobe] ell-clip lines=%d width=%d: %s",
+                           pr.lineCount, pr.lineWidth[0], ok ? "OK" : "FAIL");
+                if (!ok)
+                {
+                    proofFails++;
+                }
+            }
+            else if (strstr(text, "CLAMPKEEP then filler") == text)
+            {
+                layout_test_probe_maxlines(
+                    (const DocInline **)blk->inlines, blk->inlineCount, 380,
+                    NULL, 0, 16, 3, &pr);
+                int ok = (pr.lineCount == 3);
+                logger_log("[cssprobe] clamp-lines lines=%d want 3: %s",
+                           pr.lineCount, ok ? "OK" : "FAIL");
+                if (!ok)
+                {
+                    proofFails++;
+                }
+            }
+        }
+        fails += proofFails;
+    }
+    /* Phase 6: flex/grid container-transport receipts read DIRECTLY off
+     * the doc objects (walker-side data — unlike the P5 paint cuts these
+     * ARE visible to a doc scan): the first gap-container child carries
+     * the halved-px mount, the LAST child's slot is closed by the
+     * container's CSS exit, rem scales at the 16px browser root,
+     * row-gap beats the gap shorthand, gap is inert on a non-flex box
+     * box (CSS-correct), and align-items:center centers child blocks
+     * only inside real flex containers (align-self on its item own). */
+    {
+        static const struct
+        {
+            const char *mark;
+            int gapWant;    /* DocBlock.gapApplied must equal (skip < 0) */
+            int centerWant; /* 1 align=="center", 0 align unset (skip -1) */
+        } fk[] = {
+            {"FIXGAPA child one", 8, -1},       /* .fxg: 16px -> 8 */
+            {"FIXGAPB child two", 0, -1},       /* the tail slot closes */
+            {"FGAPC rem child", 4, -1},         /* .fxr: .5rem -> 4 */
+            {"FGAPD rem child", 0, -1},
+            {"FXROWA longhand", 6, -1},         /* .fxw: 12px -> 6 */
+            {"FXROWB longhand", 0, -1},
+            {"FAICC centered", -1, 1},
+            {"FAICD centered", -1, 1},
+            {"FXSB self-centered", -1, 1},      /* align-self: center */
+            {"FXNA plain one", -1, 0},          /* gapless flex, no carry */
+            {"AINC noflex", -1, 0},             /* center inert w/o flex */
+            {"FGNPX gap-inert", 0, -1},
+        };
+        int flexFails = 0;
+        for (size_t i = 0; i < sizeof(fk) / sizeof(fk[0]); i++)
+        {
+            int found = 0, ok = 0;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk)
+                {
+                    continue;
+                }
+                char text[192];
+                size_t off = 0;
+                text[0] = '\0';
+                for (int ii = 0;
+                     ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+                {
+                    const char *t = (blk->inlines[ii] &&
+                                     blk->inlines[ii]->text)
+                                        ? blk->inlines[ii]->text
+                                        : "";
+                    size_t tl = strlen(t);
+                    if (tl > sizeof(text) - 1 - off)
+                    {
+                        tl = sizeof(text) - 1 - off;
+                    }
+                    memcpy(text + off, t, tl);
+                    off += tl;
+                }
+                text[off] = '\0';
+                if (strstr(text, fk[i].mark) == text)
+                {
+                    found = 1;
+                    ok = 1;
+                    if (fk[i].gapWant >= 0 &&
+                        blk->gapApplied != fk[i].gapWant)
+                    {
+                        ok = 0;
+                    }
+                    if (fk[i].centerWant >= 0)
+                    {
+                        int isCt =
+                            blk->align && strcmp(blk->align, "center") == 0;
+                        if (isCt != fk[i].centerWant)
+                        {
+                            ok = 0;
+                        }
+                    }
+                    if (ok)
+                    {
+                        logger_log("[cssprobe] flex %s: OK (gap=%d align=%s)",
+                                   fk[i].mark, blk->gapApplied,
+                                   blk->align ? blk->align : "unset");
+                    }
+                }
+            }
+            if (!found || !ok)
+            {
+                flexFails++;
+                logger_log("[cssprobe] flex %s: %s", fk[i].mark,
+                           found ? "FAIL" : "MISSING");
+            }
+        }
+        fails += flexFails;
+    }
+    /* Phase 7: ::marker content receipts read DIRECTLY off the li
+     * blocks (same doc-field pattern as the Phase 6 mounts): the
+     * winning ::marker content text rides DocBlock.markerText (the
+     * drawn bullet on a custom symbol), an empty string = the author
+     * removed the bullet, and a block WITHOUT ::marker rules keeps the
+     * default glyph (markerText NULL). Layout draws the text (or
+     * nothing) from this field — the doc is the truth here. */
+    {
+        static const struct
+        {
+            const char *liText; /* block TEXT START (the li's own) */
+            const char *want;   /* markerText strcmp ("" = empty string) */
+            int wantNull;       /* 1 = markerText must be NULL */
+        } mlk[] = {
+            {"MARKORD bullet text", "MK7", 0},
+            {"REMPT bullet-less", "", 0},
+        };
+        int mFails = 0;
+        for (size_t i = 0; i < sizeof(mlk) / sizeof(mlk[0]); i++)
+        {
+            int found = 0, ok = 0;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk || blk->type != DOC_BLOCK_LIST_ITEM)
+                {
+                    continue;
+                }
+                char text[192];
+                size_t off = 0;
+                text[0] = '\0';
+                for (int ii = 0;
+                     ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+                {
+                    const char *t =
+                        (blk->inlines[ii] && blk->inlines[ii]->text)
+                            ? blk->inlines[ii]->text
+                            : "";
+                    size_t tl = strlen(t);
+                    if (tl > sizeof(text) - 1 - off)
+                    {
+                        tl = sizeof(text) - 1 - off;
+                    }
+                    memcpy(text + off, t, tl);
+                    off += tl;
+                }
+                text[off] = '\0';
+                if (strstr(text, mlk[i].liText) == text)
+                {
+                    found = 1;
+                    ok = (((blk->markerText == NULL) == (mlk[i].wantNull != 0)) &&
+                          (mlk[i].wantNull ||
+                           strcmp(blk->markerText, mlk[i].want) == 0));
+                    if (ok)
+                    {
+                        logger_log("[cssprobe] marker %s: OK (\"%s\")",
+                                   mlk[i].liText,
+                                   blk->markerText ? blk->markerText : "");
+                    }
+                }
+            }
+            if (!found || !ok)
+            {
+                mFails++;
+                logger_log("[cssprobe] marker %s: %s", mlk[i].liText,
+                           found ? "FAIL" : "MISSING");
+            }
+        }
+        fails += mFails;
+    }
+    /* Phase 8: interactive-set field asserts — the srcset picks, the
+     * multiple-select model, and the reset/default button blocks. The
+     * k[] text battery cannot see these: a picked URL is not block
+     * TEXT, and button labels never render as block inlines. Same
+     * bespoke-loop pattern as the marker battery above. */
+    {
+        static const struct
+        {
+            const char *wantAlt;
+            const char *wantSrc;
+        } rk[] = {
+            {"PLAINIMG baseline", "https://probe.example/plain.png"},
+            {"SRCSETW width pick", "https://probe.example/three.png"},
+            {"SRCSETD density pick", "https://probe.example/van@1x.png"},
+            {"SRCSETF unusable keeps src", "https://probe.example/only.png"},
+        };
+        int rFails = 0;
+        for (size_t i = 0; i < sizeof(rk) / sizeof(rk[0]); i++)
+        {
+            int found = 0;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk || blk->type != DOC_BLOCK_IMAGE || !blk->alt ||
+                    !blk->src)
+                {
+                    continue;
+                }
+                if (strcmp(blk->alt, rk[i].wantAlt) == 0)
+                {
+                    found = 1;
+                    if (strcmp(blk->src, rk[i].wantSrc) != 0)
+                    {
+                        logger_log("[cssprobe] srcset %s: FAIL (src=%.90s)",
+                                   rk[i].wantAlt, blk->src);
+                        rFails++;
+                    }
+                    else
+                    {
+                        logger_log("[cssprobe] srcset %s: OK", rk[i].wantAlt);
+                    }
+                }
+            }
+            if (!found)
+            {
+                logger_log("[cssprobe] srcset %s: MISSING (no img block)",
+                           rk[i].wantAlt);
+                rFails++;
+            }
+        }
+        fails += rFails;
+        int selFails = 0;
+        int selFound = 0;
+        for (int bi = 0; bi < doc->blockCount && !selFound; bi++)
+        {
+            DocBlock *blk = doc->blocks[bi];
+            if (!blk || blk->type != DOC_BLOCK_SELECT_FIELD || !blk->name ||
+                strcmp(blk->name, "msel") != 0)
+            {
+                continue;
+            }
+            selFound = 1;
+            int ok = (blk->optionCount == 3 && blk->multiple == 1 &&
+                      blk->selectedIndex >= 1 && blk->selectedIndex <= 3);
+            if (ok)
+            {
+                static const int wantSel[3] = {1, 0, 1};
+                static const int wantDis[3] = {0, 0, 0};
+                for (int k2 = 0; k2 < 3; k2++)
+                {
+                    DocOption *o = blk->options ? blk->options[k2] : NULL;
+                    if (!o || o->selected != wantSel[k2] ||
+                        o->disabled != wantDis[k2] || !o->text || !o->value)
+                    {
+                        ok = 0;
+                        break;
+                    }
+                }
+            }
+            logger_log("[cssprobe] msel model: %s (%d opts, multiple=%d)",
+                       ok ? "OK" : "FAIL", blk->optionCount,
+                       blk->multiple ? 1 : 0);
+            if (!ok)
+            {
+                selFails++;
+            }
+        }
+        if (!selFound)
+        {
+            logger_log("[cssprobe] msel model: MISSING (no select block)");
+            selFails++;
+        }
+        fails += selFails;
+        static const struct
+        {
+            const char *wantLabel;
+            const char *wantType;
+        } bk[] = {
+            {"RNRESET", "reset"},
+            {"FMBTN", "submit"},
+        };
+        int bFails = 0;
+        for (size_t i = 0; i < sizeof(bk) / sizeof(bk[0]); i++)
+        {
+            int found = 0;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk || blk->type != DOC_BLOCK_INPUT_SUBMIT ||
+                    !blk->label)
+                {
+                    continue;
+                }
+                if (strcmp(blk->label, bk[i].wantLabel) == 0)
+                {
+                    found = 1;
+                    int ok = (blk->buttonType &&
+                              strcmp(blk->buttonType, bk[i].wantType) == 0);
+                    logger_log("[cssprobe] button %s: %s", bk[i].wantLabel,
+                               ok ? "OK" : "FAIL");
+                    if (!ok)
+                    {
+                        bFails++;
+                    }
+                }
+            }
+            if (!found)
+            {
+                logger_log("[cssprobe] button %s: MISSING",
+                           bk[i].wantLabel);
+                bFails++;
+            }
+        }
+        fails += bFails;
+        /* The summary-less details default: a summary-less <details> prints
+         * the user-agent label — stored as the box-open block's LABEL
+         * (box_open_block takes the string as label, not an inline, so it
+         * cannot ride the k[] text battery). */
+        {
+            int detOk = 0;
+            for (int bi = 0; bi < doc->blockCount; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (blk && blk->type == DOC_BLOCK_BOX_OPEN && blk->label &&
+                    strcmp(blk->label, "> Details") == 0)
+                {
+                    detOk = 1;
+                    break;
+                }
+            }
+            logger_log("[cssprobe] details default: %s",
+                       detOk ? "OK" : "FAIL");
+            if (!detOk)
+            {
+                fails++;
+            }
+        }
+    }
+    /* Phase 9: translate receipts read DIRECTLY off the doc objects
+     * (same doc-field pattern as the Phase 6 mounts). Halved px mirrors
+     * walk_box_px (full/2); percentages carry their own field
+     * (per-mille/20 = percent-of-own-box, keyed against the element's
+     * box AT DRAW); the inline style replaces the WHOLE transform
+     * value (CSS: one property, one winning value — the sheet's
+     * translateY never contributes under an inline translateX);
+     * rotate/scale stay the 2-D policy line (census vocabulary, no
+     * floor). */
+    {
+        static const struct
+        {
+            const char *mark; /* block TEXT START */
+            int xpx, ypx, xpct, ypct;
+        } tf[] = {
+            {"TFSHIFTX", 6, 0, 0, 0},     /* 12px -> 6 half-px */
+            {"TFSHIFTY", 0, -6, 0, 0},    /* -0.75rem -> -12 -> -6 */
+            {"TFSHIFT pct", 0, 0, 5, -25},/* 10% / -50% */
+            {"TFSHIFTR", 2, 0, 0, 0},     /* rotate skipped, 4px -> 2 */
+            {"TFSHIFTWIN", 3, 0, 0, 0},   /* inline beats the sheet */
+        };
+        int tfFails = 0;
+        for (size_t i = 0; i < sizeof(tf) / sizeof(tf[0]); i++)
+        {
+            int found = 0, ok = 0;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk)
+                {
+                    continue;
+                }
+                char text[192];
+                size_t off = 0;
+                text[0] = '\0';
+                for (int ii = 0;
+                     ii < blk->inlineCount && off < sizeof(text) - 1; ii++)
+                {
+                    const char *t = (blk->inlines[ii] &&
+                                     blk->inlines[ii]->text)
+                                        ? blk->inlines[ii]->text
+                                        : "";
+                    size_t tl = strlen(t);
+                    if (tl > sizeof(text) - 1 - off)
+                    {
+                        tl = sizeof(text) - 1 - off;
+                    }
+                    memcpy(text + off, t, tl);
+                    off += tl;
+                }
+                text[off] = '\0';
+                if (strstr(text, tf[i].mark) == text)
+                {
+                    found = 1;
+                    ok = blk->tfXpx == tf[i].xpx &&
+                         blk->tfYpx == tf[i].ypx &&
+                         blk->tfXpct == tf[i].xpct &&
+                         blk->tfYpct == tf[i].ypct;
+                    if (ok)
+                    {
+                        logger_log("[cssprobe] tf %s: OK (xpx=%d ypx=%d "
+                                   "xpct=%d ypct=%d)",
+                                   tf[i].mark, blk->tfXpx, blk->tfYpx,
+                                   blk->tfXpct, blk->tfYpct);
+                    }
+                    else
+                    {
+                        logger_log("[cssprobe] tf %s: FAIL (xpx=%d ypx=%d "
+                                   "xpct=%d ypct=%d)",
+                                   tf[i].mark, blk->tfXpx, blk->tfYpx,
+                                   blk->tfXpct, blk->tfYpct);
+                    }
+                }
+            }
+            if (!found)
+            {
+                logger_log("[cssprobe] tf %s: MISSING", tf[i].mark);
+                tfFails++;
+            }
+            else if (!ok)
+            {
+                tfFails++;
+            }
+        }
+        fails += tfFails;
+        /* Gradient polarity: the dark sheet gradient answers through
+         * the shorthand's first-stop color token (find_color_token
+         * already lifts #050505 out of linear-gradient(...) as the
+         * fanned-out background-color) — the same < 130 luminance bar
+         * the inline route set. */
+        {
+            int gradOk = 0;
+            for (int bi = 0; bi < doc->blockCount; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (blk)
+                {
+                    char text[64];
+                    size_t off = 0;
+                    text[0] = '\0';
+                    for (int ii = 0;
+                         ii < blk->inlineCount && off < sizeof(text) - 1;
+                         ii++)
+                    {
+                        const char *t =
+                            (blk->inlines[ii] && blk->inlines[ii]->text)
+                                ? blk->inlines[ii]->text
+                                : "";
+                        size_t tl = strlen(t);
+                        if (tl > sizeof(text) - 1 - off)
+                        {
+                            tl = sizeof(text) - 1 - off;
+                        }
+                        memcpy(text + off, t, tl);
+                        off += tl;
+                    }
+                    text[off] = '\0';
+                    if (strstr(text, "GRADHERO") == text)
+                    {
+                        gradOk = (blk->invert == 1);
+                        break;
+                    }
+                }
+            }
+            logger_log("[cssprobe] gradhero invert: %s",
+                       gradOk ? "OK" : "FAIL");
+            if (!gradOk)
+            {
+                fails++;
+            }
+        }
+        /* Margin unit repair: 2rem top = 16 (rem scales root-16px, then
+         * the halved-px lane), and a 50% LEFT margin refuses entirely —
+         * the legacy walk mined 25px out of %-of-parent; % has no px
+         * answer before the box exists, so honest absence (indent 0). */
+        {
+            static const struct
+            {
+                const char *mark;
+                int topWant;   /* spacingTop must equal (skip < 0) */
+                int leftWant;  /* indent must equal (skip < 0) */
+            } mg[] = {
+                {"MRG2REM", 16, -1},  /* style margin-top:2rem */
+                {"MRG50PCT", -1, 0},  /* style margin-left:50% refuses */
+            };
+            int mgFails = 0;
+            for (size_t i = 0; i < sizeof(mg) / sizeof(mg[0]); i++)
+            {
+                int found = 0, ok = 0;
+                for (int bi = 0; bi < doc->blockCount && !found; bi++)
+                {
+                    DocBlock *blk = doc->blocks[bi];
+                    if (!blk)
+                    {
+                        continue;
+                    }
+                    char text[64];
+                    size_t off = 0;
+                    text[0] = '\0';
+                    for (int ii = 0;
+                         ii < blk->inlineCount && off < sizeof(text) - 1;
+                         ii++)
+                    {
+                        const char *t =
+                            (blk->inlines[ii] && blk->inlines[ii]->text)
+                                ? blk->inlines[ii]->text
+                                : "";
+                        size_t tl = strlen(t);
+                        if (tl > sizeof(text) - 1 - off)
+                        {
+                            tl = sizeof(text) - 1 - off;
+                        }
+                        memcpy(text + off, t, tl);
+                        off += tl;
+                    }
+                    text[off] = '\0';
+                    if (strstr(text, mg[i].mark) == text)
+                    {
+                        found = 1;
+                        ok = 1;
+                        if (mg[i].topWant >= 0 &&
+                            blk->spacingTop != mg[i].topWant)
+                        {
+                            ok = 0;
+                        }
+                        if (mg[i].leftWant >= 0 &&
+                            blk->indent != mg[i].leftWant)
+                        {
+                            ok = 0;
+                        }
+                        if (ok)
+                        {
+                            logger_log("[cssprobe] margin %s: OK "
+                                       "(top=%d indent=%d)",
+                                       mg[i].mark, blk->spacingTop,
+                                       blk->indent);
+                        }
+                        else
+                        {
+                            logger_log("[cssprobe] margin %s: FAIL "
+                                       "(top=%d indent=%d)",
+                                       mg[i].mark, blk->spacingTop,
+                                       blk->indent);
+                        }
+                    }
+                }
+                if (!found)
+                {
+                    logger_log("[cssprobe] margin %s: MISSING", mg[i].mark);
+                    mgFails++;
+                }
+                else if (!ok)
+                {
+                    mgFails++;
+                }
+            }
+            fails += mgFails;
+        }
+    }
+    /* Phase 2: direct-resolution rows — the engine answers RESOLVED
+     * strings for the fixture's var/calc rules (a stronger assertion
+     * than the hide canaries: exact byte compares). Class-only
+     * selectors need no DOM chain, so the hooks stay zero and the node
+     * is an inert marker (the compound match never walks it). */
+    CssEngine *peng = (CssEngine *)doc->_css;
+    if (peng)
+    {
+        CssDom qdom = {0};
+        /* One marker PER query: the winning mask caches per (node,
+         * lane) — reusing an address would serve this query the last
+         * element's matching-bits. */
+        int markerW = 0;
+        int markerD = 0;
+        size_t ql = 0;
+        const char *wv = css_winning_value(peng, "div", "calcvictim", NULL,
+                                           &qdom, (const void *)&markerW,
+                                           "width", &ql);
+        int wok = (wv && ql == 4 && memcmp(wv, "64px", 4) == 0);
+        logger_log("[cssprobe] calc-width=%.*s: %s", (int)ql, wv ? wv : "",
+                   wok ? "OK" : "FAIL");
+        if (!wok)
+        {
+            fails++;
+        }
+        const char *dv = css_winning_value(peng, "div", "xfvar", NULL,
+                                           &qdom, (const void *)&markerD,
+                                           "display", &ql);
+        int dok = (dv && ql == 4 && memcmp(dv, "none", 4) == 0);
+        logger_log("[cssprobe] var-display=%.*s: %s", (int)ql, dv ? dv : "",
+                   dok ? "OK" : "FAIL");
+        if (!dok)
+        {
+            fails++;
+        }
+        /* Phase 10: the @keyframes registry (collected at sheet parse)
+         * + the transition arm receipt. The registry must know `pf`
+         * (the fixture's single @keyframes) and NOTHING about `nokey`
+         * (the refusal canary whose run never completes — the walk side
+         * must never engage it). The transition row reads the EXACT
+         * winner span for the fixture's shorthand. */
+        int kfOk = css_keyframes_known(peng, "pf", 2) &&
+                   !css_keyframes_known(peng, "nokey", 5);
+        logger_log("[cssprobe] keyframes pf known + nokey absent: %s",
+                   kfOk ? "OK" : "FAIL");
+        if (!kfOk)
+        {
+            fails++;
+        }
+        int markerT = 0;
+        size_t tl = 0;
+        const char *tv = css_winning_value(peng, "div", "trnvictim", NULL,
+                                           &qdom, (const void *)&markerT,
+                                           "transition", &tl);
+        int tog = (tv && tl == 9 && memcmp(tv, "color .3s", 9) == 0);
+        logger_log("[cssprobe] transition=%.*s: %s", (int)tl,
+                   tv ? tv : "", tog ? "OK" : "FAIL");
+        if (!tog)
+        {
+            fails++;
+        }
+    }
+    /* Phase 10: the animation mount battery — find each canary's OWN
+     * block by its text, then assert the walk-set animName field: the
+     * engaged mount = the registry name (`pf`), the never-completing
+     * windows stay NULL. Per-walk field (fresh each walk); the
+     * once-per-(node,name) completion contract across re-walks lives
+     * on the DOM and the jsext autotest proves the real one-time fire
+     * in the running browser. */
+    {
+        static const struct
+        {
+            const char *mark;
+            const char *want; /* NULL: the field must stay absent */
+        } an[] = {
+            {"ANIMLIFT", "pf"},
+            {"ANFALLDOWN", NULL},
+            {"ANIMPAUSE", NULL},
+            {"ANIMINF", NULL},
+        };
+        int anFails = 0;
+        for (size_t i = 0; i < sizeof(an) / sizeof(an[0]); i++)
+        {
+            int found = 0;
+            const char *got = NULL;
+            for (int bi = 0; bi < doc->blockCount && !found; bi++)
+            {
+                DocBlock *blk = doc->blocks[bi];
+                if (!blk)
+                {
+                    continue;
+                }
+                char text[192];
+                cssprobe_block_text(blk, text, sizeof(text));
+                if (strstr(text, an[i].mark))
+                {
+                    found = 1;
+                    got = blk->animName;
+                }
+            }
+            int ok = 0;
+            if (!found)
+            {
+                logger_log("[cssprobe] anim %s: MISSING", an[i].mark);
+            }
+            else
+            {
+                ok = an[i].want ? (got && strcmp(got, an[i].want) == 0)
+                                : (got == NULL);
+            }
+            if (!ok)
+            {
+                anFails++;
+            }
+            logger_log("[cssprobe] anim %s: %s%s", an[i].mark,
+                       ok ? "OK" : "FAIL",
+                       an[i].want ? "" : " (field must stay absent)");
+        }
+        fails += anFails;
+    }
+    logger_log("[cssprobe] %s (%d fails)", fails ? "FAIL" : "PASS", fails);
+}
+#endif /* PLUTO_NR_AUTOTEST && !TARGET_PLAYDATE */
+
 /* R30l: user request — log the END RESULT of every DOM render: block/link
  * counts AND the actual text that made it into the doc. Device run 14 kept
  * ending "rewalk done blocks=1 links=0" with zero visibility into WHAT that
@@ -3152,6 +4192,9 @@ static void log_render_result(const char *tag, DocParseResult *doc)
         logger_log("[render-result] %s: (no doc)", tag);
         return;
     }
+#if defined(PLUTO_NR_AUTOTEST) && !defined(TARGET_PLAYDATE)
+    cssprobe_check(doc);
+#endif
     logger_log("[render-result] %s: blocks=%d links=%d title='%.48s'",
                tag, doc->blockCount, doc->linkCount,
                doc->title[0] ? doc->title : "");
@@ -3242,6 +4285,201 @@ static int render_step(TaskCtx *ctx)
             }
             memset(rt->doc, 0, sizeof(DocParseResult));
             tasks_report_progress(0.05f);
+        }
+
+        /* ── Stage C (Phase 1.5): external stylesheet fetch ──
+         * The engine needs every sheet BEFORE the parse joins them (inline
+         * <style> keeps the tight slots; <link rel="stylesheet"> fills the
+         * remainder). CSS runs regardless of the JS setting — a JS-Off
+         * page still gets its stylesheet. Sequential single-flight fetches
+         * through the shared client; the frame loop pumps http_update()
+         * while we yield the task. Caps: ≤ PLUTO_CSS_EXT_MAX sheets,
+         * ≤ PLUTO_CSS_EXT_TOTAL_MAX bytes RAM total; media/type mismatches
+         * and fetch failures skip that sheet only (absence, never crash). */
+        if (rt->body && !rt->parsed && !rt->isToggle &&
+            strncmp(rt->url, "about:", 6) != 0)
+        {
+            if (rt->cssPhase == 0)
+            {
+                /* C1: scan + resolve (no network in this step). */
+                rt->cssPhase = 1;
+                char hrefs[PLUTO_CSS_EXT_MAX][512];
+                unsigned char mediaOk[PLUTO_CSS_EXT_MAX];
+                memset(hrefs, 0, sizeof(hrefs));
+                memset(mediaOk, 0, sizeof(mediaOk));
+                int hn = css_ext_scan_links(rt->body, hrefs, mediaOk);
+                int stored = 0;
+                for (int k = 0; k < hn; k++)
+                {
+                    if (!mediaOk[k])
+                    {
+                        logger_log("[css-ext] skip %s (media)", hrefs[k]);
+                        continue;
+                    }
+                    if (stored >= PLUTO_CSS_EXT_MAX)
+                    {
+                        logger_log("[css-ext] link cap reached (%d)",
+                                   PLUTO_CSS_EXT_MAX);
+                        break;
+                    }
+                    char *abs = url_resolve(rt->url, hrefs[k]);
+                    if (!abs)
+                    {
+                        logger_log("[css-ext] resolve-fail %s", hrefs[k]);
+                        continue;
+                    }
+                    if (strncmp(abs, "http://", 7) != 0 &&
+                        strncmp(abs, "https://", 8) != 0)
+                    {
+                        pluto_free(abs);
+                        continue;
+                    }
+                    rt->cssUrls[stored] = abs;
+                    stored++;
+                }
+                rt->cssUrlN = stored;
+                rt->cssIdx = 0;
+                rt->cssPhase = (stored > 0) ? 2 : 3;
+                if (stored > 0)
+                {
+                    logger_log("[css-ext] %d stylesheet link(s) to fetch",
+                               stored);
+                }
+            }
+            if (rt->cssPhase == 2)
+            {
+                if (g_cssInFlight && g_cssDone)
+                {
+                    /* Consume the finished fetch (success, error, or
+                     * refused start). g_cssInFlight marks an owned slot —
+                     * a stray completion arriving after a mid-fetch
+                     * teardown finds it 0 and is dropped unclaimed
+                     * (never misattributed to the next render task). */
+                    g_cssInFlight = 0;
+                    if (!g_cssErr && g_cssStatus >= 200 && g_cssStatus < 400 &&
+                        g_cssBody && g_cssLen > 0)
+                    {
+                        logger_log("[css-ext] ok %s (%zu bytes)",
+                                   rt->cssUrls[rt->cssIdx], g_cssLen);
+                        rt->cssBody[rt->cssIdx] = g_cssBody;
+                        rt->cssLen[rt->cssIdx] = g_cssLen;
+                        g_cssBody = NULL;
+                        g_cssLen = 0;
+                    }
+                    else
+                    {
+                        logger_log("[css-ext] miss %s (status=%d err=%d)",
+                                   rt->cssUrls[rt->cssIdx], g_cssStatus,
+                                   g_cssErr);
+                        if (g_cssBody)
+                        {
+                            pluto_mem_realloc(g_cssBody, 0);
+                            g_cssBody = NULL;
+                        }
+                        g_cssLen = 0;
+                    }
+                    rt->cssBytes += rt->cssLen[rt->cssIdx];
+                    g_cssStatus = 0;
+                    g_cssDone = 0;
+                    g_cssErr = 0;
+                    rt->cssIdx++;
+                }
+                if (rt->cssIdx < rt->cssUrlN &&
+                    rt->cssBytes < PLUTO_CSS_EXT_TOTAL_MAX)
+                {
+                    if (http_is_loading())
+                    {
+                        return 1; /* in flight; the frame pump advances it */
+                    }
+                    HttpCallbacks cb;
+                    memset(&cb, 0, sizeof(cb));
+                    cb.onSuccess = css_ext_on_success;
+                    cb.onSuccessSpill = css_ext_on_spill;
+                    cb.onError = css_ext_on_error;
+                    int started = http_get(rt->cssUrls[rt->cssIdx], &cb);
+                    if (started)
+                    {
+                        g_cssInFlight = 1;
+                    }
+                    else
+                    {
+                        /* Immediate failure: onError ALREADY fired (client
+                         * contract) with the labels pointing at THIS slot.
+                         * Reset them here — the cursor advances past the
+                         * slot and the next step starts the next URL with
+                         * clean flags (no wrong-slot consumption). */
+                        g_cssDone = 0;
+                        g_cssErr = 0;
+                        g_cssStatus = 0;
+                        logger_log("[css-ext] start-fail %s",
+                                   rt->cssUrls[rt->cssIdx]);
+                        rt->cssIdx++; /* past it; next entry on next step */
+                    }
+                    return 1; /* every step yields; the pump runs per frame */
+                }
+                /* Queue drained: move captured bodies onto the doc result. */
+                if (rt->cssIdx < rt->cssUrlN)
+                {
+                    logger_log("[css-ext] %d link(s) skipped: byte cap",
+                               rt->cssUrlN - rt->cssIdx);
+                }
+                int have = 0;
+                for (int k = 0; k < PLUTO_CSS_EXT_MAX; k++)
+                {
+                    if (rt->cssBody[k])
+                    {
+                        have++;
+                    }
+                }
+                if (have > 0)
+                {
+                    rt->doc->cssExtBody =
+                        (char **)pluto_mem_realloc(NULL, sizeof(char *) *
+                                                          (size_t)have);
+                    rt->doc->cssExtLen =
+                        (size_t *)pluto_mem_realloc(NULL, sizeof(size_t) *
+                                                           (size_t)have);
+                    if (rt->doc->cssExtBody && rt->doc->cssExtLen)
+                    {
+                        int w = 0;
+                        for (int k = 0; k < PLUTO_CSS_EXT_MAX; k++)
+                        {
+                            if (rt->cssBody[k])
+                            {
+                                rt->doc->cssExtBody[w] = rt->cssBody[k];
+                                rt->doc->cssExtLen[w] = rt->cssLen[k];
+                                w++;
+                            }
+                        }
+                        rt->doc->cssExtN = w;
+                        logger_log("[css-ext] sheets joined: %d (%zu bytes "
+                                   "total)",
+                                   w, rt->cssBytes);
+                    }
+                    else
+                    {
+                        /* Track-array alloc failed: drop the bodies (same
+                         * absence containment as a fetch OOM). */
+                        for (int k = 0; k < PLUTO_CSS_EXT_MAX; k++)
+                        {
+                            if (rt->cssBody[k])
+                            {
+                                pluto_mem_realloc(rt->cssBody[k], 0);
+                                rt->cssBody[k] = NULL;
+                            }
+                        }
+                    }
+                }
+                for (int k = 0; k < PLUTO_CSS_EXT_MAX; k++)
+                {
+                    if (rt->cssUrls[k])
+                    {
+                        pluto_free(rt->cssUrls[k]);
+                        rt->cssUrls[k] = NULL;
+                    }
+                }
+                rt->cssPhase = 3;
+            }
         }
 
         /* ── Stage 2 (FULL): pump the prefetch session before parsing ────
@@ -3382,6 +4620,116 @@ static int render_step(TaskCtx *ctx)
     return 0;
 }
 
+/* Phase 1.5: release any stylesheet stage state still owned by the task
+ * (urls not yet transferred, bodies not yet moved onto the doc). */
+static void render_css_free(RenderTask *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    if (rt->cssPhase == 2 && g_cssInFlight)
+    {
+        /* Task torn down mid-fetch — same policy as the script prefetch
+         * abort: cancel the request so the loading lane doesn't stall.
+         * Safe for images too: the image queue defers while
+         * http_is_loading() is true, so this in-flight request is ours. */
+        http_cancel();
+    }
+    for (int k = 0; k < PLUTO_CSS_EXT_MAX; k++)
+    {
+        if (rt->cssUrls[k])
+        {
+            pluto_free(rt->cssUrls[k]);
+            rt->cssUrls[k] = NULL;
+        }
+        if (rt->cssBody[k])
+        {
+            pluto_mem_realloc(rt->cssBody[k], 0);
+            rt->cssBody[k] = NULL;
+        }
+    }
+    /* Late cancel-callbacks find an unowned collector: drop leftovers. */
+    if (g_cssBody)
+    {
+        pluto_mem_realloc(g_cssBody, 0);
+        g_cssBody = NULL;
+    }
+    g_cssLen = 0;
+    g_cssStatus = 0;
+    g_cssDone = 0;
+    g_cssErr = 0;
+    g_cssInFlight = 0;
+    rt->cssUrlN = 0;
+    rt->cssIdx = 0;
+    rt->cssBytes = 0;
+    rt->cssPhase = 0;
+}
+
+/* ── Phase 10: end-event drain (animation + transition lanes) ──────────────
+ * Runs in render_done — after a render (fresh parse or JS-mutation
+ * re-walk) completed, when the visible state IS the final state a
+ * browser would be mid-transitioning to:
+ *
+ *   animation lane: the walker enqueued nodes whose DECLARED animation
+ *   (a name the @keyframes registry holds, finite count, not paused,
+ *   element rendered) completed this walk. Each dispatches one
+ *   animationend. Per-(node,name) dedupe lives on the DOM (document
+ *   lifetime), so re-walks cannot re-engage a completed run; a NEW
+ *   name on the same node is a new run and re-engages, browser-style.
+ *
+ *   transition lane: the bridge noted the elements the page MUTATED
+ *   (attribute writes, classList, style-object writes, structural
+ *   append/insert/remove; text-only writes excluded on purpose so a
+ *   listener's own writes cannot loop). Each noted element whose
+ *   winning style still declares a transition (non-`none` value) gets
+ *   ONE transitionend — the change's end, reached immediately at the
+ *   visible render of the flat renderer. */
+static void p10_drain_end_events(void)
+{
+    if (!g_pageJs || !currentDoc)
+    {
+        return;
+    }
+    if (currentDoc->pendEndCount > 0)
+    {
+        int n = currentDoc->pendEndCount;
+        currentDoc->pendEndCount = 0;
+        for (int i = 0; i < n; i++)
+        {
+            void *node = currentDoc->pendEnd[i].node;
+            if (node)
+            {
+                jsbridge_dispatch_element_event(g_pageJs, node,
+                                                "animationend");
+            }
+        }
+        logger_log("[p10] animationend lane: %d run(s) dispatched", n);
+    }
+    {
+        void *notes[JSB_MUT_NOTES_MAX];
+        int nn = jsbridge_take_mut_notes(g_pageJs, notes,
+                                         (int)(sizeof(notes) /
+                                               sizeof(notes[0])));
+        if (nn > 0)
+        {
+            int fired = 0;
+            for (int i = 0; i < nn; i++)
+            {
+                if (document_node_transition_hot(currentDoc, notes[i]))
+                {
+                    jsbridge_dispatch_element_event(g_pageJs, notes[i],
+                                                    "transitionend");
+                    fired++;
+                }
+            }
+            logger_log("[p10] transitionend lane: %d mutation(s), "
+                       "%d armed & dispatched",
+                       nn, fired);
+        }
+    }
+}
+
 static void render_done(void *result, void *userdata)
 {
     RenderTask *rt = (RenderTask *)userdata;
@@ -3398,6 +4746,10 @@ static void render_done(void *result, void *userdata)
     /* R30l: what did this render actually produce? (pre-JS doc on the fresh
      * path — the post-eval truth logs at the rewalk site). */
     log_render_result(wasRewalk ? "done(rewalk)" : "done(fresh)", currentDoc);
+
+    /* Phase 10: the end-event lanes drain here — the visible render IS
+     * the completed state, so animationend/transitionend dispatch now. */
+    p10_drain_end_events();
 
     snprintf(pageTitle, sizeof(pageTitle), "%s",
              currentDoc->title[0] ? currentDoc->title
@@ -3466,6 +4818,7 @@ static void render_done(void *result, void *userdata)
         }
     }
 
+    render_css_free(rt);
     pluto_free(rt->body);
     free(rt);
 }
@@ -3491,6 +4844,7 @@ static void render_error(const char *message, void *userdata)
                     !detailsOpenState[detailsKeyCount - 1];
             }
         }
+        render_css_free(rt);
         if (rt->body)
         {
             pluto_free(rt->body);
@@ -5393,6 +6747,77 @@ static void form_kb_text_changed(void *ud)
 }
 
 /* ── activateFormBlock (port) ───────────────────────────────────────────── */
+/* Phase 8: the host side of a type=reset activation (the browser's
+ * form.reset()): every same-form control returns to the walk-time
+ * default captured at block creation (inputs/textarea values,
+ * checkbox/radio checked bits, select index + multiple accumulation).
+ * Disabled controls reset too (spec: reset is not a submit filter).
+ * Returns 1 when any control state changed — the only thing worth a
+ * re-walk. Scope = the tapped item's formAction string, the same
+ * same-form test the submit serializer uses. */
+static int host_form_reset(const LayoutItem *item)
+{
+    const char *fa = (item && item->formAction) ? item->formAction : "";
+    int changed = 0;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (!it || !it->formAction || fa[0] == '\0' ||
+            strcmp(it->formAction, fa) != 0)
+        {
+            continue;
+        }
+        DocBlock *b = (DocBlock *)it->block;
+        if (!b)
+        {
+            continue;
+        }
+        switch (it->type)
+        {
+        case LRI_HIDDEN_FIELD:
+        case LRI_INPUT_FIELD:
+            if (b->value != b->defaultValue)
+            {
+                b->value = b->defaultValue; /* arena alias of the walk value */
+                changed = 1;
+            }
+            break;
+        case LRI_CHECKBOX_FIELD:
+            if (b->checked != b->defaultChecked)
+            {
+                b->checked = b->defaultChecked;
+                changed = 1;
+            }
+            break;
+        case LRI_SELECT_FIELD:
+        {
+            int def = (b->defaultSelIndex >= 1) ? b->defaultSelIndex : 1;
+            if (b->selectedIndex != def)
+            {
+                b->selectedIndex = def;
+                changed = 1;
+            }
+            if (b->multiple)
+            {
+                for (int k = 0; k < b->optionCount; k++)
+                {
+                    DocOption *o = b->options[k];
+                    if (o && !o->group && o->selected != o->defaultSelected)
+                    {
+                        o->selected = o->defaultSelected;
+                        changed = 1;
+                    }
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return changed;
+}
+
 static void activate_form_block(const LayoutItem *item)
 {
     if (!item || item->disabled)
@@ -5419,15 +6844,70 @@ static void activate_form_block(const LayoutItem *item)
          * as before (byte-identical static-page behavior). */
         const DocBlock *blk = (const DocBlock *)item->block;
         void *srcNode = blk ? blk->srcNode : NULL;
+        /* Phase 8: a type=reset button's activation does NOT submit —
+         * the browser order is click, then form.reset() (no submit). A
+         * JS handler can still own the click (preventDefault = the
+         * handler re-walks); with no handler the HOST performs the
+         * reset: every same-form control returns to its walk-time
+         * default (captured at block creation). Formless reset buttons
+         * do nothing (spec). Without JS at all the host reset still
+         * runs — a static page's reset is pure DOM behavior. */
+        int isReset =
+            (blk && blk->buttonType && strcmp(blk->buttonType, "reset") == 0);
+        if (isReset && !srcNode)
+        {
+            logger_log("[form] reset without a source node: nothing to do");
+            break;
+        }
+        if (isReset && !g_pageJs)
+        {
+            DomNode *formNode = form_node_ancestor(srcNode);
+            if (formNode)
+            {
+                if (host_form_reset(item))
+                {
+                    logger_log("[form] reset performed (no JS)");
+                    page_rewalk_now();
+                }
+            }
+            else
+            {
+                logger_log("[form] formless reset: nothing to reset");
+            }
+            break;
+        }
         int rc = JSB_EVENT_NONE;
         if (g_pageJs && srcNode)
         {
             rc = jsbridge_dispatch_element_event(g_pageJs, srcNode, "click");
-            logger_log("[form] submit tap: click=%d node=%p tag=%s", rc,
-                       srcNode, ((DomNode *)srcNode)->tag ? ((DomNode *)srcNode)->tag : "?");
+            logger_log("[form] %s tap: click=%d node=%p tag=%s",
+                       isReset ? "reset" : "submit", rc, srcNode,
+                       ((DomNode *)srcNode)->tag ? ((DomNode *)srcNode)->tag : "?");
             if (rc == JSB_EVENT_SUPPRESSED)
             {
                 page_rewalk_now(); /* the click handler owns the action */
+                break;
+            }
+            if (isReset)
+            {
+                DomNode *formNode = form_node_ancestor(srcNode);
+                if (formNode)
+                {
+                    /* Whatever a handler did NOT prevent, the button's
+                     * own reset fires after the click (the browser
+                     * order); the host reset is the same for both
+                     * rc==NONE (no handler ran) and rc==NAVIGATE
+                     * (handlers ran, none prevented). */
+                    if (host_form_reset(item))
+                    {
+                        logger_log("[form] reset performed");
+                        page_rewalk_now();
+                    }
+                }
+                else
+                {
+                    logger_log("[form] formless reset: nothing to reset");
+                }
                 break;
             }
             DomNode *formNode = form_node_ancestor(srcNode);
@@ -5507,6 +6987,16 @@ static void activate_form_block(const LayoutItem *item)
                 DocOption *opt = block->options[block->selectedIndex - 1];
                 if (opt && !opt->disabled && !opt->group)
                 {
+                    /* Phase 8: on a multiple select the cycle ACCUMULATES
+                     * the pick (each arrival marks the option selected)
+                     * so the user's taps join the author's selected=
+                     * truth in the submit set. No deselect UI ships in
+                     * this phase — the reset button (or a JS rewrite of
+                     * option.selected) is the way back. */
+                    if (block->multiple)
+                    {
+                        opt->selected = 1;
+                    }
                     break;
                 }
                 tries--;
@@ -5592,16 +7082,58 @@ static void submit_form(const char *formAction, const LayoutItem *inputBlock)
             if (!it->disabled && sameForm)
             {
                 DocBlock *b = (DocBlock *)it->block;
-                int si = b->selectedIndex;
-                if (si >= 1 && si <= b->optionCount)
+                if (b->multiple)
                 {
-                    DocOption *opt = b->options[si - 1];
-                    if (opt && !opt->disabled && !opt->group)
+                    /* Phase 8: a multiple select submits EVERY selected
+                     * option as its own name=value pair (the real
+                     * application/x-www-form-urlencoded shape) — both
+                     * the author's selected= truth and any tap
+                     * accumulation above. The seen[] dedupe below is
+                     * bypassed: the same name is SUPPOSED to repeat. */
+                    for (int k = 0; k < b->optionCount; k++)
                     {
-                        name = it->name ? it->name : "";
-                        value = (opt->value && opt->value[0]) ? opt->value
-                                : (opt->text ? opt->text : "");
-                        include = 1;
+                        DocOption *opt = b->options[k];
+                        if (!opt || opt->disabled || opt->group ||
+                            !opt->selected)
+                        {
+                            continue;
+                        }
+                        const char *mname = it->name ? it->name : "";
+                        const char *mval =
+                            (opt->value && opt->value[0]) ? opt->value
+                                                          : (opt->text
+                                                                 ? opt->text
+                                                                 : "");
+                        if (mname[0])
+                        {
+                            char *ek = url_encode(mname);
+                            char *ev = url_encode(mval ? mval : "");
+                            if (pairCount > 0)
+                            {
+                                strbuf_append(&query, "&");
+                            }
+                            strbuf_appendf(&query, "%s=%s", ek ? ek : "",
+                                           ev ? ev : "");
+                            pluto_free(ek);
+                            pluto_free(ev);
+                            pairCount++;
+                        }
+                    }
+                }
+                else
+                {
+                    int si = b->selectedIndex;
+                    if (si >= 1 && si <= b->optionCount)
+                    {
+                        DocOption *opt = b->options[si - 1];
+                        if (opt && !opt->disabled && !opt->group)
+                        {
+                            name = it->name ? it->name : "";
+                            value = (opt->value && opt->value[0])
+                                        ? opt->value
+                                        : (opt->text ? opt->text : "");
+                            include = 1;
+                        }
                     }
                 }
             }

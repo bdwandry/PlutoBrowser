@@ -910,31 +910,93 @@ int jsbridge_el_class_has(void *elp, const char *token)
     return dom_class_has((DomNode *)elp, token);
 }
 
+/* ── Phase 10: classList change-decorating (transition lane + R58 parity) ──
+ * R58 escalted plain appendChild batches to domDirty; the classList
+ * methods were left on the budget heuristic. They are live-tree
+ * mutations too: a class flip changes computed style, so both the
+ * rewalk latch and the transition-lane note ride HERE — but only when
+ * the attribute really changed (a no-op add/remove must not fire a
+ * transition; browser parity). */
+static int cls_before(DomNode *el, char *buf, int cap)
+{
+    buf[0] = '\0';
+    if (!el)
+    {
+        return 0;
+    }
+    const char *cls = dom_get_attr(el, "class");
+    if (!cls || !cls[0])
+    {
+        return 0;
+    }
+    if ((int)strlen(cls) >= cap)
+    {
+        return -1; /* over-cap: treat as changed (conservative) */
+    }
+    snprintf(buf, (size_t)cap, "%s", cls);
+    return 0;
+}
+
+static void cls_after(JsBridge *b, DomNode *el, const char *before)
+{
+    if (!b || !el)
+    {
+        return;
+    }
+    const char *cls = dom_get_attr(el, "class");
+    if (cls && cls[0] && strcmp(cls, before) != 0)
+    {
+        b->domDirty = 1; /* R58 parity: the frame loop must re-anchor */
+        jsbridge_note_dom_mutation(b, el); /* transition-lane note */
+    }
+}
+
 int jsbridge_el_class_add(JsBridge *b, void *elp, const char *token)
 {
+    char before[192];
     if (!b || !b->dom || !budget_take(b))
     {
         return -1;
     }
-    return dom_class_add(b->dom, (DomNode *)elp, token);
+    cls_before((DomNode *)elp, before, sizeof(before));
+    int rc = dom_class_add(b->dom, (DomNode *)elp, token);
+    if (rc >= 0)
+    {
+        cls_after(b, (DomNode *)elp, before);
+    }
+    return rc;
 }
 
 int jsbridge_el_class_remove(JsBridge *b, void *elp, const char *token)
 {
+    char before[192];
     if (!b || !b->dom || !budget_take(b))
     {
         return -1;
     }
-    return dom_class_remove(b->dom, (DomNode *)elp, token);
+    cls_before((DomNode *)elp, before, sizeof(before));
+    int rc = dom_class_remove(b->dom, (DomNode *)elp, token);
+    if (rc >= 0)
+    {
+        cls_after(b, (DomNode *)elp, before);
+    }
+    return rc;
 }
 
 int jsbridge_el_class_toggle(JsBridge *b, void *elp, const char *token)
 {
+    char before[192];
     if (!b || !b->dom || !budget_take(b))
     {
         return -1;
     }
-    return dom_class_toggle(b->dom, (DomNode *)elp, token);
+    cls_before((DomNode *)elp, before, sizeof(before));
+    int rc = dom_class_toggle(b->dom, (DomNode *)elp, token);
+    if (rc >= 0)
+    {
+        cls_after(b, (DomNode *)elp, before);
+    }
+    return rc;
 }
 
 /* ── SW5: ES5-compatible shims (Set / Map / Image / dataset /
@@ -2595,6 +2657,43 @@ int jsbridge_take_dom_dirty(JsBridge *b)
     b->domDirty = 0;
     logger_log("[dom] dirty: innerHTML assignment triggered rewalk");
     return 1;
+}
+
+/* ── Phase 10: transition-lane mutation notes ─────────────────────────────
+ * Ring with in-ring dedupe: a node mutated twice in one batch (multiple
+ * attribute writes) notes once — drain-time the browser consults the
+ * node once per batch, browser-style (one event per change batch). */
+void jsbridge_note_dom_mutation(JsBridge *b, void *node)
+{
+    if (!b || !node)
+    {
+        return;
+    }
+    for (int i = 0; i < b->mutNoteCount; i++)
+    {
+        if (b->mutNotes[i].node == node)
+        {
+            return; /* already noted this batch */
+        }
+    }
+    if (b->mutNoteCount < JSB_MUT_NOTES_MAX)
+    {
+        b->mutNotes[b->mutNoteCount++].node = node;
+    }
+}
+
+int jsbridge_take_mut_notes(JsBridge *b, void **out, int max)
+{
+    int n = 0;
+    if (b)
+    {
+        for (int i = 0; i < b->mutNoteCount && out && n < max; i++)
+        {
+            out[n++] = b->mutNotes[i].node;
+        }
+        b->mutNoteCount = 0; /* dropped notes are gone (bounded lane) */
+    }
+    return n;
 }
 
 int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)

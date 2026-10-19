@@ -98,7 +98,7 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
   - **Reader Mode**: Distills articles for clean, distraction-free reading.
   - **HTML Mode**: Full visual layout with virtual mouse cursor, interactive forms, and clickable elements.
 - **HTML Elements**: `<html>`/`<head>`/`<body>`, `<h1>`-`<h6>`, `<p>`, `<div>`/`<span>`, `<a>`, `<ul>`/`<ol>`/`<li>`, semantic containers (`<article>`/`<section>`/`<nav>`/`<header>`/`<footer>`/`<main>`/`<figure>`), `<blockquote>`, `<code>`, `<pre>`, `<hr>`, `<br>`/`<wbr>`/`<nobr>`, `<img>`, `<table>`, `<details>`/`<summary>`, `<dialog>`, `<fieldset>`, `<select>`, ruby, text-level semantics, and `<script>` blocks (Inline mode runs embedded scripts; Full mode additionally downloads and runs `src=` files in page order; Off skips scripts entirely). Script pages show an honest `Loading...` state while content arrives.
-- **CSS Engine**: Selectors (child `>`, `:first/last/only/nth-child`, `:link`, `[attr]`, `!important`), `@media` (width/height, print, monochrome, orientation), `::before`/`::after` with `content`/`attr()`, borders, box spacing, tables with `border-collapse`, dithered grays, font-size buckets, `white-space`/`break-word`, and `display` mapping (flex/grid/table linearize for 1-bit). Covered by `about:acidtest`.
+- **CSS Engine**: Selectors (child `>`, `:first/last/only/nth-child`, `:link`, `[attr]`, `!important`), `@media` (width/height, print, monochrome, orientation), `::before`/`::after` with `content`/`attr()`, borders, box spacing, tables with `border-collapse`, dithered grays, font-size buckets, `white-space`/`break-word`, and `display` mapping (flex/grid/table linearize for 1-bit). Covered by `about:acidtest`; the deeper engine canaries (keyframes registry, animationend/transitionend lanes, the P9 unit/transform grammar, probe census rows) render at `about:cssprobe`.
 - **Form Support**: Text inputs, checkboxes, radio buttons, dropdowns, submit buttons, hidden fields, and `<button>` elements. Forms are submitted per the HTML spec (hidden inputs included, submit button name/value always appended).
 - **Inline Styles**: Bold, italic, underline, strikethrough, code, small, sub/superscript, text alignment.
 - **`<base href>` Support**: Resolves relative URLs correctly when a base element is present.
@@ -153,7 +153,8 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 - `about:acidtest` — HTML & image rendering test suite
 - `about:javascript` — JavaScript engine & DOM-integration test suite (PASS/PART/MISS per capability; full demo of supported engine + DOM features)
 - `about:blank` — Blank page
-- `about:jsext` — External `<script src>` (Full mode) test suite
+- `about:jsext` — External `<script src>` (Full mode) test suite (incl. end-event listeners: scripted `animationend`/`transitionend` delivery fixtures)
+- `about:cssprobe` — CSS engine probe (zero-JS): skip-class census + deep canaries covering the whole 10-phase CSS engine — keyframes registry and animation/transition end-event lanes, `var()`/`calc()`, `@media`, flex/grid gap mounts, generated content, srcset picks, unit grammar/translate offsets, gradient polarity
 
 All internal pages are also listed **on the Home page** under a **Test Cases** section beneath Speed Dial: every built-in `about:` site gets a clickable card (identical card grid and crank/D-pad navigation as bookmarks; A opens the page).
 

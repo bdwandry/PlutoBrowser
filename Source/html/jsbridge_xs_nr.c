@@ -1262,6 +1262,7 @@ static void xs_el_set_innerHTML(xsMachine *the)
              * → page_rewalk_now(), the same escalation the throttled pumps
              * use for handler mutations. */
             b->domDirty = 1;
+            jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree replaced */
 #if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
             logger_log("[elap] innerHTML set ok → domDirty=1");
 #endif
@@ -1313,6 +1314,13 @@ static void xs_el_setAttribute(xsMachine *the)
         xsTypeError("setAttribute failed");
     }
     b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
+    if (rc == 0)
+    {
+        /* Phase 10: attribute writes flip computed style (class/aria/
+         * value lanes ride the same store). Text-free writes only —
+         * see jsbridge.h's note contract. */
+        jsbridge_note_dom_mutation(b, n);
+    }
 }
 
 static void xs_el_removeAttribute(xsMachine *the)
@@ -1328,6 +1336,7 @@ static void xs_el_removeAttribute(xsMachine *the)
     {
         dom_remove_attr(n, k);
         b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
+        jsbridge_note_dom_mutation(b, n); /* Phase 10: removed attribute */
     }
     JFree(k);
 }
@@ -1581,6 +1590,7 @@ static void xs_el_appendChild(xsMachine *the)
      * another" finding 2026-10-18). One flag per service call; the frame
      * loop takes it at most once per frame → at most one re-walk. */
     b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree swap = style change */
     xs_maybe_queue_asset_load(b, c); /* react stylesheets enter via append */
 }
 
@@ -1604,6 +1614,7 @@ static void xs_el_removeChild(xsMachine *the)
         xsTypeError("removeChild failed");
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree shape changed */
 }
 
 /* ── SW5: inline style string reader/writer (shared with the style object
@@ -1719,7 +1730,14 @@ static void xs_style_write_prop(JsBridge *b, DomNode *n, const char *prop,
             return;
         }
     }
-    dom_set_attr(b->dom, n, "style", buf);
+    int sSet = dom_set_attr(b->dom, n, "style", buf);
+    if (sSet == 0)
+    {
+        /* Phase 10: the style object flipped an inline property — the
+         * classic transition trigger (react's isOpen .style opacities).
+         * Note-only: the rewalk ladder stays as the pumps govern it. */
+        jsbridge_note_dom_mutation(b, n);
+    }
 }
 
 static const char *const XS_STYLE_PROPS[] = {
@@ -1972,6 +1990,7 @@ static void xs_el_insertBefore(xsMachine *the)
         xsTypeError("insertBefore failed");
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree moved */
     xs_maybe_queue_asset_load(b, c); /* react stylesheet hoisting path */
 }
 
@@ -2377,7 +2396,13 @@ static void xs_el_addEventListener(xsMachine *the)
      * B3 bubbling dispatch (xs_dispatch_element_event) delivers back out;
      * load/error stay the resource-completion channels react-dom parks
      * commits on (the engine delivers cached-asset loads at the next
-     * microcheckpoint — see xs_queue_resource_fire). */
+     * microcheckpoint — see xs_queue_resource_fire). Phase 10 note: the
+     * end-event classes (animationend/transitionend) are NOT kind 0 on
+     * purpose — dispatch_click delivers kind-0 listeners WITHOUT an
+     * exact-type filter (the react anchor only ever holds the delegation
+     * click), so a kind-0 animationend would mis-deliver on every tap.
+     * They get their own class (kind 4) below and ride the render-done
+     * drain instead. */
     int isDispatch = isClick || strcmp(type, "submit") == 0 ||
                      strcmp(type, "input") == 0 ||
                      strcmp(type, "change") == 0;
@@ -2429,13 +2454,23 @@ static void xs_el_addEventListener(xsMachine *the)
     {
         kind = 3;
     }
+    /* Phase 10: the end-event class (animationend/transitionend) — stored
+     * for delivery at the render-complete drain (the browser dispatches
+     * each after the walk that completed the visible change), NOT the
+     * resource channel and NOT the tap path. */
+    if (strcmp(type, "animationend") == 0 ||
+        strcmp(type, "transitionend") == 0)
+    {
+        kind = 4;
+    }
     if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
-        kind != 3)
+        kind != 3 && kind != 4)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so
          * pages registering them don't error — the delivered classes are
          * click/submit/input/change (kind 0; B3 bubbling dispatch) and
-         * load/error (kinds 1/2, replay-cached asset completion). */
+         * load/error (kinds 1/2, replay-cached asset completion). Phase
+         * 10 adds the end-event class (kind 4; render-drain dispatch). */
         JFree(type);
         return;
     }
@@ -3079,6 +3114,7 @@ static void xs_document_appendChild(xsMachine *the)
         xsTypeError("appendChild failed");
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree grew */
     xsResult = xsArg(0);
 }
 
@@ -3100,6 +3136,7 @@ static void xs_document_insertBefore(xsMachine *the)
         xsTypeError("insertBefore failed");
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree moved */
     xsResult = xsArg(0);
 }
 
@@ -3115,11 +3152,16 @@ static void xs_document_removeChild(xsMachine *the)
     {
         xsTypeError("removeChild: node expected");
     }
+    DomNode *container = child->parent ? child->parent
+                                       : b->dom->root; /* Phase 10: the
+                     * element that loses the child (grabbed before the
+                     * detach — dom_remove_child clears child->parent). */
     if (dom_remove_child(b->dom->root, child) != 0)
     {
         xsTypeError("removeChild failed");
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    jsbridge_note_dom_mutation(b, container); /* Phase 10: subtree shrank */
     xsResult = xsArg(0);
 }
 
@@ -3252,8 +3294,17 @@ static void xs_doc_addEventListener(xsMachine *the)
     {
         kind = 3;
     }
+    /* Phase 10: document-level end-events join the stored set (kind 4);
+     * the drain dispatches element-targeted and document-registered
+     * pairs through the same exact-type climb (the target walk reaches
+     * the root, where these live). */
+    if (strcmp(type, "animationend") == 0 ||
+        strcmp(type, "transitionend") == 0)
+    {
+        kind = 4;
+    }
     if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
-        kind != 3)
+        kind != 3 && kind != 4)
     {
         /* Same UNSUPPORTED silence as the element path (see above). */
         JFree(type);
@@ -9103,6 +9154,15 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
     b->stopProp = 0;
     b->inClick = 1; /* same re-entrancy guard as dispatch_click */
     xsMachine *m = st->machine;
+    /* Phase 10: the delivery class follows the dispatched type — the
+     * page-interactivity class (kind 0) for the react delegation set,
+     * the end-event class (kind 4) for animationend/transitionend. Each
+     * class is only delivered under its own type, so the tap path can
+     * never mis-fire an end-event listener and vice versa. */
+    int evKind = (strcmp(type, "animationend") == 0 ||
+                  strcmp(type, "transitionend") == 0)
+                     ? 4
+                     : 0;
 
     DomNode *t = (DomNode *)node;
     while (t)
@@ -9127,8 +9187,8 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
         for (int i = 0; i < b->listenerCount; i++)
         {
             JsListener *L = &b->listeners[i];
-            if (L->target != t || L->kind != 0 || // interactivity class only
-                strcmp(L->type, type) != 0)       /* B3: exact type route */
+            if (L->target != t || L->kind != evKind || // delivery class
+                strcmp(L->type, type) != 0)            /* B3: exact type route */
             {
                 continue;
             }

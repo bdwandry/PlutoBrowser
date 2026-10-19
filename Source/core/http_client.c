@@ -604,6 +604,57 @@ static const char JSEXTTEST_HTML[] =
     "<h1>External Script (Full) Suite</h1>\n"
     "<p id=\"banner\">running…</p>\n"
     "<div id=\"out\"></div>\n"
+    /* Phase 10 end-event lanes (real dispatch proof): .jspop's declared
+     * animation COMPLETES at the resolving walk → the browser fires
+     * animationend at render completion (the entrance-anim hook, logo
+     * style); the timer class flip on #jtrn mutates a transition-armed
+     * element → transitionend. The counters guard exactly-once (a
+     * re-fire would print 2). */
+    "<style>\n"
+    "@keyframes jspf { from { opacity: 0; } to { opacity: 1; } }\n"
+    ".jspop { animation: jspf 0.25s; }\n"
+    "#jtrn { transition: color 0.3s; }\n"
+    ".jhot { color: green; }\n"
+    "</style>\n"
+    "<div class=\"jspop\" id=\"jpop\">P10 anim victim</div>\n"
+    "<div id=\"jtrn\">P10 transition victim</div>\n"
+    "<p id=\"jp10out\">P10 animend pending</p>\n"
+    "<p id=\"jt10out\">P10 transend pending</p>\n"
+    /* Phase 10 lanes, REGISTERED INLINE so they exist before the first
+     * walk (the fresh parse runs inline scripts pre-walk; the ext suite
+     * is async and would race the animation's single completion — the
+     * browser has the same lag-vs-animation race, but our receipt needs
+     * determinism). The listeners perform a classList.add after their
+     * textContent write: the class mutation escalates domDirty (R58
+     * parity), so the NEXT pump rewalk renders the write — otherwise a
+     * render-completion write would sit invisible until an unrelated
+     * mutation. Exactly-once: a re-fire would print the 2 text. */
+    "<script>\n"
+    "var np10 = 0, tp10 = 0;\n"
+    "var jp10 = document.getElementById('jpop');\n"
+    "var jt10 = document.getElementById('jtrn');\n"
+    "if (jp10 && typeof jp10.addEventListener === 'function') {\n"
+    "  jp10.addEventListener('animationend', function(){\n"
+    "    np10 = np10 + 1;\n"
+    "    var el = document.getElementById('jp10out');\n"
+    "    if (el) {\n"
+    "      el.textContent = 'PL10ANIMEND' + np10;\n"
+    "      el.classList.add('lnote');\n"
+    "    }\n"
+    "  });\n"
+    "}\n"
+    "if (jt10 && typeof jt10.addEventListener === 'function') {\n"
+    "  jt10.addEventListener('transitionend', function(){\n"
+    "    tp10 = tp10 + 1;\n"
+    "    var el = document.getElementById('jt10out');\n"
+    "    if (el) {\n"
+    "      el.textContent = 'PL10TRANS' + tp10;\n"
+    "      el.classList.add('lnote');\n"
+    "    }\n"
+    "  });\n"
+    "}\n"
+    "setTimeout(function(){ if (jt10) jt10.classList.toggle('jhot'); }, 120);\n"
+    "</script>\n"
     /* 6: defines window.__extOrder — consumed by the final inline report. */
     "<script src=\"jsext-order.js\"></script>\n"
     /* 8: NOT in the local table → download miss → skipped, later scripts run. */
@@ -646,6 +697,28 @@ static const char JSEXTTEST_HTML[] =
     "  out.appendChild(p);\n"
     "}\n"
     "try {\n"
+    "  /* Phase 10: a MOUNTED animation — react's entrance-anim pattern.\n"
+    "   * The element is created + appended HERE, so the walk that first\n"
+    "   * resolves its declared run happens long after the listeners in\n"
+    "   * the inline pre-walk script registered — the delivery race that\n"
+    "   * swallowed the static victim's completion (the browser loses it\n"
+    "   * the same way when the listener lags the animation) is\n"
+    "   * structurally impossible for this receipt. A re-fire would print\n"
+    "   * the 2 text. */\n"
+    "  var np10m = 0;\n"
+    "  var jp10m = document.createElement('div');\n"
+    "  jp10m.setAttribute('class', 'jspop');\n"
+    "  jp10m.addEventListener('animationend', function(){\n"
+    "    np10m = np10m + 1;\n"
+    "    var o = document.getElementById('jp10out');\n"
+    "    if (o) {\n"
+    "      o.textContent = 'PL10ANIMMOUNT' + np10m;\n"
+    "      o.classList.add('lnote2');\n"
+    "    }\n"
+    "  });\n"
+    "  jp10m.textContent = 'P10 mounted anim victim';\n"
+    "  var oc10 = document.getElementById('out');\n"
+    "  if (oc10) oc10.appendChild(jp10m);\n"
     "  T('external defined global (order+engine)', function(){\n"
     "    return window.__extOrder === 'EXT_OK'; });\n"
     "  T('inline-after-external saw ext state', function(){\n"
@@ -671,6 +744,366 @@ static const char JSEXTTEST_HTML[] =
     "</script>\n"
     "</body></html>";
 
+static const char CSSPROBE_HTML[] =
+    /* ── about:cssprobe — CSS engine probe v2 (roadmap Phase 1) ────────────
+     * Zero-JS fixture: every style input below is COUNTABLE, so the
+     * [css-skip] row emitted at the end of this page's first render is the
+     * assertion. Expected skip classes on THIS page (fixture-only facts,
+     * post-Phase-7: the truth states (:target/:root/:disabled/:enabled/
+     * :checked/:placeholder-shown/:empty) + the consumed ::-family left
+     * the pcls counter (0); sib/attrOp are the phase-retired always-zero
+     * columns — '+' combinators and attr operators PARSE since Phase 1,
+     * the counters only ever counted refusals, of which the fixture's
+     * truth-state selectors carry none now); the :root var adds one var:
+     *   sib=0  attrOp=0  pcls=0  medF=1  var=4  calc=2  prop=2
+     *   (prop = backdrop-filter, border-radius — position/top/left/
+     *    right/bottom and z-index CONSUMED by the Phase 4 positioning
+     *    lane; gap/grid-template-columns + the flex/grid distribution
+     *    family CONSUMED by the Phase 6 container lane — all left the
+     *    gauge)
+     * [css-propnames] must list the four names above (P0.6 gauge).
+     * Visible canaries (asserted by the PLUTO_NR_AUTOTEST block scanner):
+     *   absent: ADJ-HIT GENSIB-HIT ATTCARET-HIT ATTDOLLAR-HIT ATTSTAR-HIT
+     *           ATTTILDE-HIT ATTBAR-HIT NOT-HIT STATE-HIT
+     *           CANARY-DISPLAY-NONE VAR-HIT VARFALL-HIT
+     *           MQ-HIT MQEM-HIT MQAND-HIT MQOR-HIT MQCONTRAST-HIT
+     *           AROWSTRAY ROOTVARHIT CHKHIT DAFTGONE
+     *           EAFTEL-enabled-sibling PHELDGONE FITHIT EMPHIT
+     *   present: ADJ-KEEP GENSIB-A ATTCARET-KEEP ATTDOLLAR-KEEP
+     *            ATTSTAR-KEEP ATTTILDE-KEEP ATTBAR-KEEP NOT-KEEP
+     *            STATE-KEEP VAR-KEEP MQ-KEEP MQNOT-KEEP MQCOLOR-KEEP
+     *            MQUNKNOWN-KEEP ABSSTATIC-KEEP ZKEEP REL-KEEP
+     *            SRKEEP OVKEEP ELLKEEP CLAMPKEEP
+     *            FIXGAPA FIXGAPB FGAPC FGAPD FXROWA FAICC FAICD
+     *            FXSB FXNA FXNC AINC
+     *            (Phase 10 block canaries: ANIMLIFT completes pf — its
+     *            block carries anim=pf; ANFALLDOWN/ANIMPAUSE/ANIMINF
+     *            keep a NULL anim field — the registry/guard refusals;
+     *            TRNVICTIM rides the direct transition query.)
+     *   absent (add): FIXED-HIT ABS-HIT ABSOFF-HIT (out-of-flow + a
+     *            signal drops; static-position absolute stays),
+     *            SROFF-HIT SRTINY-HIT (the visually-hidden recipe:
+     *            out-of-flow + overflow:hidden + a clip shape or a
+     *            1px box), TAILSUFF CLAMPCUT (the ellipsis/clamp
+     *            ...-tail cuts)
+     * Direct-resolution rows (main.c winning lookups, Phase 2):
+     *   calc-width=64px  var-display=none
+     * Expected [css-skip] row: sib=0 attrOp=0 pcls=0 medF=1 var=3
+     * calc=2 prop=2 (the census counts var/calc TEXT; the canaries
+     * assert that those texts RESOLVE; medF=1 = the unknown-feature
+     * refusal still contained by the MQUNKNOWN-KEEP marker; prop=2
+     * after the Phase 4 positioning, the Phase 5 overflow vocabulary
+     * and the Phase 6 flex/grid family became consumed — overflow/
+     * clip/text-overflow-line-clamp and the gap/flex/grid names all
+     * left the gauge; the Phase 10 transition/animation family also
+     * left (all family NAMEs joined the census vocabulary, and the
+     * @keyframes bodies never parse — they count nowhere), so the
+     * fixture's multi-phase declarations here keep the count exact).
+     * The page renders identically with JS execution off — used in every
+     * mode of the browser, never mode-sensitive. */
+    "<!DOCTYPE html><html><head><title>CSS Probe</title><style>\n"
+    "/* C0 control — known vocabulary, zero skips expected: */\n"
+    "body { margin: 4px; }\n"
+    "h1 { text-indent: 2px; }\n"
+    ".k { background-color: whitesmoke; }\n"
+    "ul.l { list-style-type: none; float: left; width: 300px; }\n"
+    "ul.l > li:first-child { text-indent: 8px; }\n"
+    "li:nth-child(2n) { border-style: none; }\n"
+    "p[hidden] { display: none; }\n"
+    "div[data-k=\"v\"] { border-width: 2px; border-collapse: separate; }\n"
+    ".bc::before { content: \">> \"; }\n"
+    ".gone { display: none; }\n"
+    "@media screen and (min-width: 240px) {\n"
+    "  .m { display: block; }\n"
+    "}\n"
+    "/* P1a sibling combinators — NOW SUPPORTED (hits must hide):\n"
+    " * h2 + p.adj = element DIRECTLY after an h2; li.gs ~ li = any later\n"
+    " * sibling li of li.gs. Controls guard over-matching. */\n"
+    "h2 + p.adj { display: none; }\n"
+    "li.gs ~ li { display: none; }\n"
+    "/* P1b attribute operators — NOW SUPPORTED (hits must hide):\n"
+    " * ^= starts / $= ends / *= contains / ~= word / |= hyphen-prefix. */\n"
+    "div[data-p^=\"ab\"] { display: none; }\n"
+    "div[data-q$=\"ef\"] { display: none; }\n"
+    "div[data-r*=\"cd\"] { display: none; }\n"
+    "div[data-s~=\"two\"] { display: none; }\n"
+    "div[data-t|=\"en\"] { display: none; }\n"
+    "/* P1c simple :not() — NOW SUPPORTED (the hit must hide, the keep\n"
+    " * sibling with .keep must stay). */\n"
+    "p.nk:not(.keep) { display: none; }\n"
+    "/* P1d interactivity states — policy (a) always-match (must hide): */\n"
+    "p.st:hover { display: none; }\n"
+    "/* Phase 3 @media evaluation — 400x240 panel truth: hits hide,\n"
+    " * keeps stay, unknown features stay false (medF=1). The and-chain\n"
+    " * canary carries a unitless zero (MQ4 exception) + landscape;\n"
+    " * MQEM-HIT proves the em breakpoint lane (22.5em = 360px). */\n"
+    "@media (min-width: 100px) { .mqhit { display: none; } }\n"
+    "@media (min-width: 9000px) { .mqmiss { display: none; } }\n"
+    "@media (min-width: 22.5em) { .mqem { display: none; } }\n"
+    "@media screen and (min-width: 0) and (orientation: landscape)\n"
+    "{ .mqand { display: none; } }\n"
+    "@media not screen and (min-width: 1px)\n"
+    "{ .mqnot { display: none; } }\n"
+    "@media print, (orientation: landscape) { .mqor { display: none; } }\n"
+    "@media (prefers-color-scheme: dark) { .mqcd { display: none; } }\n"
+    "@media (prefers-contrast: more) { .mqc { display: none; } }\n"
+    "@media (bugs: 3) { .mqu { display: none; } }\n"
+    "/* Phase 4 positioning policy: fixed/absolute + offset(z-index) =\n"
+    " * out-of-flow overlay → dropped (it would cover the page in a\n"
+    " * compositor); absolute with a clean static position stays in\n"
+    " * flow per CSS; relative keeps flowing; z-index alone is inert. */\n"
+    ".fxo { position: fixed; top: 0; }\n"
+    ".abz { position: absolute; z-index: 9; }\n"
+    ".abp { position: absolute; left: -9999px; }\n"
+    ".abs2 { position: absolute; }\n"
+    ".z2 { z-index: 500; }\n"
+    ".rel2 { position: relative; }\n"
+    "/* Phase 5 overflow policy: the visually-hidden recipe (absolute +\n"
+    " * overflow:hidden + a concealing clip shape OR a 1px box) drops;\n"
+    " * partial patterns flow; text-overflow:ellipsis + nowrap cuts the\n"
+    " * overflowing single line with a ... tail; -webkit-line-clamp: 3\n"
+    " * caps the block at three lines the same way; plain overflow:\n"
+    " * hidden at a normal size is a containment no-op that keeps every\n"
+    " * word. */\n"
+    ".sro { position: absolute; overflow: hidden; clip-path: inset(50%); }\n"
+    ".srt { position: absolute; overflow: hidden; width: 1px; height: 1px; }\n"
+    ".srb { position: absolute; overflow: hidden; }\n"
+    ".ell { white-space: nowrap; text-overflow: ellipsis; }\n"
+    ".cl3 { -webkit-line-clamp: 3; }\n"
+    ".ovn { overflow: hidden; }\n"
+    "/* Phase 6 flex/grid policy (css.h): the container lane. A flex/grid\n"
+    " * box is a block container; gap mounts on the halved-px scale\n"
+    " * (16px -> 8, Lua-parity margins) and rem rides the 16px browser\n"
+    " * root; row-gap beats the gap shorthand; align-items:center\n"
+    " * cross-centers child blocks on REAL flex containers only; the\n"
+    " * distribution values (direction/wrap/justify/place/grid-templates)\n"
+    " * are consumed names without 2-D behavior — the column axis is the\n"
+    " * block flow itself. */\n"
+    ".fxg { display: flex; gap: 16px; }\n"
+    ".fxr { display: flex; gap: .5rem; }\n"
+    ".fxw { display: flex; row-gap: 12px; }\n"
+    ".fxa { display: flex; align-items: center; }\n"
+    ".fxn { display: flex; }\n"
+    ".fss { align-self: center; }\n"
+    ".fxd { display: block; gap: 4px; }\n"
+    ".aic { align-items: center; }\n"
+    "/* Phase 7 pseudo-elements + truth states — the content cascade now\n"
+    " * LANDS (walk_pseudo_emit allows punctuation INLINE, keeps the\n"
+    " * stray-sibling guard for block subjects; walk_pseudo_text resolves\n"
+    " * quotes + attr() + CSS escapes) and ::marker feeds the li bullet:\n"
+    " *   .spi  span before+after inline (letters) -> PSBEF-SPMID-PSAFT\n"
+    " *   .bcp  p before (letters, block-lane anon sibling) -> its own\n"
+    " *         block starting \"BCARROW\" before the div's text\n"
+    " *   .arw  block-lane pure punctuation -> the stray-line guard\n"
+    " *         keeps it dropped (AROWSTRAY absent) while the div stays\n"
+    " *   .beacon::after attr(data-url) -> \" [https://probe.example/beacon]\"\n"
+    " *   .lmk li::marker \"MK7\" (the marker text rides the doc field,\n"
+    " *         layout draws bold LRI) ; .lmr empty \"\" removes the bullet\n"
+    " * Truth states: :root vars match the root element (RHIT gone via\n"
+    " * var), :checked/:disabled/:enabled/:placeholder-shown/:focus-within\n"
+    " * match their real control state (sibling text canaries), :target\n"
+    " * matches the CURRENT fragment only (URL-less probe -> TGTHIT stays)\n"
+    " * and :empty matches the truly-empty node (EMPHIT sibling hidden). */\n"
+    ".spi::before { content: \"PSBEF-\"; }\n"
+    ".spi::after { content: \"-PSAFT\"; }\n"
+    ".bcp::before { content: \"BCARROW \"; }\n"
+    ".arw::before { content: \">> \"; }\n"
+    ".beacon::after { content: \" [\" attr(data-url) \"]\"; }\n"
+    ".lmk li::marker { content: \"MK7\"; }\n"
+    ".lmr li::marker { content: \"\"; }\n"
+    ":root { --roothit: none; }\n"
+    ".ph { display: var(--roothit); }\n"
+    ".pk { display: block; }\n"
+    ".ckr:checked + .ckl { display: none; }\n"
+    ".ckr2:checked + .ckl2 { display: none; }\n"
+    ".btnd:disabled + p { display: none; }\n"
+    ".btne:enabled + .afte { display: none; }\n"
+    "button.btnk:disabled + p { display: none; }\n"
+    ".ip:placeholder-shown + .aftph { display: none; }\n"
+    ".fwr:focus-within { display: none; }\n"
+    "#tgx:target { display: none; }\n"
+    ".ev:empty + p { display: none; }\n"
+    ".ev2:empty + p { display: none; }\n"
+    "/* Phase 9 transforms/gradients/units — translate mounts as a REAL\n"
+    " * paint offset (DocBlock tf fields; % keys against the element's own\n"
+    " * box at draw); rotate/scale stay the 2-D policy line; gradient\n"
+    " * backgrounds decide ink polarity by stop average; the unit family\n"
+    " * widened (vmin/vmax/ch/ex + rem margins through the shared reader).\n"
+    " * ALL canary declarations ride KNOWN vocabulary on purpose — the\n"
+    " * [css-skip] tally below stays byte-stable (no new refusals). */\n"
+    ".tfx { transform: translateX(12px); }\n"
+    ".tfy { transform: translateY(-0.75rem); }\n"
+    ".tfp { transform: translate(10%, -50%); }\n"
+    ".tfr { transform: rotate(45deg) translateX(4px); }\n"
+    ".tfmix { transform: translateY(-50%); }\n"
+    "@media (min-width: 120vmin) { .vminhit { display: none; } }\n"
+    ".gradhero { background: linear-gradient(#050505, #232323);\n"
+    "             color: #000; }\n"
+    ".v { color: var(--ink, #111); font-size: 3rem; }\n"
+    ".v2 { backdrop-filter: blur(2px); width: calc(100% - 8px); }\n"
+    ".g { position: absolute; gap: 4px; border-radius: 4px;\n"
+    "     grid-template-columns: repeat(3, 1fr); }\n"
+    "/* Phase 2: custom properties + var()/calc() RESOLUTION —\n"
+    " * the census above now counts var=3 calc=2 (the two new var()\n"
+    " * display rules + the calc width). main.c asserts resolution\n"
+    " * directly (calc-width=64px, var-display=none) and via hide\n"
+    " * canaries: --hd rides a plain class (v1 note: custom properties\n"
+    " * join the doc table in sheet order; :root is a refused\n"
+    " * pseudo-class here). */\n"
+    ".vroot { --hd: none; }\n"
+    ".xfvar { display: var(--hd); }\n"
+    ".xffall { display: var(--nope, none); }\n"
+    ".vkeep { display: block; }\n"
+    ".calcvictim { width: calc(30px + 34px); }\n"
+    "/* Phase 10 animation/transition lanes — an animation NAME that the\n"
+    " * @keyframes registry holds engages its end event at the walk:\n"
+    " * .pop mounts anim=pf. The refusal windows engage NOTHING (browser\n"
+    " * parity: an unregistered name is an inert animation; a paused\n"
+    " * state never completes; an infinite iteration count never ends).\n"
+    " * All declarations ride KNOWN vocabulary (the P10 family joined\n"
+    " * the census tables) and the @keyframes body skips whole (never\n"
+    " * parsed, never counted) — the [css-skip] tally stays exact. */\n"
+    "@keyframes pf { from { opacity: 0; } to { opacity: 1; } }\n"
+    ".pop { animation: pf 0.3s; }\n"
+    ".popnf { animation: nokey 0.3s; }\n"
+    ".poppa { animation: pf 0.3s paused; }\n"
+    ".popinf { animation: pf 0.3s infinite; }\n"
+    ".trnvictim { transition: color .3s; }\n"
+    "</style></head><body>\n"
+    "<h1 class=\"k\">CSS Probe</h1>\n"
+    "<p class=\"k\">Phase-1 fixture — check the [css-skip] log row.</p>\n"
+    "<p class=\"xfvar\">VAR-HIT must be absent (var resolves to none)</p>\n"
+    "<p class=\"vkeep\">VAR-KEEP must stay visible</p>\n"
+    "<p class=\"xffall\">VARFALL-HIT must be absent (fallback none)</p>\n"
+    "<p>Plain paragraph stays visible (unaffected by the var sheet).</p>\n"
+    "<div class=\"vroot\"></div>\n"
+    "<p class=\"mqhit\">MQ-HIT must be absent (400 >= 100px)</p>\n"
+    "<p class=\"mqmiss\">MQ-KEEP must stay visible (9000px)</p>\n"
+    "<p class=\"mqem\">MQEM-HIT must be absent (22.5em = 360px)</p>\n"
+    "<p class=\"mqand\">MQAND-HIT must be absent (0 + landscape)</p>\n"
+    "<p class=\"mqnot\">MQNOT-KEEP must stay visible</p>\n"
+    "<p class=\"mqor\">MQOR-HIT must be absent (comma OR)</p>\n"
+    "<p class=\"mqcd\">MQCOLOR-KEEP must stay visible (light)</p>\n"
+    "<p class=\"mqc\">MQCONTRAST-HIT must be absent (more)</p>\n"
+    "<p class=\"mqu\">MQUNKNOWN-KEEP must stay visible</p>\n"
+    "<p class=\"fxo\">FIXED-HIT must be absent (fixed + top)</p>\n"
+    "<p class=\"abz\">ABS-HIT must be absent (absolute + z)</p>\n"
+    "<p class=\"abp\">ABSOFF-HIT must be absent (left -9999px)</p>\n"
+    "<p class=\"abs2\">ABSSTATIC-KEEP must stay visible</p>\n"
+    "<p class=\"z2\">ZKEEP must stay visible (z alone inert)</p>\n"
+    "<p class=\"rel2\">REL-KEEP must stay visible</p>\n"
+    "<p class=\"sro\">SROFF-HIT must be absent (visually-hidden recipe)</p>\n"
+    "<p class=\"srt\">SRTINY-HIT must be absent (1px box recipe)</p>\n"
+    "<p class=\"srb\">SRKEEP must stay visible (no clip shape, no tiny box)</p>\n"
+    "<p class=\"ovn\">OVKEEP must stay visible (containment no-op keeps every word)</p>\n"
+    "<p class=\"ell\">ELLKEEP visible then a long run of filler words follows here so single nowrap line genuinely overflows the panel budget and the ellipsis cut lands well before TAILSUFF which must go</p>\n"
+    "<p class=\"cl3\">CLAMPKEEP then filler so the block wraps past three lines: one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven twenty-eight twenty-nine thirty thirty-one thirty-two thirty-three thirty-four thirty-five thirty-six thirty-seven plus more words to be certain the cut reaches CLAMPCUT which must go</p>\n"
+    "<div class=\"fxg\"><div>FIXGAPA child one</div><div>FIXGAPB child two</div></div>\n"
+    "<div class=\"fxr\"><div>FGAPC rem child one</div><div>FGAPD rem child two</div></div>\n"
+    "<div class=\"fxw\"><div>FXROWA longhand one</div><div>FXROWB longhand two</div></div>\n"
+    "<div class=\"fxa\"><div>FAICC centered one</div><div>FAICD centered two</div></div>\n"
+    "<div class=\"fxn\"><div>FXNA plain one</div><div class=\"fss\">FXSB self-centered two</div><div>FXNC plain three</div></div>\n"
+    "<div class=\"fxd\"><div>FGNPX gap-inert child</div></div>\n"
+    "<div class=\"aic\"><div>AINC noflex center child</div></div>\n"
+    "<span class=\"spi\">SPMID</span>\n"
+    "<p class=\"bcp\">BCBODY arrow-prefixed paragraph</p>\n"
+    "<p class=\"beacon\" data-url=\"https://probe.example/beacon\">BEACON attr link</p>\n"
+    "<div class=\"arw\">ARWDROP stray-guard keeps this div</div>\n"
+    "<ul class=\"lmk\"><li>MARKORD bullet text</li></ul>\n"
+    "<ul class=\"lmr\"><li>REMPT bullet-less item</li></ul>\n"
+    "<p class=\"ph\">ROOTVARHIT root-var display</p>\n"
+    "<p class=\"pk\">ROOTKEEP root-var keep</p>\n"
+    "<div class=\"ckwrap\"><input type=\"checkbox\" class=\"ckr\" checked><label class=\"ckl\">CHKHIT checked-label</label><input type=\"checkbox\" class=\"ckr2\"><label class=\"ckl2\">CHKKEEP unchecked-label</label></div>\n"
+    "<button class=\"btnd\" disabled>BTNGONE</button>\n"
+    "<p>DAFTGONE button-disabled sibling</p>\n"
+    "<button class=\"btne\">EAFTEL</button>\n"
+    "<p class=\"afte\">EAFTEL enabled-sibling</p>\n"
+    "<button class=\"btnk\">BSTKEEP</button>\n"
+    "<p>DSTKEEP enabled-boundary sibling</p>\n"
+    "<input type=\"text\" class=\"ip\" placeholder=\"PLHELD text\">\n"
+    "<p class=\"aftph\">PHELDGONE placeholder sibling</p>\n"
+    "<div class=\"fwr\"><p>FITHIT focus-within child</p></div>\n"
+    "<p id=\"tgx\">TGTHIT target-less page keeps</p>\n"
+    "<p class=\"ev\"></p>\n"
+    "<p>EMPHIT empty-sibling</p>\n"
+    "<p class=\"ev2\">EV2NOTEMPTY</p>\n"
+    "<p>EKKEEP nonempty-sibling</p>\n"
+    /* P9 HTML markers — transform mounts read as DOC fields (tfXpx/
+     * tfYpx/tfXpct/tfYpct), the gradient hero asserts its invert flag,
+     * the media query consumes 120vmin (VMINHIT hides), and the margin
+     * unit repair shows as real spacing (2rem top = 16; 50% left = 0,
+     * the legacy "%-as-25px" wrong turn gone). */
+    "<p class=\"tfx\">TFSHIFTX x-shift</p>\n"
+    "<p class=\"tfy\">TFSHIFTY y-shift</p>\n"
+    "<p class=\"tfp\">TFSHIFT pct pair</p>\n"
+    "<p class=\"tfr\">TFSHIFTR rotate composed</p>\n"
+    "<p class=\"tfmix\" style=\"transform: translateX(6px)\">TFSHIFTWIN inline beats sheet</p>\n"
+    "<p class=\"vminhit\">VMINHIT must be absent (120vmin = 288px)</p>\n"
+    "<div class=\"gradhero\">GRADHERO dark gradient inverts</div>\n"
+    "<p style=\"margin-top:2rem\">MRG2REM rem margin (16 half-px top)</p>\n"
+    "<p style=\"margin-left:50%\">MRG50PCT refuses at walk (0 left)</p>\n"
+    /* P10 HTML markers — the engaged animation mount carries its
+     * registry name as a block field (an battery below); the never-
+     * completing windows mount nothing (the registry/guard refusals);
+     * the transition victim asserts via the direct winner query —
+     * no text can express an arm (see the Phase 2 rows). */
+    "<div class=\"pop\">ANIMLIFT completes pf</div>\n"
+    "<div class=\"popnf\">ANFALLDOWN unregistered name</div>\n"
+    "<div class=\"poppa\">ANIMPAUSE paused holds open</div>\n"
+    "<div class=\"popinf\">ANIMINF infinite never ends</div>\n"
+    "<div class=\"trnvictim\">TRNVICTIM transition armed</div>\n"
+    /* P8 HTML interactive set — details/dialog/template/srcset/select/
+     * reset. Mostly NO CSS declarations: the [css-skip] tally below
+     * asserts EXACT counts (pcls/medF/var/calc/prop), so the P8
+     * canaries stay HTML-only to keep that battery byte-stable */
+    "<h2>Phase 8 interactive set</h2>\n"
+    "<template><p>TMPLJUNK template body must be absent</p></template>\n"
+    "<p>TMPLKEEP template-follow keeps</p>\n"
+    "<dialog><p>DLGCLOSED must be absent (no open attr)</p></dialog>\n"
+    "<dialog open><p>DLGOPEN open dialog prints</p></dialog>\n"
+    "<details><p>DETBODY closed skip keeps hiding</p></details>\n"
+    "<img src=\"https://probe.example/plain.png\" alt=\"PLAINIMG baseline\">\n"
+    "<img src=\"https://probe.example/small.png\" srcset=\"https://probe.example/one.png 200w, https://probe.example/two.png 900w, https://probe.example/three.png 480w\" alt=\"SRCSETW width pick\">\n"
+    "<img src=\"https://probe.example/van.png\" srcset=\"https://probe.example/van@1x.png 1x, https://probe.example/van@3x.png 3x, https://probe.example/van@1.5x.png 1.5x\" alt=\"SRCSETD density pick\">\n"
+    "<img src=\"https://probe.example/only.png\" srcset=\"\" alt=\"SRCSETF unusable keeps src\">\n"
+    "<form action=\"#f8\" method=\"get\"><input type=\"text\" name=\"rn\" value=\"RV0\"><button type=\"reset\">RNRESET</button><input type=\"hidden\" name=\"hn\" value=\"HV0\"></form>\n"
+    "<form action=\"#g8\" method=\"get\"><select name=\"msel\" multiple><option value=\"a\" selected>MS1</option><option value=\"b\">MS2</option><option value=\"c\" selected>MS3</option></select><button>FMBTN</button></form>\n"
+    "<h2>Adjacent sibling</h2>\n"
+    "<p class=\"adj\">ADJ-HIT must be absent</p>\n"
+    "<div>ADJ-KEEP must stay visible (follows a div, not an h2)</div>\n"
+    "<h2>General sibling</h2>\n"
+    "<ul class=\"l\">\n"
+    "  <li>GENSIB-A must stay visible (before li.gs)</li>\n"
+    "  <li class=\"gs\">GENSIB sandbox entry</li>\n"
+    "  <li>GENSIB-HIT must be absent</li>\n"
+    "</ul>\n"
+    "<h2>Attribute operators</h2>\n"
+    "<div data-p=\"abcdef\">ATTCARET-HIT must be absent (^=</div>\n"
+    "<div data-p=\"xabc\">ATTCARET-KEEP must stay visible</div>\n"
+    "<div data-q=\"abcdef\">ATTDOLLAR-HIT must be absent ($=</div>\n"
+    "<div data-q=\"abcx\">ATTDOLLAR-KEEP must stay visible</div>\n"
+    "<div data-r=\"abcdefgh\">ATTSTAR-HIT must be absent (*=</div>\n"
+    "<div data-r=\"ab_efgh\">ATTSTAR-KEEP must stay visible</div>\n"
+    "<div data-s=\"one two three\">ATTTILDE-HIT must be absent (~=</div>\n"
+    "<div data-s=\"onetwo\">ATTTILDE-KEEP must stay visible</div>\n"
+    "<div data-t=\"en-US\">ATTBAR-HIT must be absent (|=</div>\n"
+    "<div data-t=\"ens\">ATTBAR-KEEP must stay visible</div>\n"
+    "<h2>Simple :not</h2>\n"
+    "<p class=\"nk\">NOT-HIT must be absent</p>\n"
+    "<p class=\"nk keep\">NOT-KEEP must stay visible</p>\n"
+    "<h2>State pseudo-classes</h2>\n"
+    "<p class=\"st\">STATE-HIT must be absent (:hover always-match)</p>\n"
+    "<p class=\"st2\">STATE-KEEP must stay visible</p>\n"
+    "<div class=\"bc\">CANARY-BEFORE (inline prints; stray block-lane guard keeps it off its own line)</div>\n"
+    "<div class=\"m\">media block (min-width:240px valid feature)</div>\n"
+    "<p class=\"gone\">CANARY-DISPLAY-NONE must be absent</p>\n"
+    "<h2>Value/planned-gap sections</h2>\n"
+    "<p class=\"v\">var + font-size text</p>\n"
+    "<p class=\"v2\">calc + backdrop-filter text</p>\n"
+    "<p class=\"g\">position/gap/border-radius/grid text</p>\n"
+    "<p>[css-skip] expected: sib=0 attrOp=0 pcls=0 medF=1 var=4 calc=2 prop=2</p>\n"
+    "</body></html>";
+
 static const InternalPage INTERNAL_PAGES[] = {
     { "about:home", "PlutoBrowser",
       "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
@@ -679,17 +1112,19 @@ static const InternalPage INTERNAL_PAGES[] = {
     { "about:acidtest", "HTML Acid Test", ACIDTEST_HTML },
     { "about:javascript", "JavaScript Test Suite", JSTEST_HTML },
     { "about:jsext", "Full JS Test Suite", JSEXTTEST_HTML },
+    { "about:cssprobe", "CSS Probe", CSSPROBE_HTML },
 };
 
 /* Read-only directory view (http_client.h): name + title per internal page,
  * same order as INTERNAL_PAGES — the home page's Test Cases section lists
- * exactly these entries (all 5 programmed about: sites). */
+ * exactly these entries (all 6 programmed about: sites). */
 static const HttpTestPage TEST_PAGES[] = {
     { "about:home", "PlutoBrowser Home" },
     { "about:blank", "Blank Page" },
     { "about:acidtest", "HTML Acid Test" },
     { "about:javascript", "JavaScript Test Suite" },
     { "about:jsext", "Full JS Test Suite" },
+    { "about:cssprobe", "CSS Probe" },
 };
 
 size_t http_internal_page_body(const char *url, const char **bodyOut)
