@@ -544,8 +544,48 @@ void fxParseJSONToken(txMachine* the, txJSONParser* theParser)
 			break;
 		default:
 		error:
-			mxSyntaxError("%ld: invalid character", theParser->line);	
+		{
+			/* xs_no_recursion (host boot forensic): a JSON.parse failure
+			 * kills the page boot (flight row values). Dump the parse text
+			 * head + the offending char/offset through the weak host
+			 * report hook. Pure C slot reads — no interpreter re-entry. */
+			extern void xs_engine_nr_report(const char* fmt, ...) __attribute__((weak));
+			if (xs_engine_nr_report) {
+				const char* nrSrc = theParser->slot->value.string;
+				long nrOff = mxPtrDiff(p - nrSrc);
+				char nrHead[180];
+				long nrN = 0;
+				long nrFrom = nrOff - 64;
+				long nrTo = nrOff + 8;
+				long nrI;
+				nrHead[0] = 0;
+				if (nrFrom < 0)
+					nrFrom = 0;
+				nrN += snprintf(nrHead, sizeof(nrHead), "at@%ld:", nrOff);
+				if (nrN < 0 || nrN >= (long)sizeof(nrHead))
+					nrN = (long)sizeof(nrHead) - 1;
+				for (nrI = nrFrom; nrI < nrTo && nrN < (long)sizeof(nrHead) - 6;
+					 nrI++) {
+					unsigned char nrC = (unsigned char)nrSrc[nrI];
+					if (nrC >= 0x20 && nrC < 0x7F) {
+						nrHead[nrN++] = (char)nrC;
+					}
+					else {
+						nrN += snprintf(nrHead + nrN,
+										sizeof(nrHead) - (size_t)nrN, "<%d>",
+										nrC);
+						if (nrN >= (long)sizeof(nrHead))
+							break;
+					}
+				}
+				nrHead[nrN] = 0;
+				xs_engine_nr_report("[json] fail line=%ld off=%ld ch=%d %s",
+									theParser->line, nrOff,
+									(int)(unsigned char)*p, nrHead);
+			}
+			mxSyntaxError("%ld: invalid character", theParser->line);
 			break;
+		}
 		}
 	}
 	theParser->offset = mxPtrDiff(p - theParser->slot->value.string);

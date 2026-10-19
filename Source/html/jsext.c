@@ -33,6 +33,7 @@
 
 #include "html/jsext.h"
 #include "html/jsbridge.h"
+#include "html/jsbridge_internal.h" /* jsbridge_script_type_is_data */
 #include "core/url.h"
 #include "core/logger.h"
 #include "core/http_client.h"
@@ -376,6 +377,16 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
             break; /* unterminated: drop (tokenizer parity) */
         }
 
+        /* Data-type scripts (JSON-LD, importmap …) are not executable
+         * JavaScript — browsers never run them (HTML spec §4.12.1). Skip the
+         * whole element without emitting a slot, so the slot list stays an
+         * executable-script list (same rule as the legacy inline scanner). */
+        if (jsbridge_script_type_is_data(lt, gt))
+        {
+            pos = close + 8;
+            goto advance;
+        }
+
         if (hasSrc && srcStart && srcLen >= 5 &&
             (srcStart[0] | 0x20) == 'd' && (srcStart[1] | 0x20) == 'a' &&
             (srcStart[2] | 0x20) == 't' && (srcStart[3] | 0x20) == 'a' &&
@@ -391,6 +402,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].inlineStart = srcStart;
                 slots[count].inlineLen = srcLen;
                 slots[count].extIndex = JS_SCRIPT_DATA;
+                slots[count].tagStart = lt;
+                slots[count].tagLen = (size_t)(gt - lt + 1);
             }
             count++;
             pos = close + 8;
@@ -411,6 +424,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].inlineStart = NULL;
                 slots[count].inlineLen = 0;
                 slots[count].extIndex = -1;
+                slots[count].tagStart = lt;
+                slots[count].tagLen = (size_t)(gt - lt + 1);
             }
             char *raw = tag_attr_value(afterName, gt, "src", 3);
             if (raw && raw[0] && extRaw)
@@ -456,6 +471,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].inlineStart = gt + 1;
                 slots[count].inlineLen = (size_t)(close - (gt + 1));
                 slots[count].extIndex = -1;
+                slots[count].tagStart = lt;
+                slots[count].tagLen = (size_t)(gt - lt + 1);
             }
             count++;
             pos = close + 8;
@@ -644,8 +661,10 @@ static const char JSEXT_BIG_B[] = JSEXT_PAD1071;
 static const char JSEXT_BIG_C[] = JSEXT_PAD1000 "window.__big3 = 1;\n";
 
 /* Test 10: 72,821 bytes — SW2b: now ACCEPTED (the old per-script download
- * cap is gone); it becomes a RAM-resident source under the page budget and
- * the per-script SOURCE ceiling gates it at execution. */
+ * cap is gone); a body this size is self-admitted DISK-RESIDENT by policy
+ * (over the one-frame parse cap — no engine can whole-file-admit it), so
+ * it executes via the per-segment chunked stream and sets its marker on
+ * every engine. */
 static const char JSEXT_HUGE[] = JSEXT_PAD1000 JSEXT_PAD300 "window.__huge = 1;\n";
 typedef struct
 {
@@ -714,11 +733,17 @@ int jsext_local_fill(JsExtArena *arena, JsExtScript *ext, int extCount)
             ext[i].url[0] = '\0';
             continue;
         }
-        if (len > JSEXT_SPILL_THRESHOLD)
+        if (len > JSEXT_SPILL_THRESHOLD ||
+            len >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
         {
-            /* SW2b: over the RAM-residency threshold — ALWAYS disk-resident
-             * (same as the network path), regardless of budget. The arena
-             * cannot hold a source this size anyway (small-block chunks). */
+            /* SW2b: over the RAM-residency threshold OR over the one-frame
+             * parse cap — ALWAYS disk-resident (same as the network path),
+             * regardless of budget. Over 256KB the arena cannot hold the
+             * source anyway (small-block chunks); over 64KB a monolith can
+             * never whole-file-admit (device: the lexer cannot lex it
+             * unyielded — E1 cap; sim under the device envelope: the
+             * whole-file probe aborts the engine) — disk residency routes
+             * the body to the per-segment chunked stream instead. */
             SpillFile sp = pluto_spill_begin();
             if (sp != PLUTO_SPILL_INVALID &&
                 pluto_spill_write(sp, hit->source, len) == 0)
@@ -1008,12 +1033,15 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
     {
         logger_log("[jsext] FAIL %s empty body", url);
     }
-    else if (bodyLen > JSEXT_SPILL_THRESHOLD)
+    else if (bodyLen > JSEXT_SPILL_THRESHOLD ||
+             bodyLen >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
     {
         /* Disk-resident adoption: write the delivered body to a spill file
          * (one sequential flash write; the RAM copy dies with the callback).
-         * No page budget: disk residency is the point of SW2b. The per-
-         * script SOURCE ceiling applies at materialization (execution). */
+         * No page budget: disk residency is the point of SW2b. Bodies over
+         * the one-frame parse cap adopt disk residency too, so materiali-
+         * zation runs per-segment on the chunked stream path instead of a
+         * monolith admission no engine can grant (see the local path). */
         SpillFile sp = pluto_spill_begin();
         if (sp != PLUTO_SPILL_INVALID &&
             pluto_spill_write(sp, body, bodyLen) == 0)

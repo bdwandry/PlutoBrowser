@@ -64,6 +64,9 @@
 #include <stdarg.h>
 #include "../core/pluto_mem.h"
 #include "../core/pluto_spill.h"
+#if !defined(TARGET_PLAYDATE)
+#include <execinfo.h> /* A2: C backtrace at meter overruns (host labs only) */
+#endif
 
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
@@ -93,6 +96,11 @@ extern PlaydateAPI *pluto_pd(void);
  * (xsScript.c); 0 = unlimited. Set at engine boot on device. */
 extern unsigned long fxNRParserTotalCap;
 extern int fxNRParserCodegenCapped; /* R26g: cap covers codegen in attempt mode */
+
+/* A2 forward decls: real queueMicrotask (host fn registered at engine
+ * init; the flush runs from the xs_drain_jobs boundaries below). */
+static void xs_queueMicrotask(xsMachine *the);
+static int xs_flush_microtasks(JsBridge *b);
 
 /* ── machine sizing (Playdate-sized; slots ≈ 32B, chunks are bytes) ──── */
 #define XS_INIT_CHUNK (384u * 1024u)
@@ -134,10 +142,32 @@ extern int fxNRParserCodegenCapped; /* R26g: cap covers codegen in attempt mode 
  * finished mounting (R14). 16384 was a provisional ceiling while the R22
  * tail appeared to recurse past 4096 — but that demand was the WC_FOR/WC_TRY
  * sync-skip fork bug (infinite-loop growth, peak 16370), not organic
- * recursion. With the epilogue fixes the measured full-site bootstrap peak
- * is 1598 slots (fxNRStackPeakSlots), so 4096 (128KB host) carries ~2.5x
- * headroom and restores the R14 sizing. */
-#define XS_STACK_COUNT 4096u
+ * recursion. R55b (2026-10-18), C4-cycle truth: the CURRENT site's react
+ * RSC boot (turbopack chunks planned by jsbridge_bundler_plan, the
+ * R-flight-data processing in the app-router scripts) aborts with slots
+ * =4096 — sim log 18:57 twice per run: "script 11 aborted engine
+ * (JavaScript stack overflow)" inside an ~10-frame .apply call chain with
+ * below-anchor=-400B (the [cstack] anchor rows describe the C stack, NOT
+ * the value stack — the slot cap was the gate). The R14-era field-proven
+ * 16384 (C1 line: -DXS_STACK_COUNT=16384u carried every green C3/C4/C5
+ * cycle) is the default again: 16384 slots ≈ 256KB one-time reserve at
+ * machine create on ARM32 (fxAllocateSlots), inside the 7.68MB budget
+ * ladder with room. The probe rows ([slotstack] overflow alloc /
+ * interpreter overflow) are always-on, so a future site shape exceeding
+ * this reports its real demand before any sizing decision.
+ * A2 (bundler-run harness): modern framework bootstraps need a deeper
+ * value stack than the legacy bootstrap sample — XS_STACK_COUNT is a
+ * normal #ifndef override now; the bump harness defines a higher count
+ * (-DXS_STACK_COUNT=16384). */
+#ifndef XS_STACK_COUNT
+#define XS_STACK_COUNT 16384u
+#endif
+/* A2: C-owned queueMicrotask depth (pinned fn slots — see
+ * xs_flush_microtasks). The framework queues one microtask per async step;
+ * browsers hold an unbounded queue, but each flush runs at most one batch
+ * and deferred callbacks wait for the next machine boundary, so the slot
+ * budget bounds device RAM, not fidelity. Overflow raises visibly. */
+#define XS_MICRO_MAX 32
 #define XS_INIT_KEYS 2048u
 #define XS_INC_KEYS 256u
 #define XS_NAME_MOD 127u
@@ -325,6 +355,7 @@ typedef struct
 {
     xsMachine *machine;
     xsSlot elProto; /* element prototype (rooted) */
+    xsSlot scriptProto; /* <script> element prototype (rooted; see build) */
     xsSlot sheetProto; /* CSSOM StyleSheet prototype (rooted; text-backed) */
     xsSlot urlProto; /* URL prototype (rooted; toString/toJSON) */
     /* Pinned listener functions; JsListener.ref holds the index.
@@ -334,6 +365,38 @@ typedef struct
      * Same xsRemember/xsForget ownership contract as fns[]. */
     xsSlot tfn[JSBRIDGE_TIMERS_MAX];
     unsigned char tfnSet[JSBRIDGE_TIMERS_MAX]; /* slot holds a pin */
+    /* A2: microtask queue (real queueMicrotask) — C-owned pinned fns,
+     * flushed FLAT at machine boundaries (see xs_flush_microtasks). Never
+     * dispatched through the promise machinery: the framework needs
+     * queueMicrotask(fn) to complete synchronously WITHOUT running fn
+     * nested inside its caller (a Promise-based JS shim reenters itself
+     * against this engine's synchronous then dispatch). The queue is a RING
+     * on PURPOSE: fxRemember repurposes the pinned slot struct's ->next as
+     * the C_root chain node, so an entry must be pinned exactly once and
+     * its struct NEVER copied while pinned (shifting copies corrupts the
+     * pin chain — fxForget then scans a cycle forever). */
+    xsSlot mtQ[XS_MICRO_MAX];
+    int mtHead;  /* dequeue index (ring) */
+    int mtCount; /* queued fns */
+    /* A2: pending resource-load fires (replay-cached asset semantics).
+     * react-dom's commit gate (suspendResource / insertStylesheetIntoRoot)
+     * counts pending stylesheets and waits for the created <link>'s load
+     * OR error event before unsuspending; without a bounded delivery the
+     * commit stays parked on the 60s timeout and the page never reaches
+     * the listener-binding stage. The replay environment models the
+     * page's own assets as already cached and complete, so queued fires
+     * deliver ONE synthetic 'load' per link element at the next
+     * microcheckpoint. Elements stay raw DomNode pointers: the tree lives
+     * in the document's arena and is never compacted while the engine is
+     * attached (close resets the queue first). */
+#define XS_RESFIRE_MAX 8
+    DomNode *resFire[XS_RESFIRE_MAX]; /* elements awaiting a load fire */
+    int resFireCount;
+    /* Lazily-created dispatcher host fn (queued into mtQ; pinned once at
+     * creation and re-Remember'd per enqueue via its own ring slot — the
+     * re-pin is legal because each ring slot is a distinct chain node). */
+    xsSlot resFireFn;
+    int resFireFnSet;
     /* XHR + fetch pins (same ownership contract; fetch uses the same
      * xfn[] slots — XS has no native Promise, so only XMLHttpRequest). */
     xsSlot xfn[JSBRIDGE_XHR_MAX]; /* completion handlers / promise resolve */
@@ -341,6 +404,21 @@ typedef struct
     unsigned char xfnSet[JSBRIDGE_XHR_MAX];
     unsigned char xobjSet[JSBRIDGE_XHR_MAX];
     xsSlot xhrProto; /* XMLHttpRequest prototype (rooted) */
+    /* B3: per-node ELEMENT WRAPPER cache — the browser identity model.
+     * xs_push_element used to build a FRESH wrapper per push, so a wrapper
+     * react wrote its fiber key onto (node[internalInstanceKey] = fiber)
+     * was invisible to the NEXT wrapper pushed for the same node, and the
+     * delegated dispatch's getClosestInstanceFromNode(target) found
+     * nothing. One pinned wrapper per node (xsRemember'd at insert,
+     * xsForget at close) makes react's own property writes DURABLE — plain
+     * browser semantics: an Element object identity is stable for the
+     * document's lifetime. Fixed reserve: over-cap pushes fall back to
+     * fresh wrappers (the old behavior), noted once in the trace. */
+#define XS_ELW_CAP 1024
+    DomNode *elwNode[XS_ELW_CAP];
+    xsSlot elwWrap[XS_ELW_CAP]; /* pinned IN the slot (see st->fns note) */
+    int elwCount;
+    int elwOverflow; /* set once when the reserve is exhausted */
     /* R20: in-flight time-sliced bundler-monolith split (see
      * xs_run_script_split below). plan.spans points at spansBuf and the
      * source points INTO the live document's rawHtml buffer (JS source
@@ -386,6 +464,9 @@ typedef struct
         unsigned long pumpBudget;   /* parser steps allowed this frame */
         unsigned long emaStepsPerMs; /* self-tuning estimate (0 = unset) */
         unsigned long savedParserCap; /* admission-scoped cap to restore */
+        unsigned long savedBudget;   /* R56: funnel floor raised across the
+                                      * codegen+run window (device only);
+                                      * restored at xs_step_discard */
         char *segBuf;    /* JMalloc'd segment source (owned) */
         long segLen;     /* emitted segment length */
         txParser *parser;   /* heap-resident parser (fxInitializeParser) */
@@ -444,7 +525,29 @@ typedef struct
         txSlot *iFrame;
         txByte *iCode;
     } mount;
+    /* C4 (fetch shim): one-shot latch. The shim is an engine-owned script
+     * that defines global `fetch`/`AbortSignal` over the engine's own
+     * XMLHttpRequest + native Promise; it runs once, before the page's
+     * first script, via xs_run_script's injection point. */
+    unsigned char fetchShimDone;
 } XsState;
+
+/* ── R55b value-stack forensics (shared by sim + device) ────────────
+ * The fork's interpreter calls this at the failing bounded push
+ * (mxAllocStack underflow in xsRun.c / fxOverflow native push overflow
+ * in xsAPI.c) right before the abort. want = slot count the push asked
+ * for; depth = live value-stack depth (stackTop - stack) at the abort
+ * point. Defined at file scope UNCONDITIONALLY (outside the
+ * PLUTO_NO_STOCK_XS guard) because the fork ENGINE compiles and runs on
+ * device builds too — only the hook definitions are single-binary.
+ * XS_STACK_COUNT sizing reads this row, not the [cstack] anchor numbers,
+ * which describe the C stack and do not apply to the value stack. */
+void pluto_fork_stack_overflow_probe(long want, long depth)
+{
+    (void)want;
+    (void)depth;
+    logger_log("[slotstack] overflow alloc: want=%ld depth=%ld", want, depth);
+}
 
 /* ── host-provided platform functions (mxUseDefault* = 0) ────────────
 
@@ -457,10 +560,19 @@ typedef struct
 #ifndef PLUTO_NO_STOCK_XS
 #else
 
-/* fxAbort: every fatal engine condition lands here (OOM, C-stack, meter
- * limit, unhandled rejection, …). Instead of the stock fprintf+exit
- * (would kill the browser), record and unwind to the OUTERMOST host
- * bracket — the stock ESP32 device platform's ABORT_EXITTOHOST pattern. */
+/* R37/depth=0 abort forensics: the anchor the engine's fxCStackLimit
+ * hands out, kept file-global so fxAbort can log the SP distance at the
+ * moment a guard fires (real deep recursion ⇒ delta ≈ the budget;
+ * a cross-region/bogus compare ⇒ tiny or negative delta). */
+static char *g_cstackAnchor = NULL;
+
+#ifdef PLUTO_THROW_LOG
+/* Throw-trace companion (PLUTO_THROW_LOG harness build only): the fork's
+ * fxThrowMessage logging reads the RUNNING script number from here; both
+ * run entrypoints keep it current. */
+int g_pluto_throw_script = 0;
+#endif
+
 void fxAbort(txMachine *the, int status)
 {
     /* fxAbortString is an internal (renamed to _nr) in the fork — the
@@ -482,6 +594,37 @@ void fxAbort(txMachine *the, int status)
         the->exitStatus = status;
     }
     logger_log("[xs] abort: %s", what);
+    {
+        /* SP probe: address of this frame's local ≈ the SP at the abort.
+         * below-anchor > 0 ⇒ that many bytes BELOW the fxCStackLimit
+         * anchor (legit deep chain ≈ the budget value); ≤ 0 ⇒ the guard
+         * compared across regions or the anchor is bogus. */
+        char spProbe;
+        long below = g_cstackAnchor
+                         ? (long)(g_cstackAnchor - (char *)&spProbe)
+                         : -1L;
+        logger_log("[cstack] abort %s: sp~%p anchor=%p below-anchor=%+ldB",
+                   what, (void *)&spProbe, (void *)g_cstackAnchor, below);
+    }
+    if (status == XS_JAVASCRIPT_STACK_OVERFLOW_EXIT && the)
+    {
+        /* A2 forensics: a JS-stack exhaustion is a recursion-shape question
+         * — walk the frame chain (slot->next links the previous frame) and
+         * log the deepest callers. Read-only (names come from the engine's
+         * symbol tables), safe at abort time. */
+        txSlot *f = the->frame;
+        int depth = 0;
+        while (f && depth < 14)
+        {
+            char name[96];
+            name[0] = '\0';
+            fxBufferFrameName(the, name, sizeof(name), f, "");
+            logger_log("[cstack] overflow frame[%d] %s%s", depth,
+                       name[0] ? name : "?", depth == 0 ? " <-deepest" : "");
+            f = f->next;
+            depth++;
+        }
+    }
     if (status == 11) /* XS_PUMP_CORRUPTION_EXIT — fork diagnostics */
     {
         extern long gXSNRFaultKind;
@@ -514,6 +657,16 @@ char *fxCStackLimit(void)
     if (!base)
     {
         base = &probe;
+        g_cstackAnchor = base;
+        /* One line per process: the anchor the parser/machine/regex guards
+         * will compare every SP against (device run Anonymous evidence:
+         * without it a bogus anchor was undiagnosable). */
+        logger_log("[cstack] anchor=%p budget=%uKB",
+                   (void *)base, XS_CSTACK_LIMIT / 1024u);
+    }
+    else
+    {
+        g_cstackAnchor = base;
     }
     return base - XS_CSTACK_LIMIT;
 }
@@ -628,7 +781,10 @@ static void xs_el_get_tagName(xsMachine *the)
     DomNode *n = this_node(the);
     if (!n || n->kind != DOM_ELEMENT)
     {
-        xsResult = xsString("");
+        /* HTML nodeName per kind: text → "#text", comment → "#comment" */
+        xsResult = xsString(n && n->kind == DOM_COMMENT ? "#comment"
+                            : n && n->kind == DOM_TEXT  ? "#text"
+                                                        : "");
         return;
     }
     char up[32];
@@ -655,6 +811,48 @@ static void xs_el_get_id(xsMachine *the)
     DomNode *n = this_node(the);
     const char *v = n ? dom_get_attr(n, "id") : NULL;
     xsResult = xsString(v ? v : "");
+}
+
+/* C4: form-control `value` property (react's controlled-input contract:
+ * e.target.value on read, .value = "..." on write). Stored on the node's
+ * `value` ATTRIBUTE — the same store dom_set_attr feeds and the block
+ * walker mirrors — so re-renders that rebuild nodes keep carrying the
+ * typed text across dispatches. */
+static void xs_el_get_value(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "value") : NULL;
+#if defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[val] get tag=%s → '%.20s'",
+               (n && n->kind == DOM_ELEMENT && n->tag) ? n->tag : "?",
+               v ? v : "");
+#endif
+    xsResult = xsString(v ? v : "");
+}
+
+static void xs_el_set_value(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        char *v = to_cstring(the, xsArg(0));
+        if (!v)
+        {
+            xsTypeError("out of memory");
+        }
+#if defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[val] set tag=%s '%.20s'",
+                   n->kind == DOM_ELEMENT && n->tag ? n->tag : "?", v);
+#endif
+        int rc = dom_set_attr(b->dom, n, "value", v);
+        JFree(v);
+        if (rc != 0)
+        {
+            xsTypeError("value assignment failed");
+        }
+    }
 }
 
 /* URL decomposition attributes on HTML URL-bearing elements. */
@@ -705,6 +903,36 @@ static void xs_el_set_href(xsMachine *the)
     if (rc) xsTypeError("href assignment failed");
 }
 
+/* src: the src-bearing URL attribute (script/img/iframe), mirror of the
+ * href getter but backed by the "src" attribute. Like a browser's .src
+ * IDL attribute, page code sees the page-base-RESOLVED absolute URL —
+ * bundler loaders pass document.currentScript.src straight into
+ * new URL(); getAttribute("src") remains the raw text. */
+static void xs_el_get_src(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    const char *href = n ? dom_get_attr(n, "src") : NULL;
+    char *absolute = href ? url_resolve(b->doc->baseUrl, href) : NULL;
+    xsResult = xsString(absolute ? absolute : (href ? href : ""));
+    if (absolute)
+    {
+        pluto_free(absolute);
+    }
+}
+
+static void xs_el_set_src(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char *value = to_cstring(the, xsArg(0));
+    if (!value) xsTypeError("out of memory");
+    int rc = n ? dom_set_attr(b->dom, n, "src", value) : -1;
+    JFree(value);
+    if (rc) xsTypeError("src assignment failed");
+}
+
 static void xs_el_get_textContent(xsMachine *the)
 {
     DomNode *n = this_node(the);
@@ -720,10 +948,84 @@ static void xs_el_get_textContent(xsMachine *the)
     }
 }
 
-/* UNSUPPORTED (no subtree serializer): degrades to text — engine parity. */
+/* REAL markup serializer (browser parity). Next.js's root error boundary
+ * snapshots `document.documentElement.innerHTML` and re-renders
+ * <html dangerouslySetInnerHTML={{__html: snapshot}}> on a hydration
+ * fallback; with the old text-degraded getter the snapshot was plain body
+ * text and that assignment erased head+body (the replayed hydration gap). */
 static void xs_el_get_innerHTML(xsMachine *the)
 {
-    xs_el_get_textContent(the);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        xsResult = xsString("");
+        return;
+    }
+    char *s = NULL;
+    size_t slen = 0;
+    int rc = dom_serialize_children_html(n, &s, &slen);
+    if (rc != 0 || !s)
+    {
+#ifdef PLUTO_THROW_LOG
+        logger_log("[dom] innerHTML serialize rc=%d tag=%s kids=%d", rc,
+                   (n->tag) ? n->tag : "?", n->childCount);
+#endif
+        xsResult = xsString("");
+        return;
+    }
+    xsResult = xsString(s);
+    JFree(s);
+}
+
+/* getRootNode — react's fu() prefers it ("function"==typeof e.getRootNode)
+ * and checks the returned node for nodeType 9/11 (document/fragment).
+ * Every engine node lives in the page tree, so this is the owner document
+ * (same observable as ownerDocument; detached-node semantics unsupported). */
+static void xs_el_get_rootNode(xsMachine *the)
+{
+    (void)this_node(the);
+    xsResult = xsGet(xsGlobal, xsID("document"));
+}
+
+/* attachShadow — react's route announcer (next module 62634) mounts its
+ * visually-hidden aria-live host as
+ *     e.attachShadow({mode:"open"}).appendChild(div)
+ * then reads `e?.shadowRoot?.childNodes[0]` on later route-change reels.
+ * Missing this made the WHOLE commit throw ("call: not a function" kind=0
+ * undefined callee from iE/commitHookEffectListMount right after the
+ * [crt] next-route-announcer + [crt] div rows), which collapsed hydration
+ * into the fallback innerHTML restore with zero fibers attached — no
+ * delegated handlers survived, so form submits still navigated.
+ * Implementation: the open shadow root IS a real element node, held OUT
+ * of the render tree (parent NULL → invisible to layout, tag scans and
+ * serializer output) but backed by full Element machinery so
+ * appendChild/childNodes/setHostData work on its content. `mode` is
+ * ignored (an open-only platform in practice). */
+static void xs_el_attachShadow(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *host = this_node(the);
+    if (!host || host->kind != DOM_ELEMENT)
+    {
+        xsTypeError("attachShadow: element expected");
+    }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[shadow] attach host=%s(%p)", (host->tag) ? host->tag : "?",
+               (void *)host);
+#endif
+    DomNode *root = host->shadowRoot;
+    if (!root)
+    {
+        root = dom_create_element(b->dom, "#shadow-root");
+        if (!root)
+        {
+            xsTypeError("attachShadow failed");
+        }
+        root->shadowHost = host;
+        host->shadowRoot = root;
+    }
+    xsResult = xs_push_element(b, root);
 }
 
 static void xs_el_get_parentNode(xsMachine *the)
@@ -773,10 +1075,112 @@ static void xs_el_get_ownerDocument(xsMachine *the)
     xsResult = xsGet(xsGlobal, xsID("document"));
 }
 
+/* isConnected — next's announcer cleanup gates removeChild on
+ * `e?.isConnected` (missing it just leaked the announcer host, but the
+ * getter is cheap and observable-correct): TRUE iff the parent chain
+ * reaches the document root; the shadow root (parent NULL, NOT the doc
+ * root) and detached fragments report FALSE, matching real semantics
+ * for the host element the announcer queries. */
+static void xs_el_get_isConnected(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    DomNode *root = (b->dom) ? b->dom->root : NULL;
+    int conn = 0;
+    if (n)
+    {
+        for (DomNode *p = n; p; p = p->parent)
+        {
+            if (p == root)
+            {
+                conn = 1;
+                break;
+            }
+        }
+    }
+    xsResult = xsBoolean(conn);
+}
+
+/* Element.attributes — a live snapshot Array of {name,value} objects.
+ * Browser shape is a NamedNodeMap (iterable + length + [n]); React DOM's
+ * AppHTML wrapper walks `document.documentElement.attributes` as
+ * `n<e.attributes.length` + indexed {name,value} pairs, and clones
+ * attributes on client re-render mounts, so the Array covers every
+ * documented use. Value "" = boolean attribute present with no value
+ * (dom_get_attr maps the tokenizer marker). Non-elements: undefined
+ * (only Element owns the collection in the spec). */
+static void xs_el_get_attributes(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    xsResult = xsUndefined;
+    if (!n || n->kind != DOM_ELEMENT)
+        return;
+    xsResult = xsNewArray(n->attrCount > 0 ? n->attrCount : 0);
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        xsSlot entry = xsNewObject();
+        const char *val = dom_get_attr(n, n->attrs[i].key);
+        xsSet(entry, xsID("name"), xsString(n->attrs[i].key));
+        xsSet(entry, xsID("value"), xsString(val ? val : ""));
+        xsSetAt(xsResult, xsInteger(i), entry);
+    }
+    (void)b;
+}
+
+/* Form type — React's hydrate matcher validates inputs with
+ * `"hidden" !== e.type`; browser default for <input> is "text",
+ * <button> is "submit"; other elements have no .type. */
+static void xs_el_get_type(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xsUndefined;
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    const char *v = dom_get_attr(n, "type");
+    if (v)
+    {
+        xsResult = xsString(v);
+    }
+    else if (n->tag && !strcmp(n->tag, "input"))
+    {
+        xsResult = xsString("text");
+    }
+    else if (n->tag && !strcmp(n->tag, "button"))
+    {
+        xsResult = xsString("submit");
+    }
+}
+
+/* namespaceURI — browser-parity: xhtml for html-parsed nodes, svg for
+ * svg tags. The hoisting path uses it to skip foreign elements. */
+static void xs_el_get_namespaceURI(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xsString("http://www.w3.org/1999/xhtml");
+    if (n && n->kind == DOM_ELEMENT && n->tag &&
+        (!strcmp(n->tag, "svg") || !strcmp(n->tag, "path")))
+    {
+        xsResult = xsString("http://www.w3.org/2000/svg");
+    }
+}
+
 static void xs_el_get_nodeType(xsMachine *the)
 {
     DomNode *n = this_node(the);
-    xsResult = xsInteger((n && n->kind == DOM_ELEMENT) ? 1 : 3);
+    /* A shadow-root node reports 11 (DOCUMENT_FRAGMENT), not 1 — it was
+     * made as an element for the element vtable, but react's remount reel
+     * (`e?.shadowRoot?.childNodes[0]`) and any generic node-type sniff
+     * should see the browser kind. */
+    if (n && n->shadowHost)
+    {
+        xsResult = xsInteger(11);
+        return;
+    }
+    xsResult = xsInteger((n && n->kind == DOM_ELEMENT) ? 1
+                         : (n && n->kind == DOM_COMMENT) ? 8 : 3);
 }
 
 static void xs_el_set_id(xsMachine *the)
@@ -827,6 +1231,13 @@ static void xs_el_set_innerHTML(xsMachine *the)
     JsBridge *b = bridge_of(the);
     BUDGET_OR_THROW(b);
     DomNode *n = this_node(the);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    if (n)
+    {
+        logger_log("[elap] innerHTML set this=%p tag=%s kind=%d",
+                   (void *)n, (n->tag) ? n->tag : "?", (int)n->kind);
+    }
+#endif
     if (n && n->kind == DOM_ELEMENT)
     {
         char *s = to_cstring(the, xsArg(0));
@@ -834,8 +1245,27 @@ static void xs_el_set_innerHTML(xsMachine *the)
         {
             xsTypeError("out of memory");
         }
-        int rc = jsbridge_el_set_inner_html(b, n, s, strlen(s));
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[elap] innerHTML len=%zu head=%.64s", strlen(s), s);
+#endif
+        /* Document-sized snapshots (Next.js error-boundary fallback
+         * assigns documentElement.innerHTML back) need the NR cap, not
+         * the shared 16KB one: a contact page snapshot is ~22KB. */
+        int rc = jsbridge_el_set_inner_html_ex(b, n, s, strlen(s),
+                                               (size_t)128 * 1024);
         JFree(s);
+        if (rc == 0)
+        {
+            /* The assignment replaced/cleared live subtree children —
+             * layout must re-anchor (stale blocks dispatch to DETACHED
+             * nodes). The frame loop answers via jsbridge_take_dom_dirty
+             * → page_rewalk_now(), the same escalation the throttled pumps
+             * use for handler mutations. */
+            b->domDirty = 1;
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+            logger_log("[elap] innerHTML set ok → domDirty=1");
+#endif
+        }
         if (rc != 0)
         {
             xsTypeError("innerHTML assignment failed");
@@ -882,10 +1312,12 @@ static void xs_el_setAttribute(xsMachine *the)
     {
         xsTypeError("setAttribute failed");
     }
+    b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
 }
 
 static void xs_el_removeAttribute(xsMachine *the)
 {
+    JsBridge *b = bridge_of(the);
     DomNode *n = this_node(the);
     char *k = to_cstring(the, xsArg(0));
     if (!k)
@@ -895,8 +1327,230 @@ static void xs_el_removeAttribute(xsMachine *the)
     if (n)
     {
         dom_remove_attr(n, k);
+        b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
     }
     JFree(k);
+}
+
+/* React's hydration-reset commit path (ij()) unlinks attribute nodes:
+ * `for (var l = t.attributes; l.length;) t.removeAttributeNode(l[0])`.
+ * Our attributes shim hands back plain {name,value} records, so removing
+ * by the record's name is the spec-equivalent observable behavior; the
+ * record is returned as the removed Attr-like node. */
+static void xs_el_removeAttributeNode(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    if (!n || xsTypeOf(xsArg(0)) != xsReferenceType)
+    {
+        xsTypeError("removeAttributeNode: attribute node expected");
+    }
+    xsSlot nm = xsGet(xsArg(0), xsID("name"));
+    char *k = to_cstring(the, nm);
+    if (!k)
+    {
+        xsTypeError("out of memory");
+    }
+    dom_remove_attr(n, k);
+    JFree(k);
+    xsResult = xsArg(0);
+}
+
+static void xs_el_hasAttribute(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    char *k = to_cstring(the, xsArg(0));
+    if (!k)
+    {
+        xsTypeError("out of memory");
+    }
+    const char *v = n ? dom_get_attr(n, k) : NULL;
+    JFree(k);
+    xsResult = xsBoolean(v != NULL);
+}
+
+static void xs_el_hasChildNodes(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xsBoolean(n && n->childCount > 0);
+}
+
+/* ── A2: replay-cached resource load events ─────────────────────────────
+ * react-dom blocks an SSR commit on stylesheet resources: it inserts or
+ * reuses a <link> (rel=preload|stylesheet) and waits for that element's
+ * load OR error event before unsuspending (SUSPENSEY_STYLESHEET_TIMEOUT
+ * is 60s — on this replay the gate never opened and the mount never
+ * reached the event-binding stage). A browser dispatches those events
+ * from its fetch pipeline; the offline replay models the page's own
+ * assets as already fetched and complete, so link insertions and load
+ * registrations queue ONE dispatcher on the microtask ring and it fires
+ * every 'load' listener pinned on the element (exactly one event per
+ * element, like the browser) plus the element's onload property hook
+ * when a callable was assigned (the `instance._p = new Promise(resolve
+ * => { instance.onload = resolve … })` resolution path). 'error' pings
+ * are registered but never fired: a browser reports exactly one of the
+ * two events per resource. */
+static void xs_event_preventDefault(xsMachine *the); /* defined below */
+static void xs_fire_pending_resource_loads(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    /* Cleared BEFORE firing: a ping may insert more resources, and those
+     * enqueue their own dispatcher for the next microcheckpoint. */
+    int count = st->resFireCount;
+    st->resFireCount = 0;
+    for (int i = 0; i < count; i++)
+    {
+        DomNode *el = st->resFire[i];
+        st->resFire[i] = NULL;
+        if (!el)
+        {
+            continue;
+        }
+        /* react registers pings BEFORE setInitialProperties, so re-check
+         * the element's rel here instead of trusting the queue time. */
+        const char *rel = dom_get_attr(el, "rel");
+        if (!rel || (strcmp(rel, "preload") != 0 &&
+                     strcmp(rel, "stylesheet") != 0))
+        {
+            continue;
+        }
+#ifdef PLUTO_THROW_LOG
+        const char *href = dom_get_attr(el, "href");
+        logger_log("[load] fire href=%.60s", href ? href : "-");
+#endif
+        /* A real dispatch passes an Event object: react's non-delegated
+         * load dispatcher reads event.target (getEventTarget) and the
+         * simple pings just ignore it. Built exactly like the click
+         * event, with target set so fiber resolution can follow it. */
+        xsSlot ev = xsNewHostObject(NULL);
+        xsResult = ev; /* GC anchor: preventDefault fn allocates */
+        xsDefine(ev, xsID("type"), xsString("load"), xsDefault);
+        xsDefine(ev, xsID("preventDefault"),
+                 xsNewHostFunction(xs_event_preventDefault, 0),
+                 xsDefault);
+        xsSlot w = xs_push_element(b, el); /* allocs: ev stays anchored */
+        xsDefine(ev, xsID("target"), w, xsDefault); /* ev keeps w alive */
+        for (int li = 0; li < b->listenerCount; li++)
+        {
+            JsListener *L = &b->listeners[li];
+            if (L->target != el || L->kind != 1) /* load pings only */
+            {
+                continue;
+            }
+            xsSlot fn = st->fns[li];
+            if (!fxIsCallable(the, &fn))
+            {
+                continue;
+            }
+#ifdef PLUTO_THROW_LOG
+            logger_log("[load] ping li=%d", li);
+#endif
+            /* Browser dispatch semantics: ONE listener throwing never
+             * cancels the event (the rest still get it, and the failure
+             * surfaces to window.onerror, not to the dispatcher). */
+            xsTry
+            {
+                /* listeners run with this = the event target, exactly
+                 * like a browser-dispatched DOM event */
+                xsCall2_noResult(fn, xsID("call"), w, ev);
+            }
+            xsCatch
+            {
+                logger_log("[load] ping li=%d threw (isolated)", li);
+            }
+        }
+        xsSlot onload = xsGet(w, xsID("onload"));
+        if (fxIsCallable(the, &onload))
+        {
+            xsTry
+            {
+                /* onLoad receives the event, like the browser. */
+                xsCall2_noResult(onload, xsID("call"), w, ev);
+            }
+            xsCatch
+            {
+                logger_log("[load] onload hook threw (isolated)");
+            }
+        }
+        xsResult = xsUndefined; /* drop the anchor before the next fire */
+        /* The delivered load event is DOM-relevant work (an adopt pass
+         * ran and the mount may have touched the head). Consume one
+         * budget unit so the frame pump reports the round as a mutation
+         * trigger — the browser equivalent schedules a style/layout
+         * update on asset completion. Checked, not thrown: an exhausted
+         * budget means the page is done regardless. */
+        if (budget_take(b))
+        {
+            logger_log("[load] consumed budget (mutation signal)");
+        }
+    }
+}
+
+/* Queue one pending load fire for `el`. Deduped while pending: browsers
+ * dispatch load exactly once per resource, and react registers the same
+ * ping on both the load and error channel. */
+static void xs_queue_resource_fire(JsBridge *b, DomNode *el)
+{
+    if (!b || !el)
+    {
+        return;
+    }
+    XsState *st = state_of(b);
+    if (!st->machine)
+    {
+        return;
+    }
+    xsMachine *the = st->machine; /* value macros below need `the` */
+    for (int i = 0; i < st->resFireCount; i++)
+    {
+        if (st->resFire[i] == el)
+        {
+            return;
+        }
+    }
+    if (st->resFireCount >= XS_RESFIRE_MAX)
+    {
+        logger_log("[js] resource fire queue full");
+        return;
+    }
+    st->resFire[st->resFireCount++] = el;
+    if (!st->resFireFnSet)
+    {
+        st->resFireFn = xsNewHostFunction(xs_fire_pending_resource_loads, 0);
+        xsRemember(st->resFireFn); /* pinned for the machine lifetime */
+        st->resFireFnSet = 1;
+    }
+    if (st->mtCount >= XS_MICRO_MAX)
+    {
+        logger_log("[js] microtask queue full (load fire deferred)");
+        st->resFireCount--;
+        st->resFire[st->resFireCount] = NULL;
+        return;
+    }
+    /* Same ring protocol as xs_queueMicrotask: copy the dispatcher value
+     * into the tail slot and pin THE SLOT (never the source struct). */
+    int idx = (st->mtHead + st->mtCount) % XS_MICRO_MAX;
+    st->mtQ[idx] = st->resFireFn;
+    xsRemember(st->mtQ[idx]);
+    st->mtCount++;
+}
+
+/* Buffers a cached-asset completion when a stylesheet/preload link enters
+ * the document (appendChild / insertBefore). Attributes may still be
+ * landing when this runs; the dispatcher re-validates rel at fire time. */
+static void xs_maybe_queue_asset_load(JsBridge *b, DomNode *c)
+{
+    if (!c || c->kind != DOM_ELEMENT || !c->tag || strcmp(c->tag, "link"))
+    {
+        return;
+    }
+    const char *rel = dom_get_attr(c, "rel");
+    if (!rel || (strcmp(rel, "preload") != 0 &&
+                 strcmp(rel, "stylesheet") != 0))
+    {
+        return;
+    }
+    xs_queue_resource_fire(b, c);
 }
 
 static void xs_el_appendChild(xsMachine *the)
@@ -905,10 +1559,29 @@ static void xs_el_appendChild(xsMachine *the)
     BUDGET_OR_THROW(b);
     DomNode *n = this_node(the);
     DomNode *c = arg_node(the, 0);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    if (n && c && (!n->tag || (!c->tag && c->kind != DOM_ELEMENT) ||
+                   strcmp(n->tag, "head") != 0))
+    {
+        /* Head-hoist rows flood; everything else is rare. */
+        logger_log("[elap] append parent=%s child=%s kind=%d",
+                   (n->tag) ? n->tag : "?",
+                   (c->kind == DOM_ELEMENT && c->tag) ? c->tag : "#other",
+                   c->kind);
+    }
+#endif
     if (!n || !c || dom_append_child(b->dom, n, c) != 0)
     {
         xsTypeError("appendChild failed");
     }
+    /* R58: ANY live-tree mutation must reach the frame loop — the pump's
+     * callBudget heuristic misses plain appendChild batches, so a
+     * handler-triggered subtree swap (react setState rerenders) left the
+     * layout on stale blocks with DETACHED srcNodes (the dead "Send
+     * another" finding 2026-10-18). One flag per service call; the frame
+     * loop takes it at most once per frame → at most one re-walk. */
+    b->domDirty = 1;
+    xs_maybe_queue_asset_load(b, c); /* react stylesheets enter via append */
 }
 
 static void xs_el_removeChild(xsMachine *the)
@@ -917,10 +1590,20 @@ static void xs_el_removeChild(xsMachine *the)
     BUDGET_OR_THROW(b);
     DomNode *n = this_node(the);
     DomNode *c = arg_node(the, 0);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    if (n && c)
+    {
+        logger_log("[elap] remove parent=%s child=%s kind=%d",
+                   (n->tag) ? n->tag : "?",
+                   (c->kind == DOM_ELEMENT && c->tag) ? c->tag : "#other",
+                   c->kind);
+    }
+#endif
     if (!n || !c || dom_remove_child(n, c) != 0)
     {
         xsTypeError("removeChild failed");
     }
+    b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
 }
 
 /* ── SW5: inline style string reader/writer (shared with the style object
@@ -1288,6 +1971,8 @@ static void xs_el_insertBefore(xsMachine *the)
     {
         xsTypeError("insertBefore failed");
     }
+    b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    xs_maybe_queue_asset_load(b, c); /* react stylesheet hoisting path */
 }
 
 /* querySelector emit: XS pushes wrappers into the array slot carried in
@@ -1337,6 +2022,10 @@ static void xs_el_querySelector(xsMachine *the)
     {
         xsTypeError("out of memory");
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2: react's stylesheet hydration selector reads */
+    logger_log("[qs] %.80s recv=%s", sel,
+               n && n->tag ? n->tag : "#other");
+#endif
     char scratch[JSBRIDGE_QS_SCRATCH];
     DomNode *hit = (DomNode *)jsbridge_el_query_selector_first(
         b, n, sel, scratch, sizeof(scratch));
@@ -1396,6 +2085,242 @@ static void xs_el_get_nextElementSibling(xsMachine *the)
                                n ? dom_next_element_sibling(n) : NULL);
 }
 
+/* ── Node-level (incl. text) traversal — hydration parity ──
+ * React's hydrate matcher starts at containerInfo.body.firstChild and
+ * steps e.nextSibling across TEXT nodes (c9() in react-dom), so the
+ * element-only getters above are not enough; the parsed tree keeps text
+ * nodes as children. Null (not undefined) ends every walk per DOM spec. */
+static DomNode *xs_el_sibling(DomNode *n, int delta)
+{
+    if (!n || !n->parent)
+        return NULL;
+    DomNode *p = n->parent;
+    for (int i = 0; i < p->childCount; i++)
+    {
+        if (p->children[i] == n)
+        {
+            int j = i + delta;
+            return (j >= 0 && j < p->childCount) ? p->children[j] : NULL;
+        }
+    }
+    return NULL;
+}
+
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2 harness-only hydrate-walk trace */
+static void walk_head(char *out, int cap, DomNode *c)
+{
+    if (!c)
+    {
+        snprintf(out, (size_t)cap, "null");
+        return;
+    }
+    if (c->kind == DOM_ELEMENT)
+        snprintf(out, (size_t)cap, "<%s>", c->tag ? c->tag : "?");
+    else if (c->kind == DOM_COMMENT)
+        snprintf(out, (size_t)cap, "c[%s]", c->text ? c->text : "");
+    else
+        snprintf(out, (size_t)cap, "t[%s]", c->text ? c->text : "");
+    /* Keep the row one-line and byte-safe (fold anything > 0x7e). */
+    for (char *p = out; *p; p++)
+        if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e)
+            *p = '?';
+}
+#endif
+
+static void xs_el_get_firstChild(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    DomNode *c = (n && n->childCount) ? n->children[0] : NULL;
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2 harness-only hydrate-walk trace */
+    static int s_fcLog = 0;
+    if (s_fcLog++ < 1500)
+    {
+        char head[40];
+        walk_head(head, sizeof(head), c);
+        logger_log("[walk] firstChild recv=%s kind=%d fx=%d out=%s",
+                   n && n->kind == DOM_ELEMENT && n->tag ? n->tag : "#other",
+                   n ? n->kind : -1,
+                   c ? (c->kind == DOM_ELEMENT
+                            ? (c->tag ? (int)c->tag[0] : 63)
+                            : (c->kind == DOM_COMMENT ? 99 : 116))
+                     : 0,
+                   head);
+    }
+#endif
+    xsResult = xs_push_element(b, c);
+}
+
+static void xs_el_get_lastChild(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xs_push_element(bridge_of(the),
+                               (n && n->childCount) ? n->children[n->childCount - 1] : NULL);
+}
+
+static void xs_el_get_nextSibling(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    DomNode *s = n ? xs_el_sibling(n, 1) : NULL;
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2 harness-only hydrate-walk trace */
+    static int s_nsLog = 0;
+    if (s_nsLog++ < 1500)
+    {
+        char head[40];
+        walk_head(head, sizeof(head), s);
+        logger_log("[walk] nextSibling recv=%s kind=%d from=%d out=%s",
+                   n && n->kind == DOM_ELEMENT && n->tag ? n->tag : "#other",
+                   n ? n->kind : -1,
+                   s ? (s->kind == DOM_ELEMENT
+                            ? (s->tag ? (int)s->tag[0] : 63)
+                            : (s->kind == DOM_COMMENT ? 99 : 116))
+                     : 0,
+                   head);
+    }
+#endif
+    xsResult = xs_push_element(b, s);
+}
+
+static void xs_el_get_previousSibling(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xs_push_element(bridge_of(the), n ? xs_el_sibling(n, -1) : NULL);
+}
+
+static void xs_el_get_childNodes(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    xsResult = xsNewArray(0);
+    if (n)
+    {
+        for (int i = 0; i < n->childCount; i++)
+        {
+            xsSetAt(xsResult, xsInteger(i), xs_push_element(b, n->children[i]));
+        }
+    }
+}
+
+/* CharacterData.data — Text(.data alias of textContent) and Comment.
+ * c9()/the hydrate boundary walk reads e.data on marker comments; the
+ * tokenizer drops comments so this is only reachable for text nodes.
+ * Elements have no .data in the DOM (honest undefined). */
+static void xs_el_get_data(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2 harness-only hydrate-scan trace */
+    static int s_dgLog = 0;
+    if (s_dgLog++ < 1500)
+    {
+        char head[40];
+        walk_head(head, sizeof(head), n);
+        logger_log("[tget] data self=%s", head);
+    }
+#endif
+    if (n && n->kind != DOM_ELEMENT)
+    {
+        xsResult = xsString(n->text ? n->text : "");
+    }
+    else
+    {
+        xsResult = xsUndefined;
+    }
+}
+
+/* Element.dataset — data-* attributes camelCased on a plain object.
+ * React's stylesheet-hoisting path reads `o.dataset.precedence`. */
+static void xs_el_get_dataset(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsSlot obj = xsNewObject();
+    xsResult = obj;
+    if (!n)
+    {
+        return;
+    }
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        const char *k = n->attrs[i].key;
+        if (strncmp(k, "data-", 5) != 0)
+        {
+            continue;
+        }
+        char camel[64];
+        int ci = 0;
+        for (const char *p = k + 5; *p && ci + 1 < (int)sizeof(camel); p++)
+        {
+            if (*p == '-' && p[1])
+            {
+                p++;
+                camel[ci++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+            }
+            else
+            {
+                camel[ci++] = *p;
+            }
+        }
+        camel[ci] = '\0';
+        const char *v = dom_get_attr(n, k);
+        xsSet(obj, xsID(camel), xsString(v ? v : ""));
+    }
+}
+
+/* CharacterData.nodeValue — React's single-text-child fast paths
+ * (t_(e,t): `n.nodeValue = t` and the selection walker's
+ * `p.nodeValue.length`) read/write TEXT nodes through this slot. The
+ * old arena string stays owned by the document arena (wholesale free on
+ * dom_free_result), so re-pointing without an explicit release is safe
+ * and bounded. Elements keep the browser's null. */
+static void xs_el_get_nodeValue(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2 harness-only hydrate-claim trace */
+    static int s_nvLog = 0;
+    if (s_nvLog++ < 1500)
+    {
+        char head[40];
+        walk_head(head, sizeof(head), n);
+        logger_log("[tget] nodeValue self=%s", head);
+    }
+#endif
+    if (n && n->kind != DOM_ELEMENT)
+    {
+        xsResult = xsString(n->text ? n->text : "");
+    }
+    else
+    {
+        xsResult = xsNull;
+    }
+}
+
+static void xs_el_set_nodeValue(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        return;
+    }
+    if (n->kind == DOM_ELEMENT)
+    {
+        xs_el_set_textContent(the);
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    char *dup = dom_arena_dup(b->dom, v, (int)strlen(v));
+    JFree(v);
+    if (!dup)
+    {
+        xsTypeError("nodeValue assignment failed");
+    }
+    n->text = dup;
+}
+
 static void xs_el_get_classList(xsMachine *the)
 {
     xs_push_classlist(bridge_of(the), this_node(the));
@@ -1406,31 +2331,122 @@ static void xs_el_get_style(xsMachine *the)
     xs_push_style(bridge_of(the), this_node(the));
 }
 
+/* Strict function-identity test for the listener dedupe: two slots alias
+ * the SAME script/host function iff kind matches and the kind-defining
+ * value is the same record. For code/callback instances `address` is the
+ * function body pointer — two distinct closures over one shared body also
+ * differ via their `closures`/scope snapshots (each mount builds its own).
+ * Name-based dedupe (e.g. on ID) would be WRONG here: ids are property
+ * names, not value identity. */
+static int xs_same_listener_fn(xsMachine *the, const xsSlot *a, const xsSlot *b)
+{
+    (void)the;
+    if (a->kind != b->kind)
+    {
+        return 0;
+    }
+    switch (a->kind)
+    {
+    case XS_CODE_KIND:
+    case XS_CODE_X_KIND:
+        return (a->value.code.address == b->value.code.address) &&
+               (a->value.code.closures == b->value.code.closures);
+    case XS_CALLBACK_KIND:
+    case XS_CALLBACK_X_KIND:
+        return (a->value.callback.address == b->value.callback.address) &&
+               (a->value.callback.closures == b->value.callback.closures);
+    case XS_HOST_FUNCTION_KIND:
+        return a->value.hostFunction.builder == b->value.hostFunction.builder;
+    default:
+        return 0;
+    }
+}
+
 static void xs_el_addEventListener(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
-    XsState *st = state_of(b);
-    DomNode *n = this_node(the);
+    XsState *st = state_of(b);    DomNode *n = this_node(the);
     char *type = to_cstring(the, xsArg(0));
     if (!type)
     {
         xsTypeError("out of memory");
     }
     int isClick = (strcmp(type, "click") == 0);
-    JFree(type);
-    if (!isClick)
+    /* kind selects the delivery class: the page-interactivity class (kind 0)
+     * covers click + submit/input/change — the react-dom delegation set the
+     * B3 bubbling dispatch (xs_dispatch_element_event) delivers back out;
+     * load/error stay the resource-completion channels react-dom parks
+     * commits on (the engine delivers cached-asset loads at the next
+     * microcheckpoint — see xs_queue_resource_fire). */
+    int isDispatch = isClick || strcmp(type, "submit") == 0 ||
+                     strcmp(type, "input") == 0 ||
+                     strcmp(type, "change") == 0;
+    int kind = isDispatch ? 0 : (strcmp(type, "load") == 0 ? 1 : 2);
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2: listener registration trace (react pings) */
+    {
+        const char *tg = (n && n->kind == DOM_ELEMENT && n->tag) ? n->tag : "#other";
+        const char *rel = n ? dom_get_attr(n, "rel") : NULL;
+        const char *href = n ? dom_get_attr(n, "href") : NULL;
+        logger_log("[lsn] type=%s recv=%s rel=%s href=%.60s", type, tg,
+                   rel ? rel : "-", href ? href : "-");
+    }
+#endif
+    xsSlot fn = xsArg(1);
+    /* DOM-spec re-registration no-op: an addEventListener whose (type,
+     * callback, target) tuple exactly matches an existing listener does
+     * not grow the set — real browsers dedupe at EventTarget registration
+     * before any store. react-dom re-offers the same cached closures on
+     * every commit pass, which at JSBRIDGE_LISTENERS_MAX 32 blew the cap
+     * with "too many event listeners" and killed the first real-hydration
+     * commit. Without this, browsers would NEED removal bookkeeping we
+     * don't model (element-level removeEventListener is a noop here —
+     * react always re-registers through the same fiber-cached closures,
+     * so identical tuples are the re-render replay themselves). A NEW
+     * closure (fresh mount after unmount) is a DIFFERENT tuple and gets
+     * a slot, matching real semantics. */
+    for (int i = 0; i < b->listenerCount; i++)
+    {
+        JsListener *E = &b->listeners[i];
+        if (E->target == n && !strcmp(E->type, type) &&
+            xs_same_listener_fn(the, &st->fns[(int)(intptr_t)E->ref], &fn))
+        {
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+            logger_log("[lsn] dup type=%s recv=%s (slot %d kept)", type,
+                       (n && n->kind == DOM_ELEMENT && n->tag) ? n->tag
+                                                               : "#other",
+                       i);
+#endif
+            JFree(type);
+            return;
+        }
+    }
+    /* R54: DOMContentLoaded joins the accepted set with its own kind (3)
+     * — dispatched ONLY at the script-queue drain (jsbridge.c calls
+     * impl->script_queue_drained once the last parked script ran), the
+     * browser's parsing-complete moment. No other machinery consults
+     * kind 3, so there is no accidental second delivery. */
+    if (strcmp(type, "DOMContentLoaded") == 0)
+    {
+        kind = 3;
+    }
+    if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
+        kind != 3)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so
-         * pages registering them don't error — only click is delivered. */
+         * pages registering them don't error — the delivered classes are
+         * click/submit/input/change (kind 0; B3 bubbling dispatch) and
+         * load/error (kinds 1/2, replay-cached asset completion). */
+        JFree(type);
         return;
     }
-    xsSlot fn = xsArg(1);
     if (!fxIsCallable(the, &fn))
     {
+        JFree(type);
         xsTypeError("listener must be a function");
     }
     if (b->listenerCount >= JSBRIDGE_LISTENERS_MAX)
     {
+        JFree(type);
         xsTypeError("too many event listeners");
     }
     int idx = b->listenerCount++;
@@ -1439,25 +2455,32 @@ static void xs_el_addEventListener(xsMachine *the)
     JsListener *L = &b->listeners[idx];
     L->ref = (void *)(intptr_t)idx;
     L->target = n;
+    L->kind = kind;
+    snprintf(L->type, sizeof(L->type), "%s", type);
+    JFree(type);
+    if (kind == 1)
+    {
+        /* A load ping on an asset link = the cached-asset completion the
+         * commit is waiting for; queue the fire for the next
+         * microcheckpoint (the element's rel is revalidated at fire
+         * time — attrs often land after addEventListener here). */
+        xs_queue_resource_fire(b, n);
+    }
 }
 
-static void xs_el_getElementsByTagName(xsMachine *the)
+/* Shared tag scan: collect element descendants of `start` (start itself
+ * excluded, "*" wildcard) into a fresh array in xsResult. Used by both
+ * element.getElementsByTagName and the document alias. */
+static void xs_collect_tags_into(JsBridge *b, DomNode *start, char *tag)
 {
-    JsBridge *b = bridge_of(the);
-    BUDGET_OR_THROW(b);
-    DomNode *n = this_node(the);
-    char *tag = to_cstring(the, xsArg(0));
-    if (!tag)
-    {
-        xsTypeError("out of memory");
-    }
+    xsMachine *the = machine_of(b); /* value macros below need `the` */
     xsResult = xsNewArray(0);
     int k = 0;
-    if (n)
+    if (start)
     {
         DomNode *stack[DOM_SEARCH_MAX_DEPTH];
         int top = 0;
-        stack[top++] = n;
+        stack[top++] = start;
         while (top > 0)
         {
             DomNode *cur = stack[--top];
@@ -1480,13 +2503,47 @@ static void xs_el_getElementsByTagName(xsMachine *the)
             }
         }
     }
+}
+
+static void xs_el_getElementsByTagName(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char *tag = to_cstring(the, xsArg(0));
+    if (!tag)
+    {
+        xsTypeError("out of memory");
+    }
+    xs_collect_tags_into(b, n, tag);
     JFree(tag);
 }
 
-/* Push a fresh wrapper for `node` (NULL → null). The prototype is a
- * rooted host object; xsNewHostInstance clones it (inheriting its
- * internal host slot for the instance's data) and we store the DomNode*
- * as host data. Wrappers are never cached → nothing for GC to trace. */
+/* document.getElementsByTagName — the same walk rooted at the document.
+ * react-dom's hoistable-resource adopt path scans the document this way
+ * (case "link" / case "meta" call document.getElementsByTagName in
+ * commitWhileSuspended recovery), so the doc wrapper needs the alias. */
+static void xs_doc_getElementsByTagName(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = (b->dom && b->dom->root) ? b->dom->root : NULL;
+    char *tag = to_cstring(the, xsArg(0));
+    if (!tag)
+    {
+        xsTypeError("out of memory");
+    }
+    xs_collect_tags_into(b, n, tag);
+    JFree(tag);
+}
+
+/* Push the ONE cached wrapper for `node` (browser identity model; NULL →
+ * null): instances share a rooted prototype and carry the DomNode* as host
+ * data, but wrappers are now memoized per node so JS-visible object
+ * identity — and any expando the page wrote (react's fiber key) — survives
+ * across pushes. Wrapper == the ts->fns[] pin contract: fxRemember embeds
+ * the pinned slot struct into its root chain, so the value is pinned
+ * IN the cache slot, never in a local. */
 static xsSlot xs_push_element(JsBridge *b, DomNode *node)
 {
     xsMachine *the = machine_of(b); /* value macros below need `the` */
@@ -1494,8 +2551,44 @@ static xsSlot xs_push_element(JsBridge *b, DomNode *node)
     {
         return xsNull;
     }
-    xsSlot obj = xsNewHostInstance(state_of(b)->elProto);
+    /* A2: <script> elements route to a dedicated sub-prototype (instance →
+     * scriptProto → elProto) so bundler-parity checks like
+     * `document.currentScript instanceof HTMLScriptElement` behave like a
+     * browser, where currentScript IS an HTMLScriptElement. Services
+     * (getAttribute/login getters) still resolve through the same shared
+     * prototype machinery. Synthetic currentScript and dynamically
+     * created script elements both pass through here. */
+    XsState *st = state_of(b);
+    xsSlot proto = st->elProto;
+    if (node->kind == DOM_ELEMENT && node->tag &&
+        !strcmp(node->tag, "script"))
+    {
+        proto = st->scriptProto;
+    }
+    /* Backwards scan: insertion order correlates with reuse recency. */
+    for (int i = st->elwCount - 1; i >= 0; i--)
+    {
+        if (st->elwNode[i] == node)
+        {
+            return st->elwWrap[i];
+        }
+    }
+    xsSlot obj = xsNewHostInstance(proto);
     xs_set_host_data_site(the, "element", obj, node);
+    if (st->elwCount < XS_ELW_CAP)
+    {
+        xsResult = obj; /* marked-slot anchor while the arrays settle */
+        int w = st->elwCount++;
+        st->elwNode[w] = node;
+        st->elwWrap[w] = obj;
+        xsRemember(st->elwWrap[w]);
+    }
+    else if (!st->elwOverflow)
+    {
+        st->elwOverflow = 1;
+        logger_log("[xs] el wrapper cache full (%d) — new pushes are fresh",
+                   XS_ELW_CAP);
+    }
     return obj;
 }
 
@@ -1693,6 +2786,9 @@ static void xs_document_createElement(xsMachine *the)
     {
         xsTypeError("out of memory");
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE) /* A2: who creates elements at hydration-commit time */
+    logger_log("[crt] %s", tag);
+#endif
     DomNode *el = dom_create_element(b->dom, tag);
     JFree(tag);
     if (!el)
@@ -1718,6 +2814,207 @@ static void xs_document_createTextNode(xsMachine *the)
         xsTypeError("createTextNode failed");
     }
     xsResult = xs_push_element(b, t);
+}
+
+/* document.getElementsByName — pseudo-array of elements whose name
+ * attribute matches. Next.js announcer/detection paths read it. */
+static void xs_doc_collect_by_name(JsBridge *b, DomNode *n, const char *namev,
+                                   xsSlot arr, int *k, int depth)
+{
+    if (!n || *k >= 64 || depth > DOM_SEARCH_MAX_DEPTH)
+    {
+        return;
+    }
+    if (n->kind == DOM_ELEMENT)
+    {
+        const char *v = dom_get_attr(n, "name");
+        if (v && !strcmp(v, namev))
+        {
+            xsMachine *the = machine_of(b); /* xsSetAt macro needs `the` */
+            xsSlot el = xs_push_element(b, n);
+            xsSetAt(arr, xsInteger((*k)++), el);
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        xs_doc_collect_by_name(b, n->children[i], namev, arr, k, depth + 1);
+    }
+}
+
+static void xs_doc_getElementsByName(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    char *namev = to_cstring(the, xsArg(0));
+    if (!namev)
+    {
+        xsTypeError("out of memory");
+    }
+    xsResult = xsNewArray(0);
+    int k = 0;
+    if (b->dom && b->dom->root)
+    {
+        xs_doc_collect_by_name(b, b->dom->root, namev, xsResult, &k, 0);
+    }
+    JFree(namev);
+}
+
+/* A2: document.currentScript — bundled loaders (Turbopack/webpack chunk
+ * registration) read it during every <script> run to discover their own
+ * chunk URL (`document.currentScript.src` / getAttribute("src")). The
+ * ROUTER stamps the running script's open-tag span on the bridge around
+ * each run; this synthesizes a detached <script> element carrying the
+ * stamped attributes, so getAttribute walks them like any tree element.
+ * Identity across reads within one run is not modeled (fresh element per
+ * access) — loaders read it once per slot. Outside a script run (timers,
+ * import(), page_script) the router's context is clear: null, like a
+ * browser. */
+static void xs_document_getCurrentScript(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    if (!b || !b->dom || !b->curTagStart || b->curTagLen < 8)
+    {
+        xsResult = xsNull;
+        return;
+    }
+    /* A2 (throw trace): log the stamped open tag with every read during a
+     * run so loader-parity questions ("which script is current at the
+     * runtime-module registration?") are answerable from the replay log.
+     * The running script index (the same counter the throw trace logs) is
+     * included; with the ld+json slot counted it maps 1:1 to the run
+     * sequence in the log. */
+#ifdef PLUTO_THROW_LOG
+    logger_log("[cs] script %d stamp: %.*s",
+               g_pluto_throw_script,
+               (int)(b->curTagLen > 120 ? 120 : b->curTagLen),
+               b->curTagStart);
+#endif
+    DomNode *el = dom_create_element(b->dom, "script");
+    if (!el)
+    {
+        xsResult = xsNull;
+        return;
+    }
+    /* Attribute walk over the stamped "<script …>" open-tag span: parse
+     * name[=value] pairs (quoted or bare values; valueless attrs store
+     * ""). The tag name itself ("<script", 7 bytes after the '<') is
+     * skipped — attributes start after it. Names are lowercased (HTML
+     * attribute names are case-insensitive and the tree stores them
+     * lowercase — getAttribute("src") then works for SRC= pages too).
+     * Values keep the raw span bytes: bundler src URLs (chunk paths,
+     * data: URLs) are entity-free, matching how the scanners capture
+     * script-tag attributes. */
+    const char *p = b->curTagStart + 1 + 7; /* after '<script' */
+    const char *lim = b->curTagStart + b->curTagLen - 1; /* exclude '>' */
+    int haveSrc = 0;
+    while (p < lim)
+    {
+        while (p < lim && (*p == ' ' || *p == '\t' || *p == '\n' ||
+                           *p == '\r' || *p == '/'))
+        {
+            p++; /* whitespace / stray self-close slash */
+        }
+        if (p >= lim)
+        {
+            break;
+        }
+        const char *n0 = p;
+        while (p < lim && *p != '=' && *p != ' ' && *p != '\t' &&
+               *p != '\n' && *p != '\r' && *p != '>' && *p != '/')
+        {
+            p++;
+        }
+        size_t nlen = (size_t)(p - n0);
+        if (nlen >= 48)
+        {
+            p++; /* pathological name: step past it, keep scanning */
+            continue;
+        }
+        if (nlen == 0)
+        {
+            continue;
+        }
+        char name[48];
+        for (size_t k = 0; k < nlen; k++)
+        {
+            name[k] = (n0[k] >= 'A' && n0[k] <= 'Z') ? (char)(n0[k] + 32)
+                                                     : n0[k];
+        }
+        name[nlen] = '\0';
+        const char *v0 = NULL;
+        size_t vlen = 0;
+        if (p < lim && *p == '=')
+        {
+            p++;
+            while (p < lim && (*p == ' ' || *p == '\t' || *p == '\n' ||
+                               *p == '\r'))
+            {
+                p++;
+            }
+            if (p < lim && (*p == '"' || *p == '\''))
+            {
+                char q = *p++;
+                v0 = p;
+                while (p < lim && *p != q)
+                {
+                    p++;
+                }
+                vlen = (size_t)(p - v0);
+                if (p < lim)
+                {
+                    p++; /* closing quote */
+                }
+            }
+            else
+            {
+                v0 = p;
+                while (p < lim && *p != ' ' && *p != '\t' && *p != '\n' &&
+                       *p != '\r' && *p != '>')
+                {
+                    p++;
+                }
+                vlen = (size_t)(p - v0);
+            }
+        }
+        char *v = NULL;
+        if (v0 && vlen)
+        {
+            v = (char *)JMalloc(vlen + 1);
+            if (v)
+            {
+                memcpy(v, v0, vlen);
+                v[vlen] = '\0';
+            }
+        }
+        dom_set_attr(b->dom, el, name, v ? v : "");
+        if (!strcmp(name, "src"))
+        {
+            haveSrc = 1;
+        }
+        if (v)
+        {
+            JFree(v);
+        }
+    }
+    /* A2: bundler loaders read currentScript.src during module-registry
+     * drains that our engine executes while an inline bootstrap slot is
+     * still stamped (Next.js getAssetPrefix: `new URL(
+     * document.currentScript.src)` → the page's URL polyfill rejects ""). A
+     * real browser resolves that read against a src-bearing chunk script
+     * (the loader's own /_next/ prefix), never a bare inline tag. When the
+     * stamped open tag carries no src attribute (inline slot), attach the
+     * router's stamped external chunk URL (curSrcUrl) so src-based
+     * asset-prefix discovery behaves like the site instead of parsing an
+     * empty URL. getAttribute("src") on a genuinely src-bearing stamped tag
+     * keeps the raw attribute — the fallback only fires for inline slots. */
+    if (!haveSrc && b->lastExtSrcUrl)
+    {
+        dom_set_attr(b->dom, el, "src", b->lastExtSrcUrl);
+#ifdef PLUTO_THROW_LOG
+        logger_log("[cs] script %d src-fallback: %s",
+                   g_pluto_throw_script, b->lastExtSrcUrl);
+#endif
+    }
+    xsResult = xs_push_element(b, el);
 }
 
 /* document.title: walk the live tree's <title> so scripts and the chrome
@@ -1757,11 +3054,234 @@ static void xs_document_getTitle(xsMachine *the)
     xsResult = xsString(b->doc->title[0] ? b->doc->title : "");
 }
 
-/* document/window.addEventListener: UNSUPPORTED delivery (no bubbling
- * model); accepted silently so common pages don't throw — parity. */
+/* ── document-level appendChild/insertBefore/removeChild (B5-follow) ──────
+ * react-dom's document-container commits (insertInContainerBefore /
+ * removeChildFromContainer / clearDocument's node walk) call these on the
+ * document object; the wrapper previously lacked them and every call threw
+ * `call: not a function` (the fallback wipe then hit missing-surface
+ * errors). Browser mapping: the synthetic #root owns the document's
+ * children (doctype is not represented), so these route into/out of
+ * b->dom->root's children via the same node ops the element methods use. */
+static void xs_document_appendChild(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    if (!b || !b->dom || !b->dom->root)
+    {
+        xsTypeError("document.appendChild: no document");
+    }
+    DomNode *child = arg_node(the, 0);
+    if (!child)
+    {
+        xsTypeError("appendChild: node expected");
+    }
+    if (dom_append_child(b->dom, b->dom->root, child) != 0)
+    {
+        xsTypeError("appendChild failed");
+    }
+    b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    xsResult = xsArg(0);
+}
+
+static void xs_document_insertBefore(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    if (!b || !b->dom || !b->dom->root)
+    {
+        xsTypeError("document.insertBefore: no document");
+    }
+    DomNode *child = arg_node(the, 0);
+    DomNode *ref = arg_node(the, 1);
+    if (!child || (xsTypeOf(xsArg(1)) != xsUndefinedType && !ref))
+    {
+        xsTypeError("insertBefore: node expected");
+    }
+    if (dom_insert_before(b->dom, b->dom->root, child, ref) != 0)
+    {
+        xsTypeError("insertBefore failed");
+    }
+    b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    xsResult = xsArg(0);
+}
+
+static void xs_document_removeChild(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    if (!b || !b->dom || !b->dom->root)
+    {
+        xsTypeError("document.removeChild: no document");
+    }
+    DomNode *child = arg_node(the, 0);
+    if (!child)
+    {
+        xsTypeError("removeChild: node expected");
+    }
+    if (dom_remove_child(b->dom->root, child) != 0)
+    {
+        xsTypeError("removeChild failed");
+    }
+    b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
+    xsResult = xsArg(0);
+}
+
+/* body/head/documentElement/activeElement as LIVE getters. The init-time
+ * def_val coding bound wrappers ONCE (stale if react swaps head/body on a
+ * fallback re-render — the stale `document.body` then reports a detached
+ * subtree). Same fallbacks as the old bindings: body/activeElement keep
+ * the #root fallback for fragment documents; head falls back to the
+ * document element so CSS-in-JS hosts (emotion `container ||
+ * document.head`) always get an insertable node. */
+static void xs_document_getBodyLike(xsMachine *the, const char *tag,
+                                    int inactive)
+{
+    (void)inactive;
+    JsBridge *b = bridge_of(the);
+    DomNode *root = (b && b->dom) ? (DomNode *)b->dom->root : NULL;
+    if (!root)
+    {
+        xsResult = xsNull;
+        return;
+    }
+    DomNode *hit = find_first_element(b, tag);
+    xsResult = xs_push_element(b, hit ? hit : root);
+}
+
+static void xs_document_getBody(xsMachine *the)
+{
+    xs_document_getBodyLike(the, "body", 0);
+}
+
+static void xs_document_getActiveElement(xsMachine *the)
+{
+    xs_document_getBodyLike(the, "body", 1);
+}
+
+static void xs_document_getHeadLike(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *root = (b && b->dom) ? (DomNode *)b->dom->root : NULL;
+    if (!root)
+    {
+        xsResult = xsNull;
+        return;
+    }
+    DomNode *head = find_first_element(b, "head");
+    if (!head)
+    {
+        head = find_first_element(b, "html");
+    }
+    xsResult = xs_push_element(b, head ? head : root);
+}
+
+static void xs_document_getHead(xsMachine *the)
+{
+    xs_document_getHeadLike(the);
+}
+
+static void xs_document_getDocumentElement(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *root = (b && b->dom) ? (DomNode *)b->dom->root : NULL;
+    if (!root)
+    {
+        xsResult = xsNull;
+        return;
+    }
+    DomNode *html = find_first_element(b, "html");
+    xsResult = xs_push_element(b, html ? html : root);
+}
+
+/* R54: document.readyState — browser parse phases. While the per-frame
+ * script queue (the parked attach plan) still has entries the document
+ * is effectively still "loading": the sync attach loop ran every script
+ * before any async boundary EVER observed the page, so reflect that
+ * truth here. Fork-bundles branch on exactly this read — next.js's
+ * app-router prefers DOMContentLoaded for its RSC stream closer when
+ * readyState is "loading" at eval and only otherwise setTimeout()s it;
+ * the callback timer (its 50ms scheduler) firing BETWEEN queued script
+ * frames voided the flight buffer mid-push ("Unexpected server data:
+ * missing bootstrap script." from the bundle's L()) — the throw that
+ * made the contact page un-hydratable under the queue. Undefined
+ * up to now: `undefined === "loading"` fell into the timer branch on
+ * every build (also pre-queue), hidden only because sync windows never
+ * delivered timers mid-stage. */
+static void xs_document_readyState(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    xsResult = xsString((b && b->scriptQueueNext < b->scriptQueueCount)
+                            ? "loading"
+                            : "interactive");
+}
+
+/* document/window.addEventListener: B3 — delegated listeners register with
+ * target = the live document root node so the bubbling dispatch
+ * (xs_dispatch_element_event) delivers to them. react-dom's app-router
+ * hydration uses the DOCUMENT as its root container and calls
+ * document.addEventListener('click'|'submit'|… , handler) at commit — the
+ * old silent no-op dropped every delegated registration, which is why the
+ * click dispatch found no handlers (`[lsn]` showed only the non-delegated
+ * load/error/invalid pings). The kind map + acceptance filter mirror
+ * xs_el_addEventListener; same-node duplicate deliveries (window vs
+ * document aliases) are left to the caller, like a browser. */
 static void xs_doc_addEventListener(xsMachine *the)
 {
-    (void)the;
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    DomNode *target = (b->dom && b->dom->root) ? b->dom->root : NULL;
+    if (!target)
+    {
+        return; /* no live tree: nothing to attach to */
+    }
+    char *type = to_cstring(the, xsArg(0));
+    if (!type)
+    {
+        xsTypeError("out of memory");
+    }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[lsn] type=%s recv=#doc", type);
+#endif
+    int isClick = (strcmp(type, "click") == 0);
+    int isDispatch = isClick || strcmp(type, "submit") == 0 ||
+                     strcmp(type, "input") == 0 ||
+                     strcmp(type, "change") == 0;
+    int kind = isDispatch ? 0 : (strcmp(type, "load") == 0 ? 1 : 2);
+    /* R54: DOMContentLoaded gets its own kind (3) — dispatched ONLY at
+     * the script-queue drain (impl->script_queue_drained), the browser's
+     * parsing-complete moment; next.js's app-router arms its RSC stream
+     * closer (M) here when readyState was "loading" at eval. */
+    if (strcmp(type, "DOMContentLoaded") == 0)
+    {
+        kind = 3;
+    }
+    if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
+        kind != 3)
+    {
+        /* Same UNSUPPORTED silence as the element path (see above). */
+        JFree(type);
+        return;
+    }
+    xsSlot fn = xsArg(1);
+    if (!fxIsCallable(the, &fn))
+    {
+        JFree(type);
+        xsTypeError("listener must be a function");
+    }
+    if (b->listenerCount >= JSBRIDGE_LISTENERS_MAX)
+    {
+        JFree(type);
+        xsTypeError("too many event listeners");
+    }
+    int idx = b->listenerCount++;
+    st->fns[idx] = fn;
+    xsRemember(st->fns[idx]); /* pin against GC */
+    JsListener *L = &b->listeners[idx];
+    L->ref = (void *)(intptr_t)idx;
+    L->target = target;
+    L->kind = kind;
+    snprintf(L->type, sizeof(L->type), "%s", type);
+    JFree(type);
+    /* NOTE: kind==1 on the DOCUMENT is NOT queued into the resource fire —
+     * element-level load listeners own that channel; a second fire would
+     * run react's asset-completion listener twice. */
 }
 
 static void xs_location_assign(xsMachine *the)
@@ -1787,6 +3307,39 @@ static void xs_alert(xsMachine *the)
 static void xs_noop(xsMachine *the)
 {
     (void)the;
+}
+
+/* performance.now for the A2 bridge globals — ms from the same monotonic
+ * clock the pump budgets use. React's scheduler calls this every work
+ * slice; NaN is wrong (lanes math compares deltas), so return a real
+ * float. Sim keeps clock_gettime's FRACTIONAL ms; the device has no
+ * CLOCK_MONOTONIC in the toolchain (and clock_gettime is
+ * macro-redefined by the QuickJS shim there — see the sim-frame probe in
+ * the split path) so it reads the SDK's monotonic ms clock (integer ms:
+ * sub-ms lane scheduling degrades gracefully). */
+static void xs_performance_now(xsMachine *the)
+{
+    double ms = 0.0;
+#if defined(TARGET_PLAYDATE)
+    PlaydateAPI *pdp = pluto_pd();
+    ms = pdp ? (double)pdp->system->getCurrentTimeMilliseconds() : 0.0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+    xsResult = xsNumber(ms);
+}
+
+/* performance.getEntriesByType/getEntries — React 19's commit-suspend
+ * path dereferences `performance.getEntriesByType` BEFORE its typeof
+ * check, so the global must exist; entries themselves never exist in
+ * this environment (no resource/page timing), and React degrades to
+ * its navigator.connection fallback with an empty array. */
+static void xs_performance_getEntriesByType(xsMachine *the)
+{
+    (void)the;
+    xsResult = xsNewArray(0);
 }
 
 static void xs_computed_getPropertyValue(xsMachine *the)
@@ -1837,7 +3390,11 @@ static void xs_document_createComment(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
     BUDGET_OR_THROW(b);
-    DomNode *t = dom_create_text(b->dom, "");
+    char scratch[2] = "";
+    char *data = to_cstring(the, xsArg(0));
+    const char *raw = data ? data : scratch; /* createComment() ok w/o args */
+    DomNode *t = dom_create_comment(b->dom, raw);
+    JFree(data);
     if (!t)
     {
         xsTypeError("createComment failed");
@@ -1915,6 +3472,16 @@ static void xs_document_setTitle(xsMachine *the)
 static void xs_event_preventDefault(xsMachine *the)
 {
     bridge_of(the)->preventDef = 1;
+}
+
+/* B3: honored on OUR event objects during the bubbled walk (react's
+ * synthetic wrappers around them keep their own copies of the flag).
+ * Latches b->stopProp; the dispatch stops climbing past whatever node
+ * the listener was attached to (later listeners on the SAME node still
+ * run, like a browser). */
+static void xs_event_stopPropagation(xsMachine *the)
+{
+    bridge_of(the)->stopProp = 1;
 }
 
 /* ── prototype + globals (runs inside xsBeginHostExit at init) ───────── */
@@ -2164,6 +3731,15 @@ static void xs_build_el_proto(JsBridge *b)
                               * build below allocates (unrooted C-field slots
                               * get swept and reused mid-build) */
 
+    /* A2: <script> element sub-prototype (instance → scriptProto →
+     * elProto). Members are resolved LIVE through elProto, so the empty
+     * sub-object suffices; HTMLScriptElement.prototype is pinned to this
+     * in xs_build_globals so bundler module factories' instanceof checks
+     * (document.currentScript) behave like a browser. Rooted for the
+     * machine's lifetime like the other engine-owned prototypes. */
+    st->scriptProto = xsNewHostInstance(st->elProto);
+    xsRemember(st->scriptProto);
+
     static const struct
     {
         const char *name;
@@ -2172,7 +3748,9 @@ static void xs_build_el_proto(JsBridge *b)
     } accs[] = {
         {"tagName", xs_el_get_tagName, NULL},
         {"id", xs_el_get_id, xs_el_set_id},
+        {"value", xs_el_get_value, xs_el_set_value},
         {"href", xs_el_get_href, xs_el_set_href},
+        {"src", xs_el_get_src, xs_el_set_src},
         {"protocol", xs_el_get_protocol, NULL},
         {"host", xs_el_get_host, NULL},
         {"hostname", xs_el_get_hostname, NULL},
@@ -2181,15 +3759,28 @@ static void xs_build_el_proto(JsBridge *b)
         {"search", xs_el_get_search, NULL},
         {"hash", xs_el_get_hash, NULL},
         {"textContent", xs_el_get_textContent, xs_el_set_textContent},
+        {"isConnected", xs_el_get_isConnected, NULL},
         {"innerHTML", xs_el_get_innerHTML, xs_el_set_innerHTML},
         {"parentNode", xs_el_get_parentNode, NULL},
         {"childElementCount", xs_el_get_childElementCount, NULL},
         {"children", xs_el_get_children, NULL},
+        {"attributes", xs_el_get_attributes, NULL},
         {"nodeType", xs_el_get_nodeType, NULL},
         {"nodeName", xs_el_get_tagName, NULL},
         {"ownerDocument", xs_el_get_ownerDocument, NULL},
+        {"getRootNode", xs_el_get_rootNode, NULL},
         {"firstElementChild", xs_el_get_firstElementChild, NULL},
         {"nextElementSibling", xs_el_get_nextElementSibling, NULL},
+        {"firstChild", xs_el_get_firstChild, NULL},
+        {"lastChild", xs_el_get_lastChild, NULL},
+        {"nextSibling", xs_el_get_nextSibling, NULL},
+        {"previousSibling", xs_el_get_previousSibling, NULL},
+        {"childNodes", xs_el_get_childNodes, NULL},
+        {"data", xs_el_get_data, NULL},
+        {"dataset", xs_el_get_dataset, NULL},
+        {"nodeValue", xs_el_get_nodeValue, xs_el_set_nodeValue},
+        {"type", xs_el_get_type, NULL},
+        {"namespaceURI", xs_el_get_namespaceURI, NULL},
         {"classList", xs_el_get_classList, NULL},
         {"style", xs_el_get_style, NULL},
         {"sheet", xs_el_get_sheet, NULL},
@@ -2203,6 +3794,9 @@ static void xs_build_el_proto(JsBridge *b)
         {"getAttribute", xs_el_getAttribute, 1},
         {"setAttribute", xs_el_setAttribute, 2},
         {"removeAttribute", xs_el_removeAttribute, 1},
+        {"removeAttributeNode", xs_el_removeAttributeNode, 1},
+        {"hasAttribute", xs_el_hasAttribute, 1},
+        {"hasChildNodes", xs_el_hasChildNodes, 0},
         {"appendChild", xs_el_appendChild, 1},
         {"removeChild", xs_el_removeChild, 1},
         {"insertBefore", xs_el_insertBefore, 2},
@@ -2211,6 +3805,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"addEventListener", xs_el_addEventListener, 2},
         {"getElementsByTagName", xs_el_getElementsByTagName, 1},
         {"getBoundingClientRect", xs_el_getBoundingClientRect, 0},
+        {"attachShadow", xs_el_attachShadow, 1},
     };
 
     xsSlot proto = st->elProto;
@@ -2300,6 +3895,10 @@ static void xs_setTimeout(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
     XsState *st = state_of(b);
+    /* Boot forensics: if the page never queues ANY timer, its quiet idle is
+     * a scheduling-init death, not a pump gap — the log tells them apart. */
+    logger_log("[timer] setTimeout registered (argc=%d)",
+               (int)xsToInteger(xsArgc));
     xs_timer_setup(the, b, st, JS_TIMER_TIMEOUT);
 }
 
@@ -2308,6 +3907,64 @@ static void xs_setInterval(xsMachine *the)
     JsBridge *b = bridge_of(the);
     XsState *st = state_of(b);
     xs_timer_setup(the, b, st, JS_TIMER_INTERVAL);
+}
+
+/* ── A2: real queueMicrotask (C-owned queue) ────────────────────────
+ * Browser contract: enqueue the callback; it runs flat at the NEXT
+ * microcheckpoint, never nested inside the caller. The callback is kept
+ * out of the promise machinery (which this engine drives synchronously
+ * when its promise is already resolved — a Promise-based shim self-
+ * reenters: replayF stack resolve → queueMicrotask → … to JS-stack
+ * exhaustion). Overflow raises: the queue is the device budget. */
+static void xs_queueMicrotask(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    if (st->mtCount >= XS_MICRO_MAX)
+    {
+        xsTypeError("too many microtasks");
+    }
+    /* Ring tail, pinned exactly once; see the mtQ note on XsState for why
+     * entries are never copied or re-pinned while the machine lives. */
+    int idx = (st->mtHead + st->mtCount) % XS_MICRO_MAX;
+    st->mtQ[idx] = xsArg(0);
+    xsRemember(st->mtQ[idx]); /* pin against GC */
+    st->mtCount++;
+    /* A2 hydrate forensics: WHO queues callbacks (the machine is still
+     * inside the calling JS frame here) + the queue trajectory after the
+     * payload scripts. First 16 rows name callers 1:1; then every 32nd. */
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    {
+        static long mtqSeq = 0;
+        long seq = ++mtqSeq;
+        if (seq <= 16 || (seq & 31) == 0)
+        {
+            char frx[110];
+            int fnx = 0;
+            for (txSlot *fg = the->frame;
+                 fg && fnx + 1 < (int)sizeof(frx); fg = fg->next, fnx++)
+            {
+                char nmx[44];
+                nmx[0] = '\0';
+                fxBufferFrameName(the, nmx, sizeof(nmx), fg, "");
+                if (!nmx[0])
+                {
+                    snprintf(nmx, sizeof(nmx), "?");
+                }
+                int wx = snprintf(frx + fnx, sizeof(frx) - (size_t)fnx,
+                                  "%s%s", fnx ? "<-" : "", nmx);
+                if (wx < 0 || (size_t)wx >= sizeof(frx) - (size_t)fnx)
+                {
+                    break;
+                }
+                fnx += wx;
+            }
+            logger_log("[mtq] seq=%ld idx=%d total=%d from=%s", seq, idx,
+                       st->mtCount, frx);
+        }
+    }
+#endif
+    xsResult = xsUndefined;
 }
 
 static void xs_clear_common(xsMachine *the)
@@ -2528,8 +4185,20 @@ static void xs_build_globals(JsBridge *b)
         };
         for (size_t i = 0; i < sizeof(ctors) / sizeof(ctors[0]); i++)
         {
-            def_val(the, glob, ctors[i],
-                    xsNewHostConstructor(xs_noop, 0, xsNewObject()));
+            /* A2: HTMLScriptElement gets the script sub-prototype for
+             * real instanceof parity — `document.currentScript` (the
+             * synthetic element) is pushed on that prototype, so bundler
+             * module factories that verify it (Next.js getAssetPrefix)
+             * behave like a browser instead of throwing the "Expected
+             * document.currentScript to be a <script> element"
+             * InvariantError in the loader's swallow. The remaining
+             * constructors stay inert (prototype never matches — mirrors
+             * the QuickJS bridge for untouched feature checks). */
+            xsSlot ctor = xsNewHostConstructor(
+                xs_noop, 0,
+                !strcmp(ctors[i], "HTMLScriptElement") ? st->scriptProto
+                                                       : xsNewObject());
+            def_val(the, glob, ctors[i], ctor);
         }
     }
 
@@ -2541,6 +4210,47 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, con, "warn", xs_console_log, 0);
         def_fn(the, con, "error", xs_console_log, 0);
         def_val(the, glob, "console", con);
+    }
+
+    /* performance — React DOM (19.x) reads performance.now() every
+     * scheduler tick and performance.getEntriesByType() in the
+     * commit-suspend path UNGUARDED (the
+     * `0<m.imgBytes&&0===fT&&(fT=62500*(function(){if("function"==typeof
+     * performance.getEntriesByType)...` IIFE dereferences the global
+     * before any typeof check). With the global missing that get throws
+     * "cannot coerce undefined to object" INSIDE the commit attempt,
+     * React's recoverable-error machinery retries 3x and every pass
+     * aborts — hydration never commits. now()/mark()/measure() cover
+     * the other scheduler/profiling reads; getEntriesByType returns an
+     * empty array (honest: no resource timing exists here) so React's
+     * bandwidth estimate degrades to its navigator.connection fallback
+     * exactly as the spec fallback chain intends. */
+    {
+        xsSlot perf = xsNewHostObject(NULL);
+        xsResult = perf; /* GC anchor */
+        def_fn(the, perf, "now", xs_performance_now, 0);
+        def_fn(the, perf, "mark", xs_noop, 1);
+        def_fn(the, perf, "measure", xs_noop, 0);
+        def_fn(the, perf, "getEntriesByType", xs_performance_getEntriesByType, 1);
+        def_fn(the, perf, "getEntries", xs_performance_getEntriesByType, 0);
+        def_fn(the, perf, "clearMeasures", xs_noop, 0);
+        def_fn(the, perf, "clearMarks", xs_noop, 0);
+        {
+            /* Device: no CLOCK_MONOTONIC in the toolchain — SDK ms clock. */
+            double origin = 0.0;
+#if defined(TARGET_PLAYDATE)
+            PlaydateAPI *pdp = pluto_pd();
+            origin = pdp ? (double)pdp->system->getCurrentTimeMilliseconds()
+                         : 0.0;
+#else
+            struct timespec tso;
+            clock_gettime(CLOCK_MONOTONIC, &tso);
+            origin = (double)tso.tv_sec * 1000.0 +
+                     (double)tso.tv_nsec / 1000000.0;
+#endif
+            def_val(the, perf, "timeOrigin", xsNumber(origin));
+        }
+        def_val(the, glob, "performance", perf);
     }
 
     /* navigator */
@@ -2645,12 +4355,27 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, doc, "createComment", xs_document_createComment, 1);
         def_fn(the, doc, "querySelector", xs_document_querySelector, 1);
         def_fn(the, doc, "querySelectorAll", xs_document_querySelectorAll, 1);
+        def_fn(the, doc, "getElementsByName", xs_doc_getElementsByName, 1);
+        def_fn(the, doc, "getElementsByTagName", xs_doc_getElementsByTagName, 1);
         def_fn(the, doc, "write", xs_document_write, 0);
         def_fn(the, doc, "writeln", xs_document_writeln, 0);
+        def_fn(the, doc, "appendChild", xs_document_appendChild, 1);
+        def_fn(the, doc, "insertBefore", xs_document_insertBefore, 2);
+        def_fn(the, doc, "removeChild", xs_document_removeChild, 1);
         def_fn(the, doc, "addEventListener", xs_doc_addEventListener, 2);
         def_fn(the, doc, "removeEventListener", xs_noop, 2);
         def_val(the, doc, "defaultView", glob);
         def_val(the, doc, "nodeType", xsInteger(9));
+        /* C4 (input fidelity): react's ChangeEventPlugin capability-probes
+         * `"oninput" in document` (browser truth) to pick the modern
+         * TrackerEventPlugin path for text-input onChange dispatch.
+         * Missing it, the typed 'input'/'change' envelopes fall into the
+         * IE-era selectionchange/focusout branch (nU) — which never calls
+         * the onChange accumulate — so controlled-input typing was
+         * silently swallowed at dispatch (submitted states stayed "").
+         * null is the browser-consistent value: the property exists but
+         * is not an active handler until assigned. */
+        def_val(the, doc, "oninput", xsNull);
         /* title as a live getter (walks the tree; see above) */
         {
             xsSlot getter = xsNewHostFunction(xs_document_getTitle, 0);
@@ -2658,23 +4383,32 @@ static void xs_build_globals(JsBridge *b)
             xsSlot titleSetter = xsNewHostFunction(xs_document_setTitle, 1);
             xsDefine(doc, xsID("title"), titleSetter, xsIsSetter);
         }
-        /* body/head/documentElement: document-order search from #root
-         * (see find_first_element — these are grandchildren of the
-         * synthetic root). body/activeElement keep the #root fallback
-         * for fragment documents; head falls back to the document
-         * element so CSS-in-JS hosts (emotion `container ||
-         * document.head`) always get an insertable node. */
-        DomNode *body = find_first_element(b, "body");
-        def_val(the, doc, "body",
-                xs_push_element(b, body ? body : b->dom->root));
-        def_val(the, doc, "activeElement", xs_push_element(b, body ? body : b->dom->root));
+        /* A2: currentScript as a live getter — the router stamps each
+         * running script's tag span (jsbridge_cur_script_stamp) and this
+         * synthesizes the element (see xs_document_getCurrentScript). */
         {
-            DomNode *html = find_first_element(b, "html");
-            DomNode *head = find_first_element(b, "head");
-            def_val(the, doc, "documentElement",
-                    xs_push_element(b, html ? html : b->dom->root));
-            def_val(the, doc, "head",
-                    xs_push_element(b, head ? head : (html ? html : b->dom->root)));
+            xsSlot csGetter = xsNewHostFunction(xs_document_getCurrentScript, 0);
+            xsDefine(doc, xsID("currentScript"), csGetter, xsIsGetter);
+        }
+        /* body/head/documentElement/activeElement: LIVE getters over the
+         * document-order search from #root (see xs_document_getBody*
+         * above) — the init-time def_val bindings could go stale when
+         * react swaps head/body on a fallback re-render. */
+        {
+            xsSlot gBody = xsNewHostFunction(xs_document_getBody, 0);
+            xsDefine(doc, xsID("body"), gBody, xsIsGetter);
+            xsSlot gActive = xsNewHostFunction(xs_document_getActiveElement, 0);
+            xsDefine(doc, xsID("activeElement"), gActive, xsIsGetter);
+            xsSlot gHead = xsNewHostFunction(xs_document_getHead, 0);
+            xsDefine(doc, xsID("head"), gHead, xsIsGetter);
+            xsSlot gHtml = xsNewHostFunction(xs_document_getDocumentElement, 0);
+            xsDefine(doc, xsID("documentElement"), gHtml, xsIsGetter);
+            /* R54: readyState mirrors the parked script queue (see the
+             * host fn) — "loading" through the drain, "interactive"
+             * after. Fork frameworks branch on it (next.js arms the RSC
+             * closer via DOMContentLoaded instead of setTimeout). */
+            xsSlot gReady = xsNewHostFunction(xs_document_readyState, 0);
+            xsDefine(doc, xsID("readyState"), gReady, xsIsGetter);
         }
         /* R22: styleSheets — empty StyleSheetList. CSS-in-JS (react-jss/emotion)
          * walks document.styleSheets for their speedy insertRule path; with an
@@ -2694,8 +4428,13 @@ static void xs_build_globals(JsBridge *b)
     def_fn(the, glob, "setInterval", xs_setInterval, 0);
     def_fn(the, glob, "clearTimeout", xs_clearTimeout, 0);
     def_fn(the, glob, "clearInterval", xs_clearInterval, 0);
-    def_fn(the, glob, "requestAnimationFrame", xs_setTimeout, 0);
+    def_fn(the, glob, "queueMicrotask", xs_queueMicrotask, 1);
 }
+
+/* forward decl (defined below with the metering section) — the drain
+ * re-arms this window per round; see xs_drain_jobs below. */
+static txBoolean xs_meter_callback(txMachine *the, txU8 count);
+extern void fzJobMeterStats(long *resets);
 
 /* ── microtask drain (fxRunLoop parity, tool-free) ──────────────�
  * Jobs live in the reserved mxPendingJobs slot (fixed offset from
@@ -2706,12 +4445,91 @@ static void xs_build_globals(JsBridge *b)
  */
 static void xs_drain_jobs(xsMachine *the)
 {
+    long rounds = 0;
+#if defined(PLUTO_HYDRATE_TRACE)
+    JsBridge *bP = (JsBridge *)xsGetContext(the);
+    logger_log("[drain] enter pending=%d",
+               mxPendingJobs.value.reference->next ? 1 : 0);
+#endif
     fxEndJob(the);
     while (mxPendingJobs.value.reference->next)
     {
         fxRunPromiseJobs(the);
         fxEndJob(the);
+        /* C4 livelock cap: a self-requeueing job chain (framework
+         * scheduler per-slice continuations) spins this drain forever —
+         * previously a sim hang at "[drain] enter pending=1" with zero
+         * visibility (no meter overrun, no [jobs] heartbeat ≤256 rounds).
+         * Cap the rounds like a browser's microtask budget and log the
+         * surrender so the hang becomes a named, contained defer. */
+        rounds++;
+        if (rounds >= 1024)
+        {
+            char capName[96];
+            capName[0] = '\0';
+            fxBufferFrameName(the, capName, sizeof(capName), the->frame, "");
+            logger_log("[drain] cap rounds=%ld pending-left frame=%s", rounds,
+                       capName[0] ? capName : "?");
+            break;
+        }
+        /* A2: re-arm the meter window at drain-round boundaries. A
+         * statement's run and its async fallout share one window today:
+         * bundler machinery (registerChunk continuations, the flight
+         * client) finishes as promise jobs and pushed a 4.8KB payload
+         * slot's cumulative count past its source-scaled cap (5.3M vs
+         * 5.3M) → stock abort + engine reset MID-BOOT. Each drain round
+         * is a task checkpoint — re-arm like the split pump's per-slice
+         * re-arm. Only where metering is already armed (mount bursts
+         * keep their own clock-based contract untouched). */
+        if (the->meterInterval)
+        {
+            JsBridge *jb = (JsBridge *)xsGetContext(the);
+            XsState *js = jb ? (XsState *)jb->implState : NULL;
+            if (!(js && js->mount.active))
+            {
+                /* Same reset fxBeginMetering performs (fresh window, same
+                 * callback) — done inline because xsBeginMetering the
+                 * public macro is a do/while(0) host-jump bracket (each
+                 * call LINKS a jump; mid-drain calls would leak chains). */
+                the->meterIndex = 0;
+                the->meterCount = ((txU8)XS_METER_STEP) << 16;
+                the->meterInterval = ((txU8)XS_METER_STEP) << 16;
+            }
+        }
+#ifdef PLUTO_THROW_LOG
+        /* A2 forensics (harness-only): a self-rescheduling job chain
+         * (framework schedulers queue a continuation per slice) spins this
+         * unmetered loop forever with NO other log — a heartbeat makes the
+         * hang visible; past a sanity threshold dump the frame chain so the
+         * rescheduling cycle is identifiable. */
+        rounds++;
+        if ((rounds & 255) == 0)
+        {
+            char name[96];
+            name[0] = '\0';
+            fxBufferFrameName(the, name, sizeof(name), the->frame, "");
+            logger_log("[jobs] drain round %ld pending=%d frame=%s",
+                       rounds, mxPendingJobs.value.reference->next ? 1 : 0,
+                       name[0] ? name : "?");
+        }
+        if (rounds == 1024)
+        {
+            txSlot *f = the->frame;
+            for (int d = 0; f && d < 10; d++, f = f->next)
+            {
+                char nm[80];
+                nm[0] = '\0';
+                fxBufferFrameName(the, nm, sizeof(nm), f, "");
+                logger_log("[jobs] deep frame[%d] %s", d, nm[0] ? nm : "?");
+            }
+        }
+#else
+        (void)rounds;
+#endif
     }
+#if defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[drain] done rounds=%ld", rounds);
+#endif
 }
 
 /* ── metering (per-script run limit) ───────────────────
@@ -2953,6 +4771,17 @@ void xs_engine_stack_probe(const char* site, void* sp)
     s_stack_n++;
     if (depth > s_stack_best)
         s_stack_best = depth;
+    if ((s_stack_n & 63) == 0)
+    {
+        /* A2 sample row: the ≥4KB-delta gate below hides stretches of
+         * shallow-but-numerous runs; naming site+n per 64 probes
+         * identifies which driver re-enters the interpreter (the boot
+         * drain produced >8000 unlogged "run" probes in one stretch). */
+#if defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[stack] %s n=%u depth=%ldB best=%ldB", site, s_stack_n,
+                   depth, s_stack_best);
+#endif
+    }
     if (depth > (long)XS_STACK_TRIP_DEPTH && !s_stack_overflow)
     {
         s_stack_overflow = 1;
@@ -2966,8 +4795,10 @@ void xs_engine_stack_probe(const char* site, void* sp)
         s_stack_prev - depth > 4096)
     {
         s_stack_prev = depth;
+#if defined(PLUTO_HYDRATE_TRACE)
         logger_log("[stack] %s n=%u depth=%ldB best=%ldB",
                    site, s_stack_n, depth, s_stack_best);
+#endif
     }
 #else
     (void)site;
@@ -3158,6 +4989,94 @@ static txBoolean xs_meter_callback(txMachine *the, txU8 count)
         }
     }
 #endif
+    /* A2 forensics: name the overrun once before the stock abort so the
+     * log shows executed meter ops vs the limit (a spin reads as a small
+     * overshoot against a tiny limit; legit big-bundle work reads as a
+     * large overshoot against a source-scaled limit). */
+    if (count > xs_run_limit)
+    {
+        JsBridge *mb = (JsBridge *)xsGetContext(the);
+        XsState *mst = mb ? (XsState *)mb->implState : NULL;
+        char fr[160];
+        int fn = 0;
+        for (txSlot *ff = the->frame; ff && fn + 1 < (int)sizeof(fr);
+             ff = ff->next, fn++)
+        {
+            char nm[40];
+            nm[0] = '\0';
+            fxBufferFrameName(the, nm, sizeof(nm), ff, "");
+            if (!nm[0])
+            {
+                snprintf(nm, sizeof(nm), "?");
+            }
+            int w = snprintf(fr + fn, sizeof(fr) - (size_t)fn, "%s%s",
+                             fn ? " <-" : "", nm);
+            if (w < 0 || (size_t)w >= sizeof(fr) - (size_t)fn)
+            {
+                break;
+            }
+            fn += w;
+        }
+        logger_log(
+            "[meter] overrun count=%lu limit=%lu pausereq=%d armed=%d "
+            "runDepth=%ld%s%s frames=%s",
+            (unsigned long)count, (unsigned long)xs_run_limit,
+            the->nrPauseRequest, the->nrPauseArmed,
+            the->nrRunDepth,
+            (mst && mst->mount.active) ? " mount=active" : "",
+            the->nrPauseAbort ? " abort=sticky" : "", fr);
+#if !defined(TARGET_PLAYDATE) && defined(PLUTO_HYDRATE_TRACE)
+        {
+            void *pbt[10];
+            int pn = backtrace(pbt, 10);
+            logger_log("[meter] cbacktrace frames=%d -> stderr", pn);
+            backtrace_symbols_fd(pbt, pn, fileno(stderr));
+        }
+#endif
+    }
+    else
+    {
+        /* A2: the callback fires ~every 64K meter index units; the drain's
+         * per-job re-arm count shows whether jobs are being metered
+         * individually at all. */
+        static long row = 0;
+        if ((++row & 1023) == 0)
+        {
+            long resets = -1;
+            char ft[130];
+            int ftN = 0;
+            fzJobMeterStats(&resets);
+            /* A2: name the running frame chain at the ramp — the abort
+             * walk only saw ONE frame; the ramp rows say WHICH JS program
+             * (and caller) the growing dispatches run inside. */
+            ft[0] = '\0';
+            for (txSlot *fg = the->frame; fg && ftN + 1 < (int)sizeof(ft);
+                 fg = fg->next, ftN++)
+            {
+                char nm2[48];
+                nm2[0] = '\0';
+                fxBufferFrameName(the, nm2, sizeof(nm2), fg, "");
+                if (!nm2[0])
+                {
+                    snprintf(nm2, sizeof(nm2), "?");
+                }
+                int w2 =
+                    snprintf(ft + ftN, sizeof(ft) - (size_t)ftN, "%s%s",
+                             ftN ? "<-" : "", nm2);
+                if (w2 < 0 || (size_t)w2 >= sizeof(ft) - (size_t)ftN)
+                {
+                    break;
+                }
+                ftN += w2;
+            }
+#if defined(PLUTO_HYDRATE_TRACE)
+            logger_log("[meter] tick count=%lu limit=%lu jobsReset=%ld "
+                       "frames=%s depth=%ld",
+                       (unsigned long)count, (unsigned long)xs_run_limit,
+                       resets, ft, the->nrRunDepth);
+#endif
+        }
+    }
     return count <= xs_run_limit;
 }
 
@@ -3754,6 +5673,11 @@ static int xs_run_tiny(JsBridge *b, xsMachine *m, int index,
     {
         return 0;
     }
+#ifdef PLUTO_THROW_LOG
+    /* Throw-trace companion: which script number throws (extern read by
+     * the fork's PLUTO_THROW_LOG fxThrowMessage/fxThrow instrumentation). */
+    g_pluto_throw_script = index;
+#endif
     /* No b->ran++ here: the prefix is part of ONE script's run in the other
      * engines (concatenated source), so it must not inflate ran/errs vs
      * them. Failures still surface through the caller's lastError. */
@@ -3777,6 +5701,7 @@ static int xs_run_tiny(JsBridge *b, xsMachine *m, int index,
                 fxRunScript(the, script, mxThis, C_NULL, C_NULL, C_NULL,
                             mxProgram.value.reference);
                 xs_drain_jobs(the);
+                xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
             }
         }
         xsCatch
@@ -3877,6 +5802,14 @@ static void xs_step_discard(JsBridge *b)
         fxNRParserTotalCap = st->step.savedParserCap;
         st->step.savedParserCap = 0;
     }
+    if (st->step.savedBudget)
+    {
+        /* R56: the codegen+run window's raised funnel floor ends with
+         * the session — the parser tree arenas are freed above, so the
+         * live base returns under the standing budget. */
+        pluto_mem_set_budget(st->step.savedBudget);
+        st->step.savedBudget = 0;
+    }
 #endif
     st->step.active = 0;
     st->step.state = 0;
@@ -3941,6 +5874,7 @@ static int xs_step_begin(JsBridge *b, xsMachine *m, int index, int seg,
     st->step.pumpBudget = PLUTO_SPLIT_PUMP_BUDGET_START;
     st->step.emaStepsPerMs = 0;
     st->step.savedParserCap = 0;
+    st->step.savedBudget = 0; /* R56: codegen window not raised yet */
 #ifdef TARGET_PLAYDATE
     /* R21 admission contract: scope the parser cap to what the split's
      * headroom check granted for THIS segment (same as the atomic path). */
@@ -4109,7 +6043,84 @@ static void xs_step_code_slice(JsBridge *b, xsMachine *m, int index)
 {
     XsState *st = (XsState *)b->implState;
     txParser *p = st->step.parser;
+    int runNext = 1; /* R56: 0 = skip the run hand-off below (restart /
+                      * restart-budget-exhausted) — the umbrella forbids
+                      * mid-bracket returns (a raw return would leave the
+                      * machine's jump chain pinned at this dead C frame) */
     p->firstJump = &st->step.jump;
+#ifdef TARGET_PLAYDATE
+    /* R56c (device run 16:30 trace): free engine-heap debris from the
+     * earlier atomic segments before codegen — same idiom the codegen
+     * bail-restart path uses (GC, then funnel resync). Log the drop. */
+    {
+        unsigned long liveBefore = pluto_mem_live();
+        fxCollectGarbage(m);
+        pluto_mem_resync_live();
+        if (pluto_mem_live() < liveBefore)
+            logger_log("[js] bundle %d seg %d: code head GC "
+                       "%luKB → %luKB",
+                       index, st->step.seg, liveBefore >> 10,
+                       pluto_mem_live() >> 10);
+    }
+    /* R56 codegen window (device): the admission granted the PARSE cap
+     * (segPeak ≈ len*19+512KB) but the CODE slice allocates the emitted
+     * code buffer + binding tables in the machine heap ON TOP of the
+     * still-resident parse tree — the funnel refused react-dom's 209KB
+     * codegen ~1MB short of completion at the 7.68MB budget (device
+     * 2026-10-18: "abort: memory full" right after "stepwise code
+     * slice"). Raise the floor for the whole code→run→teardown window:
+     * budget = live + allowance, clamped to what the OS heap can truly
+     * serve (progressive probe — see pluto_mem_probe_grantable), restored
+     * at xs_step_discard once the tree arenas are freed. savedBudget
+     * keeps the raised floor alive across the run slice's later frame.
+     * Sim keeps budget=0 (telemetry only) so this is a no-op there. */
+    if (!st->step.savedBudget)
+    {
+        /* R56d (device [mem] trace 16:47 cycle): the progressive probe
+         * said "grantable 2044KB" yet the funnel then served 2.75MB in
+         * 128KB chunks before refusing at the 8192KB budget — single-
+         * block probe allocation hits fragmentation that granular chunk
+         * growth does not. The codegen grows steadily ~128KB/2.2s and
+         * wanted ≥2.6MB total. Use a FIXED 3.5MB allowance: if the OS
+         * pool's true wall is hit first the SDK malloc fails on its own
+         * and the abort unwinds to this function's umbrella just as
+         * containedly as a budget refusal (no probe, no self-deception). */
+        unsigned long allowance = 3584UL * 1024UL;
+        unsigned long raised;
+        st->step.savedBudget = pluto_mem_budget();
+        raised = pluto_mem_live() + allowance;
+        if (raised < st->step.savedBudget)
+            raised = st->step.savedBudget;
+        pluto_mem_set_budget(raised);
+        logger_log("[js] bundle %d seg %d: codegen window budget "
+                   "%luKB → %luKB (allowance %luKB fixed)",
+                   index, st->step.seg, st->step.savedBudget >> 10,
+                   pluto_mem_budget() >> 10, allowance >> 10);
+    }
+#endif
+    /* R57 measure: the device only revealed the codegen demand via
+     * refusals; on host log the TRUE funnel-live delta across this slice
+     * so the react-dom compile cost is a measured number (decision input
+     * for squeezing it onto the device pool). */
+#ifndef TARGET_PLAYDATE
+    unsigned long liveCodeStart = pluto_mem_live();
+#endif
+    /* R56 umbrella: codegen allocates from the machine heap THROUGH the
+     * funnel (c_malloc → pluto_mem_realloc); a budget refusal there is a
+     * MACHINE abort (fxAbort → fxExitToHost), which walks the machine's
+     * OWN jump chain — not the parser jump this function arms below.
+     * Without a live HostExit bracket that walk derefs the->firstJump ==
+     * C_NULL (device 2026-10-18: bus fault at bfar=0x5c, the jump->
+     * nextJump offset, mid react-dom 209KB codegen). Arm the outermost
+     * bracket exactly like the parse slices do; a machine abort lands
+     * after xsEndHostExit, contained, and takes the same reset contract
+     * (xs_exec_finish + discard). Body indentation inside is unchanged
+     * to keep the R30k machinery diff minimal. */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
     if (c_setjmp(st->step.jump.jmp_buf) == 0)
     {
         if (p->errorCount == 0)
@@ -4170,8 +6181,11 @@ static void xs_step_code_slice(JsBridge *b, xsMachine *m, int index)
                                    "queued — fresh parse from owned buffer",
                                    index, st->step.seg);
                         /* step.active stays 1 with state=PARSE: the pump
-                         * yields and the caller re-queues the frame. */
-                        return;
+                         * yields and the caller re-queues the frame.
+                         * R56: return through the umbrella tail instead of
+                         * a raw mid-bracket return. */
+                        runNext = 0;
+                        goto codegen_done;
                     }
                     logger_log("[js] bundle %d seg %d: restart parser alloc "
                                "failed — failing contained",
@@ -4180,7 +6194,8 @@ static void xs_step_code_slice(JsBridge *b, xsMachine *m, int index)
                 bridge_take_error_text(b, "codegen alloc failed");
                 b->errs++;
                 xs_step_finish(b, st, "codegen restart budget exhausted");
-                return;
+                runNext = 0; /* parser was freed by discard — no tail p-touch */
+                goto codegen_done;
             }
         }
         else
@@ -4193,8 +6208,12 @@ static void xs_step_code_slice(JsBridge *b, xsMachine *m, int index)
                        "errorCount=%d",
                        index, st->step.seg, p->errorCount);
         }
-        p->firstJump = NULL;
-        st->step.state = PLUTO_STEP_RUN;
+        if (runNext)
+        {
+            p->firstJump = NULL;
+            st->step.state = PLUTO_STEP_RUN;
+        }
+codegen_done: ;
     }
     else
     {
@@ -4213,17 +6232,42 @@ static void xs_step_code_slice(JsBridge *b, xsMachine *m, int index)
          * the remaining tail slices — handled by the split pump on its
          * next pass through segErr accounting. */
         xs_step_finish(b, st, "code aborted");
+        } /* c_setjmp catch ends */
+        } /* R56 Host wrapper (xsBeginHost) */
+        xsEndHost(m);
+    } /* R56 Metering wrapper (xsBeginMetering) */
+    xsEndMetering(m);
+    xsEndHostExit(m);
+    if (m->exitStatus != xsNormalExit)
+    {
+        /* R56: machine abort mid-codegen (funnel OOM refusal → fxAbort)
+         * lands HERE containedly — same reset contract as the parse
+         * slice's abort path (fail script, delete machine, free the
+         * session host memory; also restores the R56 budget window). */
+        xs_exec_finish(b, st, m, index);
+        xs_step_discard(b);
+        return;
     }
+#ifndef TARGET_PLAYDATE
+    logger_log("[js] R57 measure: codegen slice funnel delta %luKB "
+               "(live %luKB → %luKB)",
+               (pluto_mem_live() - liveCodeStart) >> 10,
+               liveCodeStart >> 10, pluto_mem_live() >> 10);
+#endif
 }
 
 /* RUN slice: bracket + run + drain in ONE frame — the R20 contract
  * (an executing bundle segment stays atomic per frame). The script was
  * produced by the CODE slice; fxRunScript consumes it (deletes on both
- * success and throw). */
+ * success and throw). R57 measure: host-only funnel-live delta across
+ * the run (the factory EXECUTION's demand — object graphs etc.). */
 static void xs_step_run_slice(JsBridge *b, xsMachine *m, int index)
 {
     XsState *st = (XsState *)b->implState;
     txScript *script = st->step.script;
+#ifndef TARGET_PLAYDATE
+    unsigned long liveRunStart = pluto_mem_live();
+#endif
     st->step.script = NULL; /* fxRunScript consumes it */
     /* Same admission-scaled runaway guard as the atomic path: the tail
      * segment legitimately runs the whole app bootstrap. */
@@ -4240,6 +6284,7 @@ static void xs_step_run_slice(JsBridge *b, xsMachine *m, int index)
                 fxRunScript(the, script, mxThis, C_NULL, C_NULL, C_NULL,
                             mxProgram.value.reference);
                 xs_drain_jobs(the);
+                xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
             }
             xsCatch
             {
@@ -4307,6 +6352,12 @@ static void xs_step_run_slice(JsBridge *b, xsMachine *m, int index)
         xs_step_discard(b); /* machine already deleted by xs_exec_finish */
         return;
     }
+#ifndef TARGET_PLAYDATE
+    logger_log("[js] R57 measure: run slice funnel delta %luKB "
+               "(live %luKB → %luKB)",
+               (pluto_mem_live() - liveRunStart) >> 10,
+               liveRunStart >> 10, pluto_mem_live() >> 10);
+#endif
     xs_step_finish(b, st, NULL);
 }
 
@@ -4420,6 +6471,11 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
     {
         return;
     }
+#ifdef PLUTO_THROW_LOG
+    /* Throw-trace companion: which script number throws (extern read by
+     * the fork's PLUTO_THROW_LOG fxThrowMessage/fxThrow instrumentation). */
+    g_pluto_throw_script = index;
+#endif
 #ifdef TARGET_PLAYDATE
     if (execPeak)
     {
@@ -4460,6 +6516,7 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
                 fxRunScript(the, script, mxThis, C_NULL, C_NULL, C_NULL,
                             mxProgram.value.reference);
                 xs_drain_jobs(the);
+                xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
             }
         }
         xsCatch
@@ -4688,6 +6745,7 @@ static int xs_parse_and_run_mount(JsBridge *b, xsMachine *m, int index,
                          * script again. */
                         st->mount.script = NULL;
                         xs_drain_jobs(the);
+                        xs_flush_microtasks(b); /* A2: boundary flush */
                     }
                 }
             }
@@ -4848,6 +6906,7 @@ static int xs_mount_resume(JsBridge *b, int index)
                      * next segment memset over the LIVE session. */
                     st->mount.parked = 0;
                     xs_drain_jobs(the);
+                    xs_flush_microtasks(b); /* A2: boundary flush */
                     done = 1;
                 }
             }
@@ -4943,6 +7002,93 @@ static int xs_mount_resume(JsBridge *b, int index)
 static int xs_try_bundler_split_src(JsBridge *b, const char *src, size_t len,
                                     int index);
 
+/* ── C4: engine-owned `fetch` shim ────────────────────────────────────────
+ * The contact page's send handler calls
+ *   fetch(url, {method:'POST', headers, body, signal:AbortSignal.timeout()})
+ * The engine has native Promise/async-await + a working XMLHttpRequest
+ * (router HTTP), so the shim is a tiny SCRIPT (one xs_run_tiny run, before
+ * the page's first script) rather than C promise plumbing. Response shape
+ * covers the handler's usage: .ok (200–299), .status, .text()/.json()
+ * promise-returning. The signal object's timeoutms drives a setTimeout
+ * reject (the real spec abort machinery is out of scope here). */
+static const char g_fetchShimSrc[] =
+    "/* pluto fetch shim (engine-owned) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.fetch === 'function') { return; }\n"
+    "  if (typeof g.AbortSignal !== 'function') {\n"
+    "    var AS = function AbortSignal() {};\n"
+    "    AS.timeout = function (ms) {\n"
+    "      var n = 0;\n"
+    "      if (typeof ms === 'number' && ms === ms && ms > 0 &&\n"
+    "          ms <= 1200000) {\n"
+    "        n = Math.floor(ms);\n"
+    "      }\n"
+    "      return { aborted: false, reason: undefined, onabort: null,\n"
+    "        throwIfAborted: function () { if (this.aborted) {\n"
+    "            throw this.reason;\n"
+    "        } },\n"
+    "        addEventListener: function () {},\n"
+    "        removeEventListener: function () {},\n"
+    "        dispatchEvent: function () { return false; },\n"
+    "        plutoTimeoutMs: n };\n"
+    "    };\n"
+    "    g.AbortSignal = AS;\n"
+    "  }\n"
+    "  g.fetch = function (url, opts) {\n"
+    "    opts = opts || {};\n"
+    "    var ms = 0;\n"
+    "    var sig = opts.signal;\n"
+    "    if (sig && typeof sig.plutoTimeoutMs === 'number') {\n"
+    "      ms = sig.plutoTimeoutMs;\n"
+    "    }\n"
+    "    return new g.Promise(function (resolve, reject) {\n"
+    "      var xhr = new XMLHttpRequest();\n"
+    "      var timer = 0;\n"
+    "      try {\n"
+    "        xhr.open((opts.method || 'GET') + '', url + '');\n"
+    "      } catch (e) { reject(e); return; }\n"
+    "      if (ms > 0) {\n"
+    "        timer = setTimeout(function () {\n"
+    "          timer = 0;\n"
+    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
+    "        }, ms);\n"
+    "      }\n"
+    "      xhr.onload = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        var st = this.status || 0;\n"
+    "        var tx = this.responseText || '';\n"
+    "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
+    "          url: String(url), redirected: false,\n"
+    "          text: function () { return g.Promise.resolve(tx); },\n"
+    "          json: function () {\n"
+    "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
+    "            catch (e) { return g.Promise.reject(e); }\n"
+    "          } });\n"
+    "      };\n"
+    "      xhr.onerror = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        reject(new Error('Fetch failed'));\n"
+    "      };\n"
+    "      var body = opts.body;\n"
+    "      if (body === undefined || body === null) { xhr.send(); }\n"
+    "      else { xhr.send(String(body)); }\n"
+    "    });\n"
+    "  };\n"
+    "})(this);\n";
+
+static void xs_run_fetch_shim(JsBridge *b, XsState *st, int index)
+{
+    /* Latch BEFORE the run: a shim parse failure must not loop every
+     * script (pages that never call fetch would pay forever). The
+     * failure surfaces in the log + lastError from xs_run_tiny's catch. */
+    st->fetchShimDone = 1;
+    logger_log("[js] fetch shim: injecting (before script %d)", index);
+    int rc = xs_run_tiny(b, st->machine, index, g_fetchShimSrc,
+                         sizeof(g_fetchShimSrc) - 1, "fetch shim");
+    logger_log("[js] fetch shim: %s", rc ? "FAILED (engine reset)"
+                                         : "defined");
+}
+
 static void xs_run_script(JsBridge *b, const char *src, size_t len,
                           int index)
 {
@@ -4962,17 +7108,45 @@ static void xs_run_script(JsBridge *b, const char *src, size_t len,
                    index);
         return;
     }
+    /* C4: the engine-owned fetch/AbortSignal shim runs ONCE, before the
+     * first page script (send handlers call fetch at tap time, but
+     * defining the globals up front keeps every page path uniform). */
+    if (!st->fetchShimDone)
+    {
+        xs_run_fetch_shim(b, st, index);
+    }
+    /* A2 forensics: identify every plain-path slot body (the split path
+     * already announces itself with the bundler-monolith row). */
+    {
+        size_t head = len < 96 ? len : 96;
+        while (head > 0 && (src[head - 1] == '\n' || src[head - 1] == '\r' ||
+                            src[head - 1] == ' '))
+        {
+            head--;
+        }
+        logger_log("[js] script %d plain-run %zuB: %.*s%s", index, len,
+                   (int)head, src, len > head ? "…" : "");
+    }
     if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
     {
         xs_fail_script(b, index, "script too large");
         return;
     }
-    /* Same compile-safety gate as muJS/Duktape/QuickJS (one bar). */
+    /* Same compile-safety gate as muJS/Duktape/QuickJS (one bar).
+     * PLUTO_NR_BISECT (host offline-bisect harness ONLY): skip the RAM-path
+     * pre-scan so the engine's real parser surfaces the true SyntaxError
+     * position for large minified bundles — the sim's disk-stream path
+     * scans per-segment and never sees this one-shot bar, so the whole-file
+     * RAM scan on host masks the actual error this gate precedes. Never
+     * defined on simulator/device builds (mirrors the PLUTO_CHUNK_FORCE
+     * seam below). */
+#if !defined(PLUTO_NR_BISECT)
     if (!jsbridge_script_compile_safe(src, len))
     {
         xs_fail_script(b, index, "script too deeply nested (compile guard)");
         return;
     }
+#endif
 
 #ifdef PLUTO_CHUNK_FORCE
     /* Test seam (sim only, like the stream path): always try the split
@@ -4997,6 +7171,22 @@ static void xs_run_script(JsBridge *b, const char *src, size_t len,
             if (xs_try_bundler_split_src(b, src, len, index))
                 return;
         }
+    }
+#endif
+
+#ifdef TARGET_PLAYDATE
+    /* R54 belt+braces: this whole-file parse runs inside ONE engine
+     * bracket on ONE update() frame — the device lexer costs ~1s per
+     * ~30KB of minified JS and the run-loop watchdog hard-crashes (E1)
+     * past 10s. Over the cap: skip containedly instead of stalling. */
+    if (len >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
+    {
+        b->errs++;
+        logger_log("[js] script %d skipped: %zuB monolith over the %dKB "
+                   "one-frame parse cap (device cannot lex it unyielded)",
+                   index, len, JSBRIDGE_ONE_FRAME_SCRIPT_MAX >> 10);
+        bridge_take_error_text(b, "script over one-frame parse cap");
+        return;
     }
 #endif
 
@@ -5993,6 +8183,16 @@ static int xs_run_script_split(JsBridge *b, const char *src, size_t len,
     st->split.plan.tailStart = plan->tailStart;
     st->split.plan.tailEnd = plan->tailEnd;
     st->split.plan.tailStep = plan->tailStep;
+    /* R55: turbopack plan state travels with the ownership copy — the
+     * src/post spans are plan FIELDS here (not spans), so a session that
+     * resumes across frames would otherwise emit headless pushes. */
+    st->split.plan.kind = plan->kind;
+    st->split.plan.turboWrap = plan->turboWrap;
+    st->split.plan.turboNestedEnd = plan->turboNestedEnd;
+    st->split.plan.turboSrc0 = plan->turboSrc0;
+    st->split.plan.turboSrc1 = plan->turboSrc1;
+    st->split.plan.turboPost0 = plan->turboPost0;
+    st->split.plan.turboPost1 = plan->turboPost1;
     memcpy(st->split.plan.name, plan->name, sizeof(st->split.plan.name));
     /* OWN the source: copy the span once for the whole multi-frame
      * session (freed by xs_split_invalidate). The split resumes across
@@ -6605,6 +8805,12 @@ static void xs_run_script_stream(JsBridge *b, SpillFile spill, size_t len,
                    index);
         return;
     }
+    /* C4: same one-shot shim injection as xs_run_script (the stream path
+     * bypasses it entirely). */
+    if (!st->fetchShimDone)
+    {
+        xs_run_fetch_shim(b, st, index);
+    }
     if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
     {
         xs_fail_script(b, index, "script too large");
@@ -6625,6 +8831,70 @@ static void xs_run_script_stream(JsBridge *b, SpillFile spill, size_t len,
     }
     /* fall through: normal whole-file path */
 #endif
+
+    /* R60: a disk-resident body over the one-frame parse cap gets the
+     * contained routes instead of a monolith admission:
+     *   DEVICE — whole-file admission is impossible (the lexer cannot lex
+     *   64KB+ unyielded; the late R54 cap would refuse it): bundler split,
+     *   statement chunker, then a contained skip (never a retry livelock).
+     *   SIM — whole-file admission stays valid while the probe grants the
+     *   compile (the contact page's 112KB react chunk whole-file-runs on
+     *   the host heap and MUST keep doing so — the R60 regression guard):
+     *   only a probe refusal (memwatch envelope test builds) diverts to
+     *   splitter → chunker → deferred retry, same containment story. */
+    if (len >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
+    {
+#ifdef TARGET_PLAYDATE
+        if (xs_try_bundler_split(b, spill, len, index))
+            return;
+        if (xs_run_script_chunked(b, spill, len, index))
+        {
+            b->ran++; /* handled containedly by the chunked path */
+            return;
+        }
+        b->errs++;
+        logger_log("[js] script %d skipped (stream): %zuB over the %dKB "
+                   "one-frame parse cap and not chunkable",
+                   index, len, JSBRIDGE_ONE_FRAME_SCRIPT_MAX >> 10);
+        bridge_take_error_text(b, "script over one-frame parse cap");
+        return;
+#else
+        {
+            /* Sim: with no budget armed (budget 0 = unrestricted host
+             * heap) the whole-file path keeps its exact prior behavior —
+             * the contact page's 112KB react chunk whole-file-runs and
+             * MUST keep doing so (R60 regression guard, read on the 01:56
+             * tap run). With a budget armed (memwatch envelope test
+             * builds) the funnel enforces at sim scale too: OS-truth
+             * probe, then divert splitter -> chunker -> deferred retry,
+             * same containment story as the device. */
+            if (pluto_mem_budget() != 0)
+            {
+                size_t r60need = jsbridge_compile_need((unsigned long)len);
+                if (pluto_mem_probe_grantable((unsigned long)r60need) <
+                    r60need)
+                {
+                    if (xs_try_bundler_split(b, spill, len, index))
+                        return;
+                    if (xs_run_script_chunked(b, spill, len, index))
+                    {
+                        b->ran++;
+                        return;
+                    }
+                    logger_log("[js] script %d deferred (stream): %zuB over "
+                               "the %dKB one-frame parse cap, probe "
+                               "refused, not chunkable",
+                               index, len,
+                               JSBRIDGE_ONE_FRAME_SCRIPT_MAX >> 10);
+                    jsbridge_deferred_offer(b, JS_ENGINE_XS_NR, spill, len);
+                    b->errs++;
+                    return;
+                }
+            }
+        }
+        /* fall through: probe granted the whole-file compile — run it */
+#endif
+    }
 
 #ifdef TARGET_PLAYDATE
     /* Early admission check BEFORE any machine work: if the compile's
@@ -6653,6 +8923,26 @@ static void xs_run_script_stream(JsBridge *b, SpillFile spill, size_t len,
             jsbridge_deferred_offer(b, JS_ENGINE_XS_NR, spill, len);
             return;
         }
+    }
+#endif
+
+#ifdef TARGET_PLAYDATE
+    /* R54 belt+braces: the deferred retry lands HERE when memory frees —
+     * straight into this whole-file bracket on ONE update() frame. The
+     * device lexer costs ~1s per ~30KB of minified JS; the run-loop
+     * watchdog hard-crashes (E1) past 10s (2026-10-18 log showed the
+     * 112594B react chunk would one day breach it via exactly this
+     * path). Over the cap: skip containedly; giant bundles belong on the
+     * planner/split path. */
+    if (len >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
+    {
+        b->errs++;
+        logger_log("[js] script %d skipped (stream): %zuB monolith over "
+                   "the %dKB one-frame parse cap (device cannot lex it "
+                   "unyielded)",
+                   index, len, JSBRIDGE_ONE_FRAME_SCRIPT_MAX >> 10);
+        bridge_take_error_text(b, "script over one-frame parse cap");
+        return;
     }
 #endif
 
@@ -6715,7 +9005,7 @@ static int xs_dispatch_click(JsBridge *b, const void *anchorNode)
     for (int i = 0; i < b->listenerCount; i++)
     {
         JsListener *L = &b->listeners[i];
-        if (L->target != anchorNode)
+        if (L->target != anchorNode || L->kind != 0) /* clicks only */
         {
             continue;
         }
@@ -6742,6 +9032,7 @@ static int xs_dispatch_click(JsBridge *b, const void *anchorNode)
                              xsDefault);
                     xsCall2_noResult(st->fns[i], xsID("call"), xsVar(0), ev);
                     xs_drain_jobs(the);
+                    xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
                 }
                 xsCatch
                 {
@@ -6778,6 +9069,157 @@ static int xs_dispatch_click(JsBridge *b, const void *anchorNode)
     return fired ? JSB_CLICK_NAVIGATE : JSB_CLICK_NONE;
 }
 
+/* ── B3: element-event dispatch with browser bubble semantics ──────────────
+ * `node` is the event target: listeners registered ON it fire first (browser
+ * order), then listeners on each ancestor up the tree — react's delegation
+ * registers at the root container, so the climb is what delivers. Only the
+ * page-interactivity class (kind 0 = click/submit/input/change) answers;
+ * load/error resources run through the resource fire instead. Event object
+ * follows the click template (target REQUIRED — react's non-delegated
+ * dispatcher reads event.target) plus currentTarget per ancestor,
+ * cancelable/bubbles/defaultPrevented, and stopPropagation. Any
+ * preventDefault() suppresses the caller's default action (sticky: later
+ * listeners still run, browser order), and stopPropagation() stops the
+ * climb (same-node listeners still run, browser order). Per-listener xsTry
+ * isolates faults exactly like the click path. Returns a
+ * JsBridgeEventResult. */
+static int xs_dispatch_element_event(JsBridge *b, const void *node,
+                                     const char *type)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !node || !type)
+    {
+        return JSB_EVENT_NONE;
+    }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    {
+        DomNode *tn = (DomNode *)node;
+        logger_log("[dev] type=%s recv=%s", type,
+                   (tn->kind == DOM_ELEMENT && tn->tag) ? tn->tag : "#other");
+    }
+#endif
+    int fired = 0;
+    b->preventDef = 0; /* sticky: an early preventDefault wins, browser-style */
+    b->stopProp = 0;
+    b->inClick = 1; /* same re-entrancy guard as dispatch_click */
+    xsMachine *m = st->machine;
+
+    DomNode *t = (DomNode *)node;
+    while (t)
+    {
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+        {
+            int m0 = 0;
+            for (int i = 0; i < b->listenerCount; i++)
+            {
+                if (b->listeners[i].target == t &&
+                    !strcmp(b->listeners[i].type, type))
+                {
+                    m0++;
+                }
+            }
+            logger_log("[devb] step t=%s type=%s pairs=%d total=%d",
+                       (t->kind == DOM_ELEMENT && t->tag) ? t->tag
+                                                           : "#other",
+                       type, m0, b->listenerCount);
+        }
+#endif
+        for (int i = 0; i < b->listenerCount; i++)
+        {
+            JsListener *L = &b->listeners[i];
+            if (L->target != t || L->kind != 0 || // interactivity class only
+                strcmp(L->type, type) != 0)       /* B3: exact type route */
+            {
+                continue;
+            }
+            fired = 1;
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+            logger_log("[dev] fire i=%d tgt=%s type=%s", i,
+                       (t->kind == DOM_ELEMENT && t->tag) ? t->tag : "#other",
+                       type);
+#endif
+
+            xsBeginHostExit(m);
+            xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+            {
+                xsBeginHost(m);
+                {
+                    xsVars(2);
+                    xsTry
+                    {
+                        /* fresh wrappers: the ORIGINAL target (0) + the
+                         * listening node (1) + the event object */
+                        xsVar(0) = xs_push_element(b, (DomNode *)node);
+                        xsVar(1) = xs_push_element(b, t);
+                        xsSlot ev = xsNewHostObject(NULL);
+                        xsResult = ev; /* GC anchor while defining */
+                        xsDefine(xsResult, xsID("type"), xsString(type),
+                                 xsDefault);
+                        xsDefine(xsResult, xsID("target"), xsVar(0), xsDefault);
+                        xsDefine(xsResult, xsID("currentTarget"), xsVar(1),
+                                 xsDefault);
+                        xsDefine(xsResult, xsID("cancelable"), xsTrue,
+                                 xsDefault);
+                        xsDefine(xsResult, xsID("bubbles"), xsTrue, xsDefault);
+                        xsDefine(xsResult, xsID("defaultPrevented"), xsFalse,
+                                 xsDefault);
+                        xsDefine(xsResult, xsID("preventDefault"),
+                                 xsNewHostFunction(xs_event_preventDefault, 0),
+                                 xsDefault);
+                        xsDefine(xsResult, xsID("stopPropagation"),
+                                 xsNewHostFunction(xs_event_stopPropagation, 0),
+                                 xsDefault);
+                        xsCall2_noResult(st->fns[i], xsID("call"), xsVar(1),
+                                         ev);
+                        xs_drain_jobs(the);
+                        xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
+                    }
+                    xsCatch
+                    {
+                        b->errs++;
+                        bridge_take_error_text(b, "listener exception");
+                        logger_log("[js] %s handler failed", type);
+                    }
+                }
+                xsEndHost(m);
+            }
+            xsEndMetering(m);
+            xsEndHostExit(m);
+
+            b->doc->jsErrors = b->errs;
+            snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+                     b->lastError);
+            if (m->exitStatus != xsNormalExit)
+            {
+                b->errs++;
+                bridge_take_error_text(b, "engine abort in event handler");
+                logger_log("[js] %s dispatch aborted engine — engine reset",
+                           type);
+                st->machine = NULL;
+                xsDeleteMachine(m);
+                xs_split_invalidate(b); /* R20 pacing + R22 stepwise are dead */
+                pluto_mem_resync_live(); /* counter re-base (see run_script) */
+                return fired ? JSB_EVENT_NAVIGATE : JSB_EVENT_NONE;
+            }
+        }
+        if (b->stopProp)
+        {
+            break; /* browser semantics: same-node listeners ran, climb ends */
+        }
+        t = t->parent; /* bubbling: target → ancestors */
+    }
+
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (!fired)
+    {
+        return JSB_EVENT_NONE;
+    }
+    return b->preventDef ? JSB_EVENT_SUPPRESSED : JSB_EVENT_NAVIGATE;
+}
+
 /* Timer vtable: release one pinned callback (fnRef = tfn[] slot). */
 static void xs_clear_timer_ref(JsBridge *b, void *fnRef)
 {
@@ -6798,6 +9240,32 @@ static void xs_clear_timer_ref(JsBridge *b, void *fnRef)
 }
 
 /* Invoke one pinned callback. Returns 0 ok, 1 contained error, -1 abort. */
+/* C4 (async fidelity): interleaved microcheckpoint. The two job queues
+ * feed each other — a native-promise continuation can call
+ * queueMicrotask (React's setState flush does exactly that: our drain
+ * ran the await resumption, setState landed React's flush callback in
+ * the injected ring, and the drain→flush→drain pass left it STRANDED
+ * until an unrelated timer happened to fire 47s later). Alternate
+ * native-jobs and injected-ring drains until BOTH are empty, bounded
+ * like a browser's microtask checkpoint budget. */
+static void xs_boundary_microtasks(JsBridge *b)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine)
+    {
+        return;
+    }
+    for (int pass = 0; pass < 16; pass++)
+    {
+        xs_drain_jobs(st->machine);
+        if (xs_flush_microtasks(b) == 0)
+        {
+            return; /* both queues empty (the drain ran first) */
+        }
+    }
+    logger_log("[drain] boundary cap 16 passes");
+}
+
 static int xs_run_timer_ref(JsBridge *b, void *fnRef)
 {
     XsState *st = (XsState *)b->implState;
@@ -6859,7 +9327,138 @@ static int xs_run_timer_ref(JsBridge *b, void *fnRef)
         pluto_mem_resync_live(); /* counter re-base (see run_script) */
         return -1;
     }
+    /* C4 (async fidelity): match the other machine boundaries — a
+     * timer callback that settles native promises (async/await
+     * continuations, framework schedulers) must have those jobs run
+     * BEFORE the next tick, exactly like the run/script/click paths'
+     * xs_drain_jobs call sites — AND the queues interleave (see the
+     * helper's note): promise continuations queue ring callbacks and
+     * ring callbacks queue promise jobs. */
+    xs_boundary_microtasks(b);
     return 0;
+}
+
+/* ── A2: flush the microtask queue FLAT ─────────────────────────────
+ * One batch per boundary: each callback STARTS only after the previous
+ * one RETURNED (browser microcheckpoint). Callbacks enqueued while the
+ * batch runs continue in this same drain — flat, queue-ordered — so the
+ * stack never accumulates; the per-flush cap exists for device appetite
+ * and defers the tail to the next machine boundary (logged). Called at
+ * the promise-job drain boundaries (script-run ends; after each timer /
+ * XHR callback fire) so microtasks precede the next timer, like a
+ * browser. Returns run count, or -1 on engine abort. */
+static int xs_flush_microtasks(JsBridge *b)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || st->mtCount == 0)
+    {
+        return 0;
+    }
+#ifdef PLUTO_NR_MOUNT_PAUSE
+    if (st->mount.active && st->mount.parked)
+    {
+        return 0; /* parked mount owns the machine (same rule as timers) */
+    }
+#endif
+    xsMachine *m = st->machine;
+    int run = 0;
+    b->inClick = 1; /* reuse the dispatch re-entrancy guard */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
+            xsVars(1);
+            /* Ring dequeue: front index NEVER shifts; entries are pinned
+             * exactly once at enqueue and forgotten exactly once here (a
+             * struct copy of a pinned node corrupts the cRoot chain — the
+             * fork's fxRemember/fxForget use the slot struct itself as the
+             * chain node). The head advances only AFTER the callback and
+             * its unpin, so a callback's own enqueue always lands on a
+             * free tail slot — this drained entry still counts while it
+             * runs. Callbacks enqueued mid-drain join the flat queue,
+             * like a browser's microcheckpoint. */
+            while (st->mtCount > 0 && run < 256)
+            {
+                int idx = st->mtHead;
+                run++;
+                /* A2: each microtask callback is one browser microtask —
+                 * a fresh meter window per callback. Without this, ONE
+                 * flush call accumulates the boot's whole async fall-out
+                 * (~2500 callbacks, ~21M bytecodes) against the flush's
+                 * single window and trips the source-scaled abort
+                 * MID-BOOT (the stock window is cumulative from
+                 * meterIndex). Same sticky-pause guards as the fork's
+                 * per-job re-arm: mount bursts and split bursts keep
+                 * their own pause contracts. A single runaway callback
+                 * still aborts inside ITS window — CONTAINED by this
+                 * xsCatch (job-level failure, drain continues). */
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+                if ((run & 15) == 1)
+                {
+                    logger_log("[mt0] run=%d idx=%d interval=%lu count=%lu",
+                               run, idx, (unsigned long)m->meterInterval,
+                               (unsigned long)(m->meterIndex >> 16));
+                }
+#endif
+                if (m->meterInterval && !m->nrPauseRequest &&
+                    !m->nrPauseAbort)
+                {
+                    m->meterIndex = 0;
+                    m->meterCount = m->meterInterval;
+                }
+                xsTry
+                {
+                    xsVar(0) = st->mtQ[idx]; /* var pins beyond the unpin */
+                    xsCall0_noResult(xsVar(0), xsID("call"));
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+                    /* A2: per-callback count probe — separates "one fat
+                     * callback" from "the re-arm is trumped upstream". */
+                    if ((run & 7) == 3)
+                    {
+                        logger_log("[mt] run=%d count=%lu pending=%d",
+                                   run,
+                                   (unsigned long)(m->meterIndex >> 16),
+                                   st->mtCount);
+                    }
+#endif
+                }
+                xsCatch
+                {
+                    b->errs++;
+                    bridge_take_error_text(b, "microtask callback exception");
+                    logger_log("[js] microtask handler failed");
+                }
+                xsForget(st->mtQ[idx]); /* unpinned once consumed */
+                st->mtHead = (st->mtHead + 1) % XS_MICRO_MAX;
+                st->mtCount--;
+            }
+        }
+        xsEndHost(m);
+    }
+    xsEndMetering(m);
+    xsEndHostExit(m);
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (st->mtCount > 0)
+    {
+        logger_log("[js] microtasks deferred to next boundary (%d left)",
+                   st->mtCount);
+    }
+    if (m->exitStatus != xsNormalExit)
+    {
+        b->errs++;
+        bridge_take_error_text(b, "engine abort in microtask drain");
+        logger_log("[js] microtask dispatch aborted engine — engine reset");
+        xsDeleteMachine(m);
+        st->machine = NULL;
+        xs_split_invalidate(b); /* R20 pacing + R22 stepwise are dead */
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
+        return -1;
+    }
+    return run;
 }
 
 static void xs_close(JsBridge *b)
@@ -6890,6 +9489,19 @@ static void xs_close(JsBridge *b)
                     st->tfnSet[i] = 0;
                 }
             }
+            for (int i = 0; i < st->mtCount; i++)
+            {
+                xsForget(st->mtQ[(st->mtHead + i) % XS_MICRO_MAX]);
+            }
+            st->mtHead = 0;
+            st->mtCount = 0;
+            /* B3: element wrapper cache pins (one per cached node). */
+            for (int i = 0; i < st->elwCount; i++)
+            {
+                xsForget(st->elwWrap[i]);
+            }
+            st->elwCount = 0;
+            st->elwOverflow = 0;
         }
         xsEndHostExit(m);
         /* R28: invalidate the split/stepwise/mount sessions BEFORE the
@@ -6921,8 +9533,21 @@ static void xs_close(JsBridge *b)
 static void xs_xhr_open(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
+#if defined(PLUTO_HYDRATE_TRACE)
+    {
+        int ac = xsToInteger(xsArgc);
+        logger_log("[xhr] open argc=%d a0.kind=%s", ac,
+                   xsTypeOf(xsArg(0)) == xsUndefinedType ? "undef"
+                   : (xsTypeOf(xsArg(0)) == xsReferenceType ? "ref"
+                                                            : "prim"));
+    }
+#endif
     const char *method = xsToString(xsArg(0));
     const char *url = xsToString(xsArg(1));
+#if defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[xhr] open method='%.24s' url='%.60s'", method ? method : "",
+               url ? url : "");
+#endif
     int id = jsbridge_xhr_open(b, method, url);
     if (id == 0)
     {
@@ -6982,8 +9607,27 @@ static void xs_xhr_send(xsMachine *the)
     st->xobj[oslot] = xsThis;
     st->xobjSet[oslot] = 1;
     xsRemember(st->xobj[oslot]);
-    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
-                      (void *)(intptr_t)(oslot + 1));
+    /* C4: optional request body (the fetch shim's POST JSON). Anything
+     * that is not undefined coerces to the body string; the router
+     * deep-copies it before any other XS call can touch the scratch. */
+    const char *reqBody = NULL;
+    size_t reqBodyLen = 0;
+    if (xsToInteger(xsArgc) > 0 && xsTypeOf(xsArg(0)) != xsUndefinedType)
+    {
+        reqBody = xsToString(xsArg(0));
+        reqBodyLen = strlen(reqBody);
+    }
+    if (reqBody)
+    {
+        jsbridge_xhr_send_body(b, id, reqBody, reqBodyLen,
+                               (void *)(intptr_t)(fslot + 1),
+                               (void *)(intptr_t)(oslot + 1));
+    }
+    else
+    {
+        jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
+                          (void *)(intptr_t)(oslot + 1));
+    }
     xsResult = xsUndefined;
 }
 
@@ -7154,6 +9798,13 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
         pluto_mem_resync_live(); /* counter re-base (see run_script) */
         return -1;
     }
+    /* C4 (async fidelity): an onload that resolves the fetch promise
+     * queues the page's `await fetch(...)` continuation as a NATIVE
+     * promise job; the continuation's setState then queues React's
+     * flush via queueMicrotask. Drain AND flush alternate until both
+     * are empty (see the helper's note) — one flat pass left React's
+     * callback stranded in the ring for 47s. */
+    xs_boundary_microtasks(b);
     return 0;
 }
 
@@ -7199,6 +9850,124 @@ static int xs_mount_parked_query(JsBridge *b)
 #endif
 }
 
+/* ── R54: DOMContentLoaded at the script-queue drain ─────────────────
+ * Browser parse sequence: inline scripts evaluate while readyState is
+ * "loading"; DOMContentLoaded fires once AFTER the last of them. The
+ * per-frame parked queue reproduces exactly that span: readyState reads
+ * "loading" through the drain (see xs_document_readyState) and THIS
+ * dispatch is the drain moment the caller (jsbridge_script_queue_pump)
+ * invokes via impl->script_queue_drained. Without it the fork-framework
+ * branch is broken: next.js's app-router arms its RSC stream closer
+ * (M: closes the flight stream + voids the push buffer) on DCL, AND its
+ * fallback `setTimeout(M)` (50ms scheduler timer) firing BETWEEN queued
+ * script frames voided the buffer mid-push — "Unexpected server data:
+ * missing bootstrap script." on the page's last three flight scripts
+ * (the sim A/B: byte-sync drain = green; per-frame drain = 3 throws).
+ * Modeling: an Event object of type DOMContentLoaded dispatched to every
+ * registered document-level DCL listener (kind 3), one bracket, isolated
+ * throws, then the C4 boundary drain so the closer's resolution cascade
+ * (flight stream completion → hydrateRoot) starts here — the parked
+ * mount machinery owns any further frames, exactly like post-DCL
+ * hydration in a browser. */
+static void xs_script_queue_drained(JsBridge *b)
+{
+    if (!b || !b->implState)
+    {
+        return;
+    }
+    XsState *st = (XsState *)b->implState;
+    if (!st->machine)
+    {
+        return;
+    }
+    xsMachine *m = st->machine; /* value macros need `the` == m */
+    int fired = 0;
+    for (int i = 0; i < b->listenerCount; i++)
+    {
+        JsListener *L = &b->listeners[i];
+        if (L->kind != 3 || strcmp(L->type, "DOMContentLoaded") != 0)
+        {
+            continue;
+        }
+        xsSlot fn = st->fns[(int)(intptr_t)L->ref];
+        if (!fxIsCallable(m, &fn))
+        {
+            continue;
+        }
+        xsBeginHostExit(m);
+        xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+        {
+            xsBeginHost(m);
+            {
+                xsVars(2);
+                xsTry
+                {
+                    /* Event object built exactly like the load dispatch
+                     * (target = the document; react's closer only reads
+                     * nothing from it, but a real dispatch passes one). */
+                    xsVar(0) = xsNewHostObject(NULL);
+                    xsDefine(xsVar(0), xsID("type"),
+                             xsString("DOMContentLoaded"), xsDefault);
+                    xsDefine(xsVar(0), xsID("preventDefault"),
+                             xsNewHostFunction(xs_event_preventDefault, 0),
+                             xsDefault);
+                    DomNode *root =
+                        (b->dom && b->dom->root) ? b->dom->root : NULL;
+                    xsVar(1) = root ? xs_push_element(b, root) : xsNull;
+                    xsDefine(xsVar(0), xsID("target"), xsVar(1),
+                             xsDefault);
+                    xsCall2_noResult(fn, xsID("call"), xsVar(1),
+                                     xsVar(0));
+                    fired++;
+                    /* Boundary drain INSIDE the dispatch bracket: the
+                     * closer's o.close() resolves the flight consumer's
+                     * queued jobs; the hydrateRoot continuation must
+                     * begin in this same checkpoint (like every script
+                     * bracket since C4) — further work parks via R28
+                     * and resumes through the engine pump. */
+                    xs_drain_jobs(m);
+                    xs_flush_microtasks(b);
+                }
+                xsCatch
+                {
+                    char msg[112];
+                    msg[0] = '\0';
+                    {
+                        xsSlot exc = xsException;
+                        if (exc.kind == XS_REFERENCE_KIND)
+                        {
+                            xsSlot m2 = xsGet(exc, xsID("message"));
+                            char *s2 = to_cstring(m, m2);
+                            if (s2)
+                            {
+                                snprintf(msg, sizeof(msg), "%s", s2);
+                                JFree(s2);
+                            }
+                        }
+                    }
+                    logger_log("[dcl] DOMContentLoaded listener threw "
+                               "(isolated): %s",
+                               msg[0] ? msg : "exception");
+                    bridge_take_error_text(b, msg[0] ? msg : "exception");
+                    b->errs++;
+                }
+            }
+            xsEndHost(m);
+        }
+        xsEndMetering(m);
+        xsEndHostExit(m);
+        if (st->machine == NULL)
+        {
+            /* the bracket reset the machine (abort path) — job done */
+            logger_log("[dcl] dispatch ended in engine reset (ran=%d)", fired);
+            return;
+        }
+    }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dcl] DOMContentLoaded fired (listeners=%d)", fired);
+#endif
+}
+
 const JsEngineImpl js_engine_xs_nr = {
     xs_init,
     xs_run_script,
@@ -7212,7 +9981,9 @@ const JsEngineImpl js_engine_xs_nr = {
     xs_pump_split, /* R20: resume a time-sliced bundler split per frame */
     xs_eval_pending, /* R27: walker/snapshot wait-gate */
     xs_mount_parked_query, /* R28: router pump gate while parked */
-    "XS (No Recursion)"};
+    "XS (No Recursion)",
+    xs_dispatch_element_event, /* B2: click/input/change/submit bubbling */
+    xs_script_queue_drained /* R54: DOMContentLoaded at queue drain */};
 
 /* ── R20 host-harness seam ──────────────────────�
  * Direct entry to the split path for host tests (nrsplit harness);

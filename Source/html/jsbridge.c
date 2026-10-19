@@ -55,9 +55,18 @@ int budget_take(JsBridge *b)
 {
     if (b->callBudget <= 0)
     {
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[budget] DENY live=%d", b->callBudget);
+#endif
         return 0;
     }
     b->callBudget--;
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    if (b->callBudget < 20)
+    {
+        logger_log("[budget] low=%d", b->callBudget);
+    }
+#endif
     return 1;
 }
 
@@ -152,8 +161,117 @@ static const char *find_from(const char *hay, const char *end, const char *n,
 
 /* Extract <script> body spans (pointers into the raw HTML). Returns the
  * number found (may exceed `max`; the caller runs the first max). */
+
+/* ── Data-type script filter (browser-faithful) ───────────────────────────
+ * A <script> element whose `type=` attribute names a NON-executable MIME
+ * (the JSON family, importmap, speculationrules) must NOT run: browsers
+ * only execute a script when `type` is absent/empty or names JavaScript
+ * (HTML spec, §4.12.1). The two "SyntaxError: missing ;" failures on
+ * bryanwandrych.com/contact are exactly this — <script
+ * type="application/ld+json"> bodies hold a bare JSON object literal,
+ * which is a JS *block* statement, so every JS engine (browser-faithful
+ * ones) rejects it; the browser just never executes the block at all.
+ * Shared by BOTH script scanners (legacy inline extract_scripts here and
+ * FULL-mode jsbridge_scan_scripts in jsext.c) so every engine and every
+ * execution policy applies the same filter. Unknown-but-non-JSON types
+ * are NOT skipped (today's engine runs everything else; a stricter
+ * allow-list is a behavior change beyond this bug).
+ * Returns 1 when the element must be SKIPPED as data, 0 to run. */
+int jsbridge_script_type_is_data(const char *lt, const char *gt)
+{
+    if (!lt || !gt || lt >= gt)
+    {
+        return 0;
+    }
+    const char *p = lt;
+    while (p + 4 <= gt)
+    {
+        if ((p[0] | 0x20) == 't' && (p[1] | 0x20) == 'y' &&
+            (p[2] | 0x20) == 'p' && (p[3] | 0x20) == 'e')
+        {
+            /* Attribute name boundary: the previous char must separate an
+             * attribute (whitespace or '/'), so words like data-type do
+             * not match. */
+            const char *prev = p - 1;
+            if (p > lt && (*prev == ' ' || *prev == '\t' || *prev == '\n' ||
+                           *prev == '\r' || *prev == '/'))
+            {
+                const char *v = p + 4;
+                while (v < gt && (*v == ' ' || *v == '\t' || *v == '\n' ||
+                                  *v == '\r'))
+                {
+                    v++;
+                }
+                if (v < gt && *v == '=')
+                {
+                    v++;
+                    while (v < gt && (*v == ' ' || *v == '\t' || *v == '\n' ||
+                                      *v == '\r'))
+                    {
+                        v++;
+                    }
+                    char q = 0;
+                    if (v < gt && (*v == '"' || *v == '\''))
+                    {
+                        q = *v;
+                        v++;
+                    }
+                    char buf[48];
+                    size_t n = 0;
+                    while (v < gt && n < sizeof(buf) - 1)
+                    {
+                        char c = *v;
+                        if (q && c == q)
+                        {
+                            break;
+                        }
+                        if (!q && (c == ' ' || c == '\t' || c == '\n' ||
+                                   c == '\r' || c == '>'))
+                        {
+                            break; /* bareword value end */
+                        }
+                        buf[n++] = (char)((c >= 'A' && c <= 'Z') ? c + 32
+                                                                 : c);
+                        v++;
+                    }
+                    /* Trim a bare value's trailing '/' (e.g. type=x/>). */
+                    while (n > 0 && buf[n - 1] == '/')
+                    {
+                        n--;
+                    }
+                    buf[n] = '\0';
+                    if (!buf[0])
+                    {
+                        return 0; /* empty type ⇒ JavaScript */
+                    }
+                    if (strstr(buf, "javascript"))
+                    {
+                        return 0; /* any JS MIME never counts as data */
+                    }
+                    size_t len = strlen(buf);
+                    if (len >= 5 && strcmp(buf + len - 5, "+json") == 0)
+                    {
+                        return 1; /* RFC 8259 JSON family (ld+json etc.) */
+                    }
+                    if (strcmp(buf, "application/json") == 0 ||
+                        strcmp(buf, "text/json") == 0 ||
+                        strcmp(buf, "application/x-json") == 0 ||
+                        strcmp(buf, "importmap") == 0 ||
+                        strcmp(buf, "speculationrules") == 0)
+                    {
+                        return 1;
+                    }
+                    return 0; /* unknown type: keep today's run-everything */
+                }
+            }
+        }
+        p++;
+    }
+    return 0; /* no type attribute ⇒ JavaScript */
+}
+
 static int extract_scripts(const char *html, const char **starts, size_t *lens,
-                           int max)
+                           int max, const char **tags, size_t *tagLens)
 {
     const char *pos = html;
     const char *end = html + strlen(html);
@@ -193,6 +311,19 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
         {
             pos = gt + 1;
             continue; /* <scriptx … */
+        }
+        /* Data-type scripts (JSON-LD, importmap …) are not executable
+         * JavaScript — browsers never run them (HTML spec §4.12.1). Skipping
+         * mirrors the src= handling: no body captured, never counted. */
+        if (jsbridge_script_type_is_data(lt, gt))
+        {
+            const char *close = find_from(gt + 1, end, "</script", 8);
+            if (!close)
+            {
+                return count;
+            }
+            pos = close + 8;
+            goto next;
         }
         /* src= scripts: external JS is not fetched (no second engine pass);
          * skip the element like the tokenizer does. */
@@ -238,6 +369,12 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
             {
                 starts[count] = gt + 1;
                 lens[count] = (size_t)(close - (gt + 1));
+                if (tags && tagLens)
+                {
+                    /* A2: open-tag span for document.currentScript. */
+                    tags[count] = lt;
+                    tagLens[count] = (size_t)(gt - lt + 1);
+                }
             }
             count++;
 
@@ -254,6 +391,50 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
         }
     }
     return count;
+}
+
+/* ── A2: current-script context (browser-faithful document.currentScript) ──
+ * The ROUTER owns script execution order: it stamps which <script> open
+ * tag (plus any resolved src URL) is executing before handing the script to
+ * the impl, and clears the context after the run returns. Engines model the
+ * browser API off this (the NR engine synthesizes a script element whose
+ * getAttribute reads the stamped attrs); browsers expose null outside a
+ * script run, so dynamic code (timers, import(), page_script) sees null. */
+static void jsbridge_cur_script_clear(JsBridge *b)
+{
+    b->curTagStart = NULL;
+    b->curTagLen = 0;
+    b->curSrcUrl = NULL;
+}
+
+static void jsbridge_cur_script_stamp(JsBridge *b, const JsScriptSlot *slot,
+                                      const JsExtScript *e)
+{
+    jsbridge_cur_script_clear(b);
+    if (!slot)
+    {
+        return;
+    }
+    /* data:-URL slots carry no JsExtScript; browsers expose the raw data:
+     * URL as currentScript.src — the slot's inlineStart IS that value
+     * (SW2d), so passing it keeps parity there too. */
+    b->curSrcUrl = (slot->isExt && e) ? e->url
+                   : (slot->isExt && slot->extIndex == JS_SCRIPT_DATA)
+                       ? slot->inlineStart
+                       : NULL;
+    /* A2: remember the newest EXTERNAL chunk URL across clears — registry
+     * drains run during inline slots (curSrcUrl NULL there) and bundler
+     * loaders fall back to this for src-based asset-prefix discovery. The
+     * ext list lives for the whole page run, so the pointer stays valid. */
+    if (slot->isExt && e)
+    {
+        b->lastExtSrcUrl = e->url;
+    }
+    if (slot->tagStart && slot->tagLen)
+    {
+        b->curTagStart = slot->tagStart;
+        b->curTagLen = slot->tagLen;
+    }
 }
 
 /* ── compile-safety pre-scan (device stack guard) ──────────────────────────
@@ -605,12 +786,22 @@ void js_doc_flush_output(JsBridge *b)
 int jsbridge_el_set_inner_html(JsBridge *b, void *elp, const char *html,
                                size_t len)
 {
+    return jsbridge_el_set_inner_html_ex(b, elp, html, len,
+                                         JSBRIDGE_INNER_HTML_MAX);
+}
+
+/* The _ex variant takes the caller's cap (XS (No Recursion) bridge passes
+ * a document-sized one; the shared router keeps 16KB for every other
+ * engine — frozen behavior byte-identical). */
+int jsbridge_el_set_inner_html_ex(JsBridge *b, void *elp, const char *html,
+                                  size_t len, size_t maxLen)
+{
     DomNode *el = (DomNode *)elp;
     if (!b || !b->dom || !el || el->kind != DOM_ELEMENT || !html)
     {
         return -1;
     }
-    if (len > JSBRIDGE_INNER_HTML_MAX)
+    if (len > maxLen)
     {
         return -1;
     }
@@ -618,10 +809,23 @@ int jsbridge_el_set_inner_html(JsBridge *b, void *elp, const char *html,
     {
         return -1;
     }
-    /* Empty string = clear (still legal innerHTML). */
+    /* Empty string = clear (still legal innerHTML). Trace EVERY clear
+     * and every dropped child: this path is the only silent whole-subtree
+     * mutation react's fallback client render can reach, and the
+     * hydration debug needs the caller's footprint per kid. */
     for (int i = 0; i < el->childCount; i++)
     {
         el->children[i]->parent = NULL; /* detached (JS may hold wrappers) */
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[dom] innerHTML clear parent=%s(%p) child=%s kind=%d",
+                   (el->tag) ? el->tag : "?",
+                   (void *)el,
+                   (el->children[i]->kind == DOM_ELEMENT &&
+                    el->children[i]->tag)
+                       ? el->children[i]->tag
+                       : "(text)",
+                   (int)el->children[i]->kind);
+#endif
         if (!budget_take(b))
         {
             return -1;
@@ -733,18 +937,29 @@ int jsbridge_el_class_toggle(JsBridge *b, void *elp, const char *token)
     return dom_class_toggle(b->dom, (DomNode *)elp, token);
 }
 
-/* ── SW5: ES5-compatible Set / Map / Image shims (matrix old.reddit class)
- * * Pure-JS except the bare-minimum ES5 fallbacks, injected as a PREFIX
- * before every page script by run_script (all engines): any engine missing
- * a builtin gets a working-enough ES5 implementation; engines that HAVE
- * the builtin are untouched (the prefix defines nothing when the global
- * already exists). Kept tiny: this closes ReferenceError crashes on modern
- * bundles that construct Set/Map at load time — it is NOT a full ES6
- * collections implementation.
+/* ── SW5: ES5-compatible shims (Set / Map / Image / dataset /
+ * ReadableStream) * Pure-JS except the bare-minimum ES5 fallbacks,
+ * injected as a PREFIX before every page script by run_script (all
+ * engines): any engine missing a builtin gets a working-enough ES5
+ * implementation; engines that HAVE the builtin are untouched (the
+ * prefix defines nothing when the global already exists). Kept tiny:
+ * this closes ReferenceError crashes on modern bundles that construct
+ * Set/Map at load time — it is NOT a full ES6 collections
+ * implementation.
  * Image: constructor-only object (src property accepted, no decode) so
  * `new Image(); img.src = ...` preload patterns don't ReferenceError.
- * Size: ~1.4KB — prefixed per script, so it costs a few parse bytes per
- * script but no RAM residency beyond the engine's own parse. */
+ * dataset: live getAttribute-backed accessor map on documentElement's
+ * prototype (camelized data-* keys; unknown keys are plain property
+ * misses, like the browser) so bootstrap detection reading
+ * `documentElement.dataset.<key>` behaves like the browser on ES5
+ * engines.
+ * ReadableStream: minimal start/pull/getReader surface for RSC
+ * bootstrap (constructor calls start(ctl) once; ctl.enqueue/close/
+ * error; stream consumed via getReader().read() promise loops) plus
+ * async-pull wrapper sources; Promise-guarded (engines without
+ * Promise leave the global untouched).
+ * Size: ~3.7KB — prefixed per script, so it costs a few parse bytes
+ * per script but no RAM residency beyond the engine's own parse. */
 static const char JSBRIDGE_SW5_PREFIX[] =
     /* Set / Map: linear-array ES5 implementations. Keys are stored by
      * reference (===) which covers the object/string/number keying real
@@ -783,7 +998,185 @@ static const char JSBRIDGE_SW5_PREFIX[] =
     /* Image: constructor-only shim so `new Image(); img.src=...` preload
      * patterns construct cleanly (no decode — the walker never sees it). */
     "if(typeof Image=='undefined'){var Image=function(w,h){this.width=w||0;"
-    "this.height=h||0;this.src='';};}\n";
+    "this.height=h||0;this.src='';};}\n"
+    /* A2 (TextEncoder/TextDecoder): framework boots construct one during
+     * module init (Next.js App Router builds its RSC payload pipe with
+     * `new TextEncoder` before its DOMContentLoaded wait) — a missing
+     * constructor killed the boot inside the loader's swallow. encode()
+     * emits real UTF-8 (surrogate-pair aware); decode() converts back,
+     * re-pairing astral code points. Typed arrays are native (XS/Duktape
+     * ship them); engines without typed arrays only hit this shim when a
+     * page actually calls encode, which they could not fulfill before
+     * either — guarded defines, has-builtin engines are untouched. */
+    "if(typeof TextEncoder=='undefined'){var TextEncoder=function(){};"
+    /* A2c: UTF-8 buckets were shifted one octave (0x800-0xFFFF emitted
+     * 2 bytes with an invalid 0xC0 lead — "Bryan Wandrych — Portfolio"
+     * round-tripped a raw 0x14 and XS's JSON.parse rejected the flight
+     * row "1: invalid character"). Correct ladder: 1 | 2 | 3 | 4 bytes.
+     * The engine's JSON lexer accepts this — same bytes the server sent. */
+    "TextEncoder.prototype.encode=function(s){s=String(s);var out=[];"
+    "for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);"
+    "if(c>=0xD800&&c<=0xDBFF&&i+1<s.length){var d=s.charCodeAt(i+1);"
+    "if(d>=0xDC00&&d<=0xDFFF){c=0x10000+((c-0xD800)<<10)+(d-0xDC00);i++;}}"
+    "if(c>=0x10000){out.push(0xF0|((c>>18)&63),0x80|((c>>12)&63),"
+    "0x80|((c>>6)&63),0x80|(c&63));}"
+    "else if(c>=0x800){out.push(0xE0|((c>>12)&15),0x80|((c>>6)&63),"
+    "0x80|(c&63));}"
+    "else if(c>=0x80){out.push(0xC0|((c>>6)&31),0x80|(c&63));}"
+    "else{out.push(c);}}"
+    "return new Uint8Array(out);};"
+    "TextEncoder.prototype.encodeInto=function(s,a){var u=this.encode(s);"
+    "var n=u.length<a.length?u.length:a.length;"
+    "for(var i=0;i<n;i++)a[i]=u[i];return{read:n,written:n};};}\n"
+    "if(typeof TextDecoder=='undefined'){var TextDecoder=function(){};"
+    /* A2b: decode() must NOT build per-byte with s += fromCharCode — each
+     * += re-copies the whole accumulator, O(n^2) metered work (the RSC
+     * flight row resolver feeds this several-KB rows and the run trips
+     * XS's computation watchdog). Collect UTF-16 units in a plain array,
+     * then materialize the string in 8192-unit chunks — at most
+     * n/8192 concat copies instead of n. */
+    "TextDecoder.prototype.decode=function(u){if(!u)return '';"
+    "var n=u.length,units=[];"
+    "for(var i=0;i<n;){var c=u[i++];"
+    "if(c>=0xF0){c=((c&7)<<18)|((u[i++]&63)<<12)|((u[i++]&63)<<6)|(u[i++]&63);}"
+    "else if(c>=0xE0){c=((c&15)<<12)|((u[i++]&63)<<6)|(u[i++]&63);}"
+    "else if(c>=0xC0){c=((c&31)<<6)|(u[i++]&63);}"
+    "if(c>=0x10000){units.push(0xD800+(c>>10),0xDC00+(c&1023));}"
+    "else{units.push(c);}}"
+    "var s='',total=units.length;"
+    "for(var j=0;j<total;j+=8192)s+=String.fromCharCode.apply(null,"
+    "j+8192<=total?units.slice(j,j+8192):units.slice(j));"
+    "return s;};}\n"
+    /* A2 (URLSearchParams/queueMicrotask/atob/btoa): boot-critical globals
+     * of modern loaders — Next.js reads URLSearchParams while resolving
+     * its router state and schedules its RSC consumer via
+     * queueMicrotask/setTimeout; RSC payloads carry their base64 entries
+     * through atob/btoa (array包头 enforcement is thin here — string
+     * handling only, which is what b64 payloads need). Guarded defines. */
+    "if(typeof URLSearchParams=='undefined'){var URLSearchParams=function(q){"
+    "this._k=[];this._v=[];"
+    "if(q)if(typeof q=='string'){var a=q.split('&');"
+    "for(var i=0;i<a.length;i++){var kv=a[i].split('='),n=kv[0],v=kv[1];"
+    "if(n||kv.length>1){this._k.push(String(n).replace(/\\+/g,' '));"
+    "this._v.push(v===undefined?'':String(v).replace(/\\+/g,' '));}}}"
+    "else{for(var k2 in q)if(Object.prototype.hasOwnProperty.call(q,k2)){"
+    "this._k.push(String(k2));this._v.push(String(q[k2]));}}};"
+    "URLSearchParams.prototype.append=function(k,v){this._k.push(String(k));"
+    "this._v.push(String(v));};"
+    "URLSearchParams.prototype.get=function(k){for(var i=0;i<this._k.length;i++)"
+    "if(this._k[i]===String(k))return this._v[i];return null;};"
+    "URLSearchParams.prototype.getAll=function(k){var o=[];"
+    "for(var i=0;i<this._k.length;i++)if(this._k[i]===String(k))o.push(this._v[i]);"
+    "return o;};"
+    "URLSearchParams.prototype.has=function(k){for(var i=0;i<this._k.length;i++)"
+    "if(this._k[i]===String(k))return true;return false;};"
+    "URLSearchParams.prototype.set=function(k,v){k=String(k);v=String(v);"
+    "var seen=0;for(var i=0;i<this._k.length;i++)if(this._k[i]===k){"
+    "if(seen){this._k.splice(i,1);this._v.splice(i,1);i--;continue;}"
+    "this._v[i]=v;seen=1;}"
+    "if(!seen){this._k.push(k);this._v.push(v);}};"
+    "URLSearchParams.prototype['delete']=function(k){k=String(k);"
+    "for(var i=0;i<this._k.length;i++)if(this._k[i]===k){"
+    "this._k.splice(i,1);this._v.splice(i,1);i--;}};"
+    "URLSearchParams.prototype.forEach=function(cb,self){"
+    "for(var i=0;i<this._k.length;i++)cb.call(self,this._v[i],this._k[i],this);};"
+    "URLSearchParams.prototype.toString=function(){var a='';"
+    "for(var i=0;i<this._k.length;i++)a+=(a.length?'&':'')+this._k[i]+'='+this._v[i];"
+    "return a;};}\n"
+    "if(typeof queueMicrotask=='undefined'){var queueMicrotask=function(fn){"
+    "return Promise.resolve().then(fn);};}\n"
+    "if(typeof btoa=='undefined'){var btoa=function(s){"
+    "var T='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';"
+    "s=String(s);var o='';for(var i=0;i<s.length;i+=3){var a=s.charCodeAt(i),"
+    "b=s.charCodeAt(i+1),c=s.charCodeAt(i+2);"
+    "o+=T[a>>2]+T[((a&3)<<4)|(isNaN(b)?0:(b>>4))]+"
+    "(isNaN(b)?'=':T[((b&15)<<2)|(isNaN(c)?0:(c>>6))])+"
+    "(isNaN(c)?'=':T[c&63]);}"
+    "return o;};}\n"
+    "if(typeof atob=='undefined'){var atob=function(s){"
+    "var T='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';"
+    "s=String(s).replace(/[^A-Za-z0-9+\\/=]/g,'');var D={};"
+    "for(var z=0;z<T.length;z++)D[T[z]]=z;var o='';"
+    "for(var i=0;i<s.length;i+=4){var a=D[s.charAt(i)],b=D[s.charAt(i+1)];"
+    "if(a===undefined||b===undefined)return o;"
+    "var c2=s.charAt(i+2),d2=s.charAt(i+3);"
+    "var c=c2==='='?0:D[c2],d=d2==='='?0:D[d2];"
+    "o+=String.fromCharCode((a<<2|(b>>4))&255);"
+    "if(c2!=='=')o+=String.fromCharCode(((b<<4)|(c>>2))&255);"
+    "if(d2!=='=')o+=String.fromCharCode(((c<<6)|d)&255);}"
+    "return o;};}\n"
+    /* SW5 (HTMLElement.dataset): RSC boots read deployment markers via
+     * `document.documentElement.dataset.dplId` during module init. With no
+     * DOMStringMap the receiver is undefined and reading ANY dataset key
+     * throws (`cannot coerce undefined to object`), killing the module
+     * tree inside the loader's swallow — in browsers this is a plain
+     * property miss returning undefined. The getter builds a map whose
+     * known `data-*` attributes are accessor keys backed by
+     * getAttribute/setAttribute (reads are live), and whose unknown keys
+     * are plain property misses (undefined), matching the browser.
+     * Enumeration uses getAttributeNames or the attributes list when an
+     * engine has them, otherwise the map stays empty — reads still behave
+     * like the browser, which is what boots require. Guarded define;
+     * engines with a real dataset are untouched. Key camelization is a
+     * char loop (no function-replace callbacks — ES5 engines). */
+    "if(typeof document!='undefined'&&document.documentElement){"
+    "var DS__P=Object.getPrototypeOf(document.documentElement);"
+    "if(DS__P&&(typeof DS__P=='object'||typeof DS__P=='function')"
+    "&&typeof DS__P.dataset=='undefined'){"
+    "var DS__KEY=function(n){var s='';"
+    "for(var i=5;i<n.length;i++){var c=n.charAt(i);"
+    "if(c==='-'){i++;if(i<n.length)s+=n.charAt(i).toUpperCase();}"
+    "else s+=c;}return s;};"
+    "Object.defineProperty(DS__P,'dataset',{configurable:!0,enumerable:!1,"
+    "get:function(){var el=this,ds={},names=[],i;"
+    "if(typeof el.getAttributeNames=='function')names=el.getAttributeNames();"
+    "else if(el.attributes&&el.attributes.length!=null)"
+    "for(i=0;i<el.attributes.length;i++)"
+    "try{names.push(el.attributes[i].name)}catch(esn){}"
+    "for(i=0;i<names.length;i++){var n=String(names[i]);"
+    "if(n.indexOf('data-')==0&&n.length>5){var k=DS__KEY(n),a=n;"
+    "(function(k2,a2){try{Object.defineProperty(ds,k2,{configurable:!0,"
+    "enumerable:!0,get:function(){return el.getAttribute(a2)},"
+    "set:function(v){el.setAttribute(a2,v===undefined?'':String(v))}}"
+    ")}catch(esd){}})(k,a);}}"
+    "return ds;}});}}\n"
+    /* ReadableStream: one FIFO queue. enqueue hands the chunk to the
+     * oldest parked reader first (parked implies empty queue), else
+     * buffers; close/error drain parked readers (done / rejection).
+     * getReader().read() resolves buffered chunks immediately (native
+     * Promise) and parks with a [resolve, reject] pair when starving;
+     * pull sources are kicked once on the first starving read — async
+     * pumps keep themselves alive through their enqueues, and the kick
+     * re-arms when the pull promise settles. desiredSize reports a
+     * positive value so loaders take the clean close() path. */
+    "if(typeof Promise!='undefined'&&typeof ReadableStream=='undefined'){"
+    "var ReadableStream=function(src){var q=[],pend=[],closed=!1,"
+    "errored=null,pulling=!1;"
+    "var ctl={desiredSize:1,"
+    "enqueue:function(c){if(closed||errored)return;var p=pend.shift();"
+    "if(p){p[0]({done:!1,value:c});}else{q.push(c);}},"
+    "close:function(){if(closed||errored)return;closed=!0;var p;"
+    "while(p=pend.shift())p[0]({done:!0,value:void 0});},"
+    "error:function(e){if(closed||errored)return;errored=e;var p;"
+    "while(p=pend.shift())p[1](e);}};"
+    "var kick=function(){if(pulling||closed||errored)return;"
+    "if(src&&typeof src.pull=='function'){pulling=!0;var pr;"
+    "try{pr=src.pull(ctl);}catch(ep){pulling=!1;ctl.error(ep);return;}"
+    "if(pr&&typeof pr.then=='function')pr.then(function(){pulling=!1;"
+    "kick();},function(e2){pulling=!1;ctl.error(e2);});"
+    "else pulling=!1;}};"
+    "if(src&&typeof src.start=='function'){"
+    "try{src.start(ctl);}catch(es){if(!closed&&!errored)errored=es;}}"
+    "this.getReader=function(){return{read:function(){"
+    "if(q.length>0)return Promise.resolve({done:!1,value:q.shift()});"
+    "if(errored)return Promise.reject(errored);"
+    "if(closed)return Promise.resolve({done:!0,value:void 0});"
+    "kick();"
+    "return new Promise(function(res,rej){pend.push([res,rej]);});},"
+    "releaseLock:function(){},"
+    "cancel:function(){ctl.close();return Promise.resolve();}};};"
+    "this.cancel=function(){ctl.close();return Promise.resolve();};};"
+    "}\n";
 
 size_t jsbridge_sw5_prefix(const char **prefixOut)
 {
@@ -846,6 +1239,11 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     /* ── Script discovery + execution order (ENGINE-AGNOSTIC) ── */
     const char *starts[JSBRIDGE_MAX_SCRIPTS];
     size_t lens[JSBRIDGE_MAX_SCRIPTS];
+    /* A2: parallel open-tag spans for document.currentScript (pointer
+     * entries only — P19 stack rule keeps aggregate scratch off the render
+     * task; 2×24 pointers/sizes is 384B, same class as starts/lens). */
+    const char *tags[JSBRIDGE_MAX_SCRIPTS];
+    size_t tagLens[JSBRIDGE_MAX_SCRIPTS];
     int n = 0;
     int total = 0;
     if (!(policy == DOC_SCRIPT_FULL && doc->extScripts))
@@ -853,7 +1251,7 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
         /* OFF/RUN/RUN_KEEP: extract inline bodies up front. FULL defers this
          * (it scans slots instead) and only extracts in its OOM fallback. */
         n = extract_scripts(doc->rawHtml ? doc->rawHtml : "", starts, lens,
-                            JSBRIDGE_MAX_SCRIPTS);
+                            JSBRIDGE_MAX_SCRIPTS, tags, tagLens);
         total = (n > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS : n;
     }
     if (policy == DOC_SCRIPT_FULL && doc->extScripts)
@@ -883,105 +1281,40 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
                                                &extCount);
             int totalS = (nslots > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS
                                                          : nslots;
+            /* R54: PARK the plan, don't run it. The old loop executed every
+             * script's parse+compile+run bracket inside THIS attach call —
+             * one update() frame on device — and the 10s run-loop watchdog
+             * hard-crashed (E1) mid-lexer after ~9.5s of ARM parse work
+             * (2026-10-18 12:02:50). The parked plan drains ONE entry per
+             * frame through jsbridge_script_queue_pump (same branch
+             * semantics, same log rows, browser doc order preserved). */
             for (int i = 0; i < totalS; i++)
             {
-                if (!slots[i].isExt)
-                {
-                    impl->run_script(b, slots[i].inlineStart,
-                                     slots[i].inlineLen, i + 1);
-                }
-                else if (slots[i].extIndex == JS_SCRIPT_DATA)
-                {
-                    /* SW2d: data:-URL script — decode the payload straight
-                     * out of the page HTML (percent-escapes or base64 per
-                     * the mediatype params) and run it as an inline body.
-                     * Transient decode buffer: allocated, run, freed — RAM
-                     * holds one at a time, same as the spill materializer. */
-                    char *dsrc = jsext_decode_data_script(
-                        slots[i].inlineStart, slots[i].inlineLen);
-                    if (dsrc)
-                    {
-                        size_t dlen = strlen(dsrc);
-                        impl->run_script(b, dsrc, dlen, i + 1);
-                        JFree(dsrc);
-                        logger_log("[js] data: script ran (%zu bytes)", dlen);
-                    }
-                    else
-                    {
-                        logger_log("[js] data: script skip (decode failed) "
-                                   "#%d", i);
-                    }
-                }
-                else if (slots[i].extIndex >= 0 &&
-                         slots[i].extIndex < doc->extScriptCount)
-                {
-                    JsExtScript *e =
-                        &((JsExtScript *)doc->extScripts)[slots[i].extIndex];
-                    if (e->body && e->len)
-                    {
-                        /* run_script copies the source before running, so
-                         * the doc-owned body is never aliased. */
-                        impl->run_script(b, e->body, e->len, i + 1);
-                    }
-                    else if (e->spill >= 0 && e->len)
-                    {
-                        const JsEngineImpl *implNow = js_bridge_impl(b);
-                        if (implNow && implNow->run_script_stream)
-                        {
-                            /* R15: the engine can parse straight off the
-                             * disk spill handle — no RAM copy of the source
-                             * at all (SW2b's materialize round-trip was
-                             * the last giant transient; compile-time peak
-                             * drops by the full source size). */
-                            implNow->run_script_stream(b, e->spill, e->len,
-                                                       i + 1);
-                            logger_log("[js] ext ran from disk (stream): %s "
-                                       "(%zu bytes)",
-                                       e->url[0] ? e->url : "(url)", e->len);
-                        }
-                        else
-                        {
-                            /* SW2b: disk-resident source — materialize just-in-
-                             * time (RAM holds one active script; disk holds the
-                             * rest), run, release. Source-ceiling gating and
-                             * short-read handling live in the materializer. */
-                            char *src = jsext_materialize_spill_script(e);
-                            if (src)
-                            {
-                                impl->run_script(b, src, e->len, i + 1);
-                                JFree(src);
-                                logger_log("[js] ext ran from disk: %s (%zu bytes)",
-                                           e->url[0] ? e->url : "(url)", e->len);
-                            }
-                            else
-                            {
-                                logger_log("[js] ext skip (materialize failed): %s",
-                                           e->url[0] ? e->url : "(url)");
-                            }
-                        }
-                    }
-                    else
-                    {
-                        logger_log("[js] ext skip (not fetched): %s",
-                                   e->url[0] ? e->url : "(unresolved)");
-                    }
-                }
-                else
-                {
-                    logger_log("[js] ext skip (unmapped slot) #%d", i);
-                }
+                b->scriptQueue[b->scriptQueueCount++] = slots[i];
             }
+            logger_log("[jsbridge] attach parked %d script slot(s) for "
+                       "per-frame runs (was: all in one frame — E1 fix)",
+                       b->scriptQueueCount);
         }
         else
         {
             /* Scan-scratch OOM: degrade to inline-only (still logged). */
             logger_log("[js] FULL scan OOM: inline-only fallback");
             n = extract_scripts(doc->rawHtml ? doc->rawHtml : "", starts, lens,
-                                JSBRIDGE_MAX_SCRIPTS);
+                                JSBRIDGE_MAX_SCRIPTS, tags, tagLens);
             total = (n > JSBRIDGE_MAX_SCRIPTS) ? JSBRIDGE_MAX_SCRIPTS : n;
+            /* R54: same park-not-run policy as the main path (the pump
+             * hands inline entries to impl->run_script per frame). */
             for (int i = 0; i < total; i++)
             {
-                impl->run_script(b, starts[i], lens[i], i + 1);
+                JsScriptSlot s;
+                memset(&s, 0, sizeof(s));
+                s.isExt = 0;
+                s.inlineStart = starts[i];
+                s.inlineLen = lens[i];
+                s.tagStart = tags[i];
+                s.tagLen = tagLens[i];
+                b->scriptQueue[b->scriptQueueCount++] = s;
             }
         }
         if (slots)
@@ -997,7 +1330,16 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     {
         for (int i = 0; i < total; i++)
         {
+            JsScriptSlot s;
+            memset(&s, 0, sizeof(s));
+            s.isExt = 0;
+            s.inlineStart = starts[i];
+            s.inlineLen = lens[i];
+            s.tagStart = tags[i];
+            s.tagLen = tagLens[i];
+            jsbridge_cur_script_stamp(b, &s, NULL);
             impl->run_script(b, starts[i], lens[i], i + 1);
+            jsbridge_cur_script_clear(b);
         }
     }
 
@@ -1082,6 +1424,12 @@ void js_doc_close(JsBridge *b)
                 if (r->body)
                 {
                     JFree(r->body);
+                }
+                /* C4: the request body dies with the request (shared
+                 * teardown — frozen engines always have reqBody NULL). */
+                if (r->reqBody)
+                {
+                    JFree(r->reqBody);
                 }
                 memset(r, 0, sizeof(*r));
             }
@@ -1474,8 +1822,13 @@ void jsbridge_engine_pump(JsBridge *b, unsigned nowMs, int *mutationsOut)
 }
 
 /* R27: 1 while the engine still has background eval work in flight (XS NR
- * bundler split). The render pipeline gates the walk/snapshot on this so
- * they observe the POST-JS DOM. */
+ * bundler split) — or the R54 per-frame script queue still has entries.
+ * The render pipeline gates the walk/snapshot on this so they observe the
+ * POST-JS DOM: the sync attach loop ran every script before any walk, so
+ * walking mid-queue would capture the PRE-JS DOM and (with caching on)
+ * poison the snapshot with it. NOTE: the queue pump itself only gates on
+ * impl->eval_pending — counting the queue here too would make the pump
+ * wait on itself. */
 int jsbridge_eval_pending(JsBridge *b)
 {
     if (!b || b->inTimer || b->inClick)
@@ -1486,6 +1839,13 @@ int jsbridge_eval_pending(JsBridge *b)
     if (!impl || !impl->eval_pending)
     {
         return 0;
+    }
+    /* R54: the parked script queue is part of the pending truth (see the
+     * comment header). The pump's OWN gate uses impl->eval_pending only
+     * so it can never wait on itself. */
+    if (b->scriptQueueNext < b->scriptQueueCount)
+    {
+        return 1;
     }
     return impl->eval_pending(b);
 }
@@ -1552,6 +1912,224 @@ void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut)
     if (b->callBudget < budgetBefore && mutationsOut)
     {
         *mutationsOut = 1; /* the script mutated the DOM — re-render */
+    }
+}
+
+/* ── R54: per-frame script stage (parked FULL-mode plan) ─────────────────
+ * js_doc_attach parks the scanned slot plan on the bridge in document
+ * order; this dispatch helper runs ONE entry with branch semantics and
+ * log text IDENTICAL to the old sync attach loop (the device E1 of
+ * 2026-10-18 12:02:50 killed the loop inside a parse after ~9.5s of
+ * one-frame script work; see the struct field and the pump below).
+ * Returns void; the pump measures DOM budget around the call. Slots'
+ * spans point into doc-owned rawHtml — valid for the bridge lifetime.
+ * The index handed to engines is zero-based-slot+1 (same numbering as
+ * the sync loop, so log rows stay comparable). */
+static void jsbridge_run_script_entry(JsBridge *b, const JsScriptSlot *slot,
+                                      int index)
+{
+    /* The sync loop's skip/decode-failure rows print zero-based scan
+     * indices (`#%d`); index-1 preserves those exact texts. */
+    int i = index - 1;
+    const DocParseResult *doc = b->doc;
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !doc)
+    {
+        return;
+    }
+    if (!slot->isExt)
+    {
+        jsbridge_cur_script_stamp(b, slot, NULL);
+        impl->run_script(b, slot->inlineStart, slot->inlineLen, index);
+        jsbridge_cur_script_clear(b);
+    }
+    else if (slot->extIndex == JS_SCRIPT_DATA)
+    {
+        /* SW2d: data:-URL script — decode the payload straight out of the
+         * page HTML (percent-escapes or base64 per the mediatype params)
+         * and run it as an inline body. Transient decode buffer:
+         * allocated, run, freed — RAM holds one at a time. */
+        jsbridge_cur_script_stamp(b, slot, NULL);
+        char *dsrc = jsext_decode_data_script(slot->inlineStart,
+                                              slot->inlineLen);
+        if (dsrc)
+        {
+            size_t dlen = strlen(dsrc);
+            impl->run_script(b, dsrc, dlen, index);
+            jsbridge_cur_script_clear(b);
+            JFree(dsrc);
+            logger_log("[js] data: script ran (%zu bytes)", dlen);
+        }
+        else
+        {
+            jsbridge_cur_script_clear(b);
+            logger_log("[js] data: script skip (decode failed) #%d", i);
+        }
+    }
+    else if (slot->extIndex >= 0 && slot->extIndex < doc->extScriptCount)
+    {
+        JsExtScript *e =
+            &((JsExtScript *)doc->extScripts)[slot->extIndex];
+        if (e->body && e->len)
+        {
+            /* run_script copies the source before running, so the
+             * doc-owned body is never aliased. */
+            jsbridge_cur_script_stamp(b, slot, e);
+            impl->run_script(b, e->body, e->len, index);
+            jsbridge_cur_script_clear(b);
+        }
+        else if (e->spill >= 0 && e->len)
+        {
+            const JsEngineImpl *implNow = js_bridge_impl(b);
+            if (implNow && implNow->run_script_stream)
+            {
+                /* R15: the engine can parse straight off the disk spill
+                 * handle — no RAM copy of the source at all. */
+                jsbridge_cur_script_stamp(b, slot, e);
+                implNow->run_script_stream(b, e->spill, e->len, index);
+                jsbridge_cur_script_clear(b);
+                logger_log("[js] ext ran from disk (stream): %s (%zu bytes)",
+                           e->url[0] ? e->url : "(url)", e->len);
+            }
+            else
+            {
+                /* SW2b: disk-resident source — materialize just-in-time
+                 * (RAM holds one active script; disk holds the rest),
+                 * run, release. */
+                char *src = jsext_materialize_spill_script(e);
+                if (src)
+                {
+                    jsbridge_cur_script_stamp(b, slot, e);
+                    impl->run_script(b, src, e->len, index);
+                    jsbridge_cur_script_clear(b);
+                    JFree(src);
+                    logger_log("[js] ext ran from disk: %s (%zu bytes)",
+                               e->url[0] ? e->url : "(url)", e->len);
+                }
+                else
+                {
+                    logger_log("[js] ext skip (materialize failed): %s",
+                               e->url[0] ? e->url : "(url)");
+                }
+            }
+        }
+        else
+        {
+            logger_log("[js] ext skip (not fetched): %s",
+                       e->url[0] ? e->url : "(unresolved)");
+        }
+    }
+    else
+    {
+        logger_log("[js] ext skip (unmapped slot) #%d", i);
+    }
+}
+
+/* Per-frame head run: consumes ONE parked entry. Same gating contract as
+ * jsbridge_deferred_pump (busy engine → the head waits, retried next
+ * frame): mount-parked machines (R28), timer/click re-entrancy, and a
+ * mid-flight bundler split (impl->eval_pending) all hold the line.
+ * mutationsOut mirrors the deferred pump: set when the entry consumed
+ * DOM budget (caller schedules the standard re-render). */
+void jsbridge_script_queue_pump(JsBridge *b, int *mutationsOut)
+{
+    if (mutationsOut)
+    {
+        *mutationsOut = 0;
+    }
+    if (!b || b->scriptQueueNext >= b->scriptQueueCount || b->inTimer ||
+        b->inClick)
+    {
+        return;
+    }
+    if (jsbridge_mount_parked(b))
+    {
+        return; /* R28: parked mount owns the machine — retry next frame */
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (impl && impl->eval_pending && impl->eval_pending(b))
+    {
+        return; /* bundler split mid-flight — retry next frame */
+    }
+#ifdef PLUTO_R54_QUEUE_SYNC
+    /* A/B seam (sim-only, NO device build defines it): drain the whole
+     * parked queue synchronously — byte-identical ordering to the original
+     * sync attach loop — used to bisect "per-frame gaps break the page's
+     * RSC ingestion" vs "the park/drain mechanics themselves". */
+    do
+    {
+        JsScriptSlot slot = b->scriptQueue[b->scriptQueueNext];
+        int index = b->scriptQueueNext + 1;
+        b->scriptQueueNext++;
+        int budgetBefore = b->callBudget;
+        b->inTimer = 1;
+        jsbridge_run_script_entry(b, &slot, index);
+        b->inTimer = 0;
+        b->doc->jsRan = b->ran;
+        b->doc->jsErrors = b->errs;
+        snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+                 b->lastError);
+        if (b->callBudget < budgetBefore && mutationsOut)
+        {
+            *mutationsOut = 1;
+        }
+    } while (b->scriptQueueNext < b->scriptQueueCount);
+    if (mutationsOut)
+    {
+        *mutationsOut = 1; /* drain-complete re-walk (same as async) */
+    }
+    /* R54: DOMContentLoaded at drain (same as the per-frame path). */
+    {
+        const JsEngineImpl *dimpl = js_bridge_impl(b);
+        if (dimpl && dimpl->script_queue_drained)
+        {
+            dimpl->script_queue_drained(b);
+        }
+    }
+    logger_log("[jsbridge] script queue drained (SYNC seam): %d slot(s), "
+               "ran=%d errs=%d",
+               b->scriptQueueCount, b->ran, b->errs);
+    return;
+#endif
+    JsScriptSlot slot = b->scriptQueue[b->scriptQueueNext];
+    int index = b->scriptQueueNext + 1; /* sync-loop numbering */
+    b->scriptQueueNext++;               /* consume BEFORE running */
+    b->inTimer = 1; /* same re-entrancy contract as a timer fire */
+    jsbridge_run_script_entry(b, &slot, index);
+    b->inTimer = 0;
+    /* doc counters stay the sync loop's post-attach truth, refreshed. */
+    b->doc->jsRan = b->ran;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    /* R54: NO re-walks mid-drain. A/B evidence: 1 entry/frame with
+     * inter-frame re-walks → scripts 12-14 threw "missing bootstrap
+     * script", byte-sync drain green. Mechanism (bundle source, module
+     * 98569 in 3dmm3v_fq28gc.js): the tail scripts' __next_f pushes
+     * throw once the RSC push buffer `a` is voided; the closer M runs
+     * react's setTimeout fallback between frames (undefined readyState
+     * pre-R54) — see xs_document_readyState / xs_script_queue_drained
+     * for the readyState + DOMContentLoaded fix. Keeping the sync
+     * attach loop's single-visual-pass behavior anyway: mutations
+     * surface at the ONE drain-complete re-walk below. */
+    if (b->scriptQueueNext >= b->scriptQueueCount)
+    {
+        /* R54: browser parse moment — DOMContentLoaded fires once after
+         * the last script. The NR impl dispatches it to document-level
+         * DCL listeners (next.js's RSC closer arms itself there; see
+         * xs_script_queue_drained). Frozen engines: no hook, nothing. */
+        const JsEngineImpl *dimpl = js_bridge_impl(b);
+        if (dimpl && dimpl->script_queue_drained)
+        {
+            dimpl->script_queue_drained(b);
+        }
+        logger_log("[jsbridge] script queue drained: %d slot(s), ran=%d "
+                   "errs=%d",
+                   b->scriptQueueCount, b->ran, b->errs);
+        if (mutationsOut)
+        {
+            *mutationsOut = 1;
+        }
     }
 }
 
@@ -1726,8 +2304,35 @@ int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url)
     {
         return 0;
     }
-    if (!method || (strcmp(method, "GET") != 0 && strcmp(method, "get") != 0))
+#if defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[xhr] router open method='%.16s' url='%.50s'",
+               method ? method : "(null)", url ? url : "(null)");
+#endif
+    /* C4: POST (and other verbs that imply a body in practice) joins GET.
+     * The stored METHOD drives both the engine (fetch shim passes
+     * POST) and the wire path (http_request). Case-insensitive input,
+     * upcased storage. NULL keeps the old contract (error), and the
+     * unsupported-verb error text stays byte-identical for the frozen
+     * engines' logs. */
+    if (!method || !method[0])
     {
+        bridge_take_error_text(b, "xhr: only GET is supported");
+        return 0;
+    }
+    char ucMethod[8];
+    memset(ucMethod, 0, sizeof(ucMethod));
+    for (int i = 0; i < (int)sizeof(ucMethod) - 1 && method[i]; i++)
+    {
+        char c = method[i];
+        ucMethod[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    int isGet = (strcmp(ucMethod, "GET") == 0);
+    if (!isGet && strcmp(ucMethod, "POST") != 0)
+    {
+#if defined(PLUTO_HYDRATE_TRACE)
+        logger_log("[xhr] router reject: ucMethod='%.8s' raw='%.16s'",
+                   ucMethod, method);
+#endif
         bridge_take_error_text(b, "xhr: only GET is supported");
         return 0;
     }
@@ -1764,8 +2369,46 @@ int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url)
     r->state = JS_XHR_OPENED;
     snprintf(r->url, sizeof(r->url), "%s", abs);
     JFree(abs);
-    logger_log("[js] xhr #%d open %s", r->id, r->url);
+    snprintf(r->method, sizeof(r->method), "%s", isGet ? "GET" : ucMethod);
+    logger_log("[js] xhr #%d open %s %s", r->id, r->method, r->url);
     return r->id;
+}
+
+/* C4: send variant that carries the REQUEST BODY (fetch shim's POST JSON).
+ * Additive twin of jsbridge_xhr_send (frozen engines keep calling the
+ * body-less twin; body is deep-copied so the caller's string can be a
+ * transient). */
+void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
+                            size_t bodyLen, void *fnRef, void *objRef)
+{
+    if (!b || id <= 0)
+    {
+        return;
+    }
+    for (int i = 0; i < b->xhrCount; i++)
+    {
+        JsHttpRequest *r = &b->xhr[i];
+        if (r->active && r->id == id)
+        {
+            if (body && bodyLen && !r->reqBody &&
+                strcmp(r->method, "POST") == 0)
+            {
+                r->reqBody = (char *)JMalloc(bodyLen);
+                if (r->reqBody)
+                {
+                    memcpy(r->reqBody, body, bodyLen);
+                    r->reqBodyLen = bodyLen;
+                }
+                else
+                {
+                    bridge_take_error_text(b, "xhr: out of memory (body)");
+                    return;
+                }
+            }
+            break;
+        }
+    }
+    jsbridge_xhr_send(b, id, fnRef, objRef);
 }
 
 /* Start the actual fetch for an OPENED request. Returns 1 armed. Local
@@ -1819,7 +2462,29 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
     b->xhrInFlight = r->id;
     r->state = JS_XHR_HEADERS_SENT;
     logger_log("[js] xhr #%d send %s", r->id, r->url);
-    if (!http_get(r->url, &cbs))
+    /* C4: POST requests ride http_request with the stored request body;
+     * every GET (and any never-bodied request) keeps the old http_get path
+     * byte-for-byte. */
+    int started;
+    if (r->method[0] && strcmp(r->method, "POST") == 0 && r->reqBody)
+    {
+        /* R56f: expose the POST payload's lead bytes so the native form
+         * fallback can replicate the page's exact body format. */
+        char bodyTxt[112];
+        int bodyCut = (int)r->reqBodyLen;
+        if (bodyCut > 96)
+            bodyCut = 96;
+        snprintf(bodyTxt, sizeof(bodyTxt), "%.*s", bodyCut, r->reqBody);
+        logger_log("[js] xhr #%d POST body %u first96='%s'", r->id,
+                   (unsigned)r->reqBodyLen, bodyTxt);
+        started = http_request(r->method, r->url, r->reqBody, r->reqBodyLen,
+                               &cbs);
+    }
+    else
+    {
+        started = http_get(r->url, &cbs);
+    }
+    if (!started)
     {
         /* Immediate refusal: http_get may or may not have fired onError
          * already; settle only if still unsettled (the callback path owns
@@ -1921,6 +2586,17 @@ const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id)
     return NULL;
 }
 
+int jsbridge_take_dom_dirty(JsBridge *b)
+{
+    if (!b || !b->domDirty)
+    {
+        return 0;
+    }
+    b->domDirty = 0;
+    logger_log("[dom] dirty: innerHTML assignment triggered rewalk");
+    return 1;
+}
+
 int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
 {
     if (mutationsOut)
@@ -1996,6 +2672,12 @@ int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
                 {
                     JFree(r->body);
                 }
+                /* C4: free the request body alongside the response (see
+                 * the close-path sweep note). */
+                if (r->reqBody)
+                {
+                    JFree(r->reqBody);
+                }
                 memset(r, 0, sizeof(*r));
             }
         }
@@ -2035,6 +2717,22 @@ int jsbridge_dispatch_link_click(JsBridge *b, const void *anchorNode)
         return JSB_CLICK_NONE;
     }
     return impl->dispatch_click(b, anchorNode);
+}
+
+/* ── element event dispatch (B2: routed like link clicks) ────────────────── */
+int jsbridge_dispatch_element_event(JsBridge *b, const void *node,
+                                    const char *type)
+{
+    if (!b || b->inClick || !node || !type)
+    {
+        return JSB_EVENT_NONE;
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->dispatch_event /* NULL = frozen engines: native */)
+    {
+        return JSB_EVENT_NONE;
+    }
+    return impl->dispatch_event(b, node, type);
 }
 
 int jsbridge_listener_count(const JsBridge *b)

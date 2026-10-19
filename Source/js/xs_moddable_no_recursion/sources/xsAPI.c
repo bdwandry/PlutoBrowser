@@ -37,6 +37,14 @@
 
 #include "xsAll.h"
 
+#ifdef PLUTO_THROW_LOG
+	/* PLUTO throw trace (harness-only): engine-generated errors typed into
+	 * module factories / page try-catches are invisible at run level; this
+	 * routes every fxThrowMessage/fxThrow through the browser logger. */
+#include "logger.h"
+extern int g_pluto_throw_script; /* running script index (bridge sets) */
+#endif
+
 #define	XS_PROFILE_COUNT (256 * 1024)
 
 static txSlot* fxCheckHostObject(txMachine* the, txSlot* it);
@@ -1308,18 +1316,23 @@ txInteger fxCheckVar(txMachine* the, txInteger theIndex)
 	return theIndex;
 }
 
+/* R55b value-stack forensics: same probe shared with xsRun.c. */
+extern void pluto_fork_stack_overflow_probe(long want, long depth);
+
 void fxOverflow(txMachine* the, txInteger theCount, txString thePath, txInteger theLine)
 {
 	txSlot* aStack = the->stack + theCount;
 	if (theCount < 0) {
 		if (aStack < the->stackBottom) {
 			fxReport(the, "stack overflow (%ld)!\n", (the->stack - the->stackBottom) + theCount);
+			pluto_fork_stack_overflow_probe((long)-theCount, (long)(the->stackTop - the->stack));
 			fxAbort(the, XS_JAVASCRIPT_STACK_OVERFLOW_EXIT);
 		}
 	}
 	else if (theCount > 0) {
 		if (aStack > the->stackTop) {
 			fxReport(the, "stack overflow (%ld)!\n", theCount - (the->stackTop - the->stack));
+			pluto_fork_stack_overflow_probe((long)theCount, (long)(the->stackTop - the->stack));
 			fxAbort(the, XS_JAVASCRIPT_STACK_OVERFLOW_EXIT);
 		}
 	}
@@ -1329,6 +1342,13 @@ void fxOverflow(txMachine* the, txInteger theCount, txString thePath, txInteger 
 
 void fxThrow(txMachine* the, txString path, txInteger line)
 {
+#ifdef PLUTO_THROW_LOG
+	/* PLUTO throw trace (harness-only flag; device/sim builds compile this
+	 * out): module-factory failures land in the PAGE's own try/catch and
+	 * are invisible at the run level — one line per C-API throw unblocks
+	 * boot forensics (A2). */
+	logger_log("[throw] C-throw %s:%ld", path ? path : "?", (long)line);
+#endif
 #ifdef mxDebug
 	fxDebugThrow(the, path, line, "C: xsThrow");
 #endif
@@ -1360,6 +1380,126 @@ void fxThrowMessage(txMachine* the, txString path, txInteger line, txError error
 
 	if ((error <= XS_NO_ERROR) || (XS_ERROR_COUNT <= error))
 		error = XS_UNKNOWN_ERROR;
+
+#ifdef PLUTO_THROW_LOG
+	/* PLUTO throw trace (harness-only; compiled out in device/sim builds).
+	 * Engine-generated errors typed into module factories and page
+	 * try/catches never reach the run-level error counter — this makes
+	 * every ReferenceError/TypeError/etc. during a boot visible, with the
+	 * throwing frame and the nearest named frame's source line for module
+	 * triage. */
+	{
+		char framesAll[260];
+		char *locPath = C_NULL;
+		int locLine = -1;
+		txSlot *environment = C_NULL;
+		txSlot *frame = the->frame;
+		int nAll = 0;
+		framesAll[0] = '\0';
+		txSlot *walk = the->frame;
+		while (walk && nAll + 30 < (int)sizeof(framesAll)) {
+			char nm2[32];
+			nm2[0] = '\0';
+			fxBufferFrameName(the, nm2, sizeof(nm2), walk, "");
+			if (!nm2[0]) {
+				c_snprintf(nm2, sizeof(nm2), "?");
+			}
+			txInteger w2 = c_snprintf(framesAll + nAll,
+									  sizeof(framesAll) - (txSize)nAll,
+									  "%s%s", nAll ? "<-" : "", nm2);
+			if (w2 <= 0)
+				break;
+			nAll += w2;
+			walk = walk->next;
+		}
+		while (frame) {
+			environment = mxFrameToEnvironment(frame);
+			if (environment->ID != XS_NO_ID)
+				break;
+			frame = frame->next;
+		}
+		if (frame && the->frame) {
+			locPath = fxGetKeyName(the, environment->ID);
+			locLine = (int)environment->value.environment.line;
+		}
+		logger_log("[throw] script %d engine #%d: %s @[%s:%d] chain=%s",
+			   g_pluto_throw_script, (int)error, message,
+			   locPath ? locPath : "?", locLine, framesAll);
+		/* A2 throw-site: the running pc + opcode byte + hex trail. The
+		 * decodable instruction identity narrows the exact failing JS
+		 * point when frames are all minified internals. */
+		if (the->code) {
+			unsigned b1 = (unsigned char)the->code[1];
+			unsigned b2 = (unsigned char)the->code[2];
+			unsigned probeID = b1 | (b2 << 8);
+			const char *probeKey = "?";
+			if (probeID < the->keyCount) {
+				txSlot *keySlot = the->keyArray[probeID];
+				if (keySlot && (keySlot->flag & XS_DONT_ENUM_FLAG) &&
+					keySlot->value.string)
+					probeKey = keySlot->value.string;
+			}
+			/* A2 second id: the GET_PROPERTY that typically follows a
+			 * TO_INSTANCE throw in react's re-exec path sits ~6 bytes
+			 * ahead (TO_INSTANCE 1B + PULL/GET locals + op). */
+			unsigned probeID6 = 0;
+			const char *probeKey6 = "-";
+			if (the->keyCount > 0 && (unsigned char)the->code[5] == 0x60) {
+				probeID6 = (unsigned char)the->code[6] |
+						   ((unsigned int)(unsigned char)the->code[7] << 8);
+				if (probeID6 < the->keyCount) {
+					txSlot *keySlot6 = the->keyArray[probeID6];
+					if (keySlot6 && (keySlot6->flag & XS_DONT_ENUM_FLAG) &&
+						keySlot6->value.string)
+						probeKey6 = keySlot6->value.string;
+				}
+			}
+			logger_log("[tcode] code=%p b0=%d trail=%02x %02x %02x %02x %02x "
+					   "id=%u key=%s id6=%u key6=%s",
+					   (void *)the->code, (int)the->code[0],
+					   (int)(unsigned char)the->code[-4],
+					   (int)(unsigned char)the->code[-3],
+					   (int)(unsigned char)the->code[-2],
+					   (int)(unsigned char)the->code[-1],
+					   (int)(unsigned char)the->code[0],
+					   probeID, probeKey ? probeKey : "?",
+					   probeID6, probeKey6 ? probeKey6 : "?");
+			/* A2 wide window: 8 bytes before / 12 after the pc, hex. */
+			{
+				char hex[120];
+				int hx = 0;
+				for (int wi = -8; wi < 12 && hx + 4 < (int)sizeof(hex); wi++) {
+					unsigned wb = (unsigned char)the->code[wi];
+					if (wi < 0 && (txByte *)the->code + wi <
+									   (txByte *)the->firstBlock + sizeof(txBlock))
+						continue; /* don't peek outside the allocated block */
+					hx += c_snprintf(hex + hx, sizeof(hex) - (txSize)hx,
+									 "%s%02x", wi ? " " : "", wb);
+				}
+				logger_log("[twin] %s", hex);
+			}
+			/* A2 stack probe: kinds of the top 6 machine slots — the GET
+			 * AT receiver sits right below the running stack top; slot
+			 * sizes: kind word + value word logged as kind|id pairs. */
+			{
+				txSlot *ns = the->stack;
+				int ni;
+				if (ns) {
+					char ks[120];
+					int kk = 0;
+					for (ni = 0; ni < 6 && kk + 3 < (int)sizeof(ks);
+						 ni++) {
+						txSlot *sl = &ns[ni];
+						int k = sl->kind;
+						kk += c_snprintf(ks + kk, sizeof(ks) - (txSize)kk,
+										 "%s%d", ni ? "," : "", k);
+					}
+					logger_log("[tstack] kinds=%s", ks);
+				}
+			}
+		}
+	}
+#endif
 
     slot = fxNewSlot(the);
     slot->kind = XS_INSTANCE_KIND;

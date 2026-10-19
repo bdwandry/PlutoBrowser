@@ -34,7 +34,8 @@
 typedef enum
 {
     DOM_ELEMENT = 0,
-    DOM_TEXT
+    DOM_TEXT,
+    DOM_COMMENT
 } DomKind;
 
 typedef struct DomNode DomNode;
@@ -44,6 +45,11 @@ typedef struct
     char *key;   /* arena-owned */
     char *value; /* arena-owned decoded string, "", or PLUTO_TOK_ATTR_TRUE */
 } DomAttr;
+
+/* DOM_COMMENT nodes keep the RAW comment data in `text` (same field the
+ * tokenizer stores; comments are not entity-decoded). React's SSR
+ * hydration matcher walks these markers ("$!", "$?", "$~", "&", "F!",
+ * "F", "/$", "/&") to bind Suspense boundaries. */
 
 /* ── SW8: arena + paging support (implemented in dom.c / pluto_page.c) ──
  * The paging module allocates restored strings from the doc's OWN arena so
@@ -68,6 +74,15 @@ struct DomNode
      * transparently by dom_touch() (called at the bridge/walker touch
      * points). 0 = fully RAM-resident. */
     unsigned long pagedKey;
+    /* Shadow-DOM association (NR engine only; react's route announcer does
+     * host.attachShadow({mode:"open"}).appendChild(div)). The shadow root
+     * is a REAL element node kept OUT of the render tree (parent NULL →
+     * invisible to layout, tag scans and serializer output) but owned by
+     * full Element machinery, so appendChild/childNodes/getRootNode work
+     * on shadow content. Zero for every parsed tree node and every other
+     * detached fragment, so frozen engines are untouched. */
+    DomNode *shadowRoot; /* on the HOST element: its open shadow root */
+    DomNode *shadowHost; /* on the SHADOW ROOT node: owning element */
 };
 
 typedef struct
@@ -98,6 +113,12 @@ int dom_build_from_html(const char *html, DomResult *out);
 
 /* Find the first child element with the given tag (NULL if none). */
 const DomNode *dom_find_child(const DomNode *node, const char *tag);
+
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+/* Harness-only hydration debug: dump root-less fragment tops among the
+ * nodes created via dom_create_element (see dom.c). */
+void dom_created_dump(void);
+#endif
 
 /* Look up an attribute value; returns "" for boolean attributes present,
  * NULL when the attribute does not exist. */
@@ -142,6 +163,10 @@ DomNode *dom_create_element(DomResult *dom, const char *tag);
 /* Create a text node. NULL on alloc failure. */
 DomNode *dom_create_text(DomResult *dom, const char *text);
 
+/* Zero-child comment node (raw, non-decoded data). React hydration
+ * markers and document.createComment ride on these. */
+DomNode *dom_create_comment(DomResult *dom, const char *data);
+
 /* Append `child` to `parent`'s children. Returns 0 ok, -1 alloc failure or
  * bad args (child must not be an ancestor of parent — not checked). */
 int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child);
@@ -165,6 +190,13 @@ int dom_set_text(DomResult *dom, DomNode *el, const char *text);
 /* Set attribute `key` to `value` (replaces in place, else appends).
  * Empty value stores "" (still present). Returns 0 ok, -1 alloc. */
 int dom_set_attr(DomResult *dom, DomNode *el, const char *key, const char *value);
+
+/* Serialize an element's children as HTML markup (innerHTML parity; see
+ * dom.c for the writer rules). Returns 0 + heap string (caller frees via
+ * the funnel: JFree / pluto_mem_realloc(p, 0)) or -1 on bad args,
+ * -2 alloc failure, -3 runaway depth. `len` (nullable) receives the
+ * markup byte length. */
+int dom_serialize_children_html(const DomNode *el, char **out, size_t *len);
 
 /* Remove attribute `key`. Returns 0 removed, -1 absent. */
 int dom_remove_attr(DomNode *el, const char *key);

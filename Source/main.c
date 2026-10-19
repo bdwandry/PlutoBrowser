@@ -316,10 +316,11 @@ static void form_kb_did_hide(void *ud);
 /* Form keyboard target key (defined with the keyboard code, used early by
  * the formclick autotest). */
 static void form_key_snapshot(const LayoutItem *item);
-static void form_key_write(const char *text);
+static void form_key_write(const char *text, int commit);
 static const char *form_item_value(const LayoutItem *item);
 static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
+static DomNode *form_node_ancestor(DomNode *n);
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap);
 static void http_on_progress(int cur, int total);
 static void http_on_success(int status, char **headerKeys, char **headerVals,
@@ -497,6 +498,23 @@ static JsBridge *g_pageJs = NULL;
 
 /* Close the old page's bridge + doc, then adopt the new one. Callers must
  * already hold the new doc in rt->doc. */
+/* R56f: native form fallback state (the definitions live near
+ * form_node_ancestor below); page_swap_doc resets the card at the page
+ * boundary — the pointer must not survive document_free into the next
+ * page (use-after-free on the first fallback tap after a navigation). */
+static DomNode *g_fbCard;
+static DomResult *g_fbDom;
+enum
+{
+    FB_BODY_CAP = 1600,
+    FB_SAVED_MAX = 16
+};
+static char g_fbBody[FB_BODY_CAP];
+static int g_fbInFlight;
+static DomNode *g_fbSaved[FB_SAVED_MAX];
+static int g_fbSavedCount;
+static int g_fbSummaryOn;
+
 static void page_swap_doc(RenderTask *rt)
 {
     if (rt->rewalkDoc)
@@ -538,6 +556,16 @@ static void page_swap_doc(RenderTask *rt)
         }
         document_free(currentDoc);
         free(currentDoc);
+        /* R56f: the fallback's state lives in the OLD tree — drop it
+         * BEFORE any later tap could deref freed memory (the card is
+         * re-created lazily on the next fallback submit). Also kill the
+         * in-flight flag: the POST's callbacks carry the tree-identity
+         * guard and will self-log on the new page. */
+        g_fbCard = NULL;
+        g_fbDom = NULL;
+        g_fbInFlight = 0;
+        g_fbSummaryOn = 0;
+        g_fbSavedCount = 0;
         /* Page boundary: re-base the funnel's live counter to the tracked
          * truth — drift across this page's engine churn would otherwise
          * shrink the next page's usable budget (device flip-crash, 2026-09-22). */
@@ -675,11 +703,27 @@ static void js_timers_update(void)
     int engineMutations = 0;
     jsbridge_engine_pump(g_pageJs, nowMs, &engineMutations);
     mutations |= engineMutations;
+    /* R54: per-frame script stage — js_doc_attach (FULL mode) parks the
+     * page's script plan in document order and this runs ONE entry per
+     * frame. The old sync attach loop executed every script's
+     * parse+compile+run inside one update(); the device breached the 10s
+     * watchdog mid-lexer (E1 2026-10-18 12:02:50). */
+    int queueMutations = 0;
+    jsbridge_script_queue_pump(g_pageJs, &queueMutations);
+    mutations |= queueMutations;
     /* Roadmap #3: deliver settled XHR/fetch completions through the SAME
      * engine bracket + re-render path (the HTTP client was pumped earlier
      * this frame by http_update; completions it settled are pending here). */
     int xhrMutations = 0;
     (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    /* innerHTML wrapper assignments (XS (No Recursion)): the shared
+     * engines never set the latch, so the extra take is a no-op for
+     * them. Swap the layout to the fresh subtree (fallback restore swaps
+     * head/body wholesale) before the user's next tap hits stale blocks. */
+    if (jsbridge_take_dom_dirty(g_pageJs))
+    {
+        xhrMutations = 1;
+    }
     if (mutations || xhrMutations)
     {
         page_rewalk_now();
@@ -1241,7 +1285,595 @@ static void nr_revisit_autotest_tick(void)
         g_nrSnapPhase = 3;
     }
 }
+
+/* ── [nr-autotest-tap]: sim autotest, first stamped submit block ─────────
+ * After the boot page settles (hydration fallback IS allowed to run its
+ * course — phases wait past any innerHTML restore + induced rewalk), find
+ * the first layout item of type LRI_INPUT_SUBMIT whose block carries a
+ * stamped srcNode (input[type=submit|button]/button inside <form>) and
+ * drive the EXACT path a real tap uses: activate_form_block() → B2 click
+ * dispatch → B5 submit branch. PASS evidence = [form] dispatch rows +
+ * in-place handling (no navigation change) + jsErrors unchanged; the
+ * device was never touched — SIM ONLY (user gate for device deploys). */
+#if defined(PLUTO_NR_AUTOTEST_TAP)
+/* The render-result sample rows print only the FIRST THREE blocks, so a
+ * pass that hinges on text ANYWHERE on the page needs a whole-array scan:
+ * concat each block's inline texts (same source of truth the renderer
+ * prints) and substring-search. First hit returns its text for the log. */
+static int nr_tap_blocks_contain(const char *needle, const char **hit)
+{
+    if (!currentDoc || !currentDoc->blocks || !needle)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk)
+        {
+            continue;
+        }
+        for (int ii = 0; ii < blk->inlineCount; ii++)
+        {
+            const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                                ? blk->inlines[ii]->text
+                                : "";
+            if (t && strstr(t, needle))
+            {
+                if (hit)
+                {
+                    *hit = t;
+                }
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int g_nrTapPhase = 0; /* 0=settle, 1=scan+tap, 2=observe, 3=done */
+static unsigned g_nrTapFrames = 0;
+static int g_nrTapErrsBefore = 0;
+static char g_nrTapUrlBefore[128];
+static int g_nrTapBlocksBefore = -1; /* C5: block count at tap time */
+static DomNode *g_nrTapAnyNode = NULL; /* C5: clicked (formless) button node */
+static char g_nrTapAriaPre[12];       /* C5: aria-expanded pre-tap value */
+
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+/* C4 typed-send: the contact handler only POSTs once its validation
+ * passes (email regex, subject >= 2 chars, message >= 10), so the tap
+ * autotest gains a typing pass before the submit: three form_key_write
+ * commits. One write per tick — each commit's dispatched events run
+ * react's onChange → state set → re-render in the microtask pump, and the
+ * next tick re-scans a FRESH layout (stale item pointers would dangle).
+ * The honeypot input (placeholder "Company (leave blank)", aria-hidden) is
+ * skipped explicitly: its handler branch pretends-sent WITHOUT a fetch. */
+static const char *const g_nrTypeTexts[3] = {
+    "autotest@example.com",   /* passes the page's email regex */
+    "Sim autotest subject",   /* >= 2 chars */
+    "Hello from the PlutoBrowser simulator autotest message.", /* >= 10 */
+};
+static int g_nrTapField = 0;          /* next field to fill (typed order) */
+static char g_nrTapSubmitAction[128]; /* captured at the submit scan */
+/* The nth form-owned typeable field in layout (document) order that
+ * matches the tapped submit's formAction (a <form> stamps all members
+ * with resolve_href(action-or-"") — identical strings for same-form
+ * items; formless inputs keep the OUTER w->formAction which FORM_END
+ * restores). Scans fresh on every call; form_key_snapshot derives its
+ * (form, name, ordinal) key from the SAME live layout, so this scan and
+ * the write's resolution stay in sync. */
+static const LayoutItem *nr_type_field_item(int nth)
+{
+    int seen = 0;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (!it || it->type != LRI_INPUT_FIELD || !it->name)
+        {
+            continue;
+        }
+        const char *fa = it->formAction ? it->formAction : "";
+        if (strcmp(fa, g_nrTapSubmitAction) != 0)
+        {
+            continue; /* not a member of the tapped form */
+        }
+        if (it->placeholder && strstr(it->placeholder, "leave blank"))
+        {
+            continue; /* honeypot: fake-sent exit, no POST */
+        }
+        if (seen == nth)
+        {
+            return it;
+        }
+        seen++;
+    }
+    return NULL;
+}
+#endif /* PLUTO_NR_AUTOTEST_TYPE */
+
+#if defined(PLUTO_NR_AUTOTEST_TAP2)
+/* TAP2 (Send-another regression, 2026-10-18): after the C4 summary, re-run
+ * the SAME tap path on react's FORMLESS "Send another" <button> and require
+ * the form fields to come back in the LIVE DOM (an input under a <form>).
+ * Catches the R58 finding: a setState flush that swaps the summary subtree
+ * WITHOUT a re-walk leaves stale layout blocks + detached srcNodes (every
+ * later tap dispatches to a dead node). Also closes the LOOP: after the
+ * restore it re-enters phase 1 (re-type + re-send) for up to
+ * g_nrTap2Cycle full rotations — proving send ↔ Send-another can repeat
+ * indefinitely. */
+static int g_nrTap2BlocksBefore;
+static int g_nrTap2Cycle;
+
+static int nr_tap_scan_form_field(const DomNode *n, int depth)
+{
+    int i;
+    if (!n || n->kind != DOM_ELEMENT || !n->tag || depth > 8)
+    {
+        return 0;
+    }
+    if ((!strcmp(n->tag, "input") || !strcmp(n->tag, "textarea") ||
+         !strcmp(n->tag, "select")) &&
+        form_node_ancestor((DomNode *)n))
+    {
+        return 1;
+    }
+    if (!strcmp(n->tag, "script") || !strcmp(n->tag, "style") ||
+        !strcmp(n->tag, "svg") || !strcmp(n->tag, "button"))
+    {
+        return 0;
+    }
+    for (i = 0; i < n->childCount; i++)
+    {
+        if (nr_tap_scan_form_field(n->children[i], depth + 1))
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int nr_tap_form_fields_back(void)
+{
+    if (!currentDoc || !currentDoc->_dom)
+    {
+        return 0;
+    }
+    return nr_tap_scan_form_field(((DomResult *)currentDoc->_dom)->root, 0);
+}
+#endif /* PLUTO_NR_AUTOTEST_TAP2 */
+
+static void nr_autotest_tap_tick(void)
+{
+    if (g_nrTapPhase == 3 || isRendering)
+    {
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc || !g_pageJs)
+    {
+        g_nrTapFrames = 0; /* boot nav still in flight */
+        return;
+    }
+    ++g_nrTapFrames;
+    if (g_nrTapPhase == 0)
+    {
+        if (g_pageJs && jsbridge_eval_pending(g_pageJs))
+        {
+            if (g_nrTapFrames > 3600)
+            {
+                logger_log("[nr-autotest-tap] FAIL: eval never completed");
+                g_nrTapPhase = 3;
+            }
+            return;
+        }
+        if (g_nrTapFrames < 360)
+        {
+            return; /* settle: hydration fallback + innerHTML rewalk land */
+        }
+        g_nrTapPhase = 1;
+        g_nrTapFrames = 0;
+        snprintf(g_nrTapUrlBefore, sizeof(g_nrTapUrlBefore), "%s",
+                 currentDoc->baseUrl);
+        g_nrTapErrsBefore = currentDoc->jsErrors;
+        logger_log("[nr-autotest-tap] phase 1: scanning for stamped submit "
+                   "block (url=%.80s)", g_nrTapUrlBefore);
+    }
+    if (g_nrTapPhase == 1)
+    {
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+        if (g_nrTapSubmitAction[0] == '\0')
+        {
+            /* Resolve the submit's formAction so the typed field scan can
+             * match same-form items (same predicate as the tap scan
+             * below). */
+            const LayoutItem *sub = NULL;
+            for (int i = 0; i < layout_get_item_count(); i++)
+            {
+                const LayoutItem *it = layout_item_at(i);
+                if (it && it->type == LRI_INPUT_SUBMIT && it->block &&
+                    ((const DocBlock *)it->block)->srcNode &&
+                    form_node_ancestor(
+                        (DomNode *)((const DocBlock *)it->block)->srcNode))
+                {
+                    sub = it;
+                    break;
+                }
+            }
+            if (!sub)
+            {
+                logger_log("[nr-autotest-tap] FAIL: no stamped submit for "
+                           "the type pass");
+                g_nrTapPhase = 3;
+                return;
+            }
+            snprintf(g_nrTapSubmitAction, sizeof(g_nrTapSubmitAction), "%s",
+                     sub->formAction ? sub->formAction : "");
+            logger_log("[nr-autotest-tap] type: submit formAction='%.70s'",
+                       g_nrTapSubmitAction);
+        }
+        if (g_nrTapField <
+            (int)(sizeof(g_nrTypeTexts) / sizeof(g_nrTypeTexts[0])))
+        {
+            const LayoutItem *f = nr_type_field_item(g_nrTapField);
+            if (!f)
+            {
+                logger_log("[nr-autotest-tap] FAIL: field %d not found on "
+                           "the tapped form (typed=%d)",
+                           g_nrTapField, g_nrTapField);
+                g_nrTapPhase = 3;
+                return;
+            }
+            logger_log("[nr-autotest-tap] type[%d]: inputType=%s "
+                       "placeholder='%.16s'",
+                       g_nrTapField, f->inputType ? f->inputType : "?",
+                       f->placeholder ? f->placeholder : "");
+            form_key_snapshot(f);
+            form_key_write(g_nrTypeTexts[g_nrTapField],
+                           1 /* commit → input + change */);
+            g_nrTapField++;
+            return; /* next frame: fresh scan after the re-render settles */
+        }
 #endif
+        /* Target the FORM submit control: the first LRI_INPUT_SUBMIT whose
+         * stamped srcNode has a <form> ancestor (header/nav buttons carry
+         * stamps too — the site's nav toggle sorts before the contact
+         * form in document order, and a formless button never submits).
+         * C5 (PLUTO_NR_AUTOTEST_ANYBUTTON): take the FIRST stamped button
+         * regardless of a form ancestor — the nav/toggle class; its
+         * click must re-render in place without a reload. */
+        const LayoutItem *target = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_SUBMIT && it->block &&
+                ((const DocBlock *)it->block)->srcNode
+#if !defined(PLUTO_NR_AUTOTEST_ANYBUTTON)
+                && form_node_ancestor(
+                    (DomNode *)((const DocBlock *)it->block)->srcNode)
+#endif
+            )
+            {
+                target = it;
+                break;
+            }
+        }
+        if (!target)
+        {
+            logger_log("[nr-autotest-tap] FAIL: no stamped LRI_INPUT_SUBMIT "
+                       "block on the page");
+            g_nrTapPhase = 3;
+            return;
+        }
+        DomNode *src = (DomNode *)((const DocBlock *)target->block)->srcNode;
+        logger_log("[nr-autotest-tap] tap: submit block tag=%s index=%d "
+                   "blocksTotal=%d",
+                   (src && src->tag) ? src->tag : "?",
+                   (int)layout_get_item_count(),
+                   currentDoc ? currentDoc->blockCount : -1);
+#if defined(PLUTO_NR_AUTOTEST_ANYBUTTON)
+        /* C5: capture the clicked node + its aria-expanded pre-value —
+         * the site's nav toggle flips aria-expanded/data-open via react
+         * state (an ATTRIBUTE change; the menu stays structural). */
+        g_nrTapAnyNode = src;
+        const char *pv = dom_get_attr(src, "aria-expanded");
+        snprintf(g_nrTapAriaPre, sizeof(g_nrTapAriaPre), "%s",
+                 pv ? pv : "-");
+        logger_log("[nr-autotest-tap] c5 tap aria-expanded='%s' blocks=%d",
+                   g_nrTapAriaPre, currentDoc ? currentDoc->blockCount : -1);
+#endif
+        activate_form_block(target);
+        g_nrTapBlocksBefore = currentDoc ? currentDoc->blockCount : -1; /* C5 */
+        g_nrTapPhase = 2;
+        g_nrTapFrames = 0;
+        return;
+    }
+    if (g_nrTapPhase == 2)
+    {
+#if defined(PLUTO_NR_AUTOTEST_ANYBUTTON)
+        /* C5: the stamped (formless) button is pure click dispatch — no
+         * submit run, no typed fields. Browser-faithful acceptance = the
+         * click's REACTIVE effect lands: the site's nav toggle flips
+         * aria-expanded (react state → attribute update; the menu itself
+         * never changes structure, so blockCount is the FALLBACK tell —
+         * open/close lists). ~8s budget (240 pd-frames) mirrors the C4
+         * wait; polls name the values every 60. */
+        int nowBlocks = currentDoc ? currentDoc->blockCount : -1;
+        const char *ariaNow =
+            g_nrTapAnyNode ? dom_get_attr(g_nrTapAnyNode, "aria-expanded")
+                           : NULL;
+        const char *ariaCur = (ariaNow && ariaNow[0]) ? ariaNow : "-";
+        int ariaFlipped =
+            g_nrTapAnyNode && strcmp(g_nrTapAriaPre, ariaCur) != 0 &&
+            strcmp(g_nrTapAriaPre, "-") != 0;
+        if (g_nrTapFrames < 240)
+        {
+            if ((g_nrTapFrames % 60) == 0)
+            {
+                logger_log("[nr-autotest-tap] c5poll blocks=%d (was %d) "
+                           "aria='%s' (was '%s') frames=%u",
+                           nowBlocks, g_nrTapBlocksBefore, ariaCur,
+                           g_nrTapAriaPre, g_nrTapFrames);
+            }
+            if (ariaFlipped)
+            {
+                logger_log("[nr-autotest-tap] C5 RESULT inPlace=yes "
+                           "blocks=%d (was %d) clickReactive=yes "
+                           "aria-expanded '%s'->'%s' jsErrors=%d",
+                           nowBlocks, g_nrTapBlocksBefore, g_nrTapAriaPre,
+                           ariaCur, currentDoc ? currentDoc->jsErrors : -1);
+                g_nrTapPhase = 3;
+                return;
+            }
+            if (g_nrTapBlocksBefore > 0 && nowBlocks > 0 &&
+                nowBlocks != g_nrTapBlocksBefore)
+            {
+                logger_log("[nr-autotest-tap] C5 RESULT inPlace=yes "
+                           "blocks=%d (was %d) clickReactive=yes "
+                           "aria-unread jsErrors=%d",
+                           nowBlocks, g_nrTapBlocksBefore,
+                           currentDoc ? currentDoc->jsErrors : -1);
+                g_nrTapPhase = 3;
+                return;
+            }
+            return;
+        }
+        logger_log("[nr-autotest-tap] C5 RESULT inPlace=yes blocks=%d (was "
+                   "%d) clickReactive=no aria='%s' (was '%s') jsErrors=%d",
+                   nowBlocks, g_nrTapBlocksBefore, ariaCur, g_nrTapAriaPre,
+                   currentDoc ? currentDoc->jsErrors : -1);
+        g_nrTapPhase = 3;
+        return;
+#endif
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+        /* C4: wait until the send state settles (the handler's await of
+         * the fetch POST resolves into the sent/error cards) or ~20s
+         * runs out (pd frames ~30/s — 'Sending…' remains the fingerprint
+         * of a stuck wire). */
+        /* C4 (15:20 cycle): the real sent card's fingerprint block is
+         * "Sent. Your message is on its way to bwandrych@…" — the
+         * imagined "Send another" button never existed in the render. */
+        int sentCard = nr_tap_blocks_contain("Sent.", NULL);
+        int errState = nr_tap_blocks_contain("Something went wrong", NULL);
+        if (!sentCard && !errState && g_nrTapFrames < 600)
+        {
+            if ((g_nrTapFrames % 150) == 0)
+            {
+                const char *sh = NULL;
+                nr_tap_blocks_contain("Sending", &sh);
+                logger_log("[nr-autotest-tap] sendingCard=%d frames=%u",
+                           sh ? 1 : 0, g_nrTapFrames);
+            }
+            return;
+        }
+#endif
+        if (g_nrTapFrames < 90)
+        {
+            return; /* let the dispatched submit/handlers finish */
+        }
+        int same = currentDoc && strcmp(currentDoc->baseUrl,
+                                        g_nrTapUrlBefore) == 0;
+        /* C3 textual proof: the suppressed submit must leave the form's
+         * inline validation message in the rendered blocks (contact page:
+         * "…a valid email address"). A miss is honest: errCard=0 with the
+         * rest of the RESULT row still reported. */
+        const char *errHit = NULL;
+        int errCard = nr_tap_blocks_contain("valid email", &errHit);
+        logger_log("[nr-autotest-tap] RESULT inPlace=%s jsErrors=%d (was %d) "
+                   "blocks=%d errCard=%d"
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+                   " sentCard=%d errState=%d"
+#endif
+                   ,
+                   same ? "yes" : "no",
+                   currentDoc ? currentDoc->jsErrors : -1,
+                   g_nrTapErrsBefore,
+                   currentDoc ? currentDoc->blockCount : -1,
+                   errCard
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+                   ,
+                   sentCard, errState
+#endif
+        );
+        if (errCard)
+        {
+            logger_log("[nr-autotest-tap] errCard text='%.60s'", errHit);
+        }
+#if defined(PLUTO_NR_AUTOTEST_TYPE)
+        {
+            const char *hit = NULL;
+            if (sentCard && nr_tap_blocks_contain("Sent.", &hit))
+            {
+                logger_log("[nr-autotest-tap] sentCard text='%.60s'", hit);
+            }
+            if (errState && nr_tap_blocks_contain("Something went wrong",
+                                                  &hit))
+            {
+                logger_log("[nr-autotest-tap] errState text='%.60s'", hit);
+            }
+        }
+#endif
+#if defined(PLUTO_NR_AUTOTEST_TAP2) && defined(PLUTO_NR_AUTOTEST_TYPE)
+        if (sentCard)
+        {
+            /* TAP2: don't stop at the summary — prove the "Send another"
+             * tap restores the fields, then loop back for another send. */
+            g_nrTapPhase = 4;
+            g_nrTapFrames = 0;
+            logger_log("[nr-autotest-tap] TAP2 armed: summary up; settling "
+                       "90 frames before the Send-another tap");
+            return;
+        }
+#endif
+        g_nrTapPhase = 3;
+    }
+#if defined(PLUTO_NR_AUTOTEST_TAP2)
+    if (g_nrTapPhase == 4)
+    {
+        if (g_nrTapFrames < 90)
+        {
+            return; /* settle: let the summary's own re-walk land */
+        }
+        if (nr_tap_form_fields_back())
+        {
+            logger_log("[nr-autotest-tap] TAP2 skip: fields already back "
+                       "pre-tap");
+            g_nrTapPhase = 3;
+            return;
+        }
+        g_nrTapPhase = 5;
+        g_nrTapFrames = 0;
+        logger_log("[nr-autotest-tap] TAP2: scanning for the summary's "
+                   "formless Send-another button");
+    }
+    if (g_nrTapPhase == 5)
+    {
+        /* The summary's button is the BOTTOM-MOST formless stamped submit
+         * (header nav toggles stamp too but sort first in document order;
+         * the footer's GitHub/LinkedIn entries are anchors, not buttons).
+         * "Send another" replaces the removed form, so it sits below the
+         * sent text and the From/Subject rows. */
+        const LayoutItem *target = NULL;
+        int targetBlock = -1;
+        int i;
+        for (i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_SUBMIT && it->block &&
+                ((const DocBlock *)it->block)->srcNode)
+            {
+                /* blocks[] is a pointer array — find its slot index */
+                const DocBlock *blk = (const DocBlock *)it->block;
+                int blockIdx = -1;
+                int k;
+                for (k = 0; currentDoc && currentDoc->blocks &&
+                            k < currentDoc->blockCount;
+                     k++)
+                {
+                    if ((const void *)currentDoc->blocks[k] ==
+                        (const void *)blk)
+                    {
+                        blockIdx = k;
+                    }
+                }
+                DomNode *src = (DomNode *)blk->srcNode;
+#if defined(TARGET_SIMULATOR)
+                /* SIM: the summary is react's OWN markup — "Send another"
+                 * mounts OUTSIDE any form; the nav toggle stamps formless
+                 * too but sorts FIRST in document order, so the BOTTOM-MOST
+                 * formless stamped submit is the one to press. */
+                if (!form_node_ancestor(src) && blockIdx > targetBlock)
+                {
+                    target = it;
+                    targetBlock = blockIdx;
+                }
+#else
+                /* DEVICE: the fallback rebuilt the summary INSIDE the
+                 * <form> (its own card + injected button rides the form's
+                 * subtree — that's exactly why the restore branch triggers
+                 * on rc=0 submit), so the FIRST form-attached submit IS
+                 * the Send-another; the original send button was detached
+                 * along with the fields. */
+                if (form_node_ancestor(src))
+                {
+                    target = it;
+                    break;
+                }
+#endif
+            }
+        }
+        if (!target)
+        {
+            if (g_nrTapFrames < 30)
+            {
+                return; /* layout may still be settling */
+            }
+            logger_log("[nr-autotest-tap] TAP2 FAIL: no formless stamped "
+                       "button found in the summary layout");
+            g_nrTapPhase = 3;
+            return;
+        }
+        {
+            DomNode *src =
+                (DomNode *)((const DocBlock *)target->block)->srcNode;
+            logger_log("[nr-autotest-tap] TAP2 tap: formless button tag=%s "
+                       "node=%p block=%d blocks=%d cycle=%d",
+                       (src && src->tag) ? src->tag : "?", (void *)src,
+                       targetBlock, currentDoc ? currentDoc->blockCount : -1,
+                       g_nrTap2Cycle);
+        }
+        g_nrTap2BlocksBefore = currentDoc ? currentDoc->blockCount : -1;
+        activate_form_block(target);
+        g_nrTapPhase = 6;
+        g_nrTapFrames = 0;
+        return;
+    }
+    if (g_nrTapPhase == 6)
+    {
+        int blocksNow = currentDoc ? currentDoc->blockCount : -1;
+        if (nr_tap_form_fields_back())
+        {
+            logger_log("[nr-autotest-tap] TAP2 RESULT cycle=%d restored=yes "
+                       "jsErrors=%d blocks=%d (was %d) frames=%u",
+                       g_nrTap2Cycle,
+                       currentDoc ? currentDoc->jsErrors : -1, blocksNow,
+                       g_nrTap2BlocksBefore, g_nrTapFrames);
+            if (g_nrTap2Cycle < 2)
+            {
+                /* LOOP proof: re-type + re-send; the next cycle re-arms
+                 * the summary tap through identical machinery. */
+                g_nrTap2Cycle++;
+                g_nrTapField = 0;
+                g_nrTapPhase = 1;
+                g_nrTapFrames = 0;
+                logger_log("[nr-autotest-tap] TAP2: looping back to phase 1 "
+                           "(cycle %d: re-type + re-send)", g_nrTap2Cycle);
+                return;
+            }
+            logger_log("[nr-autotest-tap] TAP2 RESULT loop=%d send<->restore "
+                       "cycles closed — infinite loop proven",
+                       g_nrTap2Cycle);
+            g_nrTapPhase = 3;
+            return;
+        }
+        if (g_nrTapFrames < 240)
+        {
+            if ((g_nrTapFrames % 60) == 0)
+            {
+                logger_log("[nr-autotest-tap] TAP2 poll frames=%u blocks=%d "
+                           "(was %d)",
+                           g_nrTapFrames, blocksNow, g_nrTap2BlocksBefore);
+            }
+            return;
+        }
+        logger_log("[nr-autotest-tap] TAP2 RESULT cycle=%d restored=no "
+                   "blocks=%d (was %d) jsErrors=%d",
+                   g_nrTap2Cycle, blocksNow, g_nrTap2BlocksBefore,
+                   currentDoc ? currentDoc->jsErrors : -1);
+        g_nrTapPhase = 3;
+    }
+#endif /* PLUTO_NR_AUTOTEST_TAP2 */
+}
+#endif /* PLUTO_NR_AUTOTEST_TAP */
+#endif /* PLUTO_NR_AUTOTEST */
 
 /* Static error buffer: tasks fire onError(data) with the task's data pointer
  * (see tasks.c), so the real message travels through this side channel. */
@@ -1356,6 +1988,112 @@ static void page_autotest_tick(void)
         pluto_mem_set_budget(g_pageTestSavedBudget);
         dom_page_set_subtree_floor(0);
         g_pageTestPhase = 3;
+    }
+}
+#endif
+
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+/* TEMPORARY (sim autotest): prove the R59 re-walk CONTRACT — a walk that
+ * dies mid-build (funnel refusal mid-run — Wikipedia device crash
+ * 2026-10-18) must publish NOTHING and report failure instead of letting
+ * the renderer lay out a half-freed doc (break_lines faulted on a reused
+ * arena value as a block's inline array). Sequence: force the memory
+ * funnel strait, re-walk directly (expect rc=-1 with the doc left empty
+ * and clean, NO crash), then re-walk under the restored budget (expect
+ * rc=0 with blocks) and hand the page to the normal render pipeline.
+ * PASS/FAIL lands in pluto.log as [rewalk-oom] lines. */
+extern int g_rewalkTestForceWalkError; /* document.c test seam */
+static int g_rewalkOomPhase = 0; /* 0=strait test, 1=verify, 3=done */
+static unsigned g_rewalkOomFrames = 0;
+static unsigned long g_rewalkOomSavedBudget = 0;
+static void rewalk_oom_autotest_tick(void)
+{
+    if (g_rewalkOomPhase == 3)
+    {
+        return;
+    }
+    ++g_rewalkOomFrames;
+    if (g_rewalkOomFrames < 30)
+    {
+        return; /* settle ~0.5s */
+    }
+    if (g_rewalkOomPhase == 0)
+    {
+        if (currentState != STATE_PAGE || !currentDoc || !currentDoc->_dom)
+        {
+            if (g_rewalkOomFrames > 900)
+            {
+                logger_log("[rewalk-oom] FAIL: no live rendered page to "
+                           "rewalk (state=%d)", currentState);
+                g_rewalkOomPhase = 3;
+            }
+            return;
+        }
+        /* Hold the page pipeline like a real re-render does, so no frame
+         * draws with stale/freed layout strings while the seam runs. */
+        isRendering = 1;
+        currentState = STATE_LOADING;
+        g_rewalkOomSavedBudget = pluto_mem_budget();
+        pluto_mem_set_budget(pluto_mem_live() + 3UL * 1024UL);
+        int rc = document_rewalk(currentDoc);
+        pluto_mem_set_budget(g_rewalkOomSavedBudget);
+        if (rc == 0)
+        {
+            /* The strait deferred both refusals on this small doc —
+             * engage the seam to drive the REAL failure branch. */
+            logger_log("[rewalk-oom] budget strait deferred (rc=0); "
+                       "engaging the forced-error seam");
+            g_rewalkTestForceWalkError = 1;
+            rc = document_rewalk(currentDoc);
+            g_rewalkTestForceWalkError = 0;
+        }
+        if (rc != 0)
+        {
+            logger_log("[rewalk-oom] phase 0: failed-walk contract rc=%d, "
+                       "doc left blocks=%d parseError=%d",
+                       rc, currentDoc->blockCount, currentDoc->parseError);
+            /* Recovery under the restored budget: re-walk must succeed and
+             * the normal pipeline re-renders the healed doc. */
+            rc = document_rewalk(currentDoc);
+            int blocks = currentDoc->blockCount;
+            int perr = currentDoc->parseError;
+            isRendering = 0;
+            page_rewalk_now(); /* full re-walk + layout + swap via tasks */
+            if (rc == 0 && blocks > 0 && !perr)
+            {
+                logger_log("[rewalk-oom] recovery rewalk rc=0 blocks=%d — "
+                           "PASS (fix verified, handed to the pipeline)",
+                           blocks);
+            }
+            else
+            {
+                logger_log("[rewalk-oom] FAIL: recovery rewalk rc=%d "
+                           "blocks=%d parseError=%d", rc, blocks, perr);
+            }
+            g_rewalkOomPhase = 1; /* verify the pipeline re-render landed */
+        }
+        else
+        {
+            isRendering = 0;
+            page_rewalk_now(); /* hygiene re-render; nothing failed */
+            g_rewalkOomPhase = 3;
+        }
+        g_rewalkOomFrames = 0;
+        return;
+    }
+    /* Phase 1: the hand-off re-render completed and the page is back. */
+    if (currentState == STATE_PAGE && currentDoc && currentDoc->blockCount > 0)
+    {
+        logger_log("[rewalk-oom] PASS end-to-end: page re-rendered after a "
+                   "failed walk (blocks=%d, live=%lu)", currentDoc->blockCount,
+                   pluto_mem_live());
+        g_rewalkOomPhase = 3;
+    }
+    else if (g_rewalkOomFrames > 900)
+    {
+        logger_log("[rewalk-oom] FAIL: pipeline re-render never landed "
+                   "(state=%d)", currentState);
+        g_rewalkOomPhase = 3;
     }
 }
 #endif
@@ -1747,7 +2485,7 @@ static void formclick_autotest_tick(void)
         if (!g_twinsStaged)
         {
             form_key_snapshot(w0);
-            form_key_write("AAA-first");
+            form_key_write("AAA-first", 1 /* commit → input + change */);
             page_rewalk_now(); /* rebuild everything under the keyboard */
             g_twinsStaged = 1;
             g_formClickTestFrames = 0;
@@ -1778,7 +2516,7 @@ static void formclick_autotest_tick(void)
             return;
         }
         form_key_snapshot(u1);
-        form_key_write("BBB-second");
+        form_key_write("BBB-second", 1 /* commit → input + change */);
         const LayoutItem *v0 = NULL;
         const LayoutItem *v1 = NULL;
         for (int i = 0; i < layout_get_item_count(); i++)
@@ -2421,7 +3159,7 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     {
         return;
     }
-    int shown = doc->blockCount < 3 ? doc->blockCount : 3;
+    int shown = doc->blockCount < 24 ? doc->blockCount : 24;
     for (int bi = 0; bi < shown; bi++)
     {
         DocBlock *blk = doc->blocks[bi];
@@ -3389,6 +4127,1057 @@ static void form_node_form(char *out, size_t cap, const DomNode *n)
     }
 }
 
+/* ══ R56f/R56g: NATIVE FORM FALLBACK (the script-dead submit) — GENERAL ══
+ * When NO script ran for a submit (JSB_EVENT_NONE — on-device react-dom's
+ * 209KB factory cannot compile: R56d device [mem] trace, ~+5.75MB codegen
+ * vs a ~9.4MB pool wall) the SSR DOM still shows the REAL form with the
+ * REAL typed values (dom_set_attr "value" — the keyboard/autotest writes
+ * it; it survives rewalks). The browser performs the submission itself,
+ * GENERICALLY: all named successful controls, HTML5-lite validation
+ * (required + type=email), the HTML-standard routing (form action= →
+ * GET-navigate or urlencoded POST), else a Data/form_sites.txt profile
+ * (endpoint/body/card-string overrides — per-site data, not code), else
+ * the byte-identical static-page GET. Cards ride the dom_create helpers
+ * + dom_append_child + page_rewalk_now (the same plumbing the JS DOM
+ * services use), so the autotest DOM scans see them. The POST rides the
+ * http_request_ct path (caller-chosen Content-Type; the legacy callers'
+ * application/json is unchanged). A live script (rc=SUPPRESSED/NAVIGATE)
+ * NEVER reaches this path — the sim's hydration stays on react's own
+ * handlers. */
+
+/* The GENERIC browser strings (every site without a profile gets these;
+ * a Data/form_sites.txt profile overrides per host — data, not code). */
+static const char FB_TXT_SUCCESS[] = "Sent.";
+static const char FB_TXT_FAIL[] = "Something went wrong.";
+static const char FB_TXT_INVALID[] =
+    "Please check the form fields and try again.";
+static const char FB_TXT_SENDING[] = "Sending\u2026";
+
+/* ── Site profiles: Data/form_sites.txt (deployed DATA, not code) ─────
+ * One profile block per host; keys only:
+ *   host=example.com
+ *   endpoint=https://server.example.com/api
+ *   body=json            (or "url")
+ *   keys=dom-name:payload-key;dom-name2:payload-key2
+ *   labels=dom-name:Shown Label;dom-name2:Label
+ *   summary=name1,name2  (rows shown; empty = every submitted field)
+ *   success=... failure=... invalid=... sending=...
+ * A form with its own action= never consults profiles (standard HTML
+ * semantics run first). The file lives in the browser's data dir, so a
+ * new site is an edit, not a recompile. */
+typedef struct
+{
+    char host[64];
+    char endpoint[160];
+    int bodyJson;
+    char keys[128];
+    char labels[128];
+    char summary[96];
+    char success[192];
+    char failure[96];
+    char invalid[96];
+    char sending[24];
+} FormSite;
+enum
+{
+    FB_SITE_MAX = 4
+};
+static FormSite g_fbSites[FB_SITE_MAX];
+static int g_fbSiteCount;
+static int g_fbSitesLoaded;
+
+static void fb_site_reset(FormSite *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->bodyJson = 1; /* modern script-driven endpoints post JSON */
+    snprintf(s->success, sizeof(s->success), "%s", FB_TXT_SUCCESS);
+    snprintf(s->failure, sizeof(s->failure), "%s", FB_TXT_FAIL);
+    snprintf(s->invalid, sizeof(s->invalid), "%s", FB_TXT_INVALID);
+    snprintf(s->sending, sizeof(s->sending), "%s", FB_TXT_SENDING);
+}
+
+static void fb_site_value(FormSite *s, const char *key, const char *val)
+{
+    if (!strcmp(key, "host"))
+        snprintf(s->host, sizeof(s->host), "%s", val);
+    else if (!strcmp(key, "endpoint"))
+        snprintf(s->endpoint, sizeof(s->endpoint), "%s", val);
+    else if (!strcmp(key, "body"))
+        s->bodyJson = (strstr(val, "json") == NULL) ? 0 : 1;
+    else if (!strcmp(key, "keys"))
+        snprintf(s->keys, sizeof(s->keys), "%s", val);
+    else if (!strcmp(key, "labels"))
+        snprintf(s->labels, sizeof(s->labels), "%s", val);
+    else if (!strcmp(key, "summary"))
+        snprintf(s->summary, sizeof(s->summary), "%s", val);
+    else if (!strcmp(key, "success"))
+        snprintf(s->success, sizeof(s->success), "%s", val);
+    else if (!strcmp(key, "failure"))
+        snprintf(s->failure, sizeof(s->failure), "%s", val);
+    else if (!strcmp(key, "invalid"))
+        snprintf(s->invalid, sizeof(s->invalid), "%s", val);
+    else if (!strcmp(key, "sending"))
+        snprintf(s->sending, sizeof(s->sending), "%s", val);
+    /* unknown keys ignored (forward compatibility) */
+}
+
+static void pluto_form_sites_load(void)
+{
+    SDFile *fp;
+    int flen, got;
+    char *buf;
+    g_fbSitesLoaded = 1;
+    fp = pd->file->open("form_sites.txt", kFileReadData);
+    if (!fp)
+    {
+        logger_log("[fbform] no form_sites.txt — generic fallback only");
+        return;
+    }
+    pd->file->seek(fp, 0, SEEK_END);
+    flen = pd->file->tell(fp);
+    pd->file->seek(fp, 0, SEEK_SET);
+    if (flen <= 0 || flen > 4096)
+    {
+        logger_log("[fbform] form_sites.txt bad size %d", flen);
+        pd->file->close(fp);
+        return;
+    }
+    buf = (char *)malloc((size_t)flen + 1);
+    if (!buf)
+    {
+        pd->file->close(fp);
+        return;
+    }
+    got = pd->file->read(fp, buf, (unsigned int)flen);
+    pd->file->close(fp);
+    if (got != flen)
+    {
+        free(buf);
+        return;
+    }
+    buf[flen] = '\0';
+    {
+        FormSite cur;
+        int have = 0;
+        char *line = buf;
+        while (line && line[0])
+        {
+            char *nl = strchr(line, '\n');
+            if (nl)
+                *nl = '\0';
+            {
+                char *eq;
+                char *p = line;
+                while (*p == ' ' || *p == '\t' || *p == '\r')
+                    p++;
+                if (*p && *p != '#')
+                {
+                    eq = strchr(p, '=');
+                    if (eq)
+                    {
+                        char key[16];
+                        size_t klen = (size_t)(eq - p);
+                        char *val = eq + 1, *vend;
+                        while (klen > 0 &&
+                               (p[klen - 1] == ' ' || p[klen - 1] == '\t'))
+                            klen--;
+                        if (klen < sizeof(key))
+                        {
+                            memcpy(key, p, klen);
+                            key[klen] = '\0';
+                            vend = val + strlen(val);
+                            while (vend > val &&
+                                   (vend[-1] == ' ' || vend[-1] == '\t' ||
+                                    vend[-1] == '\r'))
+                                *--vend = '\0';
+                            if (!strcmp(key, "host"))
+                            {
+                                if (have && g_fbSiteCount < FB_SITE_MAX)
+                                    g_fbSites[g_fbSiteCount++] = cur;
+                                fb_site_reset(&cur);
+                                have = 1;
+                            }
+                            if (have)
+                                fb_site_value(&cur, key, val);
+                        }
+                    }
+                }
+            }
+            line = nl ? nl + 1 : NULL;
+        }
+        if (have && g_fbSiteCount < FB_SITE_MAX)
+            g_fbSites[g_fbSiteCount++] = cur;
+    }
+    {
+        int i;
+        for (i = 0; i < g_fbSiteCount; i++)
+            logger_log("[fbform] profile[%d] host=%s endpoint=%.60s json=%d",
+                       i, g_fbSites[i].host, g_fbSites[i].endpoint,
+                       g_fbSites[i].bodyJson);
+    }
+    logger_log("[fbform] %d site profile(s) loaded", g_fbSiteCount);
+    free(buf);
+}
+
+static const FormSite *fb_site_lookup(void)
+{
+    int i;
+    const char *host =
+        (currentUrlObj && currentUrlObj->host[0]) ? currentUrlObj->host : "";
+    if (!host[0])
+        return NULL;
+    for (i = 0; i < g_fbSiteCount; i++)
+    {
+        if (g_fbSites[i].host[0] && strstr(host, g_fbSites[i].host))
+            return &g_fbSites[i];
+    }
+    return NULL;
+}
+
+/* "name:Payload;other:Key2" map lookup — bounded copy of the value after
+ * the ':' matching token `name` (up to ';' or end). out = "" when absent. */
+static void fb_map_get(const char *raw, const char *name, size_t nameLen,
+                       char *out, size_t cap)
+{
+    size_t vLen;
+    out[0] = '\0';
+    while (raw && *raw)
+    {
+        const char *semi = strchr(raw, ';');
+        const char *colon = strchr(raw, ':');
+        size_t segLen = semi ? (size_t)(semi - raw) : strlen(raw);
+        size_t colonOff = colon ? (size_t)(colon - raw) : (size_t)-1;
+        if (colon && colonOff < segLen && colonOff == nameLen &&
+            strncmp(raw, name, nameLen) == 0)
+        {
+            vLen = segLen - colonOff - 1;
+            if (vLen + 1 > cap)
+                vLen = cap - 1;
+            memcpy(out, colon + 1, vLen);
+            out[vLen] = '\0';
+            return;
+        }
+        if (!semi)
+            break;
+        raw = semi + 1;
+    }
+}
+
+static int fb_list_has(const char *csv, const char *name)
+{
+    size_t n = strlen(name);
+    while (csv && *csv)
+    {
+        const char *comma = strchr(csv, ',');
+        size_t segLen = comma ? (size_t)(comma - csv) : strlen(csv);
+        const char *s = csv;
+        while (segLen && (*s == ' ' || *s == '\t'))
+        {
+            s++;
+            segLen--;
+        }
+        while (segLen &&
+               (s[segLen - 1] == ' ' || s[segLen - 1] == '\t'))
+            segLen--;
+        if (segLen == n && strncmp(s, name, n) == 0)
+            return 1;
+        if (!comma)
+            break;
+        csv = comma + 1;
+    }
+    return 0;
+}
+
+/* case-insensitive comparison without strcasecmp (newlib-safe). */
+static int fb_ieq(const char *a, const char *b)
+{
+    while (*a && *b)
+    {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return 0;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/* The HTML5 email-input rule (any browser spec shape, not site data):
+ * no whitespace, one @ not at the ends, a last dot in the domain that
+ * isn't first/last. */
+static int fb_email_valid(const char *v)
+{
+    const char *p, *at, *dot;
+    if (!v || !v[0])
+        return 0;
+    for (p = v; *p; p++)
+    {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+            return 0; /* [^\s] */
+        if (*p == '@')
+            break; /* first @ */
+    }
+    if (!*p || p == v || p[1] == 0)
+        return 0;
+    at = p;
+    if (!at[1])
+        return 0;
+    dot = NULL;
+    for (p = at + 1; *p; p++)
+    {
+        if (*p == '.')
+            dot = p; /* last dot in the domain */
+        else if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+                 *p == '@')
+            return 0;
+    }
+    if (!dot || dot == at + 1 || dot[1] == 0)
+        return 0;
+    return 1;
+}
+
+/* JSON escape (react sent JSON.stringify's output): " \ and C0 → escapes.
+ * Always NUL-terminates within cap. */
+static void fb_json_escape(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (; *in && n + 7 < cap; in++)
+    {
+        char c = *in;
+        if (c == '"' || c == '\\')
+        {
+            out[n++] = '\\';
+            out[n++] = c;
+        }
+        else if (c == '\n')
+        {
+            out[n++] = '\\';
+            out[n++] = 'n';
+        }
+        else if (c == '\r')
+        {
+            out[n++] = '\\';
+            out[n++] = 'r';
+        }
+        else if (c == '\t')
+        {
+            out[n++] = '\\';
+            out[n++] = 't';
+        }
+        else if ((unsigned char)c < 0x20)
+        {
+            n += (size_t)snprintf(out + n, cap - n, "\\u%04x",
+                                  (unsigned char)c);
+        }
+        else
+        {
+            out[n++] = c;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* ── generic successful-control collection (HTML spec semantics) ───────
+ * EVERY named control found within FB_WALK_MAX_DEPTH levels: name
+ * (name attr, else id), type, required flag, and a GENERIC display
+ * label (enclosing <label> text → placeholder → the name). Typed text
+ * lives in the "value" attribute (the keyboard + autotest write-back —
+ * main.c:3934); textarea falls back to its DOM text content when the
+ * attr is empty; select uses its selected option's value (else the
+ * first option). Spec skips: controls with no name, disabled fields,
+ * unchecked checkbox/radio, and aria-hidden / "leave blank" honeypots
+ * (the anti-spam convention). Live walk rows stay on for diagnosis. */
+enum
+{
+    FB_WALK_MAX_DEPTH = 6,
+    FB_FIELD_MAX = 8
+};
+
+typedef struct
+{
+    char name[48];
+    char value[256];
+    char type[16];
+    char label[64];
+    int required;
+} FbField;
+static FbField g_fbFields[FB_FIELD_MAX];
+static int g_fbFieldCount;
+
+static void fb_label_of(const DomNode *n, const char *name, char *out,
+                        size_t cap)
+{
+    const DomNode *p = n->parent;
+    int i;
+    out[0] = '\0';
+    if (p && p->kind == DOM_ELEMENT && p->tag &&
+        strcmp(p->tag, "label") == 0)
+    {
+        for (i = 0; i < p->childCount; i++)
+        {
+            const DomNode *c = p->children[i];
+            if (c->kind == DOM_TEXT && c->text && c->text[0])
+            {
+                snprintf(out, cap, "%s", c->text);
+                return;
+            }
+        }
+    }
+    snprintf(out, cap, "%s", name);
+}
+
+static void fb_field_value(DomNode *n, const char *tag, char *out,
+                           size_t cap)
+{
+    const char *v = form_node_attr(n, "value");
+    int i;
+    out[0] = '\0';
+    if (v && v[0])
+    {
+        snprintf(out, cap, "%s", v);
+        return;
+    }
+    if (!strcmp(tag, "textarea"))
+    {
+        /* HTML: a textarea's value = its DOM text content (the typed
+         * text lands in the value attr first, which wins above). */
+        for (i = 0; i < n->childCount; i++)
+        {
+            const DomNode *c = n->children[i];
+            if (c->kind == DOM_TEXT && c->text && c->text[0])
+            {
+                snprintf(out, cap, "%s", c->text);
+                return;
+            }
+        }
+    }
+    else if (!strcmp(tag, "select"))
+    {
+        /* the selected option's value; else the first option */
+        const DomNode *first = NULL;
+        for (i = 0; i < n->childCount; i++)
+        {
+            const DomNode *c = n->children[i];
+            if (c->kind == DOM_ELEMENT && c->tag &&
+                strcmp(c->tag, "option") == 0)
+            {
+                if (!first)
+                    first = c;
+                if (form_node_attr(c, "selected"))
+                {
+                    const char *ov = form_node_attr(c, "value");
+                    snprintf(out, cap, "%s",
+                             (ov && ov[0]) ? ov
+                                           : (c->text && c->text[0])
+                                               ? c->text
+                                               : "");
+                    return;
+                }
+            }
+        }
+        if (first)
+        {
+            const char *ov = form_node_attr(first, "value");
+            snprintf(out, cap, "%s",
+                     (ov && ov[0]) ? ov
+                                   : (first->text && first->text[0])
+                                       ? first->text
+                                       : "");
+        }
+    }
+}
+
+static void fb_collect_fields(const DomNode *nIn, int depth)
+{
+    DomNode *n = (DomNode *)nIn;
+    int i;
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        depth > FB_WALK_MAX_DEPTH)
+        return;
+    if (!strcmp(n->tag, "input") || !strcmp(n->tag, "textarea") ||
+        !strcmp(n->tag, "select"))
+    {
+        const char *nm = form_node_attr(n, "name");
+        const char *ty = form_node_attr(n, "type");
+        const char *ph = form_node_attr(n, "placeholder");
+        char type[16];
+        FbField *f;
+        snprintf(type, sizeof(type), "%s",
+                 (ty && ty[0]) ? ty
+                               : strcmp(n->tag, "textarea") == 0
+                                   ? "textarea"
+                                   : "text");
+        logger_log("[fbform]   walk d=%d %s type=%s name=%s val-probe ok",
+                   depth, n->tag, type, nm ? nm : "-");
+        if (!nm || !nm[0])
+            nm = form_node_attr(n, "id");
+        if (!nm || !nm[0])
+            return; /* nameless controls are never successful */
+        if (form_node_attr(n, "disabled"))
+            return; /* disabled = not submitted (spec) */
+        {
+            const char *hid = form_node_attr(n, "aria-hidden");
+            if (hid && (!hid[0] || fb_ieq(hid, "true")))
+                return; /* hidden honeypot */
+        }
+        if (ph && strstr(ph, "leave blank"))
+            return; /* the anti-spam honeypot convention */
+        if (!strcmp(type, "checkbox") || !strcmp(type, "radio"))
+        {
+            if (!form_node_attr(n, "checked"))
+                return; /* unchecked = not successful (spec) */
+        }
+        if (g_fbFieldCount >= FB_FIELD_MAX)
+            return; /* tiny cap: log + drop beyond 8 controls */
+        f = &g_fbFields[g_fbFieldCount++];
+        memset(f, 0, sizeof(*f));
+        snprintf(f->name, sizeof(f->name), "%s", nm);
+        fb_field_value(n, strcmp(n->tag, "select") == 0 ? "select"
+                                                        : n->tag,
+                       f->value, sizeof(f->value));
+        snprintf(f->type, sizeof(f->type), "%s", type);
+        fb_label_of(n, nm, f->label, sizeof(f->label));
+        f->required = (form_node_attr(n, "required") != NULL);
+        logger_log("[fbform]   field name=%s type=%s required=%d "
+                   "label='%.30s' val='%.50s'",
+                   f->name, f->type, f->required, f->label, f->value);
+        return;
+    }
+    if (!strcmp(n->tag, "button") || !strcmp(n->tag, "svg") ||
+        !strcmp(n->tag, "style") || !strcmp(n->tag, "script"))
+        return;
+    for (i = 0; i < n->childCount; i++)
+        fb_collect_fields(n->children[i], depth + 1);
+}
+
+/* Reuse the card across taps (a status-node swap, like react's); virgin
+ * card = create + append LAST in the form (inline, after the fields). */
+static void fb_card_insert(DomResult *dom, DomNode *form, const char *text)
+{
+    if (g_fbCard && g_fbCard->parent == form)
+    {
+        dom_set_text(dom, g_fbCard, text);
+    }
+    else
+    {
+        DomNode *d = dom_create_element(dom, "div");
+        if (d)
+        {
+            dom_set_attr(dom, d, "class", "pli-native-form-card");
+            dom_set_attr(dom, d, "role", "status");
+            if (dom_set_text(dom, d, text) == 0 &&
+                dom_append_child(dom, form, d) == 0)
+                g_fbCard = d;
+        }
+    }
+    page_rewalk_now();
+}
+
+/* ── R56g: the post-send SUMMARY swap (replicates the sim's react view) ──
+ * On 2xx react replaces the form's fields with the sent overview:
+ * a label + value row per submitted field and a "Send another" button
+ * (block dump 2026-10-18 22:11). The fallback mirrors that IN THE REAL
+ * DOM for ANY site: the form's original children are detached and kept
+ * in g_fbSaved (the arena owns them — re-appendChild restores), and the
+ * card fills with the per-post summary snapshot. "Send another" taps
+ * ride the normal tap path (click → submit, rc=0 = no JS) into the
+ * fallback's restore branch: card off, original children re-appended,
+ * values kept. The rows/texts come from the POST-time snapshot
+ * (fb_summary_persist): generic browser strings, or the site profile's
+ * overrides — data, not code. */
+static char g_fbRowLabel[FB_FIELD_MAX][64];
+static char g_fbRowValue[FB_FIELD_MAX][256];
+static int g_fbRowCount;
+static char g_fbTextSent[192];
+static char g_fbTextFail[96];
+
+/* Rows + texts snapshot for THIS post: profile `summary=` filters the
+ * rows, `labels=`/`success=`/`failure=` rename/copy the strings. */
+static void fb_summary_persist(const FormSite *site)
+{
+    int i;
+    g_fbRowCount = 0;
+    snprintf(g_fbTextSent, sizeof(g_fbTextSent), "%s",
+             (site && site->success[0]) ? site->success : FB_TXT_SUCCESS);
+    snprintf(g_fbTextFail, sizeof(g_fbTextFail), "%s",
+             (site && site->failure[0]) ? site->failure : FB_TXT_FAIL);
+    for (i = 0; i < g_fbFieldCount && g_fbRowCount < FB_FIELD_MAX; i++)
+    {
+        const FbField *f = &g_fbFields[i];
+        char labBuf[64];
+        if (site && site->summary[0] && !fb_list_has(site->summary, f->name))
+            continue; /* the profile's row filter */
+        fb_map_get(site ? site->labels : NULL, f->name, strlen(f->name),
+                   labBuf, sizeof(labBuf));
+        snprintf(g_fbRowLabel[g_fbRowCount], sizeof(g_fbRowLabel[0]), "%s",
+                 (labBuf[0]) ? labBuf : f->label);
+        snprintf(g_fbRowValue[g_fbRowCount], sizeof(g_fbRowValue[0]), "%s",
+                 f->value);
+        g_fbRowCount++;
+    }
+    logger_log("[fbform] summary rows=%d sent='%.50s'", g_fbRowCount,
+               g_fbTextSent);
+}
+
+static void fb_summary_swap_fields(DomResult *dom, DomNode *form)
+{
+    int i;
+    g_fbSavedCount = 0;
+    for (i = 0; i < form->childCount && g_fbSavedCount < FB_SAVED_MAX; i++)
+        g_fbSaved[g_fbSavedCount++] = form->children[i];
+    for (i = 0; i < g_fbSavedCount; i++)
+        if (g_fbSaved[i] != g_fbCard)
+            dom_remove_child(form, g_fbSaved[i]);
+    logger_log("[fbform] summary: hid %d child node(s) (kept card)",
+               g_fbSavedCount - 1);
+}
+
+static void fb_summary_row(DomResult *dom, const char *text)
+{
+    DomNode *row = dom_create_element(dom, "div");
+    if (row && dom_set_text(dom, row, text) == 0)
+        dom_append_child(dom, g_fbCard, row);
+}
+
+static void fb_summary_build(DomResult *dom, DomNode *form)
+{
+    DomNode *btn;
+    int i;
+    (void)form;
+    dom_set_text(dom, g_fbCard, g_fbTextSent);
+    for (i = 0; i < g_fbRowCount; i++)
+    {
+        fb_summary_row(dom, g_fbRowLabel[i]);
+        fb_summary_row(dom, g_fbRowValue[i]);
+    }
+    btn = dom_create_element(dom, "button");
+    if (btn && dom_set_text(dom, btn, "Send another") == 0)
+        dom_append_child(dom, g_fbCard, btn);
+    else
+        logger_log("[fbform] summary: Send another button MISSING (alloc)");
+    g_fbSummaryOn = 1;
+    page_rewalk_now();
+}
+
+static void fb_summary_restore(DomResult *dom, DomNode *form)
+{
+    int i;
+    logger_log("[fbform] Send another: restoring the form fields");
+    if (g_fbCard)
+        dom_remove_child(form, g_fbCard);
+    for (i = 0; i < g_fbSavedCount; i++)
+        dom_append_child(dom, form, g_fbSaved[i]);
+    if (g_fbSavedCount == 0)
+        logger_log("[fbform] WARNING: no saved children to restore");
+    g_fbSavedCount = 0;
+    g_fbSummaryOn = 0;
+    g_fbCard = NULL; /* detached; re-created on the next success */
+    page_rewalk_now();
+}
+
+static void fb_on_success(int status, char **headerKeys, char **headerVals,
+                          int headerCount, const char *body, size_t bodyLen,
+                          const char *url)
+{
+    (void)headerKeys;
+    (void)headerVals;
+    (void)headerCount;
+    (void)body;
+    (void)bodyLen;
+    (void)url;
+    logger_log("[fbform] POST done status=%d", status);
+    if (!g_fbInFlight)
+        return;
+    g_fbInFlight = 0;
+    if (currentDoc && (DomResult *)currentDoc->_dom == g_fbDom && g_fbCard &&
+        g_fbCard->parent)
+    {
+        DomResult *dom = (DomResult *)currentDoc->_dom;
+        DomNode *form = g_fbCard->parent;
+        if (status / 100 == 2)
+        {
+            /* R56g: 2xx = react's summary view (fields swapped out). */
+            fb_summary_swap_fields(dom, form);
+            fb_summary_build(dom, form);
+        }
+        else
+        {
+            fb_card_insert(dom, form, g_fbTextFail);
+        }
+    }
+    else
+        logger_log("[fbform] page changed mid-flight — card dropped");
+}
+
+static void fb_on_error(const char *message)
+{
+    logger_log("[fbform] POST failed: %s", message ? message : "?");
+    if (!g_fbInFlight)
+        return;
+    g_fbInFlight = 0;
+    if (currentDoc && (DomResult *)currentDoc->_dom == g_fbDom && g_fbCard &&
+        g_fbCard->parent)
+        fb_card_insert((DomResult *)currentDoc->_dom, g_fbCard->parent,
+                       g_fbTextFail);
+    else
+        logger_log("[fbform] page changed mid-flight — card dropped");
+}
+
+/* application/x-www-form-urlencoded serializer (spec): space → '+',
+ * letters/digits/`-_.` verbatim, everything else %XX-hex. Appends into
+ * `out` at *used, always NUL-terminates, truncates at cap-4. */
+static void fb_urlenc_append(const char *raw, char *out, size_t cap,
+                             size_t *used)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t u = *used;
+    for (; *raw && u + 4 < cap; raw++)
+    {
+        char c = *raw;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+            c == '~')
+        {
+            out[u++] = c;
+        }
+        else if (c == ' ')
+        {
+            out[u++] = '+';
+        }
+        else
+        {
+            out[u++] = '%';
+            out[u++] = hex[((unsigned char)c >> 4) & 0xF];
+            out[u++] = hex[(unsigned char)c & 0xF];
+        }
+    }
+    out[u] = '\0';
+    *used = u;
+}
+
+/* name=value&name2=value2 over the collected fields (the DOM names are
+ * the spec's keys for a standard action submission). */
+static void fb_pairs_urlenc(char *out, size_t cap)
+{
+    size_t used = 0;
+    int i;
+    out[0] = '\0';
+    for (i = 0; i < g_fbFieldCount; i++)
+    {
+        if (i && used + 1 < cap)
+        {
+            out[used++] = '&';
+            out[used] = '\0';
+        }
+        fb_urlenc_append(g_fbFields[i].name, out, cap, &used);
+        if (used + 1 < cap)
+        {
+            out[used++] = '=';
+            out[used] = '\0';
+        }
+        fb_urlenc_append(g_fbFields[i].value, out, cap, &used);
+    }
+}
+
+/* JSON.stringify-style body: {"payloadKey":"value",...}. The payload key
+ * comes from the profile's keys= map (the server's contract); no profile
+ * = the DOM name itself. Values stream-escape directly into the buffer. */
+static void fb_pairs_json(const FormSite *site, char *out, size_t cap)
+{
+    static const char hex[] = "0123456789abcdef";
+    size_t u = 1; /* the '{' */
+    int i;
+    out[0] = '{';
+    for (i = 0; i < g_fbFieldCount; i++)
+    {
+        const FbField *f = &g_fbFields[i];
+        char keyBuf[48];
+        const char *raw = f->value;
+        if (u + 8 >= cap)
+            break;
+        if (i)
+            out[u++] = ',';
+        out[u++] = '"';
+        /* key: characters until '"' (config-supplied payload key) */
+        {
+            const char *k;
+            fb_map_get(site ? site->keys : NULL, f->name, strlen(f->name),
+                       keyBuf, sizeof(keyBuf));
+            k = (keyBuf[0]) ? keyBuf : f->name;
+            while (*k && u + 4 < cap)
+            {
+                char c = *k++;
+                if (c == '"')
+                {
+                    out[u++] = '\\';
+                    out[u++] = '"';
+                }
+                else
+                    out[u++] = c;
+            }
+        }
+        out[u++] = '"';
+        if (u + 2 < cap)
+        {
+            out[u++] = ':';
+            out[u] = '\0';
+        }
+        /* value with the full JSON escapes */
+        if (u + 2 < cap)
+        {
+            out[u++] = '"';
+            for (; *raw && u + 7 < cap; raw++)
+            {
+                char c = *raw;
+                if (c == '"' || c == '\\')
+                {
+                    out[u++] = '\\';
+                    out[u++] = c;
+                }
+                else if (c == '\n')
+                {
+                    out[u++] = '\\';
+                    out[u++] = 'n';
+                }
+                else if (c == '\r')
+                {
+                    out[u++] = '\\';
+                    out[u++] = 'r';
+                }
+                else if (c == '\t')
+                {
+                    out[u++] = '\\';
+                    out[u++] = 't';
+                }
+                else if ((unsigned char)c < 0x20)
+                {
+                    out[u++] = '\\';
+                    out[u++] = 'u';
+                    out[u++] = '0';
+                    out[u++] = '0';
+                    out[u++] = hex[((unsigned char)c >> 4) & 0xF];
+                    out[u++] = hex[(unsigned char)c & 0xF];
+                }
+                else
+                    out[u++] = c;
+            }
+            if (u + 1 < cap)
+                out[u++] = '"';
+        }
+        out[u] = '\0';
+    }
+    if (u + 1 < cap)
+        out[u++] = '}';
+    out[u] = '\0';
+}
+
+/* HTML5-lite validation on the GENERIC collected fields: required-empty
+ * fails, type=email fails unless it passes the spec-shaped regex. The
+ * card text = the profile's invalid= (data) or the generic default. */
+static int fb_fields_valid(const FormSite *site, DomResult *dom,
+                           DomNode *form)
+{
+    int i;
+    for (i = 0; i < g_fbFieldCount; i++)
+    {
+        const FbField *f = &g_fbFields[i];
+        if (f->required && !f->value[0])
+        {
+            logger_log("[fbform] validation: required '%s' is empty",
+                       f->name);
+            fb_card_insert(dom, form,
+                           (site && site->invalid[0]) ? site->invalid
+                                                      : FB_TXT_INVALID);
+            return 0;
+        }
+        if (!strcmp(f->type, "email") && f->value[0] &&
+            !fb_email_valid(f->value))
+        {
+            logger_log("[fbform] validation: invalid email '%s' (name=%s)",
+                       f->value, f->name);
+            fb_card_insert(dom, form,
+                           (site && site->invalid[0]) ? site->invalid
+                                                      : FB_TXT_INVALID);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Returns 1 when the fallback OWNS the submit, 0 = no route (no form
+ * action, no site profile) → the caller keeps the byte-identical legacy
+ * static GET path — exactly what a script-less browser did. */
+static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
+{
+    DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
+    const FormSite *site;
+    char ep[224];
+    char ct[48];
+    int methodGet = 0;
+    int routeProfile = 0;
+    if (!dom || !form || g_fbInFlight)
+    {
+        if (g_fbInFlight)
+            logger_log("[fbform] submit ignored — POST already in flight");
+        return 0;
+    }
+    /* R56g: the summary is showing — this entry comes from the "Send
+     * another" button (click→submit, rc=0 = no JS). Restore the form. */
+    if (g_fbSummaryOn)
+    {
+        fb_summary_restore(dom, form);
+        return 1;
+    }
+    (void)item; /* only the GET route navigates */
+    logger_log("[fbform] form tag=%s kind=%d kids=%d attrs=%d node=%p",
+               form->tag ? form->tag : "?", (int)form->kind, form->childCount,
+               form->attrCount, (void *)form);
+    if (!g_fbSitesLoaded)
+        pluto_form_sites_load();
+    site = fb_site_lookup();
+    g_fbFieldCount = 0;
+    fb_collect_fields(form, 0);
+    if (g_fbFieldCount == 0)
+    {
+        logger_log("[fbform] no named control fields — old static action");
+        return 0;
+    }
+    if (!fb_fields_valid(site, dom, form))
+        return 1; /* the validation card is up; the form stays */
+    fb_summary_persist(site);
+    /* ── ROUTE: first match wins ─────────────────────────────────────
+     * a. the form has its own action → the HTML-standard submission
+     *    (GET navigates action?query; POST sends urlencoded). Works for
+     *    EVERY site's real HTML form with zero site knowledge.
+     * b. no action, but a form_sites.txt profile matches the host →
+     *    that site's endpoint + body format (data-driven).
+     * c. neither → the legacy static-page GET behavior unchanged. */
+    {
+        char actionAbs[224];
+        const char *action = form_node_attr(form, "action");
+        actionAbs[0] = '\0';
+        if (action && action[0])
+        {
+            char *abs = url_resolve(
+                (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
+                                                    : "",
+                action);
+            if (abs)
+            {
+                snprintf(actionAbs, sizeof(actionAbs), "%s", abs);
+                pluto_free(abs);
+            }
+        }
+        if (actionAbs[0])
+        {
+            const char *m = form_node_attr(form, "method");
+            methodGet =
+                (!m || !m[0] || fb_ieq(m, "get"));
+            snprintf(ep, sizeof(ep), "%s", actionAbs);
+            snprintf(ct, sizeof(ct), "%s",
+                     "application/x-www-form-urlencoded");
+            logger_log("[fbform] route=standard action=%.80s method=%s",
+                       ep, methodGet ? "GET" : "POST");
+        }
+        else if (site && site->endpoint[0])
+        {
+            snprintf(ep, sizeof(ep), "%s", site->endpoint);
+            snprintf(ct, sizeof(ct), "%s", site->bodyJson
+                                                ? "application/json"
+                                                : "application/x-www-form-urlencoded");
+            routeProfile = 1;
+            logger_log("[fbform] route=profile host=%.40s endpoint=%.70s "
+                       "body=%s",
+                       site->host, ep, site->bodyJson ? "json" : "url");
+        }
+        else
+        {
+            logger_log("[fbform] no action, no profile — legacy static GET");
+            return 0;
+        }
+    }
+    if (methodGet)
+    {
+        /* GET submission: navigate to action?<name=value&...> */
+        char enc[FB_BODY_CAP];
+        char url[FB_BODY_CAP + 128];
+        fb_pairs_urlenc(enc, sizeof(enc));
+        snprintf(url, sizeof(url), "%.900s?%.1200s", ep, enc);
+        logger_log("[fbform] GET submit → url=%.110s", url);
+        submit_form(url, item);
+        return 1;
+    }
+    {
+        HttpCallbacks cbs;
+        int started;
+        if (routeProfile && site->bodyJson)
+            fb_pairs_json(site, g_fbBody, sizeof(g_fbBody));
+        else
+            fb_pairs_urlenc(g_fbBody, sizeof(g_fbBody));
+        logger_log("[fbform] POST %s body=%u (%s)", ep,
+                   (unsigned)strlen(g_fbBody), ct);
+        g_fbDom = dom;
+        fb_card_insert(dom, form,
+                       (site && site->sending[0]) ? site->sending
+                                                  : FB_TXT_SENDING);
+        memset(&cbs, 0, sizeof(cbs));
+        cbs.onSuccess = fb_on_success;
+        cbs.onError = fb_on_error;
+        started = http_request_ct("POST", ep, ct, g_fbBody, strlen(g_fbBody),
+                                  &cbs);
+        if (!started)
+        {
+            fb_on_error("http refused");
+            return 1;
+        }
+        g_fbInFlight = 1;
+    }
+    return 1;
+}
+
+/* Nearest enclosing <form> element (B5: the submit event's target — browser
+ * dispatches an activation click on the button, then submit on the form). */
+static DomNode *form_node_ancestor(DomNode *n)
+{
+    int hops = 0;
+    for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent, hops++)
+    {
+        if (p->kind == DOM_ELEMENT && p->tag && strcmp(p->tag, "form") == 0)
+        {
+            return (DomNode *)p;
+        }
+    }
+    /* Diagnostics: a submit tap that cannot find its <form> usually means
+     * the stamped node belongs to a DETACHED subtree (fallback restore/
+     * hydration replacement swapped the body) — log the parent chain so
+     * the replay + sim logs answer "which tree was the stamp on?" */
+    if (n)
+    {
+        logger_log("[form] noform ancestor: srcNode tag=%s kind=%d",
+                   (n->kind == DOM_ELEMENT && n->tag) ? n->tag : "(text)",
+                   (int)n->kind);
+        hops = 0;
+        for (const DomNode *p = n->parent; p && hops < 6; p = p->parent, hops++)
+        {
+            logger_log("[form] noform chain hop %d: tag=%s kind=%d kids=%d",
+                       hops + 1,
+                       (p->kind == DOM_ELEMENT && p->tag) ? p->tag
+                                                          : "(text)",
+                       (int)p->kind, p->childCount);
+        }
+        if (hops == 0)
+        {
+            logger_log("[form] noform chain: srcNode is ROOT-LEVEL "
+                       "(parent=NULL — detached?)");
+        }
+    }
+    return NULL;
+}
+
 /* Recursive DOM search (document order, depth-capped like the builder):
  * ordinal-th text input/textarea with this key. Textarea counts by
  * document order; hidden/non-text types never match. */
@@ -3468,8 +5257,13 @@ static DomNode *form_key_node(void)
 }
 
 /* Write keystrokes to the live item (echo) AND the live DOM node
- * (survives rebuilds: the walker rebuilds block->value from the attr). */
-static void form_key_write(const char *text)
+ * (survives rebuilds: the walker rebuilds block->value from the attr).
+ * B4: `commit` selects the event set — 0 = live keystroke (fires "input"),
+ * 1 = keyboard commit (fires "input" then "change", the browser's
+ * keystroke/blur split). With a page engine attached, react's controlled
+ * inputs sync state from these events; without them the value only ever
+ * exists on the DOM attr and react's submit validation refuses the form. */
+static void form_key_write(const char *text, int commit)
 {
     if (!text)
     {
@@ -3484,9 +5278,29 @@ static void form_key_write(const char *text)
     if (g_formKey.valid && currentDoc && currentDoc->_dom)
     {
         DomNode *n = form_key_node();
-        if (n && n->tag && strcmp(n->tag, "input") == 0)
+        if (n && n->tag && (strcmp(n->tag, "input") == 0 ||
+                            strcmp(n->tag, "textarea") == 0))
         {
+            /* The value lands on the node BEFORE the events fire: react's
+             * onChange reads target.value synchronously. textarea now
+             * included — the walker rebuilds its value the same way. */
             dom_set_attr((DomResult *)currentDoc->_dom, n, "value", text);
+        }
+        if (g_pageJs && n && n->tag)
+        {
+            int r = jsbridge_dispatch_element_event(g_pageJs, n, "input");
+            if (commit)
+            {
+                int r2 = jsbridge_dispatch_element_event(g_pageJs, n, "change");
+                if (r == JSB_EVENT_NONE)
+                {
+                    r = r2;
+                }
+            }
+            if (r == JSB_EVENT_SUPPRESSED)
+            {
+                page_rewalk_now(); /* a handler mutated the live DOM */
+            }
         }
     }
 }
@@ -3546,7 +5360,7 @@ static void form_kb_did_hide(void *ud)
             {
                 txt[it->maxlength] = '\0';
             }
-            form_key_write(txt);
+            form_key_write(txt, 1 /* commit → input + change */);
             pluto_free(txt);
         }
     }
@@ -3572,7 +5386,7 @@ static void form_kb_text_changed(void *ud)
         if (txt)
         {
             (void)n;
-            form_key_write(txt);
+            form_key_write(txt, 0 /* live keystroke → input */);
             pluto_free(txt);
         }
     }
@@ -3595,8 +5409,68 @@ static void activate_form_block(const LayoutItem *item)
         open_keyboard_for_input(item);
         break;
     case LRI_INPUT_SUBMIT:
+    {
+        /* B5: the tap becomes a real dispatched "click" on the button's
+         * DOM node first, then a "submit" on the nearest <form> — the
+         * browser's activation order. A handler calling preventDefault()
+         * (react's onSubmit) re-walks the LIVE DOM instead of the old
+         * hardcoded submit_form reload; with no listeners at all, the
+         * dispatch short-circuits to NONE and submit_form runs exactly
+         * as before (byte-identical static-page behavior). */
+        const DocBlock *blk = (const DocBlock *)item->block;
+        void *srcNode = blk ? blk->srcNode : NULL;
+        int rc = JSB_EVENT_NONE;
+        if (g_pageJs && srcNode)
+        {
+            rc = jsbridge_dispatch_element_event(g_pageJs, srcNode, "click");
+            logger_log("[form] submit tap: click=%d node=%p tag=%s", rc,
+                       srcNode, ((DomNode *)srcNode)->tag ? ((DomNode *)srcNode)->tag : "?");
+            if (rc == JSB_EVENT_SUPPRESSED)
+            {
+                page_rewalk_now(); /* the click handler owns the action */
+                break;
+            }
+            DomNode *formNode = form_node_ancestor(srcNode);
+            if (formNode)
+            {
+                rc = jsbridge_dispatch_element_event(g_pageJs, formNode, "submit");
+                logger_log("[form] submit dispatch: rc=%d", rc);
+                if (rc == JSB_EVENT_SUPPRESSED)
+                {
+                    page_rewalk_now(); /* onSubmit handled the submission */
+                    break;
+                }
+                /* R56f fallback: nothing matched the event (rc=NONE) = no
+                 * JS handler ran — the react engine is reset/absent (the
+                 * R56d device finding). The browser performs the site's
+                 * own submission now: validate the email, show the error/
+                 * Sending/sent card inline, POST the page's exact JSON
+                 * body. Only the email-form shape takes this path; a miss
+                 * (returns 0) falls through to the byte-identical static
+                 * GET below. */
+                if (rc == JSB_EVENT_NONE)
+                {
+                    logger_log("[form] submit unhandled — native fallback "
+                               "attempt");
+                    if (pluto_form_fallback(formNode, item))
+                        break;
+                }
+            }
+            else
+            {
+                /* Formless button (nav toggles, tab bars, …): a browser's
+                 * native behavior for a formless <button type=submit> click
+                 * is NOTHING — no submit runs. The click dispatch above
+                 * already delivered the event (NAVIGATE = handlers ran,
+                 * none prevented) so a script-driven button still works. */
+                logger_log("[form] formless button: no submit run (rc=%d)",
+                           rc);
+                break;
+            }
+        }
         submit_form(item->formAction, item);
         break;
+    }
     case LRI_CHECKBOX_FIELD:
     {
         DocBlock *block = (DocBlock *)item->block;
@@ -4162,12 +6036,20 @@ static int updateFrame(void *userdata)
     snap_autotest_tick();
 #endif
 
-#if defined(PLUTO_NR_AUTOTEST)
+#if defined(PLUTO_NR_AUTOTEST) && !defined(PLUTO_NR_AUTOTEST_TAP)
     nr_revisit_autotest_tick();
+#endif
+
+#if defined(PLUTO_NR_AUTOTEST_TAP)
+    nr_autotest_tap_tick();
 #endif
 
 #if defined(PLUTO_PAGE_AUTOTEST)
     page_autotest_tick();
+#endif
+
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+    rewalk_oom_autotest_tick();
 #endif
 
 #if defined(PLUTO_CSS_AUTOTEST)
@@ -5206,6 +7088,14 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         home_page_reset();
         currentState = STATE_HOME;
 
+
+        /* R58b: boot auto-nav REMOVED (user request): production boots to
+         * the HOME launcher — the browser never navigates anywhere on its
+         * own. Test builds that need a launch-into-a-URL bring their own
+         * pending-nav handoff (the autotest defines' block below). To
+         * restore launch-into-the-site later: pendingNavUrlSet = 1 +
+         * snprintf(pendingNavUrl, ..., "<url>") right here. */
+
 #if defined(PLUTO_SETTINGS_AUTOTEST)
         /* TEMPORARY (autotest builds, sim + device): boot-time
          * settings-panel probe — open the panel (stages storage), log the
@@ -5478,7 +7368,14 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
 #if defined(PLUTO_NR_AUTOTEST)
 #ifndef PLUTO_NR_AUTOTEST_URL
+#if defined(PLUTO_NR_AUTOTEST_TAP)
+/* The tap autotest needs a stamped form-submit block: the contact page's
+ * <form class="contact" noValidate><button type="submit">Send email</button>
+ * is the hydrating in-place-submit target (react onSubmit + B5 branch). */
+#define PLUTO_NR_AUTOTEST_URL "https://bryanwandrych.com/contact"
+#else
 #define PLUTO_NR_AUTOTEST_URL "https://bryanwandrych.com"
+#endif
 #endif
 /* Optional offline repro: navigate to a local file instead of the URL
  * (test builds only; used when the device radio is down but the crash
@@ -5598,6 +7495,19 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
                    storage_setting_int("jsEngine"), currentBrowseMode);
         pendingNavUrlSet = 1;
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:acidtest");
+#endif
+
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+        /* TEMPORARY (sim autotest): land on the acidtest page with a live
+         * DomResult so the seam tick has something real to re-walk. */
+        storage_set_setting_int("jsEnabled", 1);
+        storage_set_setting_int("mode", 1); /* RAW_HTML: live DOM */
+        currentBrowseMode = MODE_RAW_HTML;
+        snapBypass = 1; /* SW6 fast path serves no live DOM — full parse */
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", "about:acidtest");
+        logger_log("[rewalk-oom] boot: RAW_HTML + snap bypass, navigating "
+                   "to acidtest");
 #endif
 
 #if defined(PLUTO_JS_CLICK_AUTOTEST)

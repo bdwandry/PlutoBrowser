@@ -4370,6 +4370,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = (strcmp(tbuf, "button") == 0) ? "Button" : "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host click/submit dispatch target */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4401,6 +4402,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host click/submit dispatch target */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4417,6 +4419,7 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             return;
         }
+        b->srcNode = node; /* host input/change dispatch target */
         b->inputType = doc_arena_str(w, "textarea");
         b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
         b->placeholder = doc_arena_str(w, attr_or_d(a, "placeholder", ""));
@@ -4477,6 +4480,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->label = doc_arena_str(w, lb);
                 b->disabled = disabled;
+                b->srcNode = node; /* host click/submit dispatch target */
                 const char *fa = attr_val(a, "formaction");
                 b->formAction = fa ? resolve_href(w, fa) : doc_arena_str(w, w->formAction ? w->formAction : "");
                 const char *fm = attr_val(a, "formmethod");
@@ -5528,6 +5532,10 @@ static void walk_node(Walker *w, const DomNode *node)
     if (!node)
     {
         return;
+    }
+    if (node->kind == DOM_COMMENT)
+    {
+        return; /* hydration markers are not renderable content */
     }
     if (node->kind == DOM_TEXT)
     {
@@ -6661,6 +6669,12 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
  * preventDefault(): blocks/links are rebuilt from the current tree without
  * re-parsing HTML or re-running scripts (script state is preserved).
  * Returns 0 ok, -1 alloc failure (doc is left with no walk output). */
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+/* Test seam (sim autotest only): 1 forces document_rewalk down its
+ * mid-walk-failure branch deterministically, without budget games. Never
+ * set in play. */
+int g_rewalkTestForceWalkError = 0;
+#endif
 int document_rewalk(DocParseResult *doc)
 {
     if (!doc || !doc->_dom)
@@ -6724,11 +6738,30 @@ int document_rewalk(DocParseResult *doc)
         PLUTO_FREE(w.frames);
     }
 
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+    if (g_rewalkTestForceWalkError)
+    {
+        /* Test seam engagement point: the walk above may have built
+         * partial blocks — exactly the production mid-refusal shape. */
+        werr = 1;
+    }
+#endif
     if (werr)
     {
-        doc_arena_free_all(&w.arena);
+        /* R59 (Wikipedia device crash, 2026-10-18): this branch used to
+         * return 0 with doc->blocks still holding the PARTIAL walk output
+         * whose strings die with the arena freed right below — the
+         * renderer then went on to LAYOUT over that half-freed state and
+         * break_lines dereferenced reused arena memory as a block's inline
+         * array (pc=break_lines+0x4e, mmfar=0x0C00, heap in a denied
+         * strait at 13.4MB on device). Free the partial HEAP walk output
+         * via doc_free_walk_output (the arrays own no arena data), free
+         * the arena, and REPORT the failure so render_step routes to the
+         * error screen instead of layout. */
+        doc_free_walk_output(doc);
         doc->parseError = 1;
-        return 0;
+        doc_arena_free_all(&w.arena);
+        return -1;
     }
 
     DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));

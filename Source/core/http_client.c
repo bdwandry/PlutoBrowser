@@ -35,6 +35,19 @@ static SpillFile g_spill = PLUTO_SPILL_INVALID;
 static int g_spillMode = SPILL_NONE; /* SPILL_ACTIVE once streaming */
 static long g_bodySpilled = 0;       /* body bytes written to disk     */
 
+/* C4 (fetch/POST): request-line method + optional REQUEST body. The
+ * whole-life contract was GET-only (every existing caller reads GET here
+ * unchanged: http_get zeroes both). The body is an OWNED copy so the
+ * caller's buffer (JsHttpRequest.reqBody) can go away mid-flight... it
+ * never does (the router owns the request till the sweep), but a copy
+ * keeps the http_client ownership story symmetric with the response. */
+static char g_reqMethod[8];          /* "GET" default */
+static char *g_reqBody;              /* owned copy */
+static size_t g_reqBodyLen;
+/* R56g: per-call POST Content-Type (set via http_request_ct; empty =
+ * the historical "application/json" so existing callers stay identical). */
+static char g_reqContentType[64];
+
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
 
@@ -780,14 +793,28 @@ static void reset_state(void)
     g_radioHealUsed = 0;
     g_radioHealPhase = 0;
     g_radioCbErrLogged = 0;
+    /* C4: drop the request body + method with the rest of the request state
+     * (both are per-request; a stale body outliving a cancel would leak AND
+     * a stale method would retag the NEXT page load as POST). */
+    if (g_reqBody)
+    {
+        PLUTO_FREE(g_reqBody);
+        g_reqBody = NULL;
+    }
+    g_reqBodyLen = 0;
+    g_reqMethod[0] = '\0';
     g_state = HS_IDLE;
 }
 
-/* Build a minimal HTTP/1.1 GET request (reference buildRequest). */
+/* Build a minimal HTTP request (reference buildRequest). GET carried the
+ * engine for its whole life; C4 adds the POST variant the JS fetch shim
+ * needs — same header set, plus Content-Type/Length for body requests. */
 static void build_request(StrBuf *out)
 {
     strbuf_reset(out);
-    strbuf_appendf(out, "GET %s HTTP/1.1\r\n", g_parsed->fullPath);
+    strbuf_appendf(out, "%s %s HTTP/1.1\r\n",
+                   g_reqMethod[0] ? g_reqMethod : "GET",
+                   g_parsed->fullPath);
     if (g_parsed->port != 80 && g_parsed->port != 443)
     {
         strbuf_appendf(out, "Host: %s:%d\r\n", g_parsed->host, g_parsed->port);
@@ -827,7 +854,26 @@ static void build_request(StrBuf *out)
     {
         strbuf_appendf(out, "Cookie: %s\r\n", cookie);
     }
+    /* C4: body requests carry the JSON content type + exact length (the
+     * response reader keys off Content-Length/chunked exactly as before;
+     * no transfer-encoding surprises on the send path). A bodyless POST
+     * still gets Content-Length: 0 (no 411 from strict servers). */
+    int isPostReq = (g_reqMethod[0] && strcmp(g_reqMethod, "POST") == 0);
+    if (isPostReq)
+    {
+        strbuf_appendf(out, "Content-Type: %s\r\n",
+                       g_reqContentType[0] ? g_reqContentType
+                                           : "application/json");
+        strbuf_appendf(out, "Content-Length: %u\r\n",
+                       (unsigned)((g_reqBody && g_reqBodyLen)
+                                      ? g_reqBodyLen
+                                      : 0));
+    }
     strbuf_appendf(out, "Connection: close\r\n\r\n");
+    if (isPostReq && g_reqBody && g_reqBodyLen)
+    {
+        strbuf_append_n(out, g_reqBody, g_reqBodyLen);
+    }
 }
 
 /* SW2c: gzip member header/footer unwrap. RFC 1952: ID1=0x1f ID2=0x8b
@@ -1599,14 +1645,72 @@ void http_client_init(PlaydateAPI *pd)
     strbuf_init(&g_savedBuf);
 }
 
-int http_get(const char *urlString, const HttpCallbacks *callbacks)
+/* Shared front door for GET (http_get) and C4 POST (http_request): the
+ * reset happens FIRST, the method/body set AFTER it (reset_state clears
+ * the previous request's params), then start_request. */
+static int http_call(const char *method, const char *urlString,
+                     const char *body, size_t bodyLen,
+                     const HttpCallbacks *callbacks)
 {
-    /* Cancel any previous request cleanly (Lua HttpClient.get). */
     reset_state();
-    /* A fresh top-level request starts a new redirect chain. */
     g_hasPendingRedirect = 0;
     g_redirectDepth = 0;
+    memset(g_reqMethod, 0, sizeof(g_reqMethod));
+    method = (method && method[0]) ? method : "GET";
+    for (int i = 0; i < (int)sizeof(g_reqMethod) - 1 && method[i]; i++)
+    {
+        char c = method[i];
+        g_reqMethod[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    if (body && bodyLen)
+    {
+        g_reqBody = (char *)PLUTO_MALLOC(bodyLen);
+        if (!g_reqBody)
+        {
+            g_reqMethod[0] = '\0';
+            return 0; /* OOM before the wire: contained */
+        }
+        memcpy(g_reqBody, body, bodyLen);
+        g_reqBodyLen = bodyLen;
+    }
+    else
+    {
+        g_reqBody = NULL;
+        g_reqBodyLen = 0;
+    }
     return start_request(urlString, callbacks);
+}
+
+int http_get(const char *urlString, const HttpCallbacks *callbacks)
+{
+    return http_call("GET", urlString, NULL, 0, callbacks);
+}
+
+/* C4 (fetch/POST): explicit METHOD + optional REQUEST body. Mirrors
+ * http_get (cancel-first contract); the body lives from this call until
+ * the next http_call/reset. Method defaults to GET; upcased in place. */
+int http_request(const char *method, const char *urlString,
+                 const char *body, size_t bodyLen,
+                 const HttpCallbacks *callbacks)
+{
+    return http_request_ct(method, urlString, NULL, body, bodyLen, callbacks);
+}
+
+/* Same front door, but the caller picks the POST Content-Type (the form
+ * fallback sends application/x-www-form-urlencoded for HTML-standard
+ * action posts). NULL/"" = the historical "application/json" — every
+ * existing caller keeps byte-identical request behavior. */
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks)
+{
+    g_reqContentType[0] = '\0';
+    if (contentType && contentType[0])
+    {
+        snprintf(g_reqContentType, sizeof(g_reqContentType), "%s",
+                 contentType);
+    }
+    return http_call(method, urlString, body, bodyLen, callbacks);
 }
 
 void http_cancel(void)

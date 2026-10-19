@@ -77,6 +77,22 @@ void http_client_init(PlaydateAPI *pd);
  * immediate failure (onError already fired). */
 int http_get(const char *urlString, const HttpCallbacks *callbacks);
 
+/* C4 (fetch/POST): start a request with an explicit METHOD and optional
+ * REQUEST body. The body bytes are copied (caller keeps ownership);
+ * method defaults to GET when NULL/empty. Same cancel-first contract
+ * as http_get; the response path is identical, so callbacks are the
+ * same struct. Content-Type is set internally (application/json) —
+ * the only send format the page's send handler posts today. */
+int http_request(const char *method, const char *urlString,
+                 const char *body, size_t bodyLen,
+                 const HttpCallbacks *callbacks);
+/* Same front door with the caller's POST Content-Type (NULL/"" keeps the
+ * historical "application/json" — used by the native form fallback for
+ * standard urlencoded action posts). */
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks);
+
 /* R15 + Compression setting: the request builder sends Accept-Encoding:
  * identity (raw bytes; reliable on weak radio) when the stored
  * encodingMode is Off (default), gzip when the user picks Gzip in

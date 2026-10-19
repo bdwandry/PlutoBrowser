@@ -1493,6 +1493,7 @@ static JSValue qjs_el_addEventListener(JSContext *ctx, JSValueConst this_val,
     JsListener *L = &b->listeners[idx];
     L->ref = (void *)(intptr_t)idx;
     L->target = n;
+    L->kind = 0; /* click only (see JsListener.kind) */
     return JS_UNDEFINED;
 }
 static JSValue qjs_el_getElementsByTagName(JSContext *ctx,

@@ -571,6 +571,412 @@ static int bundler_unwrap_entry(const char *src, size_t len,
     return 1;
 }
 
+/* ── R55: TURBOPACK push-bundle planning ─────────────────────────────────
+ * Next.js 15 turbopack chunk scripts (bryanwandrych.com ships five per
+ * page) have ONE top-level statement:
+ *
+ *     (()=>{"use strict";(globalThis.TURBOPACK||(globalThis.TURBOPACK=[]))
+ *           .push([src, id, factory, id, factory, ...])})()        [wrapped]
+ *     (globalThis.TURBOPACK||(globalThis.TURBOPACK=[]))
+ *           .push([src, [id, factory, ...], id, factory, ...])     [bare]
+ *
+ * element 0 ("src") evaluates document.currentScript for the chunk name;
+ * the rest are (module id, factory) pairs — flat, or inside ONE nested
+ * array as the next element, or both (the runtime walk recurses into a
+ * nested array then keeps scanning top level). The chunk loader (the
+ * small `turbopack-*.js` script) re-consumes every pushed array in order:
+ * for each push it resolves the chunk promise by the src name and
+ * registers every non-function element between successive factories as an
+ * id → factory binding (throwing on a trailing run with no factory).
+ *
+ * Splitting therefore re-emits ONE push per WINDOW of consecutive pairs:
+ * every segment repeats the src span (same chunk name) plus SELF-CONTAINED
+ * whole (id, factory) pairs, so (a) prefix registration order is exactly
+ * the original walk order (nested windows first, then flat), and (b) each
+ * segment's registration lands in the SAME bracket as its chunk-promise
+ * resolution — the invariant the monolithic push had. Cuts land only
+ * after a LEXICALLY-PROVEN factory (function keyword / balanced-params
+ * `(…)=>` / `ident=>`); the FINAL window must end on a proven factory
+ * because the runtime throws on dangling ids (the real file would too).
+ * Elements that are neither ids nor provable factories (object chunks'
+ * otherChunks-like payloads) END the pair region and travel verbatim as
+ * the plan's post tail, attached once to the last segment. A second
+ * nested array or an unexpected element class NO_MAPs (run unsplit) —
+ * conservative at every step. */
+
+static const char kTurboHead[] =
+    "(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(";
+
+/* Prove the raw element a..b is a function expression the runtime's
+ * `"function"==typeof` test would classify as a factory: the `function`
+ * keyword (anon or `function name(`), a balanced `(…)` parameter list
+ * directly followed by `=>`, or an identifier directly followed by `=>`.
+ * Parenthesized NON-function expressions (`(0,he.jsx)(…)`, call results)
+ * are NOT provable → 0 (conservative: never a cut point). */
+static int blx_prove_function(const char *src, size_t len, uint32_t a,
+                              uint32_t b)
+{
+    size_t p = blex_space_at(src, len, a);
+    if (p >= b || p >= len)
+        return 0;
+    unsigned char c0 = (unsigned char)src[p];
+    if (c0 == 'f' && p + 8 <= b && memcmp(src + p, "function", 8) == 0)
+    {
+        unsigned char nx = (p + 8 < b) ? (unsigned char)src[p + 8] : 0;
+        /* named = `function name(` — minifiers emit at least one space
+         * or `(` directly; anything idchar-adjacent is an identifier
+         * whose letters happen to spell "function". A bare `function`
+         * (element ends there) is not an expression. */
+        return nx == '(' || nx == ' ' || nx == '*';
+    }
+    if (c0 == '(')
+    {
+        int d = 1;
+        size_t q = p + 1;
+        while (q < b && d > 0)
+        {
+            unsigned char c = (unsigned char)src[q];
+            if (c == '"' || c == '\'' || c == '`')
+            {
+                char qc = (char)c;
+                q++;
+                while (q < b && src[q] != qc)
+                {
+                    if (src[q] == '\\')
+                        q++;
+                    q++;
+                }
+                if (q >= b)
+                    return 0;
+                q++;
+                continue;
+            }
+            if (c == '(')
+                d++;
+            else if (c == ')')
+                d--;
+            q++;
+        }
+        if (d != 0)
+            return 0;
+        q = blex_space_at(src, len, q);
+        return (q + 2 <= b && src[q] == '=' && src[q + 1] == '>');
+    }
+    if (blex_isidchar(c0))
+    {
+        size_t q = p;
+        while (q < b && blex_isidchar((unsigned char)src[q]))
+            q++;
+        q = blex_space_at(src, len, q);
+        return (q + 2 <= b && src[q] == '=' && src[q + 1] == '>');
+    }
+    return 0;
+}
+
+/* Scan the elements of an array literal whose '[' byte is at `open`,
+ * recording pair windows into plan->spans as cut. nested = 1 → pure
+ * (id, factory) elements only (pulled OUT of a nested pairs array — the
+ * windows emit FLAT via the emitter, R55b: the runtime's walk registers
+ * nothing from a length-2 `[src,[pairs]]` arg); nested = 0 → the FIRST
+ * element is the chunk src expression (recorded to plan->turboSrc0/1 and
+ * never part of a window), ONE nested pairs array is allowed as the first
+ * post-src element (windows recurse there first — the runtime's walk
+ * order), and any other non-pair element ends the region: its leading
+ * delimiter through the arg's closing ']' is the verbatim post tail. A
+ * window closes after a proven-factory element once it holds ≥ tailStep
+ * bytes; the FINAL window requires a proven-factory last element.
+ * *closeOut = the arg's closing ']' byte. Returns 1 ok. */
+static int blx_walk_turbo_pairs(const char *src, size_t len, size_t open,
+                                int nested, PlutoBundlerPlan *plan,
+                                int *windows, size_t *closeOut)
+{
+    size_t pos = open + 1;
+    int haveWin = 0;
+    int srcRecorded = 0;
+    uint32_t winStart = 0;
+    uint32_t lastElemEnd = 0;
+    int lastClass = 0;
+    size_t argClose = 0;
+    for (;;)
+    {
+        size_t sig = blex_space_at(src, len, pos);
+        if (sig >= len)
+            return 0;
+        if (src[sig] == ',')
+        {
+            /* tolerate a pending delimiter at the walk entry (the only
+             * such path is the nested-array return below) */
+            sig = blex_space_at(src, len, sig + 1);
+            pos = sig;
+            if (sig >= len)
+                return 0;
+        }
+        /* lex this element to its top-level ',' or the arg's ']' */
+        BLex x;
+        blex_init(&x, src, len, sig);
+        int d = 0;
+        int atArgClose = 0;
+        for (;;)
+        {
+            unsigned char c = (unsigned char)src[x.pos];
+            if (c == '[' || c == '{' || c == '(')
+            {
+                d++;
+            }
+            else if (c == ']' || c == '}' || c == ')')
+            {
+                if (d == 0)
+                {
+                    /* element level: only ']' can appear — the arg close */
+                    if (c != ']')
+                        return 0;
+                    argClose = x.pos;
+                    atArgClose = 1;
+                    break;
+                }
+                d--;
+            }
+            else if (c == ',' && d == 0)
+            {
+                break; /* element delimiter (x.pos sits ON it) */
+            }
+            if (!blex_raw_step(&x))
+                return 0;
+        }
+        uint32_t elemEnd = (uint32_t)(atArgClose ? argClose : x.pos);
+        if (elemEnd <= (uint32_t)sig)
+            return 0;
+        unsigned char lead = (unsigned char)src[sig];
+        int cls; /* 1 = id, 2 = proven factory, 3 = nested array, 4 = other */
+        if (lead >= '0' && lead <= '9')
+            cls = 1;
+        else if (lead == '[')
+            cls = 3;
+        else if (blx_prove_function(src, len, (uint32_t)sig, elemEnd))
+            cls = 2;
+        else
+            cls = 4;
+        if (!nested && !srcRecorded)
+        {
+            /* the src expression: verbatim span, never cut */
+            plan->turboSrc0 = (uint32_t)sig;
+            plan->turboSrc1 = elemEnd;
+            srcRecorded = 1;
+            if (atArgClose)
+                return 0; /* src only — no pairs, nothing to split */
+            pos = x.pos + 1;
+            continue;
+        }
+        if (!nested && cls == 3)
+        {
+            /* the ONE nested pairs array (must be the first post-src
+             * element — recursion preserves the runtime's walk order) */
+            size_t nestedClose;
+            if (plan->turboNestedEnd != 0)
+                return 0; /* second nested array */
+            if (!blx_walk_turbo_pairs(src, len, sig, 1, plan, windows,
+                                      &nestedClose))
+                return 0;
+            plan->turboNestedEnd = (uint32_t)nestedClose;
+            if (atArgClose)
+                break;
+            pos = nestedClose + 1;
+            continue;
+        }
+        if (cls == 4)
+        {
+            /* pair region ends: everything from here through the arg
+             * close is the verbatim post tail (top level only — nested
+             * regions are strictly id/fn pairs) */
+            if (nested)
+                return 0;
+            if (haveWin)
+            {
+                /* open final window: dangling id run would make BOTH the
+                 * original and the split registration throw */
+                if (lastClass != 2)
+                    return 0;
+                if (*windows >= plan->maxSpans)
+                    return 0;
+                plan->spans[*windows].start = winStart;
+                plan->spans[*windows].end = lastElemEnd;
+                (*windows)++;
+                haveWin = 0;
+            }
+            /* haveWin==0: the previous element's budget cut already
+             * recorded the final window (cuts land after proven fns,
+             * so its tail is factory-terminated) */
+            if (*windows == 0)
+                return 0;
+            /* locate the arg close beyond the post elements (verbatim,
+             * balance-proving just to find the end byte) */
+            {
+                BLex y;
+                blex_init(&y, src, len, x.pos); /* on the region-ending ',' */
+                int dd = 0;
+                int found = 0;
+                for (;;)
+                {
+                    unsigned char c = (unsigned char)src[y.pos];
+                    if (c == '[' || c == '{' || c == '(')
+                    {
+                        dd++;
+                    }
+                    else if (c == ']' || c == '}' || c == ')')
+                    {
+                        if (c == ']' && dd == 0)
+                        {
+                            argClose = y.pos;
+                            found = 1;
+                            break;
+                        }
+                        dd--;
+                        if (dd < 0)
+                            return 0;
+                    }
+                    if (!blex_raw_step(&y))
+                        return 0;
+                }
+                if (!found)
+                    return 0;
+            }
+            /* post tail = [lastElemEnd, argClose) — the leading ',' after
+             * the region's final element included; cap it so the LAST
+             * segment (window + post) stays parse-sized in one frame. */
+            if ((size_t)argClose - (size_t)lastElemEnd >
+                (size_t)plan->tailStep)
+                return 0; /* post too large to re-emit whole — unsplit */
+            plan->turboPost0 = lastElemEnd;
+            plan->turboPost1 = (uint32_t)argClose;
+            *closeOut = argClose;
+            return 1;
+        }
+        /* pair-region element: id, proven factory, or a nested array in
+         * the nested walk (illegal there) */
+        if (nested && cls == 3)
+            return 0;
+        if (!haveWin)
+        {
+            winStart = (uint32_t)sig;
+            haveWin = 1;
+        }
+        if (cls == 2 && (elemEnd - winStart) >= (uint32_t)plan->tailStep)
+        {
+            if (*windows >= plan->maxSpans)
+                return 0;
+            plan->spans[*windows].start = winStart;
+            plan->spans[*windows].end = elemEnd;
+            (*windows)++;
+            haveWin = 0;
+        }
+        lastElemEnd = elemEnd;
+        lastClass = cls;
+        if (atArgClose)
+            break;
+        pos = x.pos + 1; /* past the ',' delimiter */
+    }
+    /* arg closed inside the pair region: finalize the open final window.
+     * haveWin==0 with lastClass==2 is VALID (the last element's budget
+     * cut landed exactly at the region end). A nested-only walk (no top
+     * flat pairs) finalizes nothing here. */
+    if (haveWin)
+    {
+        if (lastClass != 2)
+            return 0; /* dangling id run — the runtime would throw */
+        if (*windows >= plan->maxSpans)
+            return 0;
+        plan->spans[*windows].start = winStart;
+        plan->spans[*windows].end = lastElemEnd;
+        (*windows)++;
+    }
+    *closeOut = argClose;
+    return 1;
+}
+
+/* R55 planner entry: returns 1 with the plan filled (kind=TURBOPACK),
+ * 0 = not the shape (caller continues with the webpack scan). */
+static int bundler_plan_turbopack(const char *src, size_t len, size_t pos,
+                                  PlutoBundlerPlan *plan)
+{
+    const size_t headLen = sizeof(kTurboHead) - 1;
+    int wrapped = 0;
+    size_t p = pos;
+    if (p + 6 <= len && memcmp(src + p, "(()=>{", 6) == 0)
+    {
+        /* wrapped: `(()=>{"use strict";HEAD[...]})()` */
+        BLex x;
+        blex_init(&x, src, len, p + 6);
+        if (!blex_space(&x))
+            return 0;
+        static const char strict[] = "\"use strict\";";
+        if (x.pos + sizeof(strict) - 1 > len ||
+            memcmp(src + x.pos, strict, sizeof(strict) - 1) != 0)
+            return 0;
+        x.pos += sizeof(strict) - 1;
+        if (!blex_space(&x))
+            return 0;
+        p = x.pos;
+        wrapped = 1;
+    }
+    if (p + headLen > len || memcmp(src + p, kTurboHead, headLen) != 0)
+        return 0;
+    p += headLen;
+    if (p >= len || src[p] != '[')
+        return 0; /* object pushes (runtime config) don't split */
+    int windows = 0;
+    size_t argClose = 0;
+    if (!blx_walk_turbo_pairs(src, len, p, 0, plan, &windows, &argClose))
+        return 0;
+    /* verify the push-call tail: `)` then wrapped `})()` / bare `;`|EOF */
+    {
+        BLex x;
+        blex_init(&x, src, len, argClose + 1);
+        if (!blex_space(&x))
+            return 0;
+        if (x.pos >= len || src[x.pos] != ')')
+            return 0;
+        x.pos++;
+        if (wrapped)
+        {
+            if (!blex_space(&x))
+                return 0;
+            if (x.pos >= len || src[x.pos] != '}')
+                return 0;
+            x.pos++;
+            /* `(()=>{ … })()`: the arrow's own `(` closes first, THEN the
+             * call — the real chunk tail is `…])})();`. */
+            if (!blex_space(&x))
+                return 0;
+            if (x.pos >= len || src[x.pos] != ')')
+                return 0;
+            x.pos++;
+            if (!blex_space(&x))
+                return 0;
+            if (x.pos + 1 >= len || src[x.pos] != '(' ||
+                src[x.pos + 1] != ')')
+                return 0;
+            x.pos += 2;
+        }
+    }
+    if (windows < 2)
+        return 0; /* a single window is not worth a plan */
+    plan->kind = PLUTO_BUNDLER_KIND_TURBOPACK;
+    plan->turboWrap = wrapped;
+    plan->entries = windows;
+    plan->nSpans = windows;
+    plan->tailIndex = -1;
+    plan->tailCount = 0;
+    plan->tailHasComma = 0;
+    plan->entryBodyIndex = -1;
+    plan->registryRenamed = 0;
+    plan->name[0] = '\0';
+    logger_log("[bundler] turbopack plan: wrap=%d windows=%d "
+               "src=%u..%u nestedEnd=%u post=%u..%u",
+               wrapped, windows, plan->turboSrc0, plan->turboSrc1,
+               plan->turboNestedEnd, plan->turboPost0, plan->turboPost1);
+    return 1;
+}
+
 PlutoBundlerStatus jsbridge_bundler_plan(const char *src, size_t len,
                                          PlutoBundlerPlan *plan)
 {
@@ -586,6 +992,11 @@ PlutoBundlerStatus jsbridge_bundler_plan(const char *src, size_t len,
     plan->tailStart = 0;
     plan->tailEnd = 0;
     plan->tailStep = PLUTO_BUNDLER_TAIL_STEP;
+    plan->kind = PLUTO_BUNDLER_KIND_WEBPACK; /* R55: default shape */
+    plan->turboWrap = 0;
+    plan->turboNestedEnd = 0;
+    plan->turboSrc0 = plan->turboSrc1 = 0;
+    plan->turboPost0 = plan->turboPost1 = 0;
     if (!src || len < 16)
         return PLUTO_BUNDLER_NO_MAP;
     logger_log("[bundler] plan enter len=%zu live=%luKB", len,
@@ -614,6 +1025,12 @@ PlutoBundlerStatus jsbridge_bundler_plan(const char *src, size_t len,
         }
         break;
     }
+    /* R55: turbopack push-bundle shape (Next.js 15 static chunks). Try it
+     * FIRST: this head never starts with `var`, so the webpack map scan
+     * below cannot claim it, and the wrapped variant shares the `(()=>{`
+     * head with the webpack shape. */
+    if (bundler_plan_turbopack(src, len, pos, plan))
+        return PLUTO_BUNDLER_OK;
     /* IIFE arrow head: exactly `(()=>{` */
     if (pos + 6 > len || memcmp(src + pos, "(()=>{", 6) != 0)
         return PLUTO_BUNDLER_NO_MAP;
@@ -1037,6 +1454,20 @@ size_t jsbridge_bundler_segment_cap(const PlutoBundlerPlan *plan, int seg)
 {
     if (seg < 0 || seg >= plan->nSpans)
         return 0;
+    if (plan->kind == PLUTO_BUNDLER_KIND_TURBOPACK)
+    {
+        /* R55: boilerplate (`(()=>{"use strict";` + head + delimiters +
+         * `])`/`})()`) plus the verbatim src span, this segment's window
+         * (always flat — R55b), and the post tail on the LAST segment. */
+        size_t n = (size_t)(plan->spans[seg].end - plan->spans[seg].start);
+        n += (size_t)(plan->turboSrc1 - plan->turboSrc0);
+        n += sizeof("(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([");
+        if (plan->turboWrap)
+            n += sizeof("(()=>{\"use strict\";") + sizeof("})()") - 2;
+        if (seg == plan->nSpans - 1 && plan->turboPost1 > plan->turboPost0)
+            n += (size_t)(plan->turboPost1 - plan->turboPost0);
+        return n + 32;
+    }
     if (seg == 0)
         return sizeof(plan->name) + 8;
     if (seg <= plan->entries)
@@ -1082,6 +1513,43 @@ long jsbridge_bundler_emit(const char *src, size_t len,
         used += n;                                                   \
     } while (0)
 
+    if (plan->kind == PLUTO_BUNDLER_KIND_TURBOPACK)
+    {
+        /* R55b: re-emit ONE push registration. Every segment re-carries
+         * the src expression (same chunk name each time — the runtime's
+         * registerChunk resolves an already-resolved chunk promise as a
+         * no-op, and the module walk starts at index 1), its window of
+         * whole (id, factory) pairs — ALWAYS flat: the runtime's H
+         * walker treats a length-2 arg as a CONFIG item and reads
+         * `.otherChunks` on it without registering the pairs (the
+         * original chunks stay length>2 by appending top-level pairs
+         * after their nested array), so re-wrapping a window slice in
+         * its own `[…]` would silently register nothing and reject.
+         * Flat emission of the nested array's window slices preserves
+         * the original registration order (the walk recurses into the
+         * nested array first, then scans top level — our windows are
+         * recorded in exactly that order). The wrapped form re-wraps
+         * each segment in the original `(()=>{"use strict"; … })()`
+         * strict-mode IIFE. */
+        uint32_t a = plan->spans[seg].start;
+        uint32_t b = plan->spans[seg].end;
+        if (plan->turboWrap)
+            EMIT_LIT("(()=>{\"use strict\";");
+        EMIT_LIT("(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([");
+        EMIT_SPAN(plan->turboSrc0, plan->turboSrc1);
+        EMIT_LIT(",");
+        EMIT_SPAN(a, b);
+        if (seg == plan->nSpans - 1 &&
+            plan->turboPost1 > plan->turboPost0)
+            EMIT_SPAN(plan->turboPost0, plan->turboPost1);
+        EMIT_LIT("])");
+        if (plan->turboWrap)
+            EMIT_LIT("})()");
+        else
+            EMIT_LIT(";");
+        dst[used] = '\0';
+        return (long)used;
+    }
     if (seg == 0)
     {
         /* fresh registry: `var <name>={};` */

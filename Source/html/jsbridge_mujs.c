@@ -903,6 +903,7 @@ static void js_el_addEventListener(js_State *J)
     js_copy(J, 2);
     L->ref = (void *)js_ref(J);
     L->target = n;
+    L->kind = 0; /* click only (see JsListener.kind) */
     js_pushundefined(J);
 }
 

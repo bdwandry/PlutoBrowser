@@ -100,6 +100,13 @@ typedef struct
     size_t bodyLen;
     void *fnRef;         /* engine-held completion handler */
     void *objRef;        /* engine-held wrapper object (this-binding) */
+    /* C4 (fetch/POST, NR engine): send METHOD captured at open and the
+     * REQUEST body (owned copy; freed with the request at sweep/abort/
+     * close). Zero-init keeps every existing GET-only caller identical:
+     * method[0]=='\0' means GET and reqBody==NULL means no body. */
+    char method[8];
+    char *reqBody;
+    size_t reqBodyLen;
 } JsHttpRequest;
 
 
@@ -129,11 +136,25 @@ typedef struct
 
 /* One click listener: target element + engine-held function reference.
  * `ref` is opaque (muJS registry ref / Duktape heapptr / QuickJS pinned
- * JSValue index) — only the engine that created it may deref or free it. */
+ * JSValue index) — only the engine that created it may deref or free it.
+ * `kind` (XS NR only; zero elsewhere) selects the event class the handler
+ * answers: 0 = click (dispatch_click), 1 = load, 2 = error. The engine
+ * zero-inits registrations elsewhere, so the shared click path is
+ * unchanged for the frozen engines. */
 typedef struct
 {
     void *ref;       /* engine-held handler reference */
     DomNode *target; /* element the listener was registered on */
+    int kind;        /* 0 = click, 1 = load, 2 = error (default 0) */
+    /* B3: exact event type ("click","input","change","submit","load",
+     * "error","DOMContentLoaded") — the bubbling dispatch routes
+     * listeners by type match. R54: widened 12→24 — "DOMContentLoaded"
+     * is 17 bytes with its NUL and was silently snprintf-truncated to
+     * "DOMContentD", which row 483's registration stored as a dead
+     * alias the drain dispatch (kind 3 scan) could never find.
+     * Frozen engines never set it (stays "" → their dispatch_click keeps
+     * answering kind matches only). */
+    char type[24];
 } JsListener;
 
 struct JsBridge
@@ -144,6 +165,23 @@ struct JsBridge
 
     DocParseResult *doc; /* borrowed; the browser owns it */
     DomResult *dom;      /* == doc->_dom; live tree (browser frees it) */
+
+    /* A2: `document.currentScript` context — the ROUTER stamps the running
+     * script's <script …> open-tag span (+ resolved src for data:/remote
+     * runs) before EVERY script run and clears it after; impls that model
+     * the browser API synthesize the element on demand (Turbopack/webpack
+     * loaders read currentScript.src to find their chunk URL). NULL/0
+     * between runs: dynamic import()/timers see null, like a browser. */
+    const char *curTagStart;
+    size_t curTagLen;
+    const char *curSrcUrl;
+
+    /* A2: newest stamped EXTERNAL chunk URL, kept clear-after-script
+     * (unlike curSrcUrl): bundler registry drains run while an inline
+     * bootstrap slot is stamped and loaders there read
+     * currentScript.src — a src-bearing fallback (see the NR engine's
+     * currentScript getter) resolves against this like a chunk run. */
+    const char *lastExtSrcUrl;
 
     /* document.write capture (shared, engine-agnostic) */
     StrBuf output;
@@ -178,6 +216,20 @@ struct JsBridge
     char lastError[128];
     int ran, errs;
 
+    /* B3: event.stopPropagation() latch during a bubbled dispatch (the
+     * walk stops climbing past the listener's node; frozen engines never
+     * set it — additive trailing field, zero-init like the rest). */
+    int stopProp;
+
+    /* innerHTML-assignment mutation latch (XS (No Recursion) only, so the
+     * frozen engines stay untouched): set when a wrapper-level
+     * innerHTML assignment REPLACED/cleared subtree children so the sim's
+     * frame loop re-runs page_rewalk_now() (layout must re-anchor to the
+     * fresh subtree — react's fallback restore swaps head/body wholesale,
+     * and stale layout blocks would dispatch to DETACHED nodes). Reply
+     * after each frame through jsbridge_take_dom_dirty(). */
+    int domDirty;
+
     /* R15: scripts skipped by the admission gate, waiting for memory
      * (JSBRIDGE_DEFERRED_MAX above). */
     struct
@@ -187,6 +239,20 @@ struct JsBridge
         size_t len;
     } deferred[4];
     int deferredCount;
+
+    /* R54: per-frame script stage park (FULL mode). js_doc_attach scans
+     * the slot plan, parks it HERE in document order, and returns; the
+     * frame sweep then runs ONE entry per update() through
+     * jsbridge_script_queue_pump. The old sync attach loop executed every
+     * script's parse+compile+run bracket inside ONE update() frame — the
+     * device breached the 10s SDK watchdog mid-lexer (E1 2026-10-18
+     * 12:02:50, pc=fxNewParserSymbol_nr) after ~9.5s of ARM parse work;
+     * the host sim finishes the whole stage in <1s and never reproduced
+     * it. Entries are copies: every span points into the DOC-owned
+     * rawHtml / extScripts, valid for the bridge's lifetime. */
+    JsScriptSlot scriptQueue[JSBRIDGE_MAX_SCRIPTS];
+    int scriptQueueCount; /* entries parked (<= JSBRIDGE_MAX_SCRIPTS) */
+    int scriptQueueNext;  /* next to run; == scriptQueueCount when drained */
 };
 
 /* Engine id (kept in sync with storage jsEngine / settings rows). */
@@ -264,6 +330,23 @@ typedef struct JsEngineImpl
     int (*mount_parked)(JsBridge *b);
     /* One-word engine name for logs ("muJS", "Duktape"). */
     const char *name;
+
+    /* B2: element-event dispatch with browser bubble semantics
+     * ("click"/"input"/"change"/"submit"; see jsbridge.h's
+     * jsbridge_dispatch_element_event). Additive LAST slot: the frozen
+     * engines' positional vtable initializers keep their exact mapping,
+     * and trailing unlisted members zero-init to NULL — the router then
+     * short-circuits to NONE so the caller takes its native action. */
+    int (*dispatch_event)(JsBridge *b, const void *node, const char *type);
+    /* R54: called ONCE by the router when the per-frame script queue
+     * drains (the sync attach loop's effective end).NULL = engine has
+     * no drained-time work (frozen engines zero-init). Currently: the
+     * XS-NR fork dispatches DOMContentLoaded to document-level
+     * listeners — browser parse semantics (loading during the script
+     * stage via xs_document_readyState; next.js's app-router arms its
+     * RSC stream closer on DCL, and its setTimeout fallback was
+     * interleave-unsafe with the per-frame queue). */
+    void (*script_queue_drained)(JsBridge *b);
 } JsEngineImpl;
 
 /* Router helpers shared with the impls (jsbridge.c). */
@@ -272,6 +355,11 @@ int budget_take(JsBridge *b);
 void bridge_take_error_text(JsBridge *b, const char *msg);
 /* Compile-safety gate (shared by ALL engines — one safety bar). */
 int jsbridge_script_compile_safe(const char *src, size_t len);
+/* Browser-faithful data-type filter (shared by both script scanners in
+ * jsbridge.c + jsext.c): returns 1 when this <script> element's `type=`
+ * names a non-executable MIME (JSON family / importmap …) and the element
+ * must be skipped, 0 when its body/src is executable JavaScript. */
+int jsbridge_script_type_is_data(const char *lt, const char *gt);
 
 /* ── R15: OS-truth admission + deferred-retry for giant scripts ──────────
  * A compile's peak footprint (parse tree + emitted bytecode + machine
@@ -362,6 +450,10 @@ int jsbridge_timer_clear(JsBridge *b, int id);
  * onerror through the pump). clear: deactivate (used before close). */
 int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url);
 void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef);
+/* C4 (fetch/POST): twin of jsbridge_xhr_send that also carries the
+ * REQUEST body (deep-copied). Frozen engines never call it. */
+void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
+                            size_t bodyLen, void *fnRef, void *objRef);
 void jsbridge_xhr_abort(JsBridge *b, int id);
 /* Live request lookup (engines read status/responseText off the wrapper). */
 const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id);

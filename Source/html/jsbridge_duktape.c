@@ -761,6 +761,7 @@ static duk_ret_t duk_el_addEventListener(duk_context *ctx)
     JsListener *L = &b->listeners[b->listenerCount++];
     L->ref = fnHeapptr;
     L->target = n;
+    L->kind = 0; /* click only (see JsListener.kind) */
     return 0;
 }
 static duk_ret_t duk_el_getElementsByTagName(duk_context *ctx)

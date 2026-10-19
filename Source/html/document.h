@@ -272,6 +272,14 @@ typedef struct
     double mvalue, mmax, mmin, mlow, mhigh, moptimum;
     /* reader_header (readability) */
     char *host, *readingTime; /* arena strings or NULL */
+    /* FORM blocks: source DOM node so host-driven taps/keystrokes can
+     * dispatch real events to page handlers via
+     * jsbridge_dispatch_element_event (click, input, change, submit).
+     * Stamped for DOC_BLOCK_INPUT_SUBMIT at the walker's creation sites
+     * and for input fields (textarea included). NULL for every other
+     * block kind and when JS never ran / the node came from a snapshot
+     * without one. */
+    void *srcNode;
 } DocBlock;
 
 /* ── Links (port of doc.links[i]) ────────────────────────────────────────── */

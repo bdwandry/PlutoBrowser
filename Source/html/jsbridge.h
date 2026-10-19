@@ -44,7 +44,18 @@
                                           * share the mutation budget — was
                                           * 512, sized for the textContent
                                           * era) */
-#define JSBRIDGE_LISTENERS_MAX 32        /* click listeners per page */
+#define JSBRIDGE_LISTENERS_MAX 128       /* click listeners per page — raised
+                                          * 32→128: REAL hydration (fix for the
+                                          * route-announcer attachShadow gap)
+                                          * lets react-dom's full delegated
+                                          * set bind (~75 event types, in
+                                          * bubble+capture pairs, on doc + app
+                                          * root); the exact-tuple dedupe in
+                                          * xs_el_addEventListener keeps the
+                                          * re-render re-registrations from
+                                          * growing the array, but the UNIQUE
+                                          * first-batch set no longer fits 32 */
+#define JSBRIDGE_MAX_PROPS 32            /* has-props scan per DOM object */
 #define JSBRIDGE_MAX_PROPS 32            /* has-props scan per DOM object */
 #define JSBRIDGE_MAX_FILES 32            /* document.files[] size */
 #define JSBRIDGE_WRITE_CHUNK 2048        /* per-write() growth step cap */
@@ -89,6 +100,13 @@
  * Engines still REFUSE gracefully (skip + log, page continues) if their own
  * heap limit would be exceeded — the soft budget is the real guard. */
 #define JSBRIDGE_MAX_SCRIPT_SOURCE (768 * 1024)
+/* R54: largest script a DEVICE may parse whole-file inside ONE update()
+ * frame. The SDK run-loop watchdog hard-crashes (E1) past 10s without an
+ * update() return; the 180MHz lexer costs ~1s per ~30KB of minified JS
+ * (measured: 32KB ≈ 1s bracket). Engines skip containedly above this cap
+ * (device builds only); giant bundles belong on the planner/split path or
+ * stay disk-resident + deferred. The host sim is unaffected. */
+#define JSBRIDGE_ONE_FRAME_SCRIPT_MAX (64 * 1024)
 
 /* ── SW4: QuickJS bytecode cache (QuickJS bridge only) ────────────────────
  * Sources shorter than this parse faster than a disk round-trip is worth:
@@ -132,6 +150,13 @@ typedef struct
     size_t inlineLen;
     int extIndex;            /* -1 = external but unresolvable/over-cap;
                               *    JS_SCRIPT_DATA = data:-URL payload slot */
+    /* A2 (document.currentScript): the <script …> OPEN tag span as scanned,
+     * so the router can stamp which element is running (browsers expose
+     * document.currentScript during a script's execution; bundled loaders —
+     * Turbopack/webpack — read its src to discover their chunk URL). NULL/0
+     * for legacy tag-less scans (engine behavior unchanged then). */
+    const char *tagStart;
+    size_t tagLen;
 } JsScriptSlot;
 
 typedef struct JsBridge JsBridge;
@@ -154,6 +179,15 @@ typedef enum
     JSB_CLICK_NAVIGATE = 1,   /* handlers ran, default not prevented */
     JSB_CLICK_SUPPRESSED = 2  /* preventDefault() → re-render, don't navigate */
 } JsBridgeClickResult;
+
+/* jsbridge_dispatch_element_event results (B2; same numeric scale as the
+ * click results so routers/callers can switch on either): */
+typedef enum
+{
+    JSB_EVENT_NONE = 0,        /* nothing matched → caller's native action */
+    JSB_EVENT_NAVIGATE = 1,    /* handlers ran, default not prevented */
+    JSB_EVENT_SUPPRESSED = 2   /* preventDefault() → caller re-renders */
+} JsBridgeEventResult;
 
 /* ── Script scanning ───────────────────────────────────────────────────────
  * Scan raw HTML for <script> elements in document order into `slots`.
@@ -198,6 +232,17 @@ int jsbridge_is_idle(const JsBridge *b);
  * should re-render instead of navigating. */
 int jsbridge_dispatch_link_click(JsBridge *bridge, const void *anchorNode);
 
+/* B2: dispatch a DOM event of `type` ("click", "input", "change", "submit")
+ * on `node` with browser bubble semantics: listeners registered on `node`
+ * itself fire first (this = node), then the listeners of each ancestor up
+ * the tree — react's delegation listens at the root container, so bubbling
+ * is what delivers. A handler calling preventDefault() yields
+ * JSB_EVENT_SUPPRESSED (caller re-renders the live DOM instead of taking
+ * the native action). JSB_EVENT_NONE means nothing matched — the caller
+ * keeps its native behavior unchanged. */
+int jsbridge_dispatch_element_event(JsBridge *bridge, const void *node,
+                                    const char *type);
+
 /* Run one extra script body against an attached page bridge (routed through
  * the same engine/compile-safety/budget path as page scripts). Intended for
  * host tests and diagnostics; returns 0 dispatched, -1 rejected. */
@@ -213,6 +258,15 @@ int jsbridge_page_script(JsBridge *bridge, const char *src, size_t len);
  * detached node (they operate on the node, not the tree position). */
 int jsbridge_el_set_inner_html(JsBridge *b, void *el, const char *html,
                                size_t len);
+/* Same parse/adopt path with a per-caller source cap. The XS (No
+ * Recursion) bridge needs document-sized snapshots (Next.js error
+ * boundary re-renders
+ * `<html dangerouslySetInnerHTML={{__html: documentElement.innerHTML}}>`
+ * — a contact page snapshot is ~22KB, beyond the shared 16KB guard).
+ * Other engines keep `jsbridge_el_set_inner_html` (frozen behavior
+ * byte-identical); the cap there stays JSBRIDGE_INNER_HTML_MAX. */
+int jsbridge_el_set_inner_html_ex(JsBridge *b, void *el, const char *html,
+                                  size_t len, size_t maxLen);
 /* emit is called per match in document order (return <0 to stop early);
  * the return is the match count, -1 on an unusable selector / budget-out. */
 int jsbridge_el_query_selector_all(JsBridge *b, void *el, const char *sel,
@@ -241,6 +295,18 @@ int jsbridge_timers_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
  * the timer pump; no-op when nothing is waiting or memory hasn't freed).
  * mutationsOut (may be NULL) is set when the retry consumed DOM budget. */
 void jsbridge_deferred_pump(JsBridge *bridge, int *mutationsOut);
+/* R54: per-frame script stage — js_doc_attach (FULL mode) parks the page's
+ * script slot plan in document order and runs NOTHING synchronously; this
+ * pump executes ONE parked entry per frame (the bridge's engine brackets,
+ * stamp/clear currentScript pairs and skip/resolve branches are identical
+ * to the old sync attach loop). The sync loop ran every script inside one
+ * update() frame and breached the device's 10s run-loop watchdog (E1);
+ * one bracket per frame keeps every update() return well inside the
+ * budget. Guarded by the same re-entrancy gates as the deferred pump
+ * (mount_parked / timer/click busy → the head waits, retried next frame;
+ * a mid-flight bundler split is engine-busy via impl->eval_pending).
+ * mutationsOut (may be NULL) is set when the entry consumed DOM budget. */
+void jsbridge_script_queue_pump(JsBridge *bridge, int *mutationsOut);
 /* R20: per-frame ENGINE pump — resumes background engine work that must
  * be spread across frames to keep the device run loop alive (the XS-NR
  * fork's time-sliced bundler split). Call once per frame next to the
@@ -248,9 +314,22 @@ void jsbridge_deferred_pump(JsBridge *bridge, int *mutationsOut);
  * mutationsOut (may be NULL) is set when resumed work consumed DOM
  * budget (caller schedules the standard re-render). */
 void jsbridge_engine_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
+
+/* innerHTML-assignment rewalk latch (XS (No Recursion) engines only —
+ * others always answer 0). Reads and CLEARS the bridge's domDirty flag:
+ * nonzero once means a wrapper-level innerHTML replacement/clear [a]
+ * mutated live subtree children; the caller runs page_rewalk_now() the
+ * same way the timer/deferred pumps' mutationsOut does, so layout and
+ * the tap-target stamps re-anchor to the fresh subtree. */
+int jsbridge_take_dom_dirty(JsBridge *bridge);
 /* R27: 1 while the engine's background eval (XS NR bundler split) is still
- * in flight. The render pipeline gates the walk/snapshot on this so they
- * observe the POST-JS DOM (device run 5 walked at eval second 1). */
+ * in flight — OR the R54 per-frame script queue still has entries. The
+ * render pipeline gates the walk/snapshot on this so they observe the
+ * POST-JS DOM (device run 5 walked at eval second 1). The queue is part
+ * of the pending truth: a snapshot captured while parked scripts are
+ * unpaid would freeze the PRE-JS DOM into the cache (the exact R27-era
+ * bug). The pump itself gates only on impl->eval_pending (engine work)
+ * to avoid gating on itself. */
 int jsbridge_eval_pending(JsBridge *bridge);
 /* R28: 1 while a resumable-mount run is parked mid-program (XS NR). The
  * router pumps gate deliveries on this while the page is loading. */

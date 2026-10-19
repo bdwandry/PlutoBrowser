@@ -609,6 +609,15 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         o = *opts;
     }
     int lineH = o.lineH ? o.lineH : 16;
+    if (!inlines || inlineCount <= 0)
+    {
+        /* R59 defensive guard (Wikipedia device crash 2026-10-18): a block
+         * that lost its inline array (mid-walk refusal before the re-walk
+         * contract fix) must degrade to an empty flow, never fault the
+         * loop. The re-walk now refuses to publish such states, but any
+         * producer of inlineCount>0 with inlines==NULL degrades here. */
+        return lineH;
+    }
     FlowLine cur;
     memset(&cur, 0, sizeof(cur));
     int firstWord = 1;

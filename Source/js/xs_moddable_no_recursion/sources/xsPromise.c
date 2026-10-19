@@ -36,6 +36,9 @@
  */
 
 #include "xsAll.h"
+#if defined(PLUTO_HYDRATE_TRACE)
+#include "logger.h"
+#endif
 
 //#define mxPromisePrint 1
 #ifndef mxReportUnhandledRejections
@@ -227,6 +230,45 @@ void fxAddUnhandledRejection(txMachine* the, txSlot* promise)
  		slot = slot->next = fxNewSlot(the);
 		slot->kind = reason->kind;
 		slot->value = reason->value;
+		/* xs_no_recursion (A2 boot forensic): a handler-less reject is the
+		 * boot gate — report the reason WITHOUT any interpreter re-entry
+		 * (JS calls from here would recurse into the no-recursion pump).
+		 * Strings print directly; objects print only their data-property
+		 * slots whose kind is string (message / stack are stored as raw
+		 * strings). Cap the whole session at 8 rows. */
+		static long nrRejectRows = 0;
+		if (nrRejectRows < 8) {
+			extern void xs_engine_nr_report(const char* fmt, ...) __attribute__((weak));
+			if (xs_engine_nr_report) {
+				nrRejectRows++;
+				if (reason->kind == XS_STRING_KIND && reason->value.string) {
+					xs_engine_nr_report("[reject] string reason: %.150s",
+										reason->value.string);
+				}
+				else if (reason->kind == XS_REFERENCE_KIND &&
+						 reason->value.reference) {
+					txSlot* rd = reason->value.reference->next;
+					while (rd) {
+						if (rd->kind == XS_STRING_KIND && rd->value.string &&
+							rd->value.string[0]) {
+							if (rd->ID != XS_NO_ID)
+								xs_engine_nr_report(
+									"[reject] slot %s: %.150s",
+									fxGetKeyName(the, rd->ID),
+									rd->value.string);
+							else
+								xs_engine_nr_report(
+									"[reject] slot.name?: %.150s",
+									rd->value.string);
+						}
+						rd = rd->next;
+					}
+				}
+				else {
+					xs_engine_nr_report("[reject] reason kind=%d", reason->kind);
+				}
+			}
+		}
 	}
 }
 
@@ -524,6 +566,13 @@ void fxOnResolvedPromise(txMachine* the)
 	txSlot* resolveHandler = rejectFunction->next;
 	txSlot* argument = mxArgv(0);
 	txSlot* function = resolveFunction;
+#if defined(PLUTO_HYDRATE_TRACE)
+	/* C4 probe: the resolver runner runs the user's onFulfilled INLINE
+	 * (bookmark resumes the awaited async fn here). Log whether the
+	 * handler slot even looks like a callable reference. */
+	logger_log("[prom] runner kind=%d ref=%d", resolveHandler->kind,
+	           resolveHandler->kind == XS_REFERENCE_KIND ? 1 : 0);
+#endif
 	if (resolveHandler->kind == XS_REFERENCE_KIND) {
 		mxTry(the) {
 			/* THIS */
@@ -618,11 +667,24 @@ void fxPromiseThen(txMachine* the, txSlot* promise, txSlot* onFullfilled, txSlot
 	status = mxPromiseStatus(promise);
 	if (status->value.integer == mxPendingStatus) {
 		txSlot** address = &(mxPromiseThens(promise)->value.reference->next);
-		while ((slot = *address)) 
+		while ((slot = *address))
 			address = &(slot->next);
 		slot = *address = fxNewSlot(the);
 		slot->kind = XS_REFERENCE_KIND;
 		slot->value.reference = reaction;
+#if defined(PLUTO_HYDRATE_TRACE)
+		/* C4 probe: reaction registration on this promise (await/then).
+		 * pending=1 with an ever-growing chain is the normal path;
+		 * a resolve-time chain of 0 means registration went elsewhere. */
+		{
+			int n = 0;
+			slot = mxPromiseThens(promise)->value.reference->next;
+			while (slot && (n++ < 8))
+				slot = slot->next;
+			logger_log("[prom] then promise=%p pending=1 reactions=%d",
+			           (void *)promise, n);
+		}
+#endif
 	}
 	else {
 		mxPushReference(reaction);
@@ -762,8 +824,39 @@ void fxResolvePromise(txMachine* the)
 		result = mxPromiseResult(promise);
 		result->kind = argument->kind;
 		result->value = argument->value;
+#if defined(PLUTO_HYDRATE_TRACE)
+		/* C4 probe: reaction-chain size at resolve. 0 here + drain
+		 * pending=0 = no await ever registered ON THIS PROMISE (the
+		 * awaiter is reacting to some other promise/queue). */
+		{
+			int n = 0;
+			slot = mxPromiseThens(promise)->value.reference->next;
+			while (slot && (n++ < 8))
+				slot = slot->next;
+			logger_log("[prom] resolve promise=%p chain=%d", (void *)promise,
+			           n);
+		}
+#endif
 		slot = mxPromiseThens(promise)->value.reference->next;
 		while (slot) {
+#if defined(PLUTO_HYDRATE_TRACE)
+			{
+				txSlot *rc = slot->value.reference;
+				/* k0..k2 only: the reaction layout is
+				 * [resolveFn?][rejectFn?][__onFullfilled_][__onRejected_]
+				 * [(__result_) if resolveFn given] — deep-deref probes
+				 * past the instance chain hung the boot drain. */
+				logger_log(
+				    "[prom] resolve iter slot=%p refkind=%d rc=%p "
+				    "k0=%d k1=%d k2=%d",
+				    (void *)slot, slot->kind, (void *)rc,
+				    rc ? rc->next->kind : -1,
+				    (rc && rc->next) ? rc->next->next->kind : -1,
+				    (rc && rc->next && rc->next->next)
+				        ? rc->next->next->next->kind
+				        : -1);
+			}
+#endif
 			mxPushReference(slot->value.reference);
 			mxPush(mxOnResolvedPromiseFunction);
 			mxCall();
@@ -1271,6 +1364,18 @@ void fxQueueJob(txMachine* the, txInteger count, txSlot* promise)
 	the->stack = stack;
 }
 
+static txInteger nrJobsRunning = 0;
+/* A2 probe: how many per-job meter re-arms have fired this session (the
+ * bridge's [meter] overrun row prints it to separate "one huge job" from
+ * "many middling jobs" when the drain trips the runner limit). */
+static long nrJobMeterResets = 0;
+
+void fzJobMeterStats(long *resets)
+{
+	if (resets)
+		*resets = nrJobMeterResets;
+}
+
 void fxRunPromiseJobs(txMachine* the)
 {
 	txSlot* job;
@@ -1283,6 +1388,35 @@ void fxRunPromiseJobs(txMachine* the)
 	job = mxRunningJobs.value.reference->next = mxPendingJobs.value.reference->next;
 	mxPendingJobs.value.reference->next = C_NULL;
 	while (job) {
+		/* xs_no_recursion (A2): each promise job is one browser microtask —
+		 * give it a fresh meter window. The stock window re-arms
+		 * cumulatively from meterIndex (fxNrCheckMeteringPause's true
+		 * path), so one long job CHAIN (async/await fall-out: registry
+		 * continuations, the flight client) shares ONE budget and trips
+		 * the runner's source-scaled runaway abort mid-boot. A single
+		 * runaway job is still bounded by the window the meter callback
+		 * checks. Skipped when metering is not armed (meterInterval == 0)
+		 * and when a pause/abort request is sticky (mount bursts and split
+		 * bursts keep their own pause contracts; do not reset their
+		 * accounting mid-flight). */
+		if (the->meterInterval && !the->nrPauseRequest && !the->nrPauseAbort) {
+			the->meterIndex = 0;
+			the->meterCount = the->meterInterval;
+			nrJobMeterResets++;
+		}
+#if defined(PLUTO_HYDRATE_TRACE)
+		/* C4 probe: row per native promise job (numbering like the source
+		 * promise ids would need more state; every-other-row suffices). */
+		static long jrunSeq = 0;
+		{
+			jrunSeq++;
+			if ((jrunSeq & 1) == 1) {
+				logger_log("[jrun] job=%p slot=%p %s", (void*)job,
+				           (void*)job->value.reference,
+				           (job->value.reference) ? "" : "NULLREF");
+			}
+		}
+#endif
 		mxTry(the) {
 			count = 0;
 			slot = job->value.reference->next;
@@ -1291,6 +1425,12 @@ void fxRunPromiseJobs(txMachine* the)
 				count++;
 				slot = slot->next;
 			}
+#if defined(PLUTO_HYDRATE_TRACE)
+			/* C4 probe: run-width per job. count-4 must be ≥0 — a
+			 * 0/underflowed package crashes mxRunCount silently. */
+			logger_log("[jrun2] slots=%d run=%ld", (int)count,
+			           (long)(count - 4));
+#endif
 			mxRunCount(count - 4);
 			mxPop();
 			if (mxDuringJobs.kind == XS_REFERENCE_KIND)

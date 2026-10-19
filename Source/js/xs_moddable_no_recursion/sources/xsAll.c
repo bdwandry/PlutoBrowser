@@ -93,6 +93,19 @@ again:
 
 void fxBufferFrameName(txMachine* the, txString buffer, txSize size, txSlot* frame, txString suffix)
 {
+	/* C4: NULL frame is legal from probe call sites (the machine's
+	 * frame pointer is NULL between brackets — e.g. the drain running
+	 * outside a script run). Copy nothing and return instead of
+	 * faulting on frame+2. */
+	if (!frame) {
+		txSize n = 0;
+		while (suffix[n] && (n + 1 < size)) {
+			buffer[n] = suffix[n];
+			n++;
+		}
+		buffer[n] = 0;
+		return;
+	}
 	txSlot* function = frame + 2;
 	txSlot* _this = frame + 3;
 	if (function->kind == XS_REFERENCE_KIND) {

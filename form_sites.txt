@@ -1,0 +1,16 @@
+# PlutoBrowser native-form-fallback site profiles (DATA, not code).
+# One block per host. A form with its own action= never needs a profile:
+# the browser submits it with standard HTML semantics first. Profile keys:
+#   host=, endpoint=, body=json|url, keys=dom:payload;..., labels=dom:Label;...,
+#   summary=name1,name2 (rows to show; empty = all), success=, failure=,
+#   invalid=, sending=
+host=bryanwandrych.com
+endpoint=https://server.bryanwandrych.com/send_email
+body=json
+keys=contact-email:email;contact-subject:subject;contact-message:message
+labels=contact-email:From;contact-subject:Subject
+summary=contact-email,contact-subject
+success=Sent. Your message is on its way to bwandrych@bryanwandrych.com — I'll reply as soon as I can.
+failure=Something went wrong. Please try again later.
+invalid=Please enter a valid email address.
+sending=Sending…

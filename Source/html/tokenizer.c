@@ -207,7 +207,7 @@ static int store_attr(Token *tok, Arena *arena, const char *key,
     }
     memcpy(raw, val, vlen);
     raw[vlen] = '\0';
-    char *dec = entities_decode(raw);
+    char *dec = entities_decode_browser(raw); /* attribute values decode with browser rules too */
     PLUTO_FREE(raw);
     if (!dec)
     {
@@ -442,7 +442,7 @@ static int push_text(TokenizeResult *res, Arena *arena, const char *p, size_t le
     }
     memcpy(raw, p, len);
     raw[len] = '\0';
-    char *dec = entities_decode(raw);
+    char *dec = entities_decode_browser(raw); /* browser-exact: SSR text must match the client tree byte-for-byte */
     PLUTO_FREE(raw);
     if (!dec)
     {
@@ -463,6 +463,23 @@ static int push_text(TokenizeResult *res, Arena *arena, const char *p, size_t le
     Token t;
     memset(&t, 0, sizeof(t));
     t.type = TOK_TEXT;
+    t.content = stored;
+    return toklist_push(&res->tokens, &t);
+}
+
+/* Comments carry RAW data (no entity decode — the HTML parser keeps
+ * comment text verbatim, and React's hydration markers "$", "/$",
+ * "F!", "&" compare exactly byte-for-byte against these strings). */
+static int push_comment(TokenizeResult *res, Arena *arena, const char *p, size_t len)
+{
+    char *stored = arena_dup(arena, p, len);
+    if (!stored)
+    {
+        return -1;
+    }
+    Token t;
+    memset(&t, 0, sizeof(t));
+    t.type = TOK_COMMENT;
     t.content = stored;
     return toklist_push(&res->tokens, &t);
 }
@@ -497,6 +514,75 @@ static void collapse_ws(const char *src, size_t len, char *dst, size_t dstCap)
 }
 
 /* ── Public API ────────────────────────────────────────────────────────────── */
+
+/* Emit one TAG token (start or close) from the TRIMMED inside span
+ * [b, e) of "<…>". Shared by the normal-tag branch and the real-DOM
+ * script/style/title branches so all four parse attributes identically. */
+static int emit_tag_token(TokenizeResult *out, Arena *arena, const char *b,
+                          const char *e)
+{
+    int isClosing = (b < e && b[0] == '/');
+    const char *body = isClosing ? b + 1 : b;
+    size_t bodyLen = (size_t)(isClosing ? (e - b) - 1 : e - b);
+    int selfFromSlash = (bodyLen > 0 && body[bodyLen - 1] == '/');
+    int isSelfClosing = selfFromSlash || isClosing;
+    if (selfFromSlash)
+    {
+        bodyLen--;
+    }
+    size_t nameLen = 0;
+    while (nameLen < bodyLen &&
+           (isalnum((unsigned char)body[nameLen]) || body[nameLen] == '-' ||
+            body[nameLen] == ':'))
+    {
+        nameLen++;
+    }
+    if (nameLen == 0)
+    {
+        return 0;
+    }
+    Token t;
+    memset(&t, 0, sizeof(t));
+    t.type = TOK_TAG;
+    t.name = arena_dup(arena, body, nameLen);
+    if (!t.name)
+    {
+        return -1;
+    }
+    for (size_t c = 0; c < nameLen; c++)
+    {
+        t.name[c] = (char)tolower((unsigned char)t.name[c]);
+    }
+    t.isClosing = isClosing;
+    t.isSelfClosing = isSelfClosing;
+    if (parse_attributes(body + nameLen, body + bodyLen, &t, arena) != 0)
+    {
+        return -1;
+    }
+    return toklist_push(&out->tokens, &t);
+}
+
+/* Script/style RAWTEXT body: verbatim bytes, NO entity decode and no
+ * empty-span drop (HTML keeps '</script>'-terminated raw content exactly,
+ * including newlines/indentation — hydration compares it byte-for-byte). */
+static int push_script_text(TokenizeResult *res, Arena *arena, const char *p,
+                            size_t len)
+{
+    if (len == 0)
+    {
+        return 0;
+    }
+    char *stored = arena_dup(arena, p, len);
+    if (!stored)
+    {
+        return -1;
+    }
+    Token t;
+    memset(&t, 0, sizeof(t));
+    t.type = TOK_TEXT;
+    t.content = stored;
+    return toklist_push(&res->tokens, &t);
+}
 
 int tokenizer_tokenize(const char *html, TokenizeResult *out)
 {
@@ -586,18 +672,62 @@ int tokenizer_tokenize(const char *html, TokenizeResult *out)
 
         if (insideLen >= 3 && strncmp(b, "!--", 3) == 0)
         {
-            /* 1. HTML comment: <!-- ... --> */
+            /* 1. HTML comment: <!-- ... --> → TOK_COMMENT carrying the
+             * raw data. Data spans just past "<!--" to the "-->"; on a
+             * malformed tail the fallback trims at the first '>'. */
             const char *cend = find_from(tagStart, end, "-->", 3);
+            const char *dbeg = tagStart + 4;
+            const char *dend = cend ? cend : tagEnd;
+            if (dend >= dbeg &&
+                push_comment(out, arena, dbeg, (size_t)(dend - dbeg)) != 0)
+            {
+                goto fail;
+            }
             pos = cend ? cend + 3 : tagEnd + 1;
         }
         else if (strncmp(head, "script", 6) == 0)
         {
-            /* 2. skip <script> ... </script> */
+            /* 2. <script> is a REAL DOM element now (browser parity): the
+             * SSR tree react-dom hydrates against keeps every script node
+             * in the body flow (JSON-LD metadata, hoisted src=, launch
+             * bootstrap), so the claim walker must be able to claim them.
+             * Previously everything after footer misaligned when the
+             * post-footer scripts were claimed from a NULL cursor ("Hydration
+             * failed"). The open tag carries attributes, the body is RAW
+             * text (HTML script data state — never entity-decoded), then
+             * the close tag. EXECUTION still flows exclusively from
+             * doc->rawHtml scans (extract_scripts / jsext slots), never
+             * from the DOM, and the render walker no-ops <script>. */
             const char *sc = find_close_tag(tagEnd, end, "script");
+            if (emit_tag_token(out, arena, b, e) != 0)
+            {
+                goto fail;
+            }
             if (sc)
             {
                 const char *gt = memchr(sc, '>', (size_t)(end - sc));
-                pos = (gt ? gt : sc) + 1;
+                const char *beg = tagEnd + 1;
+                if (sc > beg &&
+                    push_script_text(out, arena, beg,
+                                     (size_t)(sc - beg)) != 0)
+                {
+                    goto fail;
+                }
+                if (gt)
+                {
+                    const char *cb = sc + 1; /* "/script" inside span */
+                    const char *ce = gt;
+                    trim_span(&cb, &ce);
+                    if (emit_tag_token(out, arena, cb, ce) != 0)
+                    {
+                        goto fail;
+                    }
+                    pos = gt + 1;
+                }
+                else
+                {
+                    pos = sc + strlen("</script>");
+                }
             }
             else
             {
@@ -606,12 +736,41 @@ int tokenizer_tokenize(const char *html, TokenizeResult *out)
         }
         else if (strncmp(head, "style", 5) == 0)
         {
-            /* 3. skip <style> ... </style> */
+            /* 3. <style> is a REAL DOM element now (browser parity —
+             * react's stylesheet-hoisting claims style instances the same
+             * way). Body is RAW CSS text (RAWTEXT state — no decode);
+             * the render walker no-ops the subtree and css_scan_sheets
+             * keeps working off rawHtml. */
             const char *sc = find_close_tag(tagEnd, end, "style");
+            if (emit_tag_token(out, arena, b, e) != 0)
+            {
+                goto fail;
+            }
             if (sc)
             {
                 const char *gt = memchr(sc, '>', (size_t)(end - sc));
-                pos = (gt ? gt : sc) + 1;
+                const char *beg = tagEnd + 1;
+                if (sc > beg &&
+                    push_script_text(out, arena, beg,
+                                     (size_t)(sc - beg)) != 0)
+                {
+                    goto fail;
+                }
+                if (gt)
+                {
+                    const char *cb = sc + 1;
+                    const char *ce = gt;
+                    trim_span(&cb, &ce);
+                    if (emit_tag_token(out, arena, cb, ce) != 0)
+                    {
+                        goto fail;
+                    }
+                    pos = gt + 1;
+                }
+                else
+                {
+                    pos = sc + strlen("</style>");
+                }
             }
             else
             {
@@ -620,20 +779,48 @@ int tokenizer_tokenize(const char *html, TokenizeResult *out)
         }
         else if (strncmp(head, "title", 5) == 0)
         {
-            /* 4. page <title>: no token; pageTitle = collapsed decoded text */
+            /* 4. <title> is a REAL DOM element now (browser parity:
+             * RCDATA — the text child is entity-decoded, whitespace kept
+             * verbatim) so the claim walker matches hoisted-title
+             * hydration. pageTitle keeps the legacy collapsed form for
+             * the display string. */
             const char *tc = find_close_tag(tagEnd, end, "title");
+            if (emit_tag_token(out, arena, b, e) != 0)
+            {
+                goto fail;
+            }
+            const char *beg = tagEnd + 1;
             if (tc)
             {
+                if (tc > beg && push_text(out, arena, beg, (size_t)(tc - beg)) != 0)
+                {
+                    goto fail;
+                }
                 char collapsed[256];
-                collapse_ws(tagEnd + 1, (size_t)(tc - (tagEnd + 1)),
-                            collapsed, sizeof(collapsed));
+                collapse_ws(beg, (size_t)(tc - beg), collapsed,
+                            sizeof(collapsed));
                 char *dec = entities_decode(collapsed);
                 if (dec)
                 {
                     snprintf(out->pageTitle, sizeof(out->pageTitle), "%s", dec);
                     pluto_free(dec);
                 }
-                pos = tc + 8; /* Lua: titleClose + 8 */
+                const char *gt = memchr(tc, '>', (size_t)(end - tc));
+                if (gt)
+                {
+                    const char *cb = tc + 1;
+                    const char *ce = gt;
+                    trim_span(&cb, &ce);
+                    if (emit_tag_token(out, arena, cb, ce) != 0)
+                    {
+                        goto fail;
+                    }
+                    pos = gt + 1;
+                }
+                else
+                {
+                    pos = tc + strlen("</title>");
+                }
             }
             else
             {
@@ -643,52 +830,10 @@ int tokenizer_tokenize(const char *html, TokenizeResult *out)
         else
         {
             /* 7. normal tag */
-            int isClosing = (insideLen > 0 && b[0] == '/');
-            const char *body = isClosing ? b + 1 : b;
-            size_t bodyLen = isClosing ? insideLen - 1 : insideLen;
-            /* tagBody already trimmed (rawInside was trimmed) */
-
-            int selfFromSlash = (bodyLen > 0 && body[bodyLen - 1] == '/');
-            int isSelfClosing = selfFromSlash || isClosing;
-            if (selfFromSlash)
+            if (emit_tag_token(out, arena, b, e) != 0)
             {
-                bodyLen--;
+                goto fail;
             }
-
-            size_t nameLen = 0;
-            while (nameLen < bodyLen &&
-                   (isalnum((unsigned char)body[nameLen]) || body[nameLen] == '-' ||
-                    body[nameLen] == ':'))
-            {
-                nameLen++;
-            }
-
-            if (nameLen > 0)
-            {
-                Token t;
-                memset(&t, 0, sizeof(t));
-                t.type = TOK_TAG;
-                t.name = arena_dup(arena, body, nameLen);
-                if (!t.name)
-                {
-                    goto fail;
-                }
-                for (size_t c = 0; c < nameLen; c++)
-                {
-                    t.name[c] = (char)tolower((unsigned char)t.name[c]);
-                }
-                t.isClosing = isClosing;
-                t.isSelfClosing = isSelfClosing;
-                if (parse_attributes(body + nameLen, body + bodyLen, &t, arena) != 0)
-                {
-                    goto fail;
-                }
-                if (toklist_push(&out->tokens, &t) != 0)
-                {
-                    goto fail;
-                }
-            }
-
             pos = tagEnd + 1;
         }
     }

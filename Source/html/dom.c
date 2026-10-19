@@ -27,6 +27,16 @@ void pluto_free(void *p);
 
 #define PLUTO_REALLOC(p, n) pluto_mem_realloc((p), (n))
 
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+/* Hydration-debug registry (harness builds only): nodes made through
+ * dom_create_element, walked by dom_created_dump to find DETACHED fragment
+ * tops after a react commit (parent==NULL subtrees = content react built
+ * but never attached). */
+#define DOM_CREATED_MAX 2048
+static DomNode *g_created[DOM_CREATED_MAX];
+static int g_createdCount;
+#endif
+
 /* ── String arena: chunk list (same design as tokenizer.c) ────────────────
  * Pointers handed out by arena_dup must stay valid for the result's lifetime
  * even as more strings are added — so chunks are allocated once and never
@@ -617,6 +627,34 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
                 out->textNodes++;
             }
         }
+        else if (tok->type == TOK_COMMENT)
+        {
+            /* Comment nodes stay at the OPEN-ELEMENT insertion point
+             * (WHATWG keeps comments outside the element-depth stack).
+             * React's hydration markers ride on these nodes. */
+            if (count < MAX_NODES)
+            {
+                DomNode *n = node_new();
+                if (!n)
+                {
+                    goto fail;
+                }
+                n->kind = DOM_COMMENT;
+                n->text = arena_dup(arena, tok->content ? tok->content : "",
+                                    tok->content ? strlen(tok->content) : 0);
+                if (!n->text)
+                {
+                    PLUTO_FREE(n);
+                    goto fail;
+                }
+                n->parent = stack.items[stack.count - 1];
+                if (node_append_child(stack.items[stack.count - 1], n) != 0)
+                {
+                    goto fail;
+                }
+                count++;
+            }
+        }
         else
         {
             const char *tag = tok->name ? tok->name : "";
@@ -1016,6 +1054,15 @@ DomNode *dom_create_element(DomResult *dom, const char *tag)
         PLUTO_FREE(el);
         return NULL;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    /* Hydration-debug registry: nodes created via the DOM API (react's
+     * createElement path). Harness-only `dom_created_dump` walks it to
+     * find detached fragment tops after commits. */
+    if (g_createdCount < DOM_CREATED_MAX)
+    {
+        g_created[g_createdCount++] = el;
+    }
+#endif
     return el;
 }
 
@@ -1040,6 +1087,29 @@ DomNode *dom_create_text(DomResult *dom, const char *text)
     return n;
 }
 
+/* ── dom_build companion: zero-child comment node (hydration markers,
+ * document.createComment). Data is RAW (no entity decode). */
+DomNode *dom_create_comment(DomResult *dom, const char *data)
+{
+    if (!dom || !data)
+    {
+        return NULL;
+    }
+    DomNode *n = node_new();
+    if (!n)
+    {
+        return NULL;
+    }
+    n->kind = DOM_COMMENT;
+    n->text = arena_dup((Arena *)dom->_arena, data, strlen(data));
+    if (!n->text)
+    {
+        PLUTO_FREE(n);
+        return NULL;
+    }
+    return n;
+}
+
 int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
 {
     (void)dom;
@@ -1047,6 +1117,12 @@ int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] append parent=%s(%p) child=%s(%p) kind=%d",
+               (parent->tag) ? parent->tag : "?", (void *)parent,
+               (child->tag) ? child->tag : "?", (void *)child,
+               (int)child->kind);
+#endif
     if (node_append_child(parent, child) != 0)
     {
         return -1;
@@ -1055,12 +1131,55 @@ int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
     return 0;
 }
 
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+static void dom_created_dump_dfs(DomNode *n, int depth, int *shown)
+{
+    if (!n || depth > 4 || *shown > 40)
+    {
+        return;
+    }
+    logger_log("[frg] %.*s %s kids=%d", depth * 2, "        ",
+               (n->tag) ? n->tag : (n->kind == DOM_TEXT ? "#text" : "?"),
+               n->childCount);
+    (*shown)++;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        dom_created_dump_dfs(n->children[i], depth + 1, shown);
+    }
+}
+
+/* Dump every root-less fragment (top node with parent==NULL and real
+ * content) among the created-element registry — the shape of the tree
+ * react COMMITTED but never attached. */
+void dom_created_dump(void)
+{
+    logger_log("[frg] dump begin created=%d", g_createdCount);
+    for (int i = 0; i < g_createdCount; i++)
+    {
+        DomNode *n = g_created[i];
+        if (n && n->parent == NULL && n->childCount > 0 &&
+            n->tag && strcmp(n->tag, "#root") != 0 &&
+            !n->shadowHost) /* shadow roots are detached by DESIGN */
+        {
+            int shown = 0;
+            dom_created_dump_dfs(n, 0, &shown);
+        }
+    }
+    logger_log("[frg] dump end");
+}
+#endif
+
 int dom_remove_child(DomNode *parent, DomNode *child)
 {
     if (!parent || !child)
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] remove parent=%s child=%s",
+               (parent->tag) ? parent->tag : "?",
+               (child->tag) ? child->tag : "?");
+#endif
     for (int i = 0; i < parent->childCount; i++)
     {
         if (parent->children[i] == child)
@@ -1164,6 +1283,246 @@ int dom_remove_attr(DomNode *el, const char *key)
     return -1;
 }
 
+/* ── innerHTML subtree serializer (browser-parity markup writer) ─────────
+ * Serializes an element's children as HTML markup. Next.js's root error
+ * boundary snapshots `document.documentElement.innerHTML` and re-renders
+ * `<html dangerouslySetInnerHTML={{__html: snapshot}}>` on a hydration
+ * fallback; with the old text-degraded getter the snapshot was plain body
+ * text and that assignment erased head+body (the hydration gap). This
+ * writes REAL markup: `<tag attr="v">…</tag>`, void elements bare,
+ * text escaped for & < >, attrs also for ", comments copied,
+ * script/style text raw.
+ * Returns 0 + heap string (caller frees via PLUTO_FREE); -1 bad arg,
+ * -2 alloc failure, -3 runaway depth. len (optional) gets the length. */
+int dom_serialize_children_html(const DomNode *el, char **out, size_t *len);
+
+typedef struct
+{
+    char *buf;
+    size_t len;
+    size_t cap;
+} HtmlBuf;
+
+static int hb_grow(HtmlBuf *hb, size_t need)
+{
+    if (hb->len + need + 1 <= hb->cap)
+    {
+        return 0;
+    }
+    size_t ncap = hb->cap ? hb->cap : 1024;
+    while (hb->len + need + 1 > ncap)
+    {
+        ncap *= 2; /* 1024 → 8MB ceiling (32 doublings) */
+    }
+    char *nb = (char *)PLUTO_REALLOC(hb->buf, ncap);
+    if (!nb)
+    {
+        return -1;
+    }
+    hb->buf = nb;
+    hb->cap = ncap;
+    return 0;
+}
+
+static int hb_put(HtmlBuf *hb, const char *s, size_t n)
+{
+    if (!s || n == 0)
+    {
+        return 0;
+    }
+    if (hb_grow(hb, n) != 0)
+    {
+        return -1;
+    }
+    memcpy(hb->buf + hb->len, s, n);
+    hb->len += n;
+    hb->buf[hb->len] = '\0';
+    return 0;
+}
+
+static int hb_puts(HtmlBuf *hb, const char *s)
+{
+    return hb_put(hb, s, s ? strlen(s) : 0);
+}
+
+/* Text-escape & < > ; attr-escape & < > " (needsQuotes path). */
+static int hb_put_text(HtmlBuf *hb, const char *s, int isAttr)
+{
+    for (size_t i = 0; s[i]; i++)
+    {
+        char c = s[i];
+        const char *rep =
+            (c == '&') ? "&amp;" : (c == '<') ? "&lt;" : (c == '>') ? "&gt;"
+                                     : (isAttr && c == '"') ? "&quot;"
+                                                            : NULL;
+        if (rep)
+        {
+            if (hb_puts(hb, rep) != 0)
+            {
+                return -1;
+            }
+        }
+        else
+        {
+            if (hb_put(hb, &c, 1) != 0)
+            {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int dom_serialize_node_html(const DomNode *n, HtmlBuf *hb, int depth,
+                                   int rawText)
+{
+    if (!n || !hb)
+    {
+        return -1;
+    }
+    if (depth > 24)
+    {
+        return -3; /* runaway markup guard (top-level contract preserved) */
+    }
+    if (n->kind == DOM_TEXT)
+    {
+        return hb_put_text(hb, n->text ? n->text : "", rawText);
+    }
+    if (n->kind == DOM_COMMENT)
+    {
+        if (hb_puts(hb, "<!--") != 0)
+        {
+            return -1;
+        }
+        if (hb_puts(hb, n->text ? n->text : "") != 0)
+        {
+            return -1;
+        }
+        return hb_puts(hb, "-->");
+    }
+    if (n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return -1;
+    }
+    /* NOTE: bool attribute marker stores presence as "" — emitted as
+     * `key=""` (browser-shaped; attr serializers never emit bare keys). */
+    static const char *const VOID_TAGS[] = {"area", "base", "br", "col",
+                                            "embed", "hr", "img", "input",
+                                            "link", "meta", "param", "source",
+                                            "track", "wbr"};
+    if (hb_puts(hb, "<") != 0 || hb_puts(hb, n->tag) != 0)
+    {
+        return -1;
+    }
+    for (int a = 0; a < n->attrCount; a++)
+    {
+        const char *v = dom_get_attr(n, n->attrs[a].key);
+        if (hb_puts(hb, " ") != 0 || hb_puts(hb, n->attrs[a].key) != 0)
+        {
+            return -1;
+        }
+        if (v && v[0])
+        {
+            if (hb_puts(hb, "=\"") != 0 || hb_put_text(hb, v, 1) != 0 ||
+                hb_puts(hb, "\"") != 0)
+            {
+                return -1;
+            }
+        }
+        else
+        {
+            /* value "" / marker: emit `attr=""` (browser round-trip). */
+            if (hb_puts(hb, "=\"") != 0 || hb_puts(hb, "\"") != 0)
+            {
+                return -1;
+            }
+        }
+    }
+    if (hb_puts(hb, ">") != 0)
+    {
+        return -1;
+    }
+    int isVoid = 0;
+    for (size_t v = 0; v < sizeof(VOID_TAGS) / sizeof(VOID_TAGS[0]); v++)
+    {
+        if (strcmp(n->tag, VOID_TAGS[v]) == 0)
+        {
+            isVoid = 1;
+            break;
+        }
+    }
+    if (isVoid)
+    {
+        return 0;
+    }
+    /* script/style content renders raw (textarea escapes like plain
+     * text nodes — browser serialization parity). */
+    int kidsRaw =
+        (!strcmp(n->tag, "script") || !strcmp(n->tag, "style")) ? 1 : 0;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        if (dom_serialize_node_html(n->children[i], hb, depth + 1, kidsRaw) != 0)
+        {
+            return -1;
+        }
+    }
+    if (hb_puts(hb, "</") != 0 || hb_puts(hb, n->tag) != 0 ||
+        hb_puts(hb, ">") != 0)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+int dom_serialize_children_html(const DomNode *el, char **out, size_t *len)
+{
+    if (!out || !el || el->kind != DOM_ELEMENT)
+    {
+        return -1;
+    }
+    *out = NULL;
+    if (len)
+    {
+        *len = 0;
+    }
+    HtmlBuf hb;
+    hb.buf = NULL;
+    hb.len = 0;
+    hb.cap = 0;
+    for (int i = 0; i < el->childCount; i++)
+    {
+        int rc = dom_serialize_node_html(el->children[i], &hb, 0, 0);
+        if (rc == -3)
+        {
+            PLUTO_FREE(hb.buf);
+            return -3;
+        }
+        if (rc != 0)
+        {
+            PLUTO_FREE(hb.buf);
+            return -2;
+        }
+    }
+    if (!hb.buf)
+    {
+        hb.buf = (char *)PLUTO_MALLOC(1);
+        if (hb.buf)
+        {
+            hb.buf[0] = '\0';
+        }
+    }
+    if (!hb.buf)
+    {
+        return -2;
+    }
+    *out = hb.buf;
+    if (len)
+    {
+        *len = hb.len;
+    }
+    return 0;
+}
+
 DomNode *dom_first_element_child(const DomNode *node)
 {
     if (!node)
@@ -1212,6 +1571,11 @@ int dom_insert_before(DomResult *dom, DomNode *parent, DomNode *child,
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] insertBefore parent=%s child=%s ref=%s",
+               (parent->tag) ? parent->tag : "?", (child->tag) ? child->tag : "?",
+               ref ? (ref->tag ? ref->tag : "?") : "(null)");
+#endif
     if (ref && ref->parent != parent)
     {
         return -1; /* ref must be a child of parent (DOM semantics) */
