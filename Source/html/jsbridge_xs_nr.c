@@ -78,6 +78,7 @@
 extern void pluto_free(void *p);
 #include "../util/strbuf.h"
 #include "../html/dom.h"
+#include "../html/webstorage.h"
 
 /* No-recursion fork engine API — the exact include set of the canonical
  * host tool (xs/tools/xst.c) but pointed at the FORK: xsAll.h pulls
@@ -404,6 +405,26 @@ typedef struct
     unsigned char xfnSet[JSBRIDGE_XHR_MAX];
     unsigned char xobjSet[JSBRIDGE_XHR_MAX];
     xsSlot xhrProto; /* XMLHttpRequest prototype (rooted) */
+    /* API-P8: the Worker contained-stub lane (mirror of the xhr pins —
+     * the OBJECT is pinned at construct; deliveries read the CURRENT
+     * onerror property off it, browser at-fire semantics). */
+    xsSlot workerProto; /* Worker prototype (rooted at init) */
+    xsSlot wobj[JSBRIDGE_WORKER_MAX]; /* stub wrappers (delivery `this`) */
+    unsigned char wobjSet[JSBRIDGE_WORKER_MAX];
+    /* API-P3: per-entry history.state pins, parallel to the bridge's
+     * histUrl journal (entry i ↔ histState[i]). Slots pin against GC
+     * like the listener ring; replaceState re-pins over the slot. */
+    xsSlot histState[JSBRIDGE_HIST_MAX];
+    unsigned char histStateSet[JSBRIDGE_HIST_MAX];
+    /* Pending back-stack deliveries, latched by back/forward/go and
+     * drained at the next engine-pump frame (post-run, never mid-eval):
+     * popstate carries the new entry's state; hashchange fires only when
+     * the entry hash actually moved (old/new URLs recorded at move
+     * time). */
+    unsigned char histPendPop;
+    unsigned char histPendHash;
+    char histFromUrl[JSBRIDGE_HIST_URL_MAX];
+    char histToUrl[JSBRIDGE_HIST_URL_MAX];
     /* B3: per-node ELEMENT WRAPPER cache — the browser identity model.
      * xs_push_element used to build a FRESH wrapper per push, so a wrapper
      * react wrote its fiber key onto (node[internalInstanceKey] = fiber)
@@ -773,6 +794,10 @@ static void def_val(xsMachine *the, xsSlot obj, const char *name,
 static void xs_build_el_proto(JsBridge *b);
 static void xs_build_xhr_proto(JsBridge *b);
 static void xs_xmlhttprequest_new(xsMachine *the);
+static void xs_build_worker_proto(JsBridge *b);
+static void xs_worker_new(xsMachine *the);
+static void xs_worker_postMessage(xsMachine *the);
+static void xs_worker_terminate(xsMachine *the);
 
 /* ── accessors (this = element wrapper) ────────────────── */
 
@@ -1179,6 +1204,17 @@ static void xs_el_get_nodeType(xsMachine *the)
         xsResult = xsInteger(11);
         return;
     }
+    /* API-P6: a template's detached content fragment reports 11 too —
+     * made as an element for the element vtable, but it IS the browser's
+     * DocumentFragment surface (tpl.content.nodeType === 11). Detached is
+     * part of the rule: a nested element tagged the same stays invisible
+     * to this branch only by parent chain, and fragments are always
+     * parent-NULL nodes owned by their template. */
+    if (n && !n->parent && n->tag && strcmp(n->tag, "#template-content") == 0)
+    {
+        xsResult = xsInteger(11);
+        return;
+    }
     xsResult = xsInteger((n && n->kind == DOM_ELEMENT) ? 1
                          : (n && n->kind == DOM_COMMENT) ? 8 : 3);
 }
@@ -1200,6 +1236,42 @@ static void xs_el_set_id(xsMachine *the)
         if (rc != 0)
         {
             xsTypeError("id assignment failed");
+        }
+    }
+}
+
+/* API-P9: className accessor pair — the class attribute read returns ""
+ * never NULL (browser shape: mapped 1:1 onto 'class'), the write goes
+ * through the shared class road (jsbridge_el_class_set — the same
+ * snapshot/dirty-receipt pair the classList mutations ride, so rewalks
+ * + the transition-lane note see it exactly like setAttribute('class')).
+ * Closes the P6 parked gap: the battery's identity fixtures no longer
+ * need the setAttribute detour. */
+static void xs_el_get_className(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = (n && n->kind == DOM_ELEMENT)
+                        ? dom_get_attr(n, "class")
+                        : NULL;
+    xsResult = xsString(v ? v : "");
+}
+
+static void xs_el_set_className(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        char *v = to_cstring(the, xsArg(0));
+        if (!v)
+        {
+            xsTypeError("out of memory");
+        }
+        int rc = jsbridge_el_class_set(b, n, v); /* router owns the budget */
+        JFree(v);
+        if (rc != 0)
+        {
+            xsTypeError("className assignment failed");
         }
     }
 }
@@ -1592,6 +1664,10 @@ static void xs_el_appendChild(xsMachine *the)
     b->domDirty = 1;
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree swap = style change */
     xs_maybe_queue_asset_load(b, c); /* react stylesheets enter via append */
+    /* API-P6: browsers return the appended child — the falsy-return the
+     * probe recorded is fixed here (chained mounts like react's
+     * a.appendChild(b).appendChild(c) now behave like the browser). */
+    xsResult = xs_push_element(b, c);
 }
 
 static void xs_el_removeChild(xsMachine *the)
@@ -1615,6 +1691,8 @@ static void xs_el_removeChild(xsMachine *the)
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree shape changed */
+    /* API-P6: browsers return the REMOVED child. */
+    xsResult = xs_push_element(b, c);
 }
 
 /* ── SW5: inline style string reader/writer (shared with the style object
@@ -1992,6 +2070,8 @@ static void xs_el_insertBefore(xsMachine *the)
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree moved */
     xs_maybe_queue_asset_load(b, c); /* react stylesheet hoisting path */
+    /* API-P6: browsers return the inserted child. */
+    xsResult = xs_push_element(b, c);
 }
 
 /* querySelector emit: XS pushes wrappers into the array slot carried in
@@ -2048,6 +2128,29 @@ static void xs_el_querySelector(xsMachine *the)
     char scratch[JSBRIDGE_QS_SCRATCH];
     DomNode *hit = (DomNode *)jsbridge_el_query_selector_first(
         b, n, sel, scratch, sizeof(scratch));
+    JFree(sel);
+    xsResult = xs_push_element(b, hit);
+}
+
+/* ── API-P6: Element.closest — walks UP from the element itself with the
+ * SAME compound matcher as querySelector (the two can never disagree
+ * about what matches); returns null when nothing matches, per browsers. */
+static void xs_el_closest(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char *sel = to_cstring(the, xsArg(0));
+    if (!sel)
+    {
+        xsTypeError("out of memory");
+    }
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    DomNode *hit = (DomNode *)jsbridge_el_closest(b, n, sel, scratch,
+                                                  sizeof(scratch));
+    logger_log("[closest] '%.60s' recv=%s -> %s", sel,
+               (n && n->tag) ? n->tag : "#other",
+               (hit && hit->tag) ? hit->tag : "null");
     JFree(sel);
     xsResult = xs_push_element(b, hit);
 }
@@ -2249,6 +2352,31 @@ static void xs_el_get_data(xsMachine *the)
 
 /* Element.dataset — data-* attributes camelCased on a plain object.
  * React's stylesheet-hoisting path reads `o.dataset.precedence`. */
+/* ── API-P6: template.content — the element's detached content fragment
+ * (nodeType 11). Parsed templates hold theirs from the builder; created
+ * templates materialize an EMPTY fragment on first access — the
+ * browser's always-a-DocumentFragment content getter. Non-template
+ * elements read undefined, like browsers. */
+static void xs_el_get_content(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "template") != 0)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    DomNode *frag = dom_template_content(b->dom, n);
+    if (!frag)
+    {
+        xsTypeError("template content unavailable");
+    }
+    xsResult = xs_push_element(b, frag);
+    logger_log("[tpl] content -> node %d (children=%d)", frag->nodeId,
+               frag->childCount);
+}
+
 static void xs_el_get_dataset(xsMachine *the)
 {
     DomNode *n = this_node(the);
@@ -2463,14 +2591,22 @@ static void xs_el_addEventListener(xsMachine *the)
     {
         kind = 4;
     }
+    /* API-P3: the journal-event class (popstate/hashchange) — window
+     * lanes, delivered by the engine's history drain at the pump frame
+     * after a back/forward/go (kind 5; see xs_hist_deliver_pending). */
+    if (strcmp(type, "popstate") == 0 || strcmp(type, "hashchange") == 0)
+    {
+        kind = 5;
+    }
     if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
-        kind != 3 && kind != 4)
+        kind != 3 && kind != 4 && kind != 5)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so
          * pages registering them don't error — the delivered classes are
-         * click/submit/input/change (kind 0; B3 bubbling dispatch) and
-         * load/error (kinds 1/2, replay-cached asset completion). Phase
-         * 10 adds the end-event class (kind 4; render-drain dispatch). */
+         * click/submit/input/change (kind 0; B3 bubbling dispatch),
+         * load/error (kinds 1/2, replay-cached asset completion), the
+         * end-event class (kind 4; render-drain dispatch), and the
+         * journal events (kind 5; history drain dispatch). */
         JFree(type);
         return;
     }
@@ -2627,35 +2763,351 @@ static xsSlot xs_push_element(JsBridge *b, DomNode *node)
     return obj;
 }
 
-/* ── console ─────────────────────────── */
-static void xs_console_log(xsMachine *the)
+/* ── console (API-P4: the real log lane) ───────────────────────────────
+ * Every method routes into the LOG FILE with its own level tag
+ * ([console.log]/[console.info]/[console.debug]/[console.warn]/
+ * [console.error]) — the file is the receipt surface (device truth);
+ * the app's rendered panel NEVER changes from a console call.
+ * Behavior lanes:
+ *   1. printf-shaped substitution when the first arg is a string and
+ *      carries tokens: %s/%d/%i/%f consume args to String; %o/%O/%j
+ *      render the console shape; %c consumes its arg for nothing (no
+ *      style on a 1-bit panel); %% = literal. A token with no remaining
+ *      arg prints literally (Chrome), extra args append space-separated.
+ *   2. console-shape rendering: strings print BARE at the top level,
+ *      QUOTED nested; arrays → '[a, b, …]' (4 elements + a count tail);
+ *      objects → '{k: v, …}' (6 own-enumerable keys); functions labeled
+ *      '[Function]'; unprintables fall back to String(). Depth 2,
+ *      bounded bytes — cycle-safe by depth construction.
+ *   3. assert(…): logs 'Assertion failed: …' at the error level when the
+ *      first arg is falsey — browser semantics: it does NOT throw.
+ * A JS counter in the fixture must be able to MATCH the [console.*]
+ * rows in the log ("top-line counts match in the log" = the phase bar).
+ * Remaining boundary (documented gap, deliberately absent): count/dir/
+ * group-family/time/trace — pages that touch them see the same
+ * undefined-presence they'd get from an unknown method; inventing a
+ * fake click-through surface is not on the table. */
+
+/* Render one argument's console shape into the line buffer at `off`.
+ * Actually appending: returns new offset. `nest < 0` = top level
+ * (strings bare); `nest >= 0` = inside an object/array (strings
+ * quoted). Depth bounded via `nest < 2` descent guard. */
+static size_t xs_console_render_arg(xsMachine *the, xsSlot slot, int nest,
+                                    char *line, size_t size, size_t off)
 {
-    char line[160];
+    if (off + 2 >= size)
+    {
+        return off;
+    }
+    int kind = xsTypeOf(slot);
+    if (nest < 0)
+    {
+        if (kind == xsStringType)
+        {
+            char *s = to_cstring(the, slot);
+            size_t n = s ? strlen(s) : 0;
+            if (n > 96)
+            {
+                n = 96; /* per-arg cap at the top: the deepest " receipt */
+            }
+            if (off + n + 1 >= size)
+            {
+                n = size - off - 1;
+            }
+            memcpy(line + off, s ? s : "", n);
+            off += n;
+            line[off] = '\0';
+            if (s)
+            {
+                JFree(s);
+            }
+            return off;
+        }
+    }
+    switch (kind)
+    {
+    case xsNullType:
+    case xsUndefinedType:
+        off += (size_t)snprintf(line + off, size - off, "%s",
+                                kind == xsNullType ? "null" : "undefined");
+        return off;
+    case xsStringType:
+    {
+        char *s = to_cstring(the, slot);
+        off += (size_t)snprintf(line + off, size - off, "'%.40s'",
+                                s ? s : "");
+        if (s)
+        {
+            JFree(s);
+        }
+        return off;
+    }
+    case xsBooleanType:
+        off += (size_t)snprintf(line + off, size - off, "%s",
+                                xsToBoolean(slot) ? "true" : "false");
+        return off;
+    case xsIntegerType:
+    case xsNumberType:
+    {
+        char *s = to_cstring(the, slot);
+        off += (size_t)snprintf(line + off, size - off, "%.40s", s ? s : "");
+        if (s)
+        {
+            JFree(s);
+        }
+        return off;
+    }
+    case xsReferenceType:
+    {
+        if (fxIsCallable(the, &slot))
+        {
+            off += (size_t)snprintf(line + off, size - off, "[Function]");
+            return off;
+        }
+        /* host objects (element wrappers, XHR wrappers…) render as the
+         * honest '[Object]' — they are not data dumps */
+        if (xsGetHostDataIf(slot) != NULL)
+        {
+            off += (size_t)snprintf(line + off, size - off, "[Object]");
+            return off;
+        }
+        if (nest >= 2)
+        {
+            off += (size_t)snprintf(line + off, size - off, "[Object]");
+            return off;
+        }
+        /* array-like: numeric length + indexed fields */
+        xsSlot lenSlot = xsGet(slot, xsID("length"));
+        if (xsTypeOf(lenSlot) == xsIntegerType ||
+            xsTypeOf(lenSlot) == xsNumberType)
+        {
+            int len = (int)xsToNumber(lenSlot);
+            if (len > 0)
+            {
+                off += (size_t)snprintf(line + off, size - off, "[");
+                int shown = len < 4 ? len : 4;
+                for (int i = 0; i < shown && off + 2 < size; i++)
+                {
+                    /* elements are INDEX-keyed: xsGetIndex, not a string
+                     * id (fxNewNameC interns plain names; array slots
+                     * live behind the index flavor) */
+                    xsSlot v = xsGetIndex(slot, i);
+                    if (i)
+                    {
+                        off += (size_t)snprintf(line + off, size - off, ", ");
+                    }
+                    off = xs_console_render_arg(the, v, nest + 1, line, size,
+                                                off);
+                }
+                off += (size_t)snprintf(line + off, size - off, len > shown ? ", …%d]" : "]", len);
+                return off;
+            }
+        }
+        /* plain object shape: own-key iterator (bounded reads; the
+         * iterator dedupes via its visited set) */
+        {
+            off += (size_t)snprintf(line + off, size - off, "{");
+            xsSlot it = xsEnumerate(slot);
+            int shownTotal = 0;
+            for (;;)
+            {
+                xsSlot res = xsCall0(it, xsID("next"));
+                xsSlot doneS = xsGet(res, xsID("done"));
+                if (xsTypeOf(doneS) != xsUndefinedType && xsToBoolean(doneS))
+                {
+                    break;
+                }
+                shownTotal++;
+                if (shownTotal <= 6 && off + 4 < size)
+                {
+                    xsSlot key = xsGet(res, xsID("value"));
+                    if (xsTypeOf(key) == xsStringType)
+                    {
+                        char *ks = to_cstring(the, key);
+                        /* value get BY SLOT (xsGetAt): string keys
+                         * canonicalize whether the thing names a plain
+                         * key or an index flavor */
+                        xsSlot v = ks ? xsGetAt(slot, key) : xsNull;
+                        if (shownTotal > 1)
+                        {
+                            off += (size_t)snprintf(line + off, size - off,
+                                                    ", ");
+                        }
+                        off += (size_t)snprintf(line + off, size - off,
+                                                "%.24s: ", ks ? ks : "?");
+                        off = xs_console_render_arg(the, v, nest + 1, line,
+                                                    size, off);
+                        if (ks)
+                        {
+                            JFree(ks);
+                        }
+                    }
+                }
+                if (shownTotal > 40) /* hard read cap on hostile iterators */
+                {
+                    break;
+                }
+            }
+            off += (size_t)snprintf(line + off, size - off,
+                                    shownTotal > 6 ? ", …}" : "}");
+            return off;
+        }
+    }
+    default:
+    {
+        char *s = to_cstring(the, slot);
+        off += (size_t)snprintf(line + off, size - off, "%.40s", s ? s : "");
+        if (s)
+        {
+            JFree(s);
+        }
+        return off;
+    }
+    }
+}
+
+static size_t xs_console_format_into(xsMachine *the, char *line, size_t size,
+                                     size_t off, int first, int argc)
+{
+    if (argc > first && xsTypeOf(xsArg(first)) == xsStringType)
+    {
+        /* printf-shaped first argument → substitution */
+        char *fmt = to_cstring(the, xsArg(first));
+        if (fmt)
+        {
+            int argi = first + 1;
+            for (const char *p = fmt; *p && off + 3 < size; p++)
+            {
+                if (*p != '%')
+                {
+                    line[off++] = *p;
+                    line[off] = '\0';
+                    continue;
+                }
+                char spec = p[1];
+                if (!spec) /* trailing lone '%' */
+                {
+                    line[off++] = '%';
+                    line[off] = '\0';
+                    break;
+                }
+                if (spec == '%') /* literal percent */
+                {
+                    line[off++] = '%';
+                    line[off] = '\0';
+                    p++;
+                    continue;
+                }
+                p++;
+                if (argi < argc)
+                {
+                    spec = (spec == 'i') ? 'd' : spec;
+                    if (spec != 'c') /* %c consumes its arg silently */
+                    {
+                        off = xs_console_render_arg(the, xsArg(argi),
+                                                    (spec == 's') ? -1 : 0,
+                                                    line, size, off);
+                    }
+                    argi++;
+                }
+                else
+                {
+                    /* token with no arg: print it literally (Chrome) */
+                    off += (size_t)snprintf(line + off, size - off,
+                                            "%%%c", spec);
+                }
+            }
+            /* extra args after the format: space-separated additions */
+            for (int i = argi; i < argc && off + 3 < size; i++)
+            {
+                off += (size_t)snprintf(line + off, size - off, " ");
+                off = xs_console_render_arg(the, xsArg(i), -1, line, size,
+                                            off);
+            }
+            JFree(fmt);
+        }
+    }
+    else
+    {
+        for (int i = first; i < argc && off + 2 < size; i++)
+        {
+            if (i > first && off + 2 < size)
+            {
+                off += (size_t)snprintf(line + off, size - off, " ");
+            }
+            off = xs_console_render_arg(the, xsArg(i), -1, line, size, off);
+        }
+    }
+    line[off] = '\0'; /* the helper owns the terminator */
+    return off;
+}
+
+/* The [console.*] row publisher: format the args, tag the level, log. */
+static void xs_console_publish(xsMachine *the, const char *level)
+{
+    char line[320];
     size_t off = 0;
     line[0] = '\0';
     int argc = (int)xsToInteger(xsArgc);
-    for (int i = 0; i < argc && off < sizeof(line) - 2; i++)
+    off = xs_console_format_into(the, line, sizeof(line), off, 0, argc);
+    (void)off;
+    if (!line[0])
     {
-        char *s = to_cstring(the, xsArg(i));
-        if (!s)
-        {
-            continue;
-        }
-        size_t n = strlen(s);
-        if (off + n >= sizeof(line) - 2)
-        {
-            n = sizeof(line) - 2 - off;
-        }
-        memcpy(line + off, s, n);
-        off += n;
-        if (i < argc - 1)
-        {
-            line[off++] = ' ';
-        }
-        line[off] = '\0';
-        JFree(s);
+        snprintf(line, sizeof(line), "(empty)"); /* an empty log printed */
     }
-    logger_log("[js] %s", line);
+    logger_log("[console.%s] %s", level, line);
+}
+
+static void xs_console_log(xsMachine *the)
+{
+    xs_console_publish(the, "log");
+}
+
+static void xs_console_info(xsMachine *the)
+{
+    xs_console_publish(the, "info");
+}
+
+static void xs_console_debug(xsMachine *the)
+{
+    xs_console_publish(the, "debug");
+}
+
+static void xs_console_warn(xsMachine *the)
+{
+    xs_console_publish(the, "warn");
+}
+
+static void xs_console_error(xsMachine *the)
+{
+    xs_console_publish(the, "error");
+}
+
+static void xs_console_dir(xsMachine *the)
+{
+    /* dir = inspect: identical surface to log (same render, log level) */
+    xs_console_publish(the, "log");
+}
+
+static void xs_console_assert(xsMachine *the)
+{
+    /* browser: assert TRUTHY = silent; falsey = an ERROR row ('Assertion
+     * failed: ' + the remaining args through the SAME substitution lane).
+     * Does NOT throw. */
+    int truthy = 0;
+    if (xsToInteger(xsArgc) > 0)
+    {
+        truthy = xsToBoolean(xsArg(0));
+    }
+    if (truthy)
+    {
+        return; /* no row — the assertion holds */
+    }
+    char line[320];
+    memcpy(line, "Assertion failed: ", 18); /* the helper owns the NUL */
+    int argc = (int)xsToInteger(xsArgc);
+    xs_console_format_into(the, line, sizeof(line), 18, 1, argc);
+    logger_log("[console.error] %s", line);
 }
 
 /* ── document.write capture (engine-agnostic router buffer) ─────────── */
@@ -2766,35 +3218,12 @@ static DomNode *find_element_by_id(JsBridge *b, const char *id)
     {
         return NULL;
     }
-    DomNode *hit = NULL;
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
-    int top = 0;
-    stack[top++] = b->dom->root;
-    while (top > 0 && !hit)
-    {
-        DomNode *n = stack[--top];
-        if (n->kind == DOM_ELEMENT)
-        {
-            const char *v = dom_get_attr(n, "id");
-            if (v && strcmp(v, id) == 0)
-            {
-                hit = n;
-                break;
-            }
-        }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
-        {
-            break;
-        }
-        for (int i = 0; i < n->childCount; i++)
-        {
-            stack[top++] = n->children[i];
-        }
-    }
-    if (!hit && id[0] == '_' && id[1] == 'd')
-    {
-        hit = dom_node_by_id(b->dom, atoi(id + 2));
-    }
+    DomNode *hit = dom_find_by_id(b->dom, id);
+    /* API-P6: the shared O(depth) id scan replaced the adapter-local
+     * push-all-children walk (a body with 65+ element children aborted
+     * that walk whole — the probe page hit exactly that and the mid-page
+     * ids silently vanished). Also visits in document order now, the
+     * browser order, instead of the old LIFO right-first sweep. */
     return hit;
 }
 
@@ -2808,6 +3237,9 @@ static void xs_document_getElementById(xsMachine *the)
         xsTypeError("out of memory");
     }
     DomNode *n = find_element_by_id(b, id);
+    /* API-P6: every id lookup documents itself (LOG EVERYTHING rule);
+     * the road is the shared O(depth) dom_find_by_id now. */
+    logger_log("[getid] '%s' -> %s", id, n ? "HIT" : "NULL");
     JFree(id);
     xsResult = xs_push_element(b, n);
 }
@@ -3303,8 +3735,16 @@ static void xs_doc_addEventListener(xsMachine *the)
     {
         kind = 4;
     }
+    /* API-P3: document/window journal events (kind 5) — popstate/
+     * hashchange are window lanes; this is where window.addEventListener
+     * lands too, so both round into the same book (see the element-path
+     * note; delivery = xs_hist_deliver_pending). */
+    if (strcmp(type, "popstate") == 0 || strcmp(type, "hashchange") == 0)
+    {
+        kind = 5;
+    }
     if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
-        kind != 3 && kind != 4)
+        kind != 3 && kind != 4 && kind != 5)
     {
         /* Same UNSUPPORTED silence as the element path (see above). */
         JFree(type);
@@ -3403,10 +3843,390 @@ static void xs_computed_getPropertyValue(xsMachine *the)
     xsResult = xsString(value);
 }
 
-static void xs_history_setState(xsMachine *the)
+/* ── API-P3: the address journal ───────────────────────────────────────
+ * history.pushState/replaceState write the ENGINE'S OWN book (the
+ * bridge's histUrl[] ring, seeded with the doc base on first use) and
+ * NEVER touch the wire: no http_* call, no pendingNav, no app-bar
+ * change. Same-origin: a resolved entry whose scheme+authority head
+ * differs from the current entry's throws (browser SecurityError
+ * behavior); fragment/query/path-only forms are same-origin by
+ * construction. Oversized URLs throw like a browser's malformed-URL
+ * push. The journal feeds the LIVE location getters and the
+ * back/forward/go delivery (popstate/hashchange, drained at the next
+ * pump frame — never mid-eval). */
+
+/* scheme+authority head of a journal URL for the same-origin check:
+ * 'http://x:8080' head = 'http://x:8080'; about:/data: opaque tokens are
+ * their whole form ('about:probe'). */
+static void xs_hist_origin_of(const char *url, char *out, size_t outLen)
 {
-    if (xsToInteger(xsArgc) > 0)
-        xsSet(xsThis, xsID("state"), xsArg(0));
+    if (!url || !url[0] || outLen == 0)
+    {
+        if (outLen)
+        {
+            out[0] = '\0';
+        }
+        return;
+    }
+    const char *auth = strstr(url, "://");
+    if (auth)
+    {
+        const char *slash = strchr(auth + 3, '/');
+        size_t n = slash ? (size_t)(slash - url) : strlen(url);
+        if (n >= outLen)
+        {
+            n = outLen - 1;
+        }
+        memcpy(out, url, n);
+        out[n] = '\0';
+    }
+    else
+    {
+        /* opaque token: everything up to (and excluding) an optional
+         * fragment/query tail */
+        size_t n = strcspn(url, "#?");
+        if (n >= outLen)
+        {
+            n = outLen - 1;
+        }
+        memcpy(out, url, n);
+        out[n] = '\0';
+    }
+}
+
+static const char *xs_hist_current(JsBridge *b)
+{
+    if (b->histCount > 0 && b->histUrl[b->histIdx][0])
+    {
+        return b->histUrl[b->histIdx];
+    }
+    return (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
+}
+
+/* Seed entry 0 with the doc base on first journal use. */
+static void xs_hist_seed(JsBridge *b)
+{
+    if (b->histCount > 0)
+    {
+        return;
+    }
+    const char *base = (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
+    snprintf(b->histUrl[0], JSBRIDGE_HIST_URL_MAX, "%s", base);
+    b->histCount = 1;
+    b->histIdx = 0;
+}
+
+/* Latch a pending delivery at a journal move (from→to URLs recorded for
+ * the hashchange event). hashchange fires only when the FRAGMENT field
+ * itself moved (browser semantics — a query move is not a hash move). */
+static void xs_hist_arm_delivery(JsBridge *b, const char *fromUrl,
+                                 const char *toUrl)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st)
+    {
+        return;
+    }
+    st->histPendPop = 1;
+    if (fromUrl && toUrl)
+    {
+        char fh[JSBRIDGE_HIST_URL_MAX], th[JSBRIDGE_HIST_URL_MAX];
+        const char *fh2 = fromUrl ? strchr(fromUrl, '#') : NULL;
+        const char *th2 = toUrl ? strchr(toUrl, '#') : NULL;
+        snprintf(fh, sizeof(fh), "%s", fh2 ? fh2 + 1 : "");
+        snprintf(th, sizeof(th), "%s", th2 ? th2 + 1 : "");
+        if (strcmp(fh, th) != 0) /* hash really moved → hashchange */
+        {
+            st->histPendHash = 1;
+            snprintf(st->histFromUrl, JSBRIDGE_HIST_URL_MAX, "%s", fromUrl);
+            snprintf(st->histToUrl, JSBRIDGE_HIST_URL_MAX, "%s", toUrl);
+        }
+    }
+}
+
+/* pushState(mode=1) / replaceState(mode=0) — shared body. */
+static void xs_history_setState_common(xsMachine *the, int mode)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xs_hist_seed(b);
+    /* state (arg 0) pins per-entry; absent → null (browser default) */
+    xsSlot stateSlot = (xsToInteger(xsArgc) > 0) ? xsArg(0) : xsNull;
+
+    /* url (arg 2): optional, relative-resolved; browser coerces
+     * undefined to the current URL */
+    char *rawUrl = NULL;
+    if (xsToInteger(xsArgc) > 2)
+    {
+        rawUrl = to_cstring(the, xsArg(2)); /* NULL for undefined */
+    }
+    char abs[JSBRIDGE_HIST_URL_MAX];
+    int ok = jsbridge_hist_resolve_url(b, rawUrl ? rawUrl : "", abs,
+                                       sizeof(abs));
+    if (rawUrl)
+    {
+        JFree(rawUrl);
+    }
+    if (!ok)
+    {
+        xsTypeError("history: bad url"); /* browser: malformed push throws */
+    }
+    /* same-origin guard: scheme+authority head must match the current
+     * entry (browser throws SecurityError on cross-origin pushes) */
+    char orgNew[160], orgCur[160];
+    xs_hist_origin_of(abs, orgNew, sizeof(orgNew));
+    xs_hist_origin_of(xs_hist_current(b), orgCur, sizeof(orgCur));
+    if (strcmp(orgNew, orgCur) != 0)
+    {
+        xsTypeError("history: cross-origin push");
+    }
+
+    char fromUrl[JSBRIDGE_HIST_URL_MAX];
+    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    if (mode) /* push: grow the book (overflow = reuse the top slot — a
+               * full journal replaces the head entry, like a short
+               * browser session limit; length semantics stay browser-
+               * shaped: grows on push) */
+    {
+        if (b->histIdx < b->histCount - 1)
+        {
+            b->histCount = b->histIdx + 1; /* re-push truncates forward */
+        }
+        if (b->histCount < JSBRIDGE_HIST_MAX)
+        {
+            b->histIdx = b->histCount;
+            b->histCount++;
+        }
+        else
+        {
+            b->histIdx = JSBRIDGE_HIST_MAX - 1;
+        }
+    }
+    else /* replace: overwrite the current entry in place */
+    {
+        /* no index/count change */
+    }
+    snprintf(b->histUrl[b->histIdx], JSBRIDGE_HIST_URL_MAX, "%s", abs);
+
+    /* pin the state for the entry (replace re-pins over the old slot) */
+    if (st)
+    {
+        if (st->histStateSet[b->histIdx])
+        {
+            xsForget(st->histState[b->histIdx]);
+        }
+        st->histState[b->histIdx] = stateSlot;
+        st->histStateSet[b->histIdx] = 1;
+        xsRemember(st->histState[b->histIdx]);
+    }
+
+    logger_log("[js] history %s j=%d n=%d url='%.80s' (no network "
+               "navigation)",
+               mode ? "pushState" : "replaceState", b->histIdx, b->histCount,
+               abs);
+    /* pushState/replaceState do NOT fire popstate (browser core); only
+     * the URL surface moves. */
+    (void)fromUrl;
+}
+
+static void xs_history_pushState(xsMachine *the)
+{
+    xs_history_setState_common(the, 1);
+}
+
+static void xs_history_replaceState(xsMachine *the)
+{
+    xs_history_setState_common(the, 0);
+}
+
+/* back/forward/go: move the current index (clamped; at-boundary moves
+ * are no-ops like a browser's edge of the session), then latch the
+ * pending popstate/hashchange for the next pump frame. */
+static void xs_history_move(xsMachine *the, int delta)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xs_hist_seed(b);
+    int target = b->histIdx + delta;
+    if (target < 0)
+    {
+        target = 0;
+    }
+    if (target > b->histCount - 1)
+    {
+        target = b->histCount - 1;
+    }
+    if (target == b->histIdx)
+    {
+        logger_log("[js] history go %+d at boundary (noop)", delta);
+        return;
+    }
+    char fromUrl[JSBRIDGE_HIST_URL_MAX];
+    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    b->histIdx = target;
+    const char *to = xs_hist_current(b);
+    logger_log("[js] history back/forward → j=%d url='%.80s' (popstate "
+               "pending)",
+               b->histIdx, to);
+    xs_hist_arm_delivery(b, fromUrl, to);
+}
+
+static void xs_history_back(xsMachine *the)
+{
+    xs_history_move(the, -1);
+}
+
+static void xs_history_forward(xsMachine *the)
+{
+    xs_history_move(the, 1);
+}
+
+static void xs_history_go(xsMachine *the)
+{
+    int n = xsToInteger(xsArgc) > 0 ? xsToInteger(xsArg(0)) : 0;
+    xs_history_move(the, n);
+}
+
+static int xs_hist_current_slot(XsState *st, JsBridge *b)
+{
+    return (st && b->histCount > 0 && b->histIdx < JSBRIDGE_HIST_MAX &&
+            st->histStateSet[b->histIdx])
+               ? b->histIdx
+               : -1;
+}
+
+/* live getters */
+static void xs_history_getState(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    xs_hist_seed(b);
+    int slot = xs_hist_current_slot(st, b);
+    xsResult = (st && slot >= 0) ? st->histState[slot] : xsNull;
+}
+
+static void xs_history_getLength(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    xs_hist_seed(b);
+    xsResult = xsInteger(b->histCount);
+}
+
+/* ── API-P3: LIVE location getters ────────────────────────────────────
+ * Every property read re-derives from the address journal's current
+ * entry (seeded from the doc base), so a scripted pushState/replaceState
+ * moves the whole surface immediately — no stale bridge-time snapshot.
+ * Component logic reproduces the previous one-time builder's shapes
+ * exactly (origin/protocol/host/hostname/port defaulting, '/' pathname
+ * fallback, '?q'/'#h' prefixes); only the source URL went live.
+ * document-anchor search/hash getters (xs_el_get_search) still read
+ * ELEMENT host data — these are the window/location ones. */
+
+/* Parse helper: seeds the journal, then parses the CURRENT entry. The
+ * per-getter static UrlParsed hoists the parse result off the small
+ * stacks (url.c's hoist pattern). */
+static int xs_location_parse_current(JsBridge *b, UrlParsed *parsed)
+{
+    xs_hist_seed(b);
+    return url_parse(xs_hist_current(b), parsed) == 0;
+}
+
+static void xs_location_get_href(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    xs_hist_seed(b);
+    xsResult = xsString(xs_hist_current(b));
+}
+
+static void xs_location_get_origin(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char host[144], port[12];
+    int ok = xs_location_parse_current(b, &parsed);
+    int defaultPort = ok && ((parsed.isSsl && parsed.port == 443) ||
+                             (!parsed.isSsl && parsed.port == 80));
+    snprintf(port, sizeof(port), "%d", ok ? parsed.port : 0);
+    snprintf(host, sizeof(host), "%s%s%s", ok ? parsed.host : "",
+             ok && !defaultPort ? ":" : "", ok && !defaultPort ? port : "");
+    char origin[176];
+    snprintf(origin, sizeof(origin), "%s://%s", ok ? parsed.scheme : "", host);
+    xsResult = xsString(ok ? origin : "null");
+}
+
+static void xs_location_get_protocol(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    int ok = xs_location_parse_current(b, &parsed);
+    char component[64];
+    snprintf(component, sizeof(component), "%s:", ok ? parsed.scheme : "");
+    xsResult = xsString(component);
+}
+
+static void xs_location_get_host(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char port[12];
+    int ok = xs_location_parse_current(b, &parsed);
+    int defaultPort = ok && ((parsed.isSsl && parsed.port == 443) ||
+                             (!parsed.isSsl && parsed.port == 80));
+    snprintf(port, sizeof(port), "%d", ok ? parsed.port : 0);
+    char host[144];
+    snprintf(host, sizeof(host), "%s%s%s", ok ? parsed.host : "",
+             ok && !defaultPort ? ":" : "", ok && !defaultPort ? port : "");
+    xsResult = xsString(host);
+}
+
+static void xs_location_get_hostname(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    int ok = xs_location_parse_current(b, &parsed);
+    xsResult = xsString(ok ? parsed.host : "");
+}
+
+static void xs_location_get_port(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char port[12];
+    int ok = xs_location_parse_current(b, &parsed);
+    int defaultPort = ok && ((parsed.isSsl && parsed.port == 443) ||
+                             (!parsed.isSsl && parsed.port == 80));
+    snprintf(port, sizeof(port), "%d", ok ? parsed.port : 0);
+    xsResult = xsString(ok && !defaultPort ? port : "");
+}
+
+static void xs_location_get_pathname(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    int ok = xs_location_parse_current(b, &parsed);
+    xsResult = xsString(ok ? parsed.path : "/");
+}
+
+static void xs_location_get_search(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char component[264];
+    int ok = xs_location_parse_current(b, &parsed);
+    snprintf(component, sizeof(component), "%s%s",
+             ok && parsed.query[0] ? "?" : "", ok ? parsed.query : "");
+    xsResult = xsString(component);
+}
+
+static void xs_location_get_hash(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char component[264];
+    int ok = xs_location_parse_current(b, &parsed);
+    snprintf(component, sizeof(component), "%s%s",
+             ok && parsed.hash[0] ? "#" : "", ok ? parsed.hash : "");
+    xsResult = xsString(component);
 }
 
 static void xs_getComputedStyle(xsMachine *the)
@@ -3500,11 +4320,12 @@ static void xs_document_setTitle(xsMachine *the)
                 }
                 if (!strcmp(c->tag, "title"))
                 {
-                    DomNode *t = dom_create_text(b->dom, v);
-                    if (t)
-                    {
-                        dom_append_child(b->dom, c, t);
-                    }
+                    /* API-P3: browser-faithful set — REPLACES the title
+                     * node's text (the old append left 'API Probe' glued
+                     * to the new value and the getter read the concat).
+                     * dom_set_text swaps text-node children for one node;
+                     * a <title> only ever holds text. */
+                    dom_set_text(b->dom, c, v);
                     top = 0; /* stop the walk */
                     break;
                 }
@@ -3799,6 +4620,7 @@ static void xs_build_el_proto(JsBridge *b)
     } accs[] = {
         {"tagName", xs_el_get_tagName, NULL},
         {"id", xs_el_get_id, xs_el_set_id},
+        {"className", xs_el_get_className, xs_el_set_className},
         {"value", xs_el_get_value, xs_el_set_value},
         {"href", xs_el_get_href, xs_el_set_href},
         {"src", xs_el_get_src, xs_el_set_src},
@@ -3835,6 +4657,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"classList", xs_el_get_classList, NULL},
         {"style", xs_el_get_style, NULL},
         {"sheet", xs_el_get_sheet, NULL},
+        {"content", xs_el_get_content, NULL},
     };
     static const struct
     {
@@ -3853,6 +4676,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"insertBefore", xs_el_insertBefore, 2},
         {"querySelector", xs_el_querySelector, 1},
         {"querySelectorAll", xs_el_querySelectorAll, 1},
+        {"closest", xs_el_closest, 1},
         {"addEventListener", xs_el_addEventListener, 2},
         {"getElementsByTagName", xs_el_getElementsByTagName, 1},
         {"getBoundingClientRect", xs_el_getBoundingClientRect, 0},
@@ -4200,6 +5024,121 @@ static void xs_url_constructor(xsMachine *the)
     xsResult = obj;
 }
 
+/* ── API-P7: localStorage / sessionStorage ─────────────────────────
+ * The browser's key/value stores for page scripts, translated from the
+ * shared webstorage.c road (same origin rule, same caps, same
+ * persistence file on every engine). `this` = the storage wrapper; its
+ * host data is the WsStore* for the bound origin (local or session).
+ * Browser shape: every argument coerces string, getItem misses return
+ * null, length is a live getter, key(i) misses return null, setItem
+ * quota-fails with the browser's QuotaExceededError road, removeItem
+ * and clear are silent. Mutations log (+ save the local store's
+ * section) in webstorage.c; gets log ONLY the miss (the hot-path
+ * discipline mirrors the attribute road — a framework polling a value
+ * every frame must not flood the log file). Destructured calls
+ * (`var g = localStorage.getItem; g('k')`) throw Illegal invocation —
+ * browsers throw there too (the wrapper carries the store). */
+static void xs_storage_getItem(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    if (!s)
+    {
+        xsTypeError("Illegal invocation: storage member needs the object");
+    }
+    char *k = to_cstring(the, xsArg(0));
+    if (!k)
+    {
+        xsTypeError("out of memory");
+    }
+    char out[WS_VAL_MAX];
+    int hit = ws_get(s, k, out, sizeof(out));
+    if (!hit)
+    {
+        logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
+    }
+    JFree(k);
+    xsResult = hit ? xsString(out) : xsNull;
+}
+
+static void xs_storage_setItem(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    if (!s)
+    {
+        xsTypeError("Illegal invocation: storage member needs the object");
+    }
+    char *k = to_cstring(the, xsArg(0));
+    char *v = to_cstring(the, xsArg(1));
+    if (!k || !v)
+    {
+        JFree(k);
+        JFree(v);
+        xsTypeError("out of memory");
+    }
+    int rc = ws_set(s, k, v);
+    JFree(k);
+    JFree(v);
+    if (!rc)
+    {
+        /* The browser's QuotaExceededError road (4KB here, not 5MB). */
+        xsTypeError("QuotaExceededError: per-origin storage quota exceeded");
+    }
+}
+
+static void xs_storage_removeItem(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    if (!s)
+    {
+        xsTypeError("Illegal invocation: storage member needs the object");
+    }
+    char *k = to_cstring(the, xsArg(0));
+    if (!k)
+    {
+        xsTypeError("out of memory");
+    }
+    ws_remove(s, k);
+    JFree(k);
+}
+
+static void xs_storage_clear(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    if (!s)
+    {
+        xsTypeError("Illegal invocation: storage member needs the object");
+    }
+    ws_clear(s);
+}
+
+static void xs_storage_key(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    if (!s)
+    {
+        xsTypeError("Illegal invocation: storage member needs the object");
+    }
+    char out[WS_KEY_MAX];
+    int hit = ws_key(s, (int)xsToInteger(xsArg(0)), out, sizeof(out));
+    xsResult = hit ? xsString(out) : xsNull;
+}
+
+static void xs_storage_getLength(xsMachine *the)
+{
+    WsStore *s = (WsStore *)xsGetHostDataIf(xsThis);
+    xsResult = xsInteger(s ? ws_count(s) : 0);
+}
+
 static void xs_build_globals(JsBridge *b)
 {
     xsMachine *the = machine_of(b);
@@ -4253,13 +5192,26 @@ static void xs_build_globals(JsBridge *b)
         }
     }
 
-    /* console.log only — parity with the other bridges */
+    /* API-P4: console = the LOG lane. Every level tags its own
+     * [console.*] row in the file (the receipt surface; the rendered
+     * panel never changes). log/info/debug/warn/error/dir share the
+     * publisher; assert adds the browser semantics (truthy silent,
+     * falsey logs an error row, NEVER throws). Formatting: printf
+     * substitution (%s/%d/%i/%f/%o/%O/%j/%c + %%), console-shape
+     * rendering for objects/arrays (quoted nested strings, '[a, b]',
+     * '{k: v}', '[Function]', depth 2). count, group-star, time and
+     * trace stay ABSENT (documented boundary: an unknown method stays
+     * unknown; no fake surface). */
     {
         xsSlot con = xsNewHostObject(NULL);
         xsResult = con; /* GC anchor */
         def_fn(the, con, "log", xs_console_log, 0);
-        def_fn(the, con, "warn", xs_console_log, 0);
-        def_fn(the, con, "error", xs_console_log, 0);
+        def_fn(the, con, "info", xs_console_info, 0);
+        def_fn(the, con, "debug", xs_console_debug, 0);
+        def_fn(the, con, "warn", xs_console_warn, 0);
+        def_fn(the, con, "error", xs_console_error, 0);
+        def_fn(the, con, "dir", xs_console_dir, 0);
+        def_fn(the, con, "assert", xs_console_assert, 0);
         def_val(the, glob, "console", con);
     }
 
@@ -4315,34 +5267,73 @@ static void xs_build_globals(JsBridge *b)
         def_val(the, glob, "navigator", nav);
     }
 
-    /* Location components use the shared URL parser, not page-specific
-     * values. Routers and URL helpers need more than href. */
+    /* API-P3: location is LIVE over the address journal — every
+     * component getter re-parses the journal's current entry (seeded
+     * from the doc base), so a scripted pushState/replaceState moves
+     * the whole surface on the next read. The bridge-time snapshot
+     * builder above is gone. assign/replace stay logged-ignored (a
+     * scripted assign would be a real navigation; that's the app's
+     * move, documented boundary). */
     {
         xsSlot loc = xsNewHostObject(NULL);
-        xsResult = loc; /* GC anchor: xsString() below can collect */
-        const char *base = b->doc->baseUrl;
-        UrlParsed parsed;
-        int ok = url_parse(base, &parsed) == 0;
-        char host[144], origin[176], port[12], component[264];
-        int defaultPort = ok && ((parsed.isSsl && parsed.port == 443) || (!parsed.isSsl && parsed.port == 80));
-        snprintf(port, sizeof(port), "%d", ok ? parsed.port : 0);
-        snprintf(host, sizeof(host), "%s%s%s", ok ? parsed.host : "", ok && !defaultPort ? ":" : "", ok && !defaultPort ? port : "");
-        snprintf(origin, sizeof(origin), "%s://%s", ok ? parsed.scheme : "", host);
-        def_val(the, loc, "href", xsString(base));
-        def_val(the, loc, "origin", xsString(ok ? origin : "null"));
-        snprintf(component, sizeof(component), "%s:", ok ? parsed.scheme : "");
-        def_val(the, loc, "protocol", xsString(ok ? component : ""));
-        def_val(the, loc, "host", xsString(host));
-        def_val(the, loc, "hostname", xsString(ok ? parsed.host : ""));
-        def_val(the, loc, "port", xsString(ok && !defaultPort ? port : ""));
-        def_val(the, loc, "pathname", xsString(ok ? parsed.path : "/"));
-        snprintf(component, sizeof(component), "%s%s", ok && parsed.query[0] ? "?" : "", ok ? parsed.query : "");
-        def_val(the, loc, "search", xsString(component));
-        snprintf(component, sizeof(component), "%s%s", ok && parsed.hash[0] ? "#" : "", ok ? parsed.hash : "");
-        def_val(the, loc, "hash", xsString(component));
+        xsResult = loc; /* GC anchor */
+        static const struct
+        {
+            const char *name;
+            xsCallback get;
+        } locComps[] = {
+            {"href", xs_location_get_href},
+            {"origin", xs_location_get_origin},
+            {"protocol", xs_location_get_protocol},
+            {"host", xs_location_get_host},
+            {"hostname", xs_location_get_hostname},
+            {"port", xs_location_get_port},
+            {"pathname", xs_location_get_pathname},
+            {"search", xs_location_get_search},
+            {"hash", xs_location_get_hash},
+        };
+        for (size_t lc = 0; lc < sizeof(locComps) / sizeof(locComps[0]); lc++)
+        {
+            xsSlot get = xsNewHostFunction(locComps[lc].get, 0);
+            xsDefine(loc, xsID(locComps[lc].name), get, xsIsGetter);
+        }
         def_fn(the, loc, "assign", xs_location_assign, 1);
         def_fn(the, loc, "replace", xs_location_assign, 1);
         def_val(the, glob, "location", loc);
+    }
+
+    /* API-P7: localStorage + sessionStorage — the browser's key/value
+     * stores. ONE prototype carries the methods + the live length
+     * getter; two instances (host data = the WsStore*) land as globals.
+     * local persists per origin in the game's Data sandbox
+     * (webstorage_js.txt via the storage.c file road — works on the
+     * sim and the device identically); session lives in memory for the
+     * browser run. Origin derivation + caps are in webstorage.c (the
+     * engine-wide rule, no site anything). */
+    {
+        ws_bind((b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "");
+        xsSlot sp = xsNewHostObject(NULL);
+        xsResult = sp; /* GC anchor while the proto finishes */
+        def_fn(the, sp, "getItem", xs_storage_getItem, 1);
+        def_fn(the, sp, "setItem", xs_storage_setItem, 2);
+        def_fn(the, sp, "removeItem", xs_storage_removeItem, 1);
+        def_fn(the, sp, "clear", xs_storage_clear, 0);
+        def_fn(the, sp, "key", xs_storage_key, 1);
+        {
+            xsSlot lg = xsNewHostFunction(xs_storage_getLength, 0);
+            xsDefine(sp, xsID("length"), lg, xsIsGetter);
+        }
+        xsResult = sp; /* re-anchor before each instance alloc */
+        xsSlot lo = xsNewHostInstance(sp);
+        xsResult = lo;
+        xsSetHostData(lo, ws_local());
+        xsSlot so = xsNewHostInstance(sp);
+        xsResult = so;
+        xsSetHostData(so, ws_session());
+        def_val(the, glob, "localStorage", lo);
+        def_val(the, glob, "sessionStorage", so);
+        logger_log("[webstorage] globals bound: localStorage@%p sessionStorage@%p",
+                   (void *)ws_local(), (void *)ws_session());
     }
 
     /* URL constructor — component getters live on the prototype and read
@@ -4379,19 +5370,25 @@ static void xs_build_globals(JsBridge *b)
         def_val(the, glob, "URL", urlCtor);
     }
 
-    /* History state is stored; back/forward are inert until navigation
-     * entries are available, matching the existing QuickJS bridge. */
+    /* API-P3: history = the engine's address journal. state/length are
+     * live getters over the journal; pushState/replaceState write it
+     * (NEVER the wire); back/forward/go move the entry cursor and latch
+     * popstate/hashchange for the next pump frame. */
     {
         xsSlot history = xsNewObject();
         xsResult = history; /* GC anchor */
-        def_val(the, history, "state", xsNull);
-        def_val(the, history, "length", xsInteger(1));
+        {
+            xsSlot getter = xsNewHostFunction(xs_history_getState, 0);
+            xsDefine(history, xsID("state"), getter, xsIsGetter);
+            xsSlot lengthGetter = xsNewHostFunction(xs_history_getLength, 0);
+            xsDefine(history, xsID("length"), lengthGetter, xsIsGetter);
+        }
         def_val(the, history, "scrollRestoration", xsString("auto"));
-        def_fn(the, history, "pushState", xs_history_setState, 3);
-        def_fn(the, history, "replaceState", xs_history_setState, 3);
-        def_fn(the, history, "go", xs_noop, 1);
-        def_fn(the, history, "back", xs_noop, 0);
-        def_fn(the, history, "forward", xs_noop, 0);
+        def_fn(the, history, "pushState", xs_history_pushState, 3);
+        def_fn(the, history, "replaceState", xs_history_replaceState, 3);
+        def_fn(the, history, "go", xs_history_go, 1);
+        def_fn(the, history, "back", xs_history_back, 0);
+        def_fn(the, history, "forward", xs_history_forward, 0);
         def_val(the, glob, "history", history);
     }
 
@@ -5572,6 +6569,7 @@ static int xs_init(JsBridge *b, const char *baseUrl)
         xs_build_el_proto(b);
         xs_build_globals(b);
         xs_build_xhr_proto(b);
+        xs_build_worker_proto(b);
         /* XMLHttpRequest constructor global (xsGlobal pattern, line 1030).
          * SW5 sim finding: xsNewHostFunction does NOT set the constructor
          * flag, so `new XMLHttpRequest()` threw XS_TYPE_ERROR ("new: not a
@@ -5583,6 +6581,11 @@ static int xs_init(JsBridge *b, const char *baseUrl)
             xsSlot xglob = xsGlobal;
             xsDefine(xglob, xsID("XMLHttpRequest"),
                      xsNewHostConstructor(xs_xmlhttprequest_new, 0, st->xhrProto), xsDefault);
+            /* API-P8: the Worker contained-stub constructor (same shape —
+             * the SW5 constructor-flag finding applies equally). */
+            xsDefine(xglob, xsID("Worker"),
+                     xsNewHostConstructor(xs_worker_new, 1, st->workerProto),
+                     xsDefault);
         }
         xsEndHost(m);
     }
@@ -7098,6 +8101,13 @@ static const char g_fetchShimSrc[] =
     "      try {\n"
     "        xhr.open((opts.method || 'GET') + '', url + '');\n"
     "      } catch (e) { reject(e); return; }\n"
+    "      var hs = opts.headers;\n"
+    "      if (hs && typeof hs === 'object') {\n"
+    "        for (var hk in hs) {\n"
+    "          try { xhr.setRequestHeader(String(hk), String(hs[hk])); }\n"
+    "          catch (hfe) {}\n"
+    "        }\n"
+    "      }\n"
     "      if (ms > 0) {\n"
     "        timer = setTimeout(function () {\n"
     "          timer = 0;\n"
@@ -8781,6 +9791,190 @@ static void xs_pump_split(JsBridge *b, unsigned nowMs)
     (void)xs_split_pump(b, 0);
 }
 
+/* ── API-P3: journal delivery drain ────────────────────────────────────
+ * back/forward/go latch pending popstate/hashchange deliveries; this
+ * runs them at the NEXT engine-pump frame (post-run, never mid-eval),
+ * mirroring the xhr-completion pump: metered, per-listener xsTry
+ * isolation, contained aborts. popstate/hashchange are WINDOW lanes —
+ * document/window registrations round into the same listener book with
+ * target = the doc root; element-registered ones never fire (browser-
+ * faithful). Event objects: popstate = {type, state, preventDefault,
+ * stopPropagation} (state = the new entry's pinned value, snapshotted
+ * before the walk — a handler may push further entries); hashchange =
+ * {type, oldURL, newURL} built from the entry URLs recorded at move
+ * time. The preventDef/stopProp latches are unread outside dispatches
+ * and both reset at every dispatch entry, so the shared event-object
+ * methods stay harmless here. */
+static void xs_hist_call_listener(JsBridge *b, XsState *st,
+                                  const char *what, int i, xsSlot stateVal,
+                                  const char *oldUrl, const char *newUrl)
+{
+    xsMachine *m = st->machine;
+    b->inClick = 1; /* reuse the dispatch re-entrancy guard */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
+            xsVars(1);
+            xsTry
+            {
+                xsSlot ev = xsNewHostObject(NULL);
+                xsResult = ev; /* GC anchor */
+                xsDefine(xsResult, xsID("type"), xsString(what), xsDefault);
+                if (oldUrl == NULL)
+                {
+                    /* popstate payload: stateVal is remembered (pinned),
+                     * so funneling it through the bracket is GC-safe */
+                    xsDefine(xsResult, xsID("state"), stateVal, xsDefault);
+                }
+                else
+                {
+                    /* hashchange payload */
+                    xsDefine(xsResult, xsID("oldURL"), xsString(oldUrl), xsDefault);
+                    xsDefine(xsResult, xsID("newURL"), xsString(newUrl), xsDefault);
+                }
+                xsDefine(xsResult, xsID("preventDefault"),
+                         xsNewHostFunction(xs_event_preventDefault, 0),
+                         xsDefault);
+                xsDefine(xsResult, xsID("stopPropagation"),
+                         xsNewHostFunction(xs_event_stopPropagation, 0),
+                         xsDefault);
+                xsVar(0) = ev;
+                xsCall2_noResult(st->fns[i], xsID("call"), xsGlobal, xsVar(0));
+                xs_drain_jobs(the);
+                xs_flush_microtasks(b); /* microcheckpoint boundary */
+            }
+            xsCatch
+            {
+                b->errs++;
+                bridge_take_error_text(b, "listener exception");
+                logger_log("[js] %s handler failed", what);
+            }
+        }
+        xsEndHost(m);
+    }
+    xsEndMetering(m);
+    xsEndHostExit(m);
+
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (m->exitStatus != xsNormalExit)
+    {
+        b->errs++;
+        bridge_take_error_text(b, "engine abort in listener");
+        logger_log("[js] %s dispatch aborted engine — engine reset", what);
+        st->machine = NULL;
+        xsDeleteMachine(m);
+        xs_split_invalidate(b); /* R20 pacing + R22 stepwise are dead */
+        pluto_mem_resync_live();
+    }
+}
+
+static void xs_hist_deliver_pending(JsBridge *b)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine)
+    {
+        return;
+    }
+    if (b->inXhr || b->inTimer || b->inClick || jsbridge_mount_parked(b))
+    {
+        return; /* someone owns the machine — try again next frame */
+    }
+    if (!st->histPendPop && !st->histPendHash)
+    {
+        return;
+    }
+    xsMachine *m = st->machine;
+    /* null outside any host bracket: fxNull fills the slot directly
+     * (the xsNull macro needs the bracket-local `the`) */
+    xsSlot nullSlot;
+    fxNull(m, &nullSlot);
+
+    /* popstate first (browser order: entry state, then the hash lane) */
+    if (st->histPendPop)
+    {
+        st->histPendPop = 0;
+        xsSlot stateVal = nullSlot;
+        if (b->histCount > 0 && b->histIdx < JSBRIDGE_HIST_MAX &&
+            st->histStateSet[b->histIdx])
+        {
+            stateVal = st->histState[b->histIdx];
+        }
+        int fires = 0;
+        for (int i = 0; i < b->listenerCount && st->machine; i++)
+        {
+            JsListener *L = &b->listeners[i];
+            if (L->kind != 5 || strcmp(L->type, "popstate") != 0)
+            {
+                continue;
+            }
+            if (L->target != (b->dom ? (const void *)b->dom->root : NULL))
+            {
+                continue; /* element popstate never fires (window lane) */
+            }
+            int slot = (int)(intptr_t)L->ref;
+            if (slot < 0 || slot >= JSBRIDGE_LISTENERS_MAX)
+            {
+                continue;
+            }
+            fires++;
+            xs_hist_call_listener(b, st, "popstate", i, stateVal, NULL, NULL);
+        }
+        if (fires)
+        {
+            logger_log("[js] history delivery: popstate fires=%d j=%d",
+                       fires, b->histIdx);
+        }
+    }
+    /* then hashchange (only when the entry hash actually moved) */
+    if (st->machine && st->histPendHash)
+    {
+        st->histPendHash = 0;
+        int fires = 0;
+        for (int i = 0; i < b->listenerCount && st->machine; i++)
+        {
+            JsListener *L = &b->listeners[i];
+            if (L->kind != 5 || strcmp(L->type, "hashchange") != 0)
+            {
+                continue;
+            }
+            if (L->target != (b->dom ? (const void *)b->dom->root : NULL))
+            {
+                continue;
+            }
+            int slot = (int)(intptr_t)L->ref;
+            if (slot < 0 || slot >= JSBRIDGE_LISTENERS_MAX)
+            {
+                continue;
+            }
+            fires++;
+            xs_hist_call_listener(b, st, "hashchange", i, nullSlot,
+                                  st->histFromUrl, st->histToUrl);
+        }
+        if (fires)
+        {
+            logger_log("[js] history delivery: hashchange fires=%d "
+                       "'%.40s' → '%.40s'",
+                       fires, st->histFromUrl, st->histToUrl);
+        }
+    }
+}
+
+/* API-P3 pump wrapper (engine vtable `pump`): the split resume work
+ * first, then the journal delivery drain (popstate/hashchange latched
+ * by back/forward/go). Riding the existing vtable slot means no new
+ * per-frame plumbing in the router — jsbridge_engine_pump already runs
+ * impl->pump every frame outside any run. */
+static void xs_engine_pump(JsBridge *b, unsigned nowMs)
+{
+    xs_pump_split(b, nowMs);
+    xs_hist_deliver_pending(b);
+}
+
 /* R18 core (materialized source): plan + split-run a bundler monolith
  * whose bytes are ALREADY in RAM — either freshly read from a spill
  * handle (stream path) or the inline <script> body itself (inline path;
@@ -9622,6 +10816,29 @@ static int xs_xhr_id(xsMachine *the)
     return (int)(intptr_t)xsGetHostDataIf(xsThis);
 }
 
+/* API-P2: xhr.setRequestHeader(name, value) — the fetch shim's header
+ * lane (also real-XHR-callable). Content-Type rides the wire on POST;
+ * other headers are recorded (documented wire boundary). Invalid states
+ * throw with the bridge's error text, browser-faithful ordering. */
+static void xs_xhr_set_request_header(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    int id = xs_xhr_id(the);
+    if (id <= 0)
+    {
+        xsTypeError("xhr: setRequestHeader before open");
+    }
+    const char *name = xsToString(xsArg(0));
+    const char *value = xsToString(xsArg(1));
+    if (!jsbridge_xhr_set_header(b, id, name, value))
+    {
+        xsTypeError("%s", b->lastError[0] ? b->lastError
+                                          : "xhr: header refused");
+        b->lastError[0] = '\0';
+    }
+    xsResult = xsUndefined;
+}
+
 static void xs_xhr_send(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -9734,6 +10951,8 @@ static void xs_build_xhr_proto(JsBridge *b)
     xsRemember(st->xhrProto); /* root BEFORE the build allocates */
     def_fn(the, st->xhrProto, "open", xs_xhr_open, 2);
     def_fn(the, st->xhrProto, "send", xs_xhr_send, 0);
+    def_fn(the, st->xhrProto, "setRequestHeader", xs_xhr_set_request_header,
+           2);
     def_fn(the, st->xhrProto, "abort", xs_xhr_abort, 0);
     struct
     {
@@ -9753,6 +10972,21 @@ static void xs_build_xhr_proto(JsBridge *b)
     }
 }
 
+/* API-P8: the Worker contained-stub prototype (methods live here;
+ * onerror/onmessage materialize as proto-null values, so a fresh stub
+ * reads `null` for both before the page assigns — browser shape). */
+static void xs_build_worker_proto(JsBridge *b)
+{
+    xsMachine *the = machine_of(b);
+    XsState *st = state_of(b);
+    st->workerProto = xsNewHostObject(NULL);
+    xsRemember(st->workerProto); /* root BEFORE the build allocates */
+    def_fn(the, st->workerProto, "postMessage", xs_worker_postMessage, 1);
+    def_fn(the, st->workerProto, "terminate", xs_worker_terminate, 0);
+    def_val(the, st->workerProto, "onerror", xsNull);
+    def_val(the, st->workerProto, "onmessage", xsNull);
+}
+
 /* Constructor global: new XMLHttpRequest() / XHR() → fresh wrapper. */
 static void xs_xmlhttprequest_new(xsMachine *the)
 {
@@ -9760,6 +10994,79 @@ static void xs_xmlhttprequest_new(xsMachine *the)
     XsState *st = state_of(b);
     xsSlot obj = xsNewHostInstance(st->xhrProto);
     xs_set_host_data_site(the, "xhrNew", obj, (void *)(intptr_t)0);
+    xsResult = obj;
+}
+
+/* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note) ──
+ * Same thin-glue contract as XMLHttpRequest: wrapper = host instance of a
+ * rooted prototype, host data = the stub's public id (0 = the documented
+ * delivery-less cap shape). The OBJECT is pinned at construct (wobj[]/
+ * wobjSet[], xsRemember); the delivery reads the CURRENT onerror off it —
+ * browser at-fire semantics (pages may (re)assign handlers any time).
+ * The worker SCRIPT never compiles or runs: postMessage absorbs+logs,
+ * terminate cancels/quiets, and onerror fires ONCE at the next frame
+ * with ev = {message: stub message}. */
+static void xs_worker_postMessage(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    int id = (int)(intptr_t)xsGetHostDataIf(xsThis);
+    jsbridge_worker_post(b, id);
+    xsResult = xsUndefined;
+}
+
+static void xs_worker_terminate(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    int id = (int)(intptr_t)xsGetHostDataIf(xsThis);
+    jsbridge_worker_terminate(b, id);
+    xsResult = xsUndefined;
+}
+
+/* Constructor global: new Worker(url) / Worker(url) → stub wrapper. */
+static void xs_worker_new(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    const char *url = xsToString(xsArg(0)); /* recorded, never resolved */
+    int id = jsbridge_worker_open(b, url);
+    if (id <= 0)
+    {
+        /* Documented cap: a shape-complete delivery-less wrapper. */
+        xsSlot obj = xsNewHostInstance(st->workerProto);
+        xs_set_host_data_site(the, "workerNew", obj, (void *)(intptr_t)0);
+        xsResult = obj;
+        return;
+    }
+    int slot = -1;
+    for (int i = 0; i < JSBRIDGE_WORKER_MAX; i++)
+    {
+        if (!st->wobjSet[i])
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0)
+    {
+        st->wobj[slot] = xsNewHostInstance(st->workerProto);
+        st->wobjSet[slot] = 1;
+        xsRemember(st->wobj[slot]);
+        /* objRef = wobj slot+1 (uniform with the xhr pin encoding —
+         * slot 0 stays usable because the router's NULL rule applies
+         * to the ref POINTER). */
+        jsbridge_worker_pin(b, id, (void *)(intptr_t)(slot + 1));
+        xs_set_host_data_site(the, "workerNew", st->wobj[slot],
+                              (void *)(intptr_t)id);
+        xsResult = st->wobj[slot];
+        return;
+    }
+    /* Pin slots full: a tracked stub with no object can never deliver —
+     * the delivery is cancelled and the page gets a delivery-less shape. */
+    jsbridge_worker_terminate(b, id);
+    logger_log("[worker] no pin slot — stub #%d delivery-less (engine pin cap)",
+               id);
+    xsSlot obj = xsNewHostInstance(st->workerProto);
+    xs_set_host_data_site(the, "workerNew", obj, (void *)(intptr_t)0);
     xsResult = obj;
 }
 
@@ -9864,6 +11171,112 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
      * flush via queueMicrotask. Drain AND flush alternate until both
      * are empty (see the helper's note) — one flat pass left React's
      * callback stranded in the ring for 47s. */
+    xs_boundary_microtasks(b);
+    return 0;
+}
+
+/* API-P8: release one worker's pinned wrapper (slot inert; same bracket
+ * as xs_clear_xhr_refs). */
+static void xs_clear_worker_refs(JsBridge *b, void *objRef)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !objRef)
+    {
+        return;
+    }
+    int oslot = (int)(intptr_t)objRef - 1;
+    xsBeginHostExit(st->machine);
+    if (oslot >= 0 && oslot < JSBRIDGE_WORKER_MAX && st->wobjSet[oslot])
+    {
+        xsForget(st->wobj[oslot]);
+        st->wobjSet[oslot] = 0;
+    }
+    xsEndHostExit(st->machine);
+}
+
+/* Delivery: worker.onerror(ev) with `this` = the pinned wrapper and
+ * ev = {message}. The CURRENT onerror property is consulted at fire time
+ * (browser at-fire semantics — pages reassign handlers freely); a stub
+ * without a callable onerror delivers nothing. Same metering + contained
+ * exception + abort → engine reset bracket as xs_run_xhr_ref. */
+static int xs_run_worker_ref(JsBridge *b, void *objRef, const JsWorkerStub *w)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !objRef || !w)
+    {
+        return 1;
+    }
+#ifdef PLUTO_NR_MOUNT_PAUSE
+    if (st->mount.active && st->mount.parked)
+    {
+        /* Parked mount owns the machine (see xs_run_xhr_ref). The pin
+         * stays held; the pump retries after the mount finishes. */
+        return 1;
+    }
+#endif
+    int oslot = (int)(intptr_t)objRef - 1;
+    if (oslot < 0 || oslot >= JSBRIDGE_WORKER_MAX || !st->wobjSet[oslot])
+    {
+        return 1;
+    }
+    xsMachine *m = st->machine;
+    b->inClick = 1; /* reuse the dispatch re-entrancy guard */
+    xsBeginHostExit(m);
+    xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+    {
+        xsBeginHost(m);
+        {
+            xsVars(3);
+            xsTry
+            {
+                xsVar(0) = xsGet(st->wobj[oslot], xsID("onerror"));
+                if (fxIsCallable(m, &xsVar(0)))
+                {
+                    xsVar(1) = st->wobj[oslot];
+                    xsVar(2) = xsNewHostObject(NULL);
+                    xsSlot msg = xsString(w->message);
+                    xsDefine(xsVar(2), xsID("message"), msg, xsDefault);
+                    xsCall2_noResult(xsVar(0), xsID("call"), xsVar(1),
+                                     xsVar(2));
+                    logger_log("[worker] onerror delivered #%d present=1",
+                               w->id);
+                }
+                else
+                {
+                    logger_log("[worker] onerror delivered #%d present=0 "
+                               "(silent — unhandled worker error)",
+                               w->id);
+                }
+            }
+            xsCatch
+            {
+                if (!b->lastError[0])
+                {
+                    bridge_take_error_text(b, xsToString(xsException));
+                }
+            }
+        }
+        xsEndHost(m);
+    }
+    xsEndMetering(m);
+    xsEndHostExit(m);
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (m->exitStatus != xsNormalExit)
+    {
+        b->errs++;
+        bridge_take_error_text(b, "engine abort in worker callback");
+        logger_log("[js] worker dispatch aborted engine — engine reset");
+        xsDeleteMachine(m);
+        st->machine = NULL;
+        xs_split_invalidate(b); /* R20 pacing + R22 stepwise are dead */
+        pluto_mem_resync_live(); /* counter re-base (see run_script) */
+        return -1;
+    }
+    /* A worker error callback can build page objects and settle promises
+     * like any completion (see the xhr note). */
     xs_boundary_microtasks(b);
     return 0;
 }
@@ -10038,12 +11451,14 @@ const JsEngineImpl js_engine_xs_nr = {
     xs_run_xhr_ref,
     xs_clear_xhr_refs,
     xs_close,
-    xs_pump_split, /* R20: resume a time-sliced bundler split per frame */
+    xs_engine_pump, /* R20 split resume + API-P3 journal deliveries */
     xs_eval_pending, /* R27: walker/snapshot wait-gate */
     xs_mount_parked_query, /* R28: router pump gate while parked */
     "XS (No Recursion)",
     xs_dispatch_element_event, /* B2: click/input/change/submit bubbling */
-    xs_script_queue_drained /* R54: DOMContentLoaded at queue drain */};
+    xs_script_queue_drained, /* R54: DOMContentLoaded at queue drain */
+    xs_run_worker_ref,       /* API-P8: worker error delivery */
+    xs_clear_worker_refs /* API-P8: release the pinned wrapper */};
 
 /* ── R20 host-harness seam ──────────────────────�
  * Direct entry to the split path for host tests (nrsplit harness);

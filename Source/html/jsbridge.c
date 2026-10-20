@@ -20,6 +20,7 @@
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
 #include "jsext.h"
+#include "pd_api.h" /* API-P5: module-lane file: fetches (kFileReadData) */
 #include "../core/logger.h"
 #include "../core/url.h"
 #include "../core/http_client.h"
@@ -31,6 +32,11 @@
 extern PlaydateAPI *pluto_pd(void);
 #define JMalloc(n) pluto_mem_realloc(NULL, (n))
 #define JFree(p) pluto_mem_realloc((p), 0)
+
+/* API-P5 loader-side module lane (defined near the script router below;
+ * the attach loops route type="module" elements through it). */
+static void jsbridge_module_root(JsBridge *b, const char *src, size_t len,
+                                 const char *importBase, int index);
 
 /* Selected engine for ALL subsequently attached pages (0=muJS 1=Duktape).
  * Set from Settings via jsbridge_set_engine(); NOT from core/storage so the
@@ -268,6 +274,79 @@ int jsbridge_script_type_is_data(const char *lt, const char *gt)
         p++;
     }
     return 0; /* no type attribute ⇒ JavaScript */
+}
+
+/* API-P5: the module marker, walking the SAME attr shape type_is_data
+ * walks (own copy of the walk so the proven data filter stays byte-for-
+ * byte untouched; the two rules travel together in both scanners).
+ * Returns 1 when this <script> element's type= reads "module" (any
+ * case) — the body/src then routes through the loader-side module
+ * lane, not the engine's classic run. */
+int jsbridge_script_type_is_module(const char *lt, const char *gt)
+{
+    if (!lt || !gt || lt >= gt)
+    {
+        return 0;
+    }
+    const char *p = lt;
+    while (p + 4 <= gt)
+    {
+        if ((p[0] | 0x20) == 't' && (p[1] | 0x20) == 'y' &&
+            (p[2] | 0x20) == 'p' && (p[3] | 0x20) == 'e')
+        {
+            const char *prev = p - 1;
+            if (p > lt && (*prev == ' ' || *prev == '\t' || *prev == '\n' ||
+                           *prev == '\r' || *prev == '/'))
+            {
+                const char *v = p + 4;
+                while (v < gt && (*v == ' ' || *v == '\t' || *v == '\n' ||
+                                  *v == '\r'))
+                {
+                    v++;
+                }
+                if (v < gt && *v == '=')
+                {
+                    v++;
+                    while (v < gt && (*v == ' ' || *v == '\t' || *v == '\n' ||
+                                      *v == '\r'))
+                    {
+                        v++;
+                    }
+                    char q = 0;
+                    if (v < gt && (*v == '"' || *v == '\''))
+                    {
+                        q = *v;
+                        v++;
+                    }
+                    char buf[16];
+                    size_t n = 0;
+                    while (v < gt && n < sizeof(buf) - 1)
+                    {
+                        char c = *v;
+                        if (q && c == q)
+                        {
+                            break;
+                        }
+                        if (!q && (c == ' ' || c == '\t' || c == '\n' ||
+                                   c == '\r' || c == '>'))
+                        {
+                            break;
+                        }
+                        buf[n++] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
+                        v++;
+                    }
+                    while (n > 0 && buf[n - 1] == '/')
+                    {
+                        n--;
+                    }
+                    buf[n] = '\0';
+                    return strcmp(buf, "module") == 0;
+                }
+            }
+        }
+        p++;
+    }
+    return 0; /* no type attribute ⇒ classic (never module) */
 }
 
 static int extract_scripts(const char *html, const char **starts, size_t *lens,
@@ -902,6 +981,25 @@ void *jsbridge_el_query_selector_first(JsBridge *b, void *elp, const char *sel,
     return dom_query_selector_first(b->dom, el, sel, scratch, scratchSize);
 }
 
+/* ── API-P6: Element.closest — router-owned like the querySelector walk
+ * (one budget, one parse, one matcher); the element itself is tested
+ * first, then element ancestors up the tree. NULL for no match and for
+ * an unusable selector — engines surface both as null. */
+void *jsbridge_el_closest(JsBridge *b, void *elp, const char *sel,
+                          char *scratch, size_t scratchSize)
+{
+    DomNode *el = (DomNode *)elp;
+    if (!b || !b->dom)
+    {
+        return NULL;
+    }
+    if (!budget_take(b))
+    {
+        return NULL;
+    }
+    return dom_closest(b->dom, el, sel, scratch, scratchSize);
+}
+
 /* ── SW5: classList (O4) — router-owned so every engine gets the same
  * token semantics; a mutation charges 1 budget unit (CSS re-application
  * happens on the standard rewalk). */
@@ -992,6 +1090,25 @@ int jsbridge_el_class_toggle(JsBridge *b, void *elp, const char *token)
     }
     cls_before((DomNode *)elp, before, sizeof(before));
     int rc = dom_class_toggle(b->dom, (DomNode *)elp, token);
+    if (rc >= 0)
+    {
+        cls_after(b, (DomNode *)elp, before);
+    }
+    return rc;
+}
+
+/* API-P9: className WRITE — the whole attribute replaced (browser shape:
+ * el.className = 'a b' is setAttribute('class', 'a b') exactly). Same
+ * budget + snapshot/dirty-receipt pair as the token mutations. */
+int jsbridge_el_class_set(JsBridge *b, void *elp, const char *value)
+{
+    char before[192];
+    if (!b || !b->dom || !budget_take(b))
+    {
+        return -1;
+    }
+    cls_before((DomNode *)elp, before, sizeof(before));
+    int rc = dom_set_attr(b->dom, (DomNode *)elp, "class", value ? value : "");
     if (rc >= 0)
     {
         cls_after(b, (DomNode *)elp, before);
@@ -1376,6 +1493,8 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
                 s.inlineLen = lens[i];
                 s.tagStart = tags[i];
                 s.tagLen = tagLens[i];
+                s.isModule = jsbridge_script_type_is_module(
+                    tags[i], tags[i] + tagLens[i]);
                 b->scriptQueue[b->scriptQueueCount++] = s;
             }
         }
@@ -1399,8 +1518,21 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
             s.inlineLen = lens[i];
             s.tagStart = tags[i];
             s.tagLen = tagLens[i];
+            s.isModule = jsbridge_script_type_is_module(
+                tags[i], tags[i] + tagLens[i]);
             jsbridge_cur_script_stamp(b, &s, NULL);
-            impl->run_script(b, starts[i], lens[i], i + 1);
+            if (s.isModule)
+            {
+                /* API-P5: the same lane the pump entries use — inline
+                 * modules resolve imports against the document URL on
+                 * every engine, not only on the parked FULL path. */
+                jsbridge_module_root(b, starts[i], lens[i], doc->baseUrl,
+                                     i + 1);
+            }
+            else
+            {
+                impl->run_script(b, starts[i], lens[i], i + 1);
+            }
             jsbridge_cur_script_clear(b);
         }
     }
@@ -1497,6 +1629,20 @@ void js_doc_close(JsBridge *b)
             }
         }
         b->xhrCount = 0;
+    }
+    /* Worker stubs: release engine refs (same contract as the XHR loop). */
+    if (impl && impl->clear_worker_refs)
+    {
+        for (int i = 0; i < b->wkCount; i++)
+        {
+            JsWorkerStub *w = &b->wk[i];
+            if (w->active || w->release)
+            {
+                impl->clear_worker_refs(b, w->objRef);
+                memset(w, 0, sizeof(*w));
+            }
+        }
+        b->wkCount = 0;
     }
     if (b->doc && b->doc->_jsbridge == b)
     {
@@ -1977,6 +2123,1655 @@ void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut)
     }
 }
 
+/* ── API-P5: ES modules — the loader-side module lane ──────────────────
+ * <script type="module"> runs through THIS lane on every engine: both
+ * scanners flag the element (jsbridge_script_type_is_module), and the
+ * router swaps the classic run for a loader-side transform executed in
+ * C, BEFORE the engine sees the source. A module then executes as an
+ * ordinary script whose import/export syntax has already been
+ * browser-processed — engine isolation stays untouched (the vendored
+ * engines are never modified) and every engine gets the same lane.
+ *
+ * Browser-faithful semantics implemented:
+ *   - one run per document, wrapped in an IIFE: top-level const/let/
+ *     var/function/class stay module-local (never globals) — the module
+ *     scope isolation, for free, on every engine;
+ *   - static import declarations resolve RELATIVE TO THE MODULE'S OWN
+ *     URL (the document URL for inline modules; the module file's URL
+ *     for src= modules) through url_resolve — the same resolver the
+ *     page loader and the history journal use;
+ *   - the resolved specifier fetches through the SAME roads the page
+ *     already has: about: = the internal page store (the fetch()/
+ *     xhr road, synchronous); file: = the Data-dir rule of the file://
+ *     document loader (main.c pluto_load_local_file). http(s) imports
+ *     are refused with a receipt — an async module graph is future
+ *     work, never faked;
+ *   - `export const|let|var X[=…]`, `export function|class X` (and
+ *     `export async function X`) at top level are stripped of the
+ *     keyword and materialized onto a namespace object
+ *     globalThis.__p5mod["<resolved URL>"] after the body runs;
+ *   - `import d`, `import {a, b as c}`, `import * as ns` and the bare
+ *     `import 'x'` side-effect form all read that namespace;
+ *   - graph order = import-first (children run before the importer, in
+ *     document order of the import declarations), acyclic; the ledger
+ *     (per-document module keys + visiting state on the bridge) gives
+ *     the cycle/cap receipts.
+ *
+ * Documented boundaries (typed gaps, per the program's honesty rule):
+ *   - `export default`, `export {list}`, `export * [from]` do not
+ *     materialize: the statement is removed and the refusal logged;
+ *   - dynamic `import()` is left untouched — the engine throws at
+ *     runtime like any unknown global today;
+ *   - a path-only relative specifier on an OPAQUE about: base refuses
+ *     exactly as url_resolve does for the history journal — browsers
+ *     refuse it identically ("Failed to resolve module specifier" on
+ *     opaque origins);
+ *   - grammar coverage = the lean lexer's: comments, strings, regexp
+ *     literals and template literals are consumed as tokens; template
+ *     ${…} internals are NOT re-interpreted (the R16 chunk scanner's
+ *     accepted weakening, retained so the loader lexers all agree).
+ */
+
+#define JSBRIDGE_MOD_SRC_MAX (16 * 1024)   /* one module's fetched source */
+#define JSBRIDGE_MOD_BUILT_MAX (20 * 1024) /* prelude + body + postludes */
+#define JSBRIDGE_MOD_IMPORTS 6             /* imports per module */
+#define JSBRIDGE_MOD_NAMES 6               /* named bindings per import */
+#define JSBRIDGE_MOD_EXPORTS 12            /* exported names per module */
+#define JSBRIDGE_MOD_SPANS 40              /* removal spans per module */
+#define JSBRIDGE_MOD_MAX_DEPTH 4           /* graph nesting guard */
+#define JSBRIDGE_MOD_NAME_MAX 64           /* binding local-name cap */
+
+typedef struct
+{
+    char spec[JSBRIDGE_MOD_KEY_MAX];
+    char dflt[JSBRIDGE_MOD_NAME_MAX];
+    int namedCount;
+    struct
+    {
+        char in[JSBRIDGE_MOD_NAME_MAX];
+        char local[JSBRIDGE_MOD_NAME_MAX];
+    } named[JSBRIDGE_MOD_NAMES];
+    int star;
+    char starLocal[JSBRIDGE_MOD_NAME_MAX];
+} ModImport;
+
+typedef struct
+{
+    int importCount;
+    ModImport imp[JSBRIDGE_MOD_IMPORTS];
+    int exportCount;
+    char exp[JSBRIDGE_MOD_EXPORTS][JSBRIDGE_MOD_NAME_MAX];
+    int xDefault, xList, xStar, xDyn, xOther;
+    int spanCount;
+    struct
+    {
+        size_t at; /* inclusive */
+        size_t end; /* exclusive */
+    } cut[JSBRIDGE_MOD_SPANS];
+    /* graph phase output (children resolved and run BEFORE the build): */
+    char impKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
+    unsigned char impLoaded[JSBRIDGE_MOD_IMPORTS];
+} ModScan;
+
+static int ml_isidchar(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '$' || c >= 0x80;
+}
+
+/* Whitespace + comments trivia skip (mirrors blex_space_at, with line
+ * comments added for statement-head positions). Unterminated block
+ * comment: returns p so the caller advances (no infinite loop). */
+static size_t ml_space_at(const char *src, size_t len, size_t p)
+{
+    for (;;)
+    {
+        while (p < len && (src[p] == ' ' || src[p] == '\t' ||
+                           src[p] == '\r' || src[p] == '\n'))
+        {
+            p++;
+        }
+        if (p + 1 < len && src[p] == '/' && src[p + 1] == '/')
+        {
+            while (p < len && src[p] != '\n')
+            {
+                p++;
+            }
+            continue;
+        }
+        if (p + 1 < len && src[p] == '/' && src[p + 1] == '*')
+        {
+            size_t i = p + 2;
+            while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/'))
+            {
+                i++;
+            }
+            if (i + 1 >= len)
+            {
+                return p; /* unterminated: treat as ambiguous */
+            }
+            p = i + 2;
+            continue;
+        }
+        return p;
+    }
+}
+
+/* Regex-context classifier — mirrors the bundler's blex_regex_possible
+ * (the R16 value/division rule): / after ) ] } " ' ` or a non-keyword
+ * identifier is division; after operators, open brackets, keywords and
+ * statement starts it opens a regex literal. */
+static int ml_regex_possible(const char *src, size_t from)
+{
+    size_t p = from;
+    while (p > 0)
+    {
+        p--;
+        char c = src[p];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            continue;
+        }
+        if (c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' ||
+            c == '`')
+        {
+            return 0; /* division context */
+        }
+        if (ml_isidchar((unsigned char)c))
+        {
+            static const char *const kws[] = {
+                "return", "typeof", "case", "in", "of", "instanceof",
+                "new", "delete", "void", "do", "else", "throw", "yield",
+                "await"
+            };
+            size_t w0 = p;
+            while (w0 > 0 && ml_isidchar((unsigned char)src[w0 - 1]))
+            {
+                w0--;
+            }
+            size_t wl = p - w0 + 1;
+            for (unsigned i = 0; i < sizeof(kws) / sizeof(kws[0]); i++)
+            {
+                if (strlen(kws[i]) == wl &&
+                    memcmp(src + w0, kws[i], wl) == 0)
+                {
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        return 1; /* operators / open brackets / start: regex context */
+    }
+    return 1;
+}
+
+/* Exclusive end of the comment/string/template token opened at p.
+ * Unterminated token: returns len (the scan then bails naturally). */
+static size_t ml_line_end(const char *src, size_t len, size_t p)
+{
+    while (p < len && src[p] != '\n')
+    {
+        p++;
+    }
+    return p;
+}
+
+static size_t ml_block_end(const char *src, size_t len, size_t p)
+{
+    size_t i = p + 2;
+    while (i + 1 < len && !(src[i] == '*' && src[i + 1] == '/'))
+    {
+        i++;
+    }
+    return (i + 1 < len) ? i + 2 : len;
+}
+
+static size_t ml_string_end(const char *src, size_t len, size_t p)
+{
+    char q = src[p];
+    p++;
+    while (p < len)
+    {
+        if (src[p] == '\\')
+        {
+            p += 2;
+            continue;
+        }
+        if (src[p] == q)
+        {
+            return p + 1;
+        }
+        p++;
+    }
+    return len;
+}
+
+static size_t ml_templ_end(const char *src, size_t len, size_t p)
+{
+    p++;
+    while (p < len)
+    {
+        if (src[p] == '\\')
+        {
+            p += 2;
+            continue;
+        }
+        if (src[p] == '`')
+        {
+            return p + 1;
+        }
+        p++;
+    }
+    return len;
+}
+
+static size_t ml_regex_end(const char *src, size_t len, size_t p)
+{
+    int bracket = 0;
+    p++;
+    while (p < len)
+    {
+        if (src[p] == '\\')
+        {
+            p += 2;
+            continue;
+        }
+        if (src[p] == '[')
+        {
+            bracket = 1;
+        }
+        else if (src[p] == ']')
+        {
+            bracket = 0;
+        }
+        else if (src[p] == '/' && !bracket)
+        {
+            p++;
+            while (p < len && ml_isidchar((unsigned char)src[p]))
+            {
+                p++; /* flags */
+            }
+            return p;
+        }
+        else if (src[p] == '\n')
+        {
+            return p; /* unterminated: bail to the raw walker */
+        }
+        p++;
+    }
+    return len;
+}
+
+/* Exclusive end of the token opened at p ('/'-comment forms included;
+ * a division slash returns p+1). */
+static size_t ml_token_end(const char *src, size_t len, size_t p)
+{
+    if (p >= len)
+    {
+        return p;
+    }
+    if (src[p] == '/' && p + 1 < len)
+    {
+        if (src[p + 1] == '/')
+        {
+            return ml_line_end(src, len, p);
+        }
+        if (src[p + 1] == '*')
+        {
+            return ml_block_end(src, len, p);
+        }
+    }
+    if (src[p] == '/')
+    {
+        return ml_regex_end(src, len, p);
+    }
+    if (src[p] == '"' || src[p] == '\'')
+    {
+        return ml_string_end(src, len, p);
+    }
+    if (src[p] == '`')
+    {
+        return ml_templ_end(src, len, p);
+    }
+    return p + 1;
+}
+
+/* Boundary-true keyword check: the word `w` (len wl) sits exactly at p,
+ * with a non-identifier character on BOTH sides. */
+static int ml_word_at(const char *src, size_t len, size_t p,
+                      const char *w, size_t wl, size_t *endOut)
+{
+    if (p + wl > len)
+    {
+        return 0;
+    }
+    if (memcmp(src + p, w, wl) != 0)
+    {
+        return 0;
+    }
+    if (p > 0 && ml_isidchar((unsigned char)src[p - 1]))
+    {
+        return 0;
+    }
+    if (p + wl < len && ml_isidchar((unsigned char)src[p + wl]))
+    {
+        return 0;
+    }
+    if (endOut)
+    {
+        *endOut = p + wl;
+    }
+    return 1;
+}
+
+/* Read ONE trivia-skipping token at *pp:
+ *   kind 1 = identifier (in word, ≤ wordn-1 bytes)
+ *   kind 2 = string literal (raw contents, unquoted)
+ *   kind 0 = one punctuation char in *c0
+ * *pp advances past the token; *startOut gets the token's first byte. */
+static int ml_token(const char *src, size_t len, size_t *pp, char *word,
+                    size_t wordn, char *c0, size_t *startOut)
+{
+    size_t p = ml_space_at(src, len, *pp);
+    if (p >= len)
+    {
+        *pp = p;
+        return -1;
+    }
+    if (startOut)
+    {
+        *startOut = p;
+    }
+    if (ml_isidchar((unsigned char)src[p]) &&
+        (p == 0 || !ml_isidchar((unsigned char)src[p - 1])))
+    {
+        size_t e = p + 1;
+        while (e < len && ml_isidchar((unsigned char)src[e]))
+        {
+            e++;
+        }
+        size_t wl = e - p;
+        if (wl > wordn - 1)
+        {
+            wl = wordn - 1;
+        }
+        memcpy(word, src + p, wl);
+        word[wl] = '\0';
+        *pp = e;
+        return 1;
+    }
+    if (src[p] == '"' || src[p] == '\'')
+    {
+        size_t e = ml_string_end(src, len, p);
+        size_t inner = (e >= p + 2) ? (e - p - 2) : 0;
+        if (inner > wordn - 1)
+        {
+            inner = wordn - 1;
+        }
+        memcpy(word, src + p + 1, inner);
+        word[inner] = '\0';
+        *pp = e;
+        return 2;
+    }
+    *c0 = src[p];
+    *pp = p + 1;
+    return 0;
+}
+
+/* Named-binding list after '{'. On success *pp sits past the closing
+ * '}' and the slots are copied into `slot`; a malformed list returns 0
+ * (the caller fails the import loudly — the engine then reports the
+ * raw source). */
+static void mod_add_cut(ModScan *m, size_t at, size_t end);
+
+/* Named-binding list after '{'. On success *pp sits past the closing
+ * '}' and the slots are copied into `slot`; a malformed list returns 0
+ * (the caller fails the import loudly — the engine then reports the
+ * raw source). */
+static int mod_named_list(const char *src, size_t len, size_t p,
+                          ModImport *slot, size_t *nextOut)
+{
+    struct
+    {
+        char in[JSBRIDGE_MOD_NAME_MAX];
+        char local[JSBRIDGE_MOD_NAME_MAX];
+    } out[JSBRIDGE_MOD_NAMES];
+    int n = 0;
+    for (;;)
+    {
+        p = ml_space_at(src, len, p);
+        if (p >= len)
+        {
+            return 0;
+        }
+        if (src[p] == '}')
+        {
+            p++;
+            break;
+        }
+        if (src[p] == ',')
+        {
+            p++;
+            continue;
+        }
+        if (!ml_isidchar((unsigned char)src[p]) ||
+            (p > 0 && ml_isidchar((unsigned char)src[p - 1])))
+        {
+            return 0; /* not a binding name */
+        }
+        size_t e = p + 1;
+        while (e < len && ml_isidchar((unsigned char)src[e]))
+        {
+            e++;
+        }
+        size_t wl = e - p;
+        if (wl > sizeof(out[0].in) - 1)
+        {
+            wl = sizeof(out[0].in) - 1;
+        }
+        memcpy(out[n].in, src + p, wl);
+        out[n].in[wl] = '\0';
+        snprintf(out[n].local, sizeof(out[n].local), "%s", out[n].in);
+        p = ml_space_at(src, len, e);
+        if (ml_word_at(src, len, p, "as", 2, NULL))
+        {
+            p = ml_space_at(src, len, p + 2);
+            if (!ml_isidchar((unsigned char)src[p]) ||
+                (p > 0 && ml_isidchar((unsigned char)src[p - 1])))
+            {
+                return 0; /* `as` without an alias */
+            }
+            size_t e2 = p + 1;
+            while (e2 < len && ml_isidchar((unsigned char)src[e2]))
+            {
+                e2++;
+            }
+            wl = e2 - p;
+            if (wl > sizeof(out[0].local) - 1)
+            {
+                wl = sizeof(out[0].local) - 1;
+            }
+            char alias[JSBRIDGE_MOD_NAME_MAX];
+            memcpy(alias, src + p, wl);
+            alias[wl] = '\0';
+            snprintf(out[n].local, sizeof(out[n].local), "%s", alias);
+            p = e2;
+        }
+        n++;
+        if (n >= JSBRIDGE_MOD_NAMES)
+        {
+            logger_log("[module] import named-binding cap %d hit (the "
+                       "import keeps only its first %d bindings)",
+                       JSBRIDGE_MOD_NAMES, JSBRIDGE_MOD_NAMES);
+            break;
+        }
+    }
+    for (int i = 0; i < n; i++)
+    {
+        snprintf(slot->named[i].in, sizeof(slot->named[i].in), "%s",
+                 out[i].in);
+        snprintf(slot->named[i].local, sizeof(slot->named[i].local), "%s",
+                 out[i].local);
+    }
+    slot->namedCount = n;
+    *nextOut = p;
+    return n;
+}
+
+/* `* [as <name>]` after 'import'. Advances *pp; fills starLocal (the
+ * default "ns" keeps a valid binding when a site writes bare `*`). */
+static void mod_read_star(const char *src, size_t len, size_t *pp,
+                          char *starLocal, size_t sn)
+{
+    size_t start = 0;
+    char word[JSBRIDGE_MOD_NAME_MAX];
+    char c0 = 0;
+    int tok = ml_token(src, len, pp, word, sizeof(word), &c0, &start);
+    if (tok == 1 && strcmp(word, "as") == 0)
+    {
+        tok = ml_token(src, len, pp, word, sizeof(word), &c0, &start);
+    }
+    if (tok == 1)
+    {
+        snprintf(starLocal, sn, "%s", word);
+    }
+    else
+    {
+        snprintf(starLocal, sn, "ns");
+    }
+}
+
+static void mod_record_import(ModScan *m, const ModImport *im)
+{
+    if (m->importCount >= JSBRIDGE_MOD_IMPORTS)
+    {
+        logger_log("[module] import cap %d hit — import '%s' not cut (raw "
+                   "source left; the engine reports it)",
+                   JSBRIDGE_MOD_IMPORTS, im->spec);
+        return;
+    }
+    m->imp[m->importCount++] = *im;
+    logger_log("[module] import declared '%s' (dflt='%s' named=%d star=%d)",
+               im->spec, im->dflt[0] ? im->dflt : "-",
+               im->namedCount, im->star);
+}
+
+/* `from` + the specifier string after a bindings head. On success *pp
+ * sits past the string and spec is filled; otherwise returns 0. */
+static int mod_from_spec(const char *src, size_t len, size_t *pp,
+                         char *spec, size_t specn)
+{
+    size_t p = *pp;
+    size_t start = 0;
+    char word[JSBRIDGE_MOD_NAME_MAX];
+    char c0 = 0;
+    int tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+    if (!(tok == 1 && strcmp(word, "from") == 0))
+    {
+        return 0;
+    }
+    tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+    if (tok != 2)
+    {
+        return 0;
+    }
+    size_t wl = strlen(word);
+    if (wl > specn - 1)
+    {
+        wl = specn - 1;
+    }
+    memcpy(spec, word, wl);
+    spec[wl] = '\0';
+    *pp = p;
+    return 1;
+}
+
+/* Parse the import statement whose keyword begins at `at` (boundary
+ * guaranteed by the caller). Always returns 1 with *nextOut advanced:
+ *   - a static import is recorded and CUT;
+
+ *   - the dynamic call form is left untouched (receipt only);
+ *   - fallen shapes are logged + left for the engine's SyntaxError. */
+static void mod_parse_import(const char *src, size_t len, size_t at,
+                             ModScan *m, size_t *nextOut)
+{
+    size_t p = at + 6;
+    size_t q = ml_space_at(src, len, p);
+    if (q < len && src[q] == '(')
+    {
+        m->xDyn++;
+        logger_log("[module] dynamic import() unrewritten (runtime surface "
+                   "stays unknown)");
+        *nextOut = at + 6;
+        return;
+    }
+
+    ModImport im;
+    memset(&im, 0, sizeof(im));
+
+    size_t start = 0;
+    char word[JSBRIDGE_MOD_NAME_MAX];
+    char c0 = 0;
+    int tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+    if (tok == 2)
+    {
+        /* bare side-effect form: import 'x' */
+        snprintf(im.spec, sizeof(im.spec), "%s", word);
+    }
+    else if (tok == 1 && strcmp(word, "from") != 0)
+    {
+        /* default binding first: import d [, {list}] [, * as ns] from … */
+        snprintf(im.dflt, sizeof(im.dflt), "%s", word);
+        tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+        if (tok == 0 && c0 == ',')
+        {
+            tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+        }
+        if (tok == 0 && c0 == '{')
+        {
+            size_t after = p;
+            int got = mod_named_list(src, len, after, &im, &after);
+            if (!got)
+            {
+                logger_log("[module] import head unparseable at byte %zu — "
+                           "left for the engine's SyntaxError", at);
+                *nextOut = at + 6;
+                return;
+            }
+            p = after;
+        }
+        else if (tok == 0 && c0 == '*')
+        {
+            im.star = 1;
+            mod_read_star(src, len, &p, im.starLocal, sizeof(im.starLocal));
+        }
+        else if (!(tok == 1 && strcmp(word, "from") == 0))
+        {
+            logger_log("[module] import head unparseable at byte %zu — "
+                       "left for the engine's SyntaxError", at);
+            *nextOut = at + 6;
+            return;
+        }
+    }
+    else if (tok == 0 && c0 == '{')
+    {
+        size_t after = p;
+        int got = mod_named_list(src, len, after, &im, &after);
+        if (!got)
+        {
+            logger_log("[module] import head unparseable at byte %zu — "
+                       "left for the engine's SyntaxError", at);
+            *nextOut = at + 6;
+            return;
+        }
+        p = after;
+    }
+    else if (tok == 0 && c0 == '*')
+    {
+        im.star = 1;
+        mod_read_star(src, len, &p, im.starLocal, sizeof(im.starLocal));
+    }
+    else
+    {
+        logger_log("[module] import head unparseable at byte %zu — left "
+                   "for the engine's SyntaxError", at);
+        *nextOut = at + 6;
+        return;
+    }
+
+    /* from + specifier — skipped for the bare form (spec already read) */
+    if (!im.spec[0])
+    {
+        if (!mod_from_spec(src, len, &p, im.spec, sizeof(im.spec)))
+        {
+            logger_log("[module] from-spec unparseable at byte %zu — left "
+                       "for the engine's SyntaxError", at);
+            *nextOut = at + 6;
+            return;
+        }
+    }
+    /* optional trailing ';' (the cut includes it) */
+    size_t q2 = ml_space_at(src, len, p);
+    if (q2 < len && src[q2] == ';')
+    {
+        p = q2 + 1;
+    }
+    mod_record_import(m, &im);
+    mod_add_cut(m, at, p);
+    *nextOut = p;
+}
+
+
+/* Statement extent from p: past the terminating ';' at level 0 (or a
+ * stray EOF). Level counts { ( [ ; strings/templates/regex/comments are
+ * consumed as tokens. */
+static size_t ml_stmt_end(const char *src, size_t len, size_t p)
+{
+    int level = 0;
+    while (p < len)
+    {
+        char c = src[p];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            p++;
+            continue;
+        }
+        if (c == '/' && p + 1 < len &&
+            (src[p + 1] == '/' || src[p + 1] == '*'))
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '/' && ml_regex_possible(src, p))
+        {
+            p = ml_regex_end(src, len, p);
+            continue;
+        }
+        if (c == '/' || c == '"' || c == '\'' || c == '`')
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '{' || c == '(' || c == '[')
+        {
+            level++;
+            p++;
+            continue;
+        }
+        if (c == '}' || c == ')' || c == ']')
+        {
+            if (level == 0)
+            {
+                break; /* unbalanced close: caller's bisect */
+            }
+            level--;
+            p++;
+            continue;
+        }
+        if (c == ';' && level == 0)
+        {
+            return p + 1;
+        }
+        p++;
+    }
+    return len;
+}
+
+static void mod_add_cut(ModScan *m, size_t at, size_t end)
+{
+    if (at >= end || m->spanCount >= JSBRIDGE_MOD_SPANS)
+    {
+        if (m->spanCount >= JSBRIDGE_MOD_SPANS)
+        {
+            logger_log("[module] scan overflow (cut table full) — module "
+                       "left uncut at byte %zu (critical SyntaxError path)",
+                       at);
+        }
+        return;
+    }
+    m->cut[m->spanCount].at = at;
+    m->cut[m->spanCount].end = end;
+    m->spanCount++;
+}
+
+static void mod_add_export(ModScan *m, const char *name)
+{
+    if (!name[0])
+    {
+        return;
+    }
+    if (m->exportCount >= JSBRIDGE_MOD_EXPORTS)
+    {
+        logger_log("[module] export-name cap %d hit ('%s' not materialized "
+                   "— the declaration still runs)",
+                   JSBRIDGE_MOD_EXPORTS, name);
+        return;
+    }
+    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s", name);
+    m->exportCount++;
+}
+
+/* const/let/var declarator names, level 0: the FIRST ident of each
+ * top-level declarator (a,b in `const a = f(1), b = 2`). Destructuring
+ * heads are consumed but not named (receipt; honest gap). *endOut =
+ * past the terminating ';'. */
+static void mod_decl_names(const char *src, size_t len, size_t p, ModScan *m,
+                           size_t *endOut)
+{
+    int level = 0;
+    int expectName = 1;
+    while (p < len)
+    {
+        char c = src[p];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            p++;
+            continue;
+        }
+        if (c == '/' && p + 1 < len &&
+            (src[p + 1] == '/' || src[p + 1] == '*'))
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '/' && ml_regex_possible(src, p))
+        {
+            p = ml_regex_end(src, len, p);
+            continue;
+        }
+        if (c == '/' || c == '"' || c == '\'' || c == '`')
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '{')
+        {
+            if (expectName && level == 0)
+            {
+                logger_log("[module] export destructure unref (names stay "
+                           "local — documented boundary)");
+                expectName = 0;
+            }
+            level++;
+            p++;
+            continue;
+        }
+        if (c == '(' || c == '[')
+        {
+            level++;
+            expectName = 0;
+            p++;
+            continue;
+        }
+        if (c == '}' || c == ')' || c == ']')
+        {
+            if (level > 0)
+            {
+                level--;
+            }
+            p++;
+            continue;
+        }
+        if (c == ',' && level == 0)
+        {
+            expectName = 1;
+            p++;
+            continue;
+        }
+        if (c == ';' && level == 0)
+        {
+            p++;
+            break;
+        }
+        if (ml_isidchar((unsigned char)c) &&
+            (p == 0 || !ml_isidchar((unsigned char)src[p - 1])))
+        {
+            if (level == 0 && expectName)
+            {
+                size_t e = p + 1;
+                while (e < len && ml_isidchar((unsigned char)src[e]))
+                {
+                    e++;
+                }
+                size_t wl = e - p;
+                char nbuf[JSBRIDGE_MOD_NAME_MAX];
+                if (wl > sizeof(nbuf) - 1)
+                {
+                    wl = sizeof(nbuf) - 1;
+                }
+                memcpy(nbuf, src + p, wl);
+                nbuf[wl] = '\0';
+                mod_add_export(m, nbuf);
+                p = e;
+                expectName = 0;
+                continue;
+            }
+            while (p < len && ml_isidchar((unsigned char)src[p]))
+            {
+                p++;
+            }
+            continue;
+        }
+        p++;
+    }
+    *endOut = p;
+}
+
+/* Parse the export statement whose keyword begins at `at`. Always
+ * returns with *nextOut past the affected span:
+ *   - decl kinds cut the 'export' head (keyword+ws) and record names;
+ *   - default/list/star/generic refuse (removed whole + receipts);
+ *   - unrecognizable shapes are errored honestly by the engine (the
+ *     keyword is left and the walker resumes after it). */
+static void mod_parse_export(const char *src, size_t len, size_t at,
+                             ModScan *m, size_t *nextOut)
+{
+    size_t p = at + 6;
+    size_t start = 0;
+    char word[JSBRIDGE_MOD_NAME_MAX];
+    char c0 = 0;
+    int tok = ml_token(src, len, &p, word, sizeof(word), &c0, &start);
+
+    if (tok == 1 && (!strcmp(word, "const") || !strcmp(word, "let") ||
+                     !strcmp(word, "var")))
+    {
+        mod_add_cut(m, at, start);
+        size_t send = 0;
+        mod_decl_names(src, len, p, m, &send);
+        *nextOut = send;
+        return;
+    }
+    if (tok == 1 && (!strcmp(word, "function") || !strcmp(word, "class")))
+    {
+        mod_add_cut(m, at, start);
+        /* the name: next ident (a generator's '*' sits between) */
+        size_t np = start;
+        char c0b = 0;
+        size_t sb = 0;
+        int t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+        if (t2 == 1 && (strcmp(word, "function") == 0 ||
+                        strcmp(word, "class") == 0))
+        {
+            t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+        }
+        if (t2 == 0 && c0b == '*')
+        {
+            t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+        }
+        if (t2 == 1)
+        {
+            mod_add_export(m, word);
+        }
+        *nextOut = start; /* the walker resumes at the kind keyword */
+        return;
+    }
+    if (tok == 1 && strcmp(word, "async") == 0)
+    {
+        /* export async function name … */
+        size_t np = p;
+        char c0b = 0;
+        size_t sb = 0;
+        int t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+        if (t2 == 1 && strcmp(word, "function") == 0)
+        {
+            mod_add_cut(m, at, start);
+            size_t save = start;
+            t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+            if (t2 == 0 && c0b == '*')
+            {
+                t2 = ml_token(src, len, &np, word, sizeof(word), &c0b, &sb);
+            }
+            if (t2 == 1)
+            {
+                mod_add_export(m, word);
+            }
+            *nextOut = save; /* resume at the 'async' keyword */
+            return;
+        }
+        logger_log("[module] export head unrecognized at byte %zu — left "
+                   "for the engine's SyntaxError", at);
+        *nextOut = at + 6;
+        return;
+    }
+    if (tok == 1 && strcmp(word, "default") == 0)
+    {
+        m->xDefault++;
+        size_t send = ml_stmt_end(src, len, p);
+        mod_add_cut(m, at, send);
+        *nextOut = send;
+        logger_log("[module] export default unref (removed; the module "
+                   "still runs — documented boundary)");
+        return;
+    }
+    if (tok == 0 && (c0 == '{' || c0 == '*'))
+    {
+        if (c0 == '{')
+        {
+            m->xList++;
+            logger_log("[module] export {list} unref (removed; the module "
+                       "still runs — documented boundary)");
+        }
+        else
+        {
+            m->xStar++;
+            logger_log("[module] export * [from] unref (removed; the "
+                       "module still runs — documented boundary)");
+        }
+        size_t send = ml_stmt_end(src, len, p);
+        mod_add_cut(m, at, send);
+        *nextOut = send;
+        return;
+    }
+    logger_log("[module] export head unrecognized at byte %zu — left for "
+               "the engine's SyntaxError", at);
+    *nextOut = at + 6;
+}
+
+/* Pass A: ONE lexical walk of a module source; terminates at EOF. */
+static void mod_scan(const char *src, size_t len, ModScan *m)
+{
+    size_t p = 0;
+    int depth = 0;
+    while (p < len)
+    {
+        char c = src[p];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        {
+            p++;
+            continue;
+        }
+        if (c == '/' && p + 1 < len &&
+            (src[p + 1] == '/' || src[p + 1] == '*'))
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '/' && ml_regex_possible(src, p))
+        {
+            p = ml_regex_end(src, len, p);
+            continue;
+        }
+        if (c == '/' || c == '"' || c == '\'' || c == '`')
+        {
+            p = ml_token_end(src, len, p);
+            continue;
+        }
+        if (c == '{')
+        {
+            depth++;
+            p++;
+            continue;
+        }
+        if (c == '}')
+        {
+            if (depth > 0)
+            {
+                depth--;
+            }
+            p++;
+            continue;
+        }
+        if (ml_isidchar((unsigned char)c) &&
+            (p == 0 || !ml_isidchar((unsigned char)src[p - 1])))
+        {
+            if (depth == 0)
+            {
+                size_t wEnd = 0;
+                if (ml_word_at(src, len, p, "import", 6, &wEnd))
+                {
+                    mod_parse_import(src, len, p, m, &p);
+                    continue;
+                }
+                if (ml_word_at(src, len, p, "export", 6, &wEnd))
+                {
+                    mod_parse_export(src, len, p, m, &p);
+                    continue;
+                }
+                (void)wEnd;
+            }
+            while (p < len && ml_isidchar((unsigned char)src[p]))
+            {
+                p++;
+            }
+            continue;
+        }
+        p++;
+    }
+}
+
+static void mod_cut_end_at(const ModScan *m, size_t p, size_t *endOut)
+{
+    for (int i = 0; i < m->spanCount; i++)
+    {
+        if (p >= m->cut[i].at && p < m->cut[i].end)
+        {
+            *endOut = m->cut[i].end;
+            return;
+        }
+    }
+    *endOut = p + 1;
+}
+
+/* Growable (capped) accumulator for the built source. */
+typedef struct
+{
+    char *buf;
+    size_t cap;
+    size_t n;
+    int over;
+} ModOut;
+
+/* JS-string literal escape for keys/names inside the built source. */
+static void mod_out(ModOut *o, const char *s, size_t n)
+{
+    if (o->over)
+    {
+        return;
+    }
+    if (o->n + n + 1 > o->cap)
+    {
+        o->over = 1;
+        return;
+    }
+    memcpy(o->buf + o->n, s, n);
+    o->n += n;
+}
+
+static void mod_outs(ModOut *o, const char *s)
+{
+    mod_out(o, s, strlen(s));
+}
+
+static void mod_outj(ModOut *o, const char *s)
+{
+    for (const char *p = s; p && *p; p++)
+    {
+        if (*p == '\\' || *p == '"')
+        {
+            mod_outs(o, "\\");
+            mod_out(o, p, 1);
+        }
+        else if (*p == '\n')
+        {
+            mod_outs(o, "\\n");
+        }
+        else if (*p == '\r')
+        {
+            mod_outs(o, "\\r");
+        }
+        else if (*p == '\t')
+        {
+            mod_outs(o, "\\t");
+        }
+        else
+        {
+            mod_out(o, p, 1);
+        }
+    }
+}
+
+/* Pass C: assemble the built (classic-clean) module source:
+ *   __p5mod init; (function(){ import preludes; BODY; export
+ *   postludes; })(); */
+static char *mod_build(const char *src, size_t len, const ModScan *m,
+                       const char *key, size_t *builtLenOut)
+{
+    char *buf = (char *)JMalloc(JSBRIDGE_MOD_BUILT_MAX);
+    if (!buf)
+    {
+        return NULL;
+    }
+    ModOut o = { buf, JSBRIDGE_MOD_BUILT_MAX, 0, 0 };
+
+    mod_outs(&o, "if (!globalThis.__p5mod) globalThis.__p5mod = {};\n");
+    mod_outs(&o, "globalThis.__p5mod[\"");
+    mod_outj(&o, key);
+    mod_outs(&o, "\"] = {};\n(function(){\n");
+
+    for (int i = 0; i < m->importCount; i++)
+    {
+        const ModImport *im = &m->imp[i];
+        char ns[24];
+        snprintf(ns, sizeof(ns), "__p5i%d", i);
+        if (!m->impLoaded[i])
+        {
+            mod_outs(&o, "throw new Error(\"module '");
+            mod_outj(&o, im->spec);
+            mod_outs(&o, "' unavailable\");\n");
+            continue;
+        }
+        mod_outs(&o, "var ");
+        mod_outs(&o, ns);
+        mod_outs(&o, " = globalThis.__p5mod[\"");
+        mod_outj(&o, m->impKeys[i]);
+        mod_outs(&o, "\"];\nif (!");
+        mod_outs(&o, ns);
+        mod_outs(&o, ") throw new Error(\"module '\");\n");
+        for (int j = 0; j < im->namedCount; j++)
+        {
+            mod_outs(&o, "var ");
+            mod_outs(&o, im->named[j].local);
+            mod_outs(&o, " = ");
+            mod_outs(&o, ns);
+            mod_outs(&o, "[\"");
+            mod_outj(&o, im->named[j].in);
+            mod_outs(&o, "\"];\n");
+        }
+        if (im->dflt[0])
+        {
+            mod_outs(&o, "var ");
+            mod_outs(&o, im->dflt);
+            mod_outs(&o, " = ");
+            mod_outs(&o, ns);
+            mod_outs(&o, "[\"default\"];\n");
+        }
+        if (im->star)
+        {
+            mod_outs(&o, "var ");
+            mod_outs(&o, im->starLocal[0] ? im->starLocal : "ns");
+            mod_outs(&o, " = ");
+            mod_outs(&o, ns);
+            mod_outs(&o, ";\n");
+        }
+    }
+
+    size_t p = 0;
+    while (p < len)
+    {
+        size_t end = 0;
+        mod_cut_end_at(m, p, &end);
+        if (end > p + 1)
+        {
+            p = end; /* inside a cut span — skip to its end */
+        }
+        else
+        {
+            mod_out(&o, src + p, 1);
+            p++;
+        }
+    }
+
+    for (int i = 0; i < m->exportCount; i++)
+    {
+        mod_outs(&o, "try { globalThis.__p5mod[\"");
+        mod_outj(&o, key);
+        mod_outs(&o, "\"][\"");
+        mod_outj(&o, m->exp[i]);
+        mod_outs(&o, "\"] = ");
+        mod_outs(&o, m->exp[i]);
+        mod_outs(&o, "; } catch (__p5e) {}\n");
+    }
+    mod_outs(&o, "})();\n");
+    if (o.over)
+    {
+        logger_log("[module] built source over cap %d — module skipped "
+                   "(documented lane budget)", JSBRIDGE_MOD_BUILT_MAX);
+        JFree(buf);
+        return NULL;
+    }
+    buf[o.n] = '\0';
+    *builtLenOut = o.n;
+    return buf;
+}
+
+/* Fetch a module source for ledger key `key` through the page's own
+ * roads: about: = the internal page store; file: = the Data-dir rule of
+ * the file:// document loader (main.c pluto_load_local_file); every
+ * other scheme refuses with a receipt (async graphs = future work). */
+static int mod_fetch_source(const char *key, char *buf, size_t bufn,
+                            size_t *lenOut)
+{
+    if (strncmp(key, "about:", 6) == 0)
+    {
+        const char *local = NULL;
+        size_t llen = http_internal_page_body(key, &local);
+        if (local && llen)
+        {
+            if (llen > bufn - 1)
+            {
+                logger_log("[module] store hit too big: %s (%zu > %zu)",
+                           key, llen, bufn - 1);
+                return 0;
+            }
+            memcpy(buf, local, llen);
+            buf[llen] = '\0';
+            *lenOut = llen;
+            logger_log("[module] store hit: %s (%zu bytes)", key, llen);
+            return 1;
+        }
+        logger_log("[module] store miss: %s", key);
+        return 0;
+    }
+    if (strncmp(key, "file://", 7) == 0)
+    {
+        const char *path = key + 7;
+        while (*path == '/')
+        {
+            path++; /* file:///Data/x → /Data/x (device), Data/x (sim) */
+        }
+        PlaydateAPI *pd = pluto_pd();
+        if (!pd || !pd->file || !pd->file->open)
+        {
+            logger_log("[module] file fetch unavailable: %s", key);
+            return 0;
+        }
+        SDFile *fp = pd->file->open(path, kFileReadData);
+        if (!fp)
+        {
+            logger_log("[module] file open failed: %s", path);
+            return 0;
+        }
+        pd->file->seek(fp, 0, SEEK_END);
+        int flen = pd->file->tell(fp);
+        pd->file->seek(fp, 0, SEEK_SET);
+        if (flen <= 0 || (size_t)flen > bufn - 1)
+        {
+            logger_log("[module] file bad size %d: %s", flen, path);
+            pd->file->close(fp);
+            return 0;
+        }
+        int got = pd->file->read(fp, buf, (unsigned int)flen);
+        pd->file->close(fp);
+        if (got != flen)
+        {
+            logger_log("[module] file short read %d/%d: %s", got, flen, path);
+            return 0;
+        }
+        buf[flen] = '\0';
+        *lenOut = (size_t)flen;
+        logger_log("[module] file hit: %s (%d bytes)", path, flen);
+        return 1;
+    }
+    logger_log("[module] fetch refused (scheme unserved on this lane): %s",
+               key);
+    return 0;
+}
+
+static int mod_ledger_find(JsBridge *b, const char *key)
+{
+    for (int i = 0; i < b->modCount; i++)
+    {
+        if (strcmp(b->modKeys[i], key) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int mod_ledger_add(JsBridge *b, const char *key)
+{
+    if (b->modCount >= JSBRIDGE_MAX_MODULES)
+    {
+        return -1;
+    }
+    snprintf(b->modKeys[b->modCount], JSBRIDGE_MOD_KEY_MAX, "%s", key);
+    b->modState[b->modCount] = 0;
+    return b->modCount++;
+}
+
+static int mod_finish_run(JsBridge *b, const char *src, size_t srcLen,
+                          const char *key, const char *importBase,
+                          int depth, int index);
+static int jsbridge_module_run_key(JsBridge *b, const char *spec,
+                                   const char *importBase, int depth,
+                                   char *keyOut, size_t keyOutn, int index);
+
+/* Transform + graph-run one module whose source is IN HAND. `key` =
+ * its ledger key (the namespace name); `importBase` = the URL its
+ * imports resolve against (identical to key for fetched modules; the
+ * document URL for inline modules whose synthetic key is not a URL). */
+static int mod_finish_run(JsBridge *b, const char *src, size_t srcLen,
+                          const char *key, const char *importBase,
+                          int depth, int index)
+{
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->run_script)
+    {
+        logger_log("[module] lane unavailable (no engine): %s", key);
+        return 0;
+    }
+    ModScan *m = (ModScan *)JMalloc(sizeof(ModScan));
+    if (!m)
+    {
+        logger_log("[module] scan OOM: %s", key);
+        return 0;
+    }
+    memset(m, 0, sizeof(*m));
+    mod_scan(src, srcLen, m);
+    for (int i = 0; i < m->exportCount; i++)
+    {
+        logger_log("[module] export '%s' (key '%s')", m->exp[i], key);
+    }
+    if (m->xDefault || m->xList || m->xStar || m->xOther)
+    {
+        logger_log("[module] refusals in '%s': default=%d list=%d star=%d "
+                   "other=%d (documented boundaries)",
+                   key, m->xDefault, m->xList, m->xStar, m->xOther);
+    }
+
+    /* GRAPH ORDER: children first, in import-declaration order. */
+    for (int i = 0; i < m->importCount; i++)
+    {
+        m->impLoaded[i] = (unsigned char)jsbridge_module_run_key(
+            b, m->imp[i].spec, importBase, depth + 1, m->impKeys[i],
+            JSBRIDGE_MOD_KEY_MAX, index);
+    }
+
+    size_t builtLen = 0;
+    char *built = mod_build(src, srcLen, m, key, &builtLen);
+    int impCount = m->importCount;
+    int expCount = m->exportCount;
+    JFree(m);
+    if (!built)
+    {
+        logger_log("[module] build failed: %s", key);
+        return 0;
+    }
+    impl->run_script(b, built, builtLen, index);
+    JFree(built);
+    logger_log("[module] ran key='%s' bytes=%zu imports=%d exports=%d "
+               "(script #%d)",
+               key, builtLen, impCount, expCount, index);
+    return 1;
+}
+
+/* Resolve one import specifier to its ledger key. url_resolve does the
+ * joining exactly as the page loader and the history journal do. An
+ * OPAQUE about: base refuses path-only forms (the journal's rule;
+ * browsers refuse it identically on opaque origins). The resolved key
+ * must name a road this lane can serve: about: (store) or file: (Data
+ * dir); data:/http(s)/other refuse with receipts. */
+static int mod_resolve_key(const char *spec, const char *base, char *key,
+                           size_t keyn)
+{
+    if (!spec || !spec[0])
+    {
+        logger_log("[module] resolve refuse: empty specifier");
+        return 0;
+    }
+    char trimmed[JSBRIDGE_MOD_KEY_MAX];
+    size_t tl = strlen(spec);
+    while (tl > 0 && (spec[tl - 1] == ' ' || spec[tl - 1] == '\t' ||
+                      spec[tl - 1] == '\r' || spec[tl - 1] == '\n'))
+    {
+        tl--;
+    }
+    const char *s0 = spec;
+    while (*s0 == ' ' || *s0 == '\t' || *s0 == '\r' || *s0 == '\n')
+    {
+        s0++;
+    }
+    size_t sl = (size_t)(spec + tl - s0);
+    if (sl >= sizeof(trimmed))
+    {
+        logger_log("[module] resolve refuse: specifier over %d bytes",
+                   (int)sizeof(trimmed) - 1);
+        return 0;
+    }
+    memcpy(trimmed, s0, sl);
+    trimmed[sl] = '\0';
+
+    int haveAbs = (strncmp(trimmed, "about:", 6) == 0 ||
+                   strncmp(trimmed, "data:", 5) == 0 ||
+                   strncmp(trimmed, "javascript:", 11) == 0 ||
+                   (strstr(trimmed, "://") != NULL &&
+                    strstr(trimmed, "://") - trimmed <= 10));
+    if (!base || !base[0])
+    {
+        logger_log("[module] resolve refuse (no doc base): '%s'", trimmed);
+        return 0;
+    }
+    char *abs = url_resolve(base, trimmed);
+    if (!abs)
+    {
+        logger_log("[module] resolve refuse (resolver): '%s'", trimmed);
+        return 0;
+    }
+    if (strncmp(base, "about:", 6) == 0 && !haveAbs)
+    {
+        /* url_resolve's about: passthrough = the opaque refusal */
+        JFree(abs);
+        logger_log("[module] refuse (opaque base): '%s' on '%s' — exactly "
+                   "the browser's module-specifier refusal", trimmed, base);
+        return 0;
+    }
+
+    int ok = 0;
+    if (strncmp(abs, "about:", 6) == 0 || strncmp(abs, "file:", 5) == 0)
+    {
+        /* file-road flat join: our Data-dir model keeps file urls FLAT
+         * ('file://wikia.html' → the Data dir's 'wikia.html' — the
+         * pluto_load_local_file rule), so a path-relative import under a
+         * flat file base ('./p5rel.js' on 'file://modpage.html') must
+         * not carry the document's own name into the module path:
+         * 'file://modpage.html/p5rel.js' drops the base name →
+         * 'file://p5rel.js'. Genuinely nested paths (host 'dir',
+         * '/page.html') keep the resolver's full join (the loader opens
+         * them subdirectory-relative, matching the base tree). */
+        if (strncmp(abs, "file://", 7) == 0 && strncmp(base, "file:", 5) == 0)
+        {
+            const char *baseName = base + 7;
+            while (*baseName == '/')
+            {
+                baseName++;
+            }
+            const char *after = abs + 7;
+            while (*after == '/')
+            {
+                after++;
+            }
+            size_t nlen = strlen(baseName);
+            if (nlen && strncmp(after, baseName, nlen) == 0 &&
+                (after[nlen] == '/' || after[nlen] == '\0'))
+            {
+                after += nlen;
+                while (*after == '/')
+                {
+                    after++;
+                }
+                if (strlen(after) > 0 &&
+                    (size_t)(after - abs) + strlen(after) < keyn)
+                {
+                    snprintf(key, keyn, "file://%s", after);
+                    logger_log("[module] file-road flat join: %s -> %s "
+                               "(the Data-dir loader rule)", abs, key);
+                    ok = 1;
+                }
+                else
+                {
+                    logger_log("[module] refuse (key cap %d): '%s'",
+                               (int)keyn - 1, abs);
+                }
+            }
+        }
+        if (!ok && strlen(abs) < keyn)
+        {
+            snprintf(key, keyn, "%s", abs);
+            ok = 1;
+        }
+        else if (!ok)
+        {
+            logger_log("[module] refuse (key cap %d): '%s'", (int)keyn - 1,
+                       abs);
+        }
+    }
+    else if (strncmp(abs, "data:", 5) == 0)
+    {
+        logger_log("[module] refuse (data: module): '%s'", spec);
+    }
+    else
+    {
+        logger_log("[module] refuse (scheme unserved on this lane): '%s' — "
+                   "async module graph is future work", abs);
+    }
+    JFree(abs);
+    return ok;
+}
+
+/* Graph node: resolve → ledger (cycle/cap guard) → fetch → transform →
+ * run. Children nest via mod_finish_run BEFORE the importer builds. */
+static int jsbridge_module_run_key(JsBridge *b, const char *spec,
+                                   const char *importBase, int depth,
+                                   char *keyOut, size_t keyOutn, int index)
+{
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !spec || !spec[0])
+    {
+        return 0;
+    }
+    if (depth > JSBRIDGE_MOD_MAX_DEPTH)
+    {
+        logger_log("[module] refuse (graph depth %d > %d): '%s'", depth,
+                   JSBRIDGE_MOD_MAX_DEPTH, spec);
+        return 0;
+    }
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    if (!mod_resolve_key(spec, importBase, key, sizeof(key)))
+    {
+        return 0;
+    }
+    if (keyOut && keyOutn)
+    {
+        snprintf(keyOut, keyOutn, "%s", key);
+    }
+    logger_log("[module] import resolve '%s' (base '%s') -> '%s'", spec,
+               importBase, key);
+
+    int idx = mod_ledger_find(b, key);
+    if (idx >= 0 && b->modState[idx] == 2)
+    {
+        logger_log("[module] reuse: '%s'", key);
+        return 1;
+    }
+    if (idx >= 0 && b->modState[idx] == 1)
+    {
+        logger_log("[module] refuse (cycle): '%s' (depth %d)", key, depth);
+        return 0;
+    }
+    if (idx < 0)
+    {
+        idx = mod_ledger_add(b, key);
+        if (idx < 0)
+        {
+            logger_log("[module] refuse (graph cap %d): '%s'",
+                       JSBRIDGE_MAX_MODULES, key);
+            return 0;
+        }
+    }
+    b->modState[idx] = 1;
+
+    char *src = (char *)JMalloc(JSBRIDGE_MOD_SRC_MAX);
+    if (!src)
+    {
+        logger_log("[module] source OOM: '%s'", key);
+        return 0;
+    }
+    size_t len = 0;
+    int ok = mod_fetch_source(key, src, JSBRIDGE_MOD_SRC_MAX, &len);
+    if (ok)
+    {
+        ok = mod_finish_run(b, src, len, key, key, depth, index);
+    }
+    JFree(src);
+    int idx2 = mod_ledger_find(b, key);
+    if (idx2 >= 0)
+    {
+        if (!ok)
+        {
+            logger_log("[module] failed (stays refused for this "
+                       "document): '%s'", key);
+        }
+        b->modState[idx2] = 2; /* done — failed loads stay failed */
+    }
+    return ok;
+}
+
+/* The slot-road entry: the module element's own source (inline body,
+ * data: payload, fetched ext module). Inline/data: modules get a
+ * SYNTHETIC ledger key '<importBase>#p5mi<N>' — browsers cannot import
+ * an inline module either, so its namespace is addressable by nobody;
+ * ext modules key on their resolved URL (importable, like real
+ * browsers' fetched modules). */
+static void jsbridge_module_root(JsBridge *b, const char *src, size_t len,
+                                 const char *importBase, int index)
+{
+    if (!src || !len)
+    {
+        logger_log("[module] root skip (empty body) (script #%d)", index);
+        return;
+    }
+    if (len > JSBRIDGE_MOD_SRC_MAX)
+    {
+        logger_log("[module] root skip (over lane source cap %d): %zu "
+                   "bytes (script #%d)",
+                   JSBRIDGE_MOD_SRC_MAX, len, index);
+        return;
+    }
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    snprintf(key, sizeof(key), "%s#p5mi%d",
+             importBase ? importBase : "(nourl)", b->modSeq++);
+    int idx = mod_ledger_add(b, key);
+    if (idx < 0)
+    {
+        logger_log("[module] refuse (graph cap %d): inline module",
+                   JSBRIDGE_MAX_MODULES);
+        return;
+    }
+    b->modState[idx] = 1;
+    int ok = mod_finish_run(b, src, len, key, importBase, 0, index);
+    if (!ok)
+    {
+        logger_log("[module] root failed: '%s'", key);
+    }
+    int idx2 = mod_ledger_find(b, key);
+    if (idx2 >= 0)
+    {
+        b->modState[idx2] = 2;
+    }
+}
+
+
 /* ── R54: per-frame script stage (parked FULL-mode plan) ─────────────────
  * js_doc_attach parks the scanned slot plan on the bridge in document
  * order; this dispatch helper runs ONE entry with branch semantics and
@@ -1997,6 +3792,87 @@ static void jsbridge_run_script_entry(JsBridge *b, const JsScriptSlot *slot,
     const JsEngineImpl *impl = js_bridge_impl(b);
     if (!impl || !doc)
     {
+        return;
+    }
+    /* API-P5: a module element routes through the loader-side module
+     * lane — same three source shapes as the classic pipeline below
+     * (inline body / data: payload / fetched ext file), so the classic
+     * shapes stay byte-for-byte untouched. The stamps mirror the
+     * browser's rule: inline modules expose currentScript (their own
+     * element); fetched module code exposes none (the ext stamp covers
+     * only the element identity here, the lane logs own its receipts). */
+    if (slot->isModule)
+    {
+        if (!slot->isExt)
+        {
+            jsbridge_cur_script_stamp(b, slot, NULL);
+            jsbridge_module_root(b, slot->inlineStart, slot->inlineLen,
+                                 doc->baseUrl, index);
+            jsbridge_cur_script_clear(b);
+            logger_log("[module] inline module entry #%d done",
+                       index);
+        }
+        else if (slot->extIndex == JS_SCRIPT_DATA)
+        {
+            jsbridge_cur_script_stamp(b, slot, NULL);
+            char *dsrc = jsext_decode_data_script(slot->inlineStart,
+                                                  slot->inlineLen);
+            if (dsrc)
+            {
+                size_t dlen = strlen(dsrc);
+                jsbridge_module_root(b, dsrc, dlen, doc->baseUrl, index);
+                jsbridge_cur_script_clear(b);
+                JFree(dsrc);
+                logger_log("[module] data: module ran (%zu bytes)", dlen);
+            }
+            else
+            {
+                jsbridge_cur_script_clear(b);
+                logger_log("[module] data: module skip (decode failed) #%d",
+                           i);
+            }
+        }
+        else if (slot->extIndex >= 0 &&
+                 slot->extIndex < doc->extScriptCount)
+        {
+            JsExtScript *e =
+                &((JsExtScript *)doc->extScripts)[slot->extIndex];
+            if (e->body && e->len)
+            {
+                jsbridge_cur_script_stamp(b, slot, e);
+                jsbridge_module_root(b, e->body, e->len, e->url, index);
+                jsbridge_cur_script_clear(b);
+            }
+            else if (e->spill >= 0 && e->len)
+            {
+                char *src = jsext_materialize_spill_script(e);
+                if (src)
+                {
+                    jsbridge_cur_script_stamp(b, slot, e);
+                    jsbridge_module_root(b, src, e->len, e->url, index);
+                    jsbridge_cur_script_clear(b);
+                    JFree(src);
+                    logger_log("[module] ext module ran from disk: %s "
+                               "(%zu bytes)",
+                               e->url[0] ? e->url : "(url)", e->len);
+                }
+                else
+                {
+                    logger_log("[module] ext module skip (materialize "
+                               "failed): %s",
+                               e->url[0] ? e->url : "(url)");
+                }
+            }
+            else
+            {
+                logger_log("[module] ext module skip (not fetched): %s",
+                           e->url[0] ? e->url : "(unresolved)");
+            }
+        }
+        else
+        {
+            logger_log("[module] ext module skip (unmapped slot) #%d", i);
+        }
         return;
     }
     if (!slot->isExt)
@@ -2360,6 +4236,97 @@ static char *xhr_resolve_url(JsBridge *b, const char *url)
     return abs;
 }
 
+/* API-P3: resolve a history.pushState/replaceState URL argument against
+ * the journal's CURRENT entry (not the doc base — fragment pushes stack
+ * on whatever entry is current, like a browser's document URL). Forms:
+ *   ''          same entry (dup of the current URL)
+ *   '#frag'     keep entry path+query, swap the fragment
+ *   '?q'        keep entry path, swap the query (fragment drops — the
+ *               URL standard's query state doesn't inherit a fragment)
+ *   '/path'     root-relative against the entry's scheme+authority
+ *   'other'     path-relative per url_resolve
+ *   'scheme:…'  absolute (the engine's same-origin guard then judges it)
+ * about: bases are opaque: url_resolve hands '#x'/'?x' back untouched,
+ * so they join onto the opaque token ('about:probe' + '#h9' →
+ * 'about:probe#h9', never a stranded bare '#h9' entry). Returns 1 with
+ * out filled on success, 0 on refusal (no current entry, resolver
+ * failure, or no room). Never throws — the engine layer turns refusals
+ * into callbacks/exceptions with their own receipts. */
+static int hist_is_about_head(const char *u)
+{
+    char head[8];
+    for (int i = 0; i < 6 && u[i]; i++)
+    {
+        head[i] = (char)tolower((unsigned char)u[i]);
+    }
+    head[6] = '\0';
+    return strcmp(head, "about:") == 0;
+}
+
+int jsbridge_hist_resolve_url(JsBridge *b, const char *raw,
+                              char *out, size_t outLen)
+{
+    if (!out || outLen == 0)
+    {
+        return 0;
+    }
+    out[0] = '\0';
+    const char *cur = (b->histCount > 0 && b->histUrl[b->histIdx][0])
+                          ? b->histUrl[b->histIdx]
+                          : ((b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : NULL);
+    if (!cur || !cur[0])
+    {
+        return 0;
+    }
+    if (!raw)
+    {
+        raw = "";
+    }
+    /* url_resolve('') dups the base — the same-document push form. */
+    char *abs = url_resolve(cur, raw);
+    if (!abs)
+    {
+        return 0;
+    }
+    if ((raw[0] == '#' || raw[0] == '?') && strcmp(abs, raw) == 0 &&
+        hist_is_about_head(cur))
+    {
+        /* opaque join with field replacement (the URL standard's
+         * relative forms): '#raw' replaces the fragment and KEEPS the
+         * path+query prefix; '?raw' replaces the query AND drops any
+         * fragment. Keeps the opaque token, never strands a bare
+         * '#h9'/'?a=2' entry, never double-appends ('#h11' + '#h9' is
+         * ONE fragment field, not '...#h11#h9'). */
+        const char *q = strchr(cur, '?');
+        const char *fr = strchr(cur, '#');
+        size_t kq = q ? (size_t)(q - cur) : strlen(cur);
+        size_t kf = fr ? (size_t)(fr - cur) : strlen(cur);
+        size_t keep = (raw[0] == '?') ? ((kq < kf) ? kq : kf) : kf;
+        if (keep >= outLen - strlen(raw) - 1)
+        {
+            JFree(abs);
+            out[0] = '\0';
+            return 0;
+        }
+        memcpy(out, cur, keep);
+        out[keep] = '\0';
+        strcat(out, raw);
+        JFree(abs);
+        return 1;
+    }
+    /* An about: base strands path-only/scheme-relative forms — refuse
+     * rather than record a relative fragment as an "address". */
+    if (hist_is_about_head(cur) && abs[0] != '\0' && abs[0] != '#' &&
+        strstr(abs, "://") == NULL && strncmp(abs, "about:", 6) != 0)
+    {
+        JFree(abs);
+        return 0;
+    }
+    int need = snprintf(out, outLen, "%s", abs);
+    JFree(abs);
+    return need >= 0 && (size_t)need < outLen;
+}
+
 int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url)
 {
     if (!b)
@@ -2440,6 +4407,58 @@ int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url)
  * Additive twin of jsbridge_xhr_send (frozen engines keep calling the
  * body-less twin; body is deep-copied so the caller's string can be a
  * transient). */
+/* API-P2: the fetch shim's setRequestHeader lane. Content-Type overrides
+ * the wire default on POSTs (the request builder's only extra-header
+ * knob); every OTHER header is recorded + logged for receipts and left
+ * off the wire (documented boundary — nothing is invented or ignored
+ * silently). Only valid while the request is OPENED, like a browser. */
+int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
+                            const char *value)
+{
+    if (!b || id <= 0 || !name || !name[0])
+    {
+        return 0;
+    }
+    for (int i = 0; i < b->xhrCount; i++)
+    {
+        JsHttpRequest *r = &b->xhr[i];
+        if (r->active && r->id == id)
+        {
+            if (r->state != JS_XHR_OPENED)
+            {
+                bridge_take_error_text(b, "xhr: header after send");
+                return 0;
+            }
+            char lname[40];
+            snprintf(lname, sizeof(lname), "%s", name);
+            for (int c = 0; lname[c]; c++)
+            {
+                if (lname[c] >= 'A' && lname[c] <= 'Z')
+                {
+                    lname[c] = (char)(lname[c] + 32);
+                }
+            }
+            if (strcmp(lname, "content-type") == 0)
+            {
+                snprintf(r->reqCt, sizeof(r->reqCt), "%s",
+                         value ? value : "");
+                logger_log("[js] xhr #%d header content-type: %.60s",
+                           r->id, r->reqCt);
+                return 1;
+            }
+            snprintf(r->xhdrName, sizeof(r->xhdrName), "%s", name);
+            snprintf(r->xhdrVal, sizeof(r->xhdrVal), "%.68s",
+                     value ? value : "");
+            logger_log("[js] xhr #%d header %s: %.60s (recorded: the "
+                       "wire builder carries Content-Type only)",
+                       r->id, r->xhdrName, r->xhdrVal);
+            return 1;
+        }
+    }
+    logger_log("[js] xhr #%d header refused (no open request)", id);
+    return 0;
+}
+
 void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
                             size_t bodyLen, void *fnRef, void *objRef)
 {
@@ -2539,8 +4558,16 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
         snprintf(bodyTxt, sizeof(bodyTxt), "%.*s", bodyCut, r->reqBody);
         logger_log("[js] xhr #%d POST body %u first96='%s'", r->id,
                    (unsigned)r->reqBodyLen, bodyTxt);
-        started = http_request(r->method, r->url, r->reqBody, r->reqBodyLen,
-                               &cbs);
+        /* API-P2: a setRequestHeader Content-Type rides the wire here.
+         * NULL (no header set) keeps the historical application/json
+         * default — no pre-existing path changes. */
+        if (r->reqCt[0])
+        {
+            logger_log("[js] xhr #%d POST ct='%s'", r->id, r->reqCt);
+        }
+        started = http_request_ct(r->method, r->url,
+                                  r->reqCt[0] ? r->reqCt : NULL,
+                                  r->reqBody, r->reqBodyLen, &cbs);
     }
     else
     {
@@ -2795,6 +4822,241 @@ int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
         /* Wipe the vacated tail (ghost-slot lesson from the timer table). */
         memset(&b->xhr[w], 0, sizeof(b->xhr[0]) * (size_t)(b->xhrCount - w));
         b->xhrCount = w;
+    }
+    if (mutationsOut)
+    {
+        *mutationsOut = mutations;
+    }
+    return delivered;
+}
+
+/* ── API-P8: the Worker contained-stub router (see the JsWorkerStub note
+ * in jsbridge_internal.h) ───────────────────────────────────────────── */
+
+/* Constructor helper: register a stub (id 0 = the documented-cap
+ * delivery-less shape — the object still works, the page keeps running). */
+int jsbridge_worker_open(JsBridge *b, const char *url)
+{
+    if (!b)
+    {
+        return 0;
+    }
+    JsWorkerStub *w = NULL;
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        if (!b->wk[i].active && !b->wk[i].release)
+        {
+            w = &b->wk[i]; /* reuse a fully-dead slot */
+            break;
+        }
+    }
+    if (!w && b->wkCount < JSBRIDGE_WORKER_MAX)
+    {
+        w = &b->wk[b->wkCount++];
+    }
+    if (!w)
+    {
+        b->wkIdSeq++; /* ids stay monotonic for delivery-less stubs too */
+        if (!b->wkOverflow)
+        {
+            logger_log("[worker] stub table full (%d) — past here stubs are "
+                       "delivery-less (documented cap)",
+                       JSBRIDGE_WORKER_MAX);
+        }
+        b->wkOverflow = 1;
+        return 0;
+    }
+    memset(w, 0, sizeof(*w));
+    w->active = 1;
+    w->id = ++b->wkIdSeq;
+    if (url && url[0])
+    {
+        snprintf(w->url, sizeof(w->url), "%s", url);
+    }
+    snprintf(w->message, sizeof(w->message),
+             "the worker script is not running on this device "
+             "(single-threaded browser: worker stub)");
+    logger_log("[worker] construct #%d url='%.60s' (contained stub — "
+               "script never compiles or runs)",
+               w->id, w->url);
+    return w->id;
+}
+
+const JsWorkerStub *jsbridge_worker_get(JsBridge *b, int id)
+{
+    if (!b || id <= 0)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        if (b->wk[i].id == id)
+        {
+            return &b->wk[i];
+        }
+    }
+    return NULL;
+}
+
+/* terminate(): browser semantics — terminate BEFORE the error event is
+ * delivered cancels it (browsers: the script load never settles); after
+ * delivery or on an unknown/delivery-less stub it is a silent no-op. */
+void jsbridge_worker_terminate(JsBridge *b, int id)
+{
+    if (!b || id <= 0)
+    {
+        return;
+    }
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        JsWorkerStub *w = &b->wk[i];
+        if (w->id == id && (w->active || w->release))
+        {
+            if (w->active && !w->terminated)
+            {
+                w->terminated = 1;
+                logger_log("[worker] terminate #%d (pending delivery "
+                           "cancelled)", id);
+            }
+            return;
+        }
+    }
+}
+
+/* postMessage(): always absorbed — messages are never delivered back
+ * (onmessage cannot fire; the data is dropped). Receipt = logarithmic:
+ * the first two posts log per stub, then a single "silently" line. */
+void jsbridge_worker_post(JsBridge *b, int id)
+{
+    if (!b)
+    {
+        return;
+    }
+    if (id <= 0)
+    {
+        /* Delivery-less stub (documented cap): absorb + one receipt. */
+        if (!b->wkOverflow)
+        {
+            logger_log("[worker] postMessage absorbed (delivery-less stub)");
+        }
+        b->wkOverflow = 1;
+        return;
+    }
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        JsWorkerStub *w = &b->wk[i];
+        if (w->id == id && (w->active || w->release))
+        {
+            w->posts++;
+            if (w->posts <= 2)
+            {
+                logger_log("[worker] postMessage #%d absorbed (stub: data "
+                           "dropped — no thread)", id);
+            }
+            else if (w->posts == 3)
+            {
+                logger_log("[worker] #%d further posts absorbed silently", id);
+            }
+            return;
+        }
+    }
+}
+
+/* Engine-side pin: hand the router a stub's engine-held object ref.
+ * Set once at construct (the stub delivers once); matching-id + NULL-ref
+ * guards mean late/duplicate/mismatched pins are silent no-ops. */
+void jsbridge_worker_pin(JsBridge *b, int id, void *objRef)
+{
+    if (!b || id <= 0 || !objRef)
+    {
+        return;
+    }
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        if (b->wk[i].id == id && !b->wk[i].objRef)
+        {
+            b->wk[i].objRef = objRef;
+            return;
+        }
+    }
+}
+
+/* The worker pump: deliver every non-terminated stub's error event ONCE
+ * (the next-frame analog of a failed script load). Same bracket +
+ * sweep + mutation discipline as jsbridge_xhr_pump. */
+int jsbridge_worker_pump(JsBridge *b, int *mutationsOut)
+{
+    if (mutationsOut)
+    {
+        *mutationsOut = 0;
+    }
+    if (!b || b->inXhr || b->inTimer || b->inClick || b->inWorker)
+    {
+        return 0;
+    }
+    if (jsbridge_mount_parked(b))
+    {
+        return 0; /* parked mount owns the machine — deliveries wait */
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->run_worker_ref || !impl->clear_worker_refs)
+    {
+        return 0;
+    }
+    int delivered = 0;
+    int mutations = 0;
+    int budgetBefore = b->callBudget;
+    for (int i = 0; i < b->wkCount; i++)
+    {
+        JsWorkerStub *w = &b->wk[i];
+        if (!w->active || w->terminated || !w->objRef)
+        {
+            continue;
+        }
+        b->inWorker = 1;
+        int rc = impl->run_worker_ref(b, w->objRef, w);
+        b->inWorker = 0;
+        if (rc < 0)
+        {
+            logger_log("[js] worker delivery aborted the engine — stop");
+            break;
+        }
+        if (b->callBudget < budgetBefore)
+        {
+            mutations = 1;
+            budgetBefore = b->callBudget;
+        }
+        w->active = 0;
+        w->release = 1;
+        delivered++;
+    }
+    /* Sweep (outside every bracket): release refs, compact — the same
+     * discipline as the timer/XHR sweeps. */
+    if (!b->inWorker && !b->inXhr && !b->inTimer && !b->inClick)
+    {
+        for (int i = 0; i < b->wkCount; i++)
+        {
+            JsWorkerStub *w = &b->wk[i];
+            if (w->release && !w->active)
+            {
+                impl->clear_worker_refs(b, w->objRef);
+                memset(w, 0, sizeof(*w));
+            }
+        }
+        int wr = 0;
+        for (int rd = 0; rd < b->wkCount; rd++)
+        {
+            if (b->wk[rd].active || b->wk[rd].release)
+            {
+                if (wr != rd)
+                {
+                    b->wk[wr] = b->wk[rd];
+                }
+                wr++;
+            }
+        }
+        memset(&b->wk[wr], 0, sizeof(b->wk[0]) * (size_t)(b->wkCount - wr));
+        b->wkCount = wr;
     }
     if (mutationsOut)
     {

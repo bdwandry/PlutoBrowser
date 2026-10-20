@@ -119,6 +119,7 @@ SRC_DEVICE = \
 	Source/html/jsbridge_mujs.c \
 	Source/html/jsbridge_duktape.c \
 	Source/html/jsbridge_quickjs.c \
+	Source/html/webstorage.c \
 	Source/html/jsext.c \
 	Source/html/css.c \
 	Source/keyboard/keyboard.c \

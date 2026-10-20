@@ -107,7 +107,103 @@ typedef struct
     char method[8];
     char *reqBody;
     size_t reqBodyLen;
+    /* API-P2: setRequestHeader-carried request headers. Content-Type
+     * rides http_request_ct on wire POSTs (last write wins; zero-init =
+     * the historical application/json default — pre-existing callers stay
+     * byte-identical). Every OTHER header is RECORDed for receipts only:
+     * the HTTP client exposes no extra-header knob, so that's a
+     * documented boundary, never a faked conductor. */
+    char reqCt[64];
+    char xhdrName[40];
+    char xhdrVal[72];
 } JsHttpRequest;
+
+/* API-P3: the in-engine address journal (history.pushState/replaceState
+ * + back/forward/go over the ENGINE'S OWN book). Entry URLs are absolute
+ * (resolved against the page base or the current entry — fragments,
+ * queries, and paths resolve browser-faithfully; a scheme/host mismatch
+ * is refused like a real cross-origin push). The doc base seeds entry 0
+ * lazily on first journal use; a REAL navigation per page replaces the
+ * whole bridge, so re-seeding per page is automatic. pushState NEVER
+ * touches the wire (no http_* call, no pendingNav, no app-bar change):
+ * the journal feeds location reads and popstate/hashchange delivery
+ * only. Bytes: 8 entries x 260 = ~2KB per page (fixed, freed with the
+ * bridge). */
+#define JSBRIDGE_HIST_MAX 8
+#define JSBRIDGE_HIST_URL_MAX 260
+
+/* ── API-P8: the Worker contained-stub lane ─────────────────────────────
+ * A real background thread is not available inside this browser's single
+ * cooperative pump (device truth: one CPU, one frame budget). The honest
+ * browser-shaped story is NOT to hide the constructor — a page doing
+ * `new Worker(url)` would die on a ReferenceError and never run — but to
+ * hand the page a WORKER OBJECT that behaves like a worker whose script
+ * always fails to start, and to tell it through the browser's own failure
+ * protocol: the object constructs without throwing, carries postMessage/
+ * terminate/onerror/onmessage, and its `error` event fires ONCE at the
+ * next frame (never synchronously — the setTimeout-less analog of a real
+ * failed script load) with {message}. The worker SCRIPT is never
+ * compiled, never fetched, never executed: onmessage never fires; the
+ * main thread never blocks; a page with a non-worker fallback takes it
+ * exactly as it would for any briefly-broken script URL. postMessage is
+ * absorbed silently (logged; data dropped) — the message never comes
+ * back. terminate() silences the pending delivery or is a no-op after
+ * it. Caps (documented): 8 stubs resident per page; constructions beyond
+ * the 8th carry NO delivery slot (the object still works; onerror never
+ * fires — logged once per page). The stub table rides the SAME stable-
+ * slot + bracket discipline as timers/XHR (engine-held objRef; deliveries
+ * inside the pump; sweep outside every bracket). */
+#ifndef JSBRIDGE_WORKER_MAX
+#define JSBRIDGE_WORKER_MAX 8        /* resident worker stubs per page */
+#endif
+#ifndef JSBRIDGE_WORKER_URL_MAX
+#define JSBRIDGE_WORKER_URL_MAX 96   /* as-constructed URL (never resolved) */
+#endif
+#ifndef JSBRIDGE_WORKER_MSG_MAX
+#define JSBRIDGE_WORKER_MSG_MAX 128  /* the delivered error .message text */
+#endif
+
+/* One registered worker stub. objRef is engine-held (same opaque contract
+ * as JsHttpRequest.objRef). The URL is as the page wrote it: the router
+ * never resolves it because nothing is ever fetched. `terminated` before
+ * delivery = the stub stays silent (browser: the load was stopped);
+ * after delivery = a no-op. STABLE slots (cleared stubs stay parked
+ * (release=1) until the pump sweep), like timers/XHR. */
+typedef struct
+{
+    int active;    /* constructed, waiting for (or past) its delivery */
+    int release;   /* inert slot with an engine ref still held */
+    int id;        /* stable public id (never reused within a page) */
+    int terminated;/* terminate() seen; pending delivery cancelled */
+    int posts;     /* postMessage count (receipt; absorb always happens) */
+    char url[JSBRIDGE_WORKER_URL_MAX];
+    char message[JSBRIDGE_WORKER_MSG_MAX]; /* delivered event .message */
+    void *objRef;  /* engine-held wrapper object */
+} JsWorkerStub;
+
+/* ── API-P9: the per-node element-wrapper cache ─────────────────────────
+ * Browser identity model: ONE wrapper object per DOM node for the page's
+ * whole life — getElementById twice, a parentNode climb, a querySelector
+ * hit and an appendChild return all hand back the SAME object, so strict
+ * `===` chains and any expando the page wrote survive across accesses.
+ * XS NR has held one JS-visible wrapper per node since P1 (state arrays
+ * + pinned slots). mujs and duktape now share these BRIDGE-SCOPED
+ * entries (fresh per page — the bridge is memset(0) at attach) with
+ * engine-held refs, forwarded by the engine push_element factories:
+ *   - mujs: a js_ref registry key (the xhr-pin contract; unref'd at
+ *     page close along with the listeners);
+ *   - duktape: a heapptr whose only strong ref lives in the global
+ *     stash under the hidden key pluto.elw.<i> (i = the entry index;
+ *     the heap dies with the engine at page close, as documented).
+ * Aliasing-safe within a page: dom_remove_child DETACHES nodes (never
+ * frees), so a node pointer stays unique for the page's life; the
+ * whole DOM frees with the doc, after the engine close. */
+#define JSBRIDGE_ELW_MAX 128        /* wrapper cache entries per page */
+typedef struct
+{
+    DomNode *node; /* the cached node (arena-live for the page) */
+    void *ref;     /* engine-held wrapper ref (opaque per engine) */
+} JsElwEntry;
 
 
 typedef enum
@@ -156,6 +252,14 @@ typedef struct
      * answering kind matches only). */
     char type[24];
 } JsListener;
+
+/* API-P5: per-document ES-module graph state (loader-side lane; the
+ * transform runs in C before any engine sees the source). Keys = the
+ * RESOLVED import URLs (about: store keys, file: Data-dir paths); an
+ * inline module gets a synthetic "<docUrl>#p5mi<N>" key (inline modules
+ * are not addressable, so their namespace is theirs alone). */
+#define JSBRIDGE_MAX_MODULES 8
+#define JSBRIDGE_MOD_KEY_MAX 128
 
 struct JsBridge
 {
@@ -207,6 +311,27 @@ struct JsBridge
     int inXhr;      /* a completion callback is on the stack */
     int xhrBudgetEpoch; /* monotonically bumped per page; resets the
                          * module-global per-page byte budget on attach */
+
+    /* API-P8: the Worker contained-stub table (see the JsWorkerStub note
+     * above). Router-owned like the XHR table; deliveries ride the same
+     * pump bracket discipline. */
+    JsWorkerStub wk[JSBRIDGE_WORKER_MAX];
+    int wkCount;
+    int wkIdSeq;
+    int wkOverflow; /* >WORKER_MAX stubs this page (logged once) */
+    int inWorker;   /* a worker callback is on the stack */
+
+    /* API-P9: the per-node wrapper cache (browser identity model; see
+     * the JsElwEntry note above). Engine-held refs; fresh per page. */
+    JsElwEntry elw[JSBRIDGE_ELW_MAX];
+    int elwCount;
+    int elwOverflow; /* >ELW_MAX nodes this page (logged once) */
+
+    /* API-P3: the in-engine address journal (see the JSBRIDGE_HIST_* note
+     * above). histCount 0 = unseeded; entry 0 = the doc base seed. */
+    char histUrl[JSBRIDGE_HIST_MAX][JSBRIDGE_HIST_URL_MAX];
+    int histCount; /* entries in use (0..JSBRIDGE_HIST_MAX) */
+    int histIdx;   /* current entry index */
 
 
     int callBudget; /* DOM-mutation budget (per page) */
@@ -264,6 +389,16 @@ struct JsBridge
     JsScriptSlot scriptQueue[JSBRIDGE_MAX_SCRIPTS];
     int scriptQueueCount; /* entries parked (<= JSBRIDGE_MAX_SCRIPTS) */
     int scriptQueueNext;  /* next to run; == scriptQueueCount when drained */
+
+    /* API-P5: the module graph ledger. modKeys hold every resolved module
+     * URL this document has loaded; modState 0/1/2 = unvisited/visiting/
+     * done (the cycle guard). Fresh per bridge (memset at construct) —
+     * parts of the ledger never outlive the document. modSeq numbers
+     * synthetic keys for inline modules. */
+    char modKeys[JSBRIDGE_MAX_MODULES][JSBRIDGE_MOD_KEY_MAX];
+    unsigned char modState[JSBRIDGE_MAX_MODULES];
+    int modCount;
+    int modSeq;
 };
 
 /* Engine id (kept in sync with storage jsEngine / settings rows). */
@@ -358,6 +493,17 @@ typedef struct JsEngineImpl
      * RSC stream closer on DCL, and its setTimeout fallback was
      * interleave-unsafe with the per-frame queue). */
     void (*script_queue_drained)(JsBridge *b);
+    /* API-P8: invoke one worker stub's error delivery — the CURRENT
+     * onerror property on the pinned stub object is consulted at fire
+     * time (browser at-fire semantics) and called as onerror(ev) with
+     * `this` = the stub object and ev = {message: w->message}. A stub
+     * without a callable onerror delivers nothing (browsers: silent).
+     * `w` is stable during the call (stable-slot contract). Same return
+     * contract as run_timer_ref (0 ok / 1 contained / -1 engine abort). */
+    int (*run_worker_ref)(JsBridge *b, void *objRef, const JsWorkerStub *w);
+    /* Release one stub's engine-held object ref (slot inert; called from
+     * the pump sweep and at close). objRef may be NULL. */
+    void (*clear_worker_refs)(JsBridge *b, void *objRef);
 } JsEngineImpl;
 
 /* Router helpers shared with the impls (jsbridge.c). */
@@ -371,6 +517,12 @@ int jsbridge_script_compile_safe(const char *src, size_t len);
  * names a non-executable MIME (JSON family / importmap …) and the element
  * must be skipped, 0 when its body/src is executable JavaScript. */
 int jsbridge_script_type_is_data(const char *lt, const char *gt);
+
+/* API-P5 module marker (both scanners, same rule): returns 1 when this
+ * <script> element's `type=` reads "module" (any case). Static import/
+ * export syntax then routes through the loader-side module lane
+ * (jsbridge.c) instead of the engine's classic run. */
+int jsbridge_script_type_is_module(const char *lt, const char *gt);
 
 /* ── R15: OS-truth admission + deferred-retry for giant scripts ──────────
  * A compile's peak footprint (parse tree + emitted bytecode + machine
@@ -465,6 +617,12 @@ void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef);
  * REQUEST body (deep-copied). Frozen engines never call it. */
 void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
                             size_t bodyLen, void *fnRef, void *objRef);
+/* API-P2: the fetch shim's setRequestHeader lane. Content-Type overrides
+ * the wire default on POSTs (http_request_ct); other headers are
+ * recorded for receipts (documented wire boundary), an error text is
+ * set when the request is past OPENED. Returns 1 stored, 0 refused. */
+int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
+                            const char *value);
 void jsbridge_xhr_abort(JsBridge *b, int id);
 /* Live request lookup (engines read status/responseText off the wrapper). */
 const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id);
@@ -472,5 +630,29 @@ const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id);
  * through the engine vtable. mutationsOut set when a handler mutated DOM.
  * Returns the number of completions delivered (0 when none). */
 int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut);
+
+/* ── API-P8: the Worker contained-stub router (see JsWorkerStub) ──
+ * open() registers a stub and returns its public id; 0 = a delivery-less
+ * stub past the documented cap (the object still works). get/terminate/
+ * post follow the XHR router shapes. The pump = the delivery lane. */
+int jsbridge_worker_open(JsBridge *b, const char *url);
+const JsWorkerStub *jsbridge_worker_get(JsBridge *b, int id);
+void jsbridge_worker_terminate(JsBridge *b, int id);
+void jsbridge_worker_post(JsBridge *b, int id);
+/* Engine-side pin: hand the router a stub's engine-held object ref (set
+ * once at construct — matching-id + NULL-ref guards). */
+void jsbridge_worker_pin(JsBridge *b, int id, void *objRef);
+
+/* ── API-P3: the address journal (history.pushState/replaceState) ──
+ * The journal lives in the bridge (histUrl[]), the delivery machinery in
+ * each engine. pushState NEVER routes through the wire — no http_* call,
+ * no pendingNav, no app address-bar change: entries feed location reads
+ * and the engine's popstate/hashchange back-stack delivery only. */
+/* Resolver for pushState/replaceState URL arguments: resolves `raw`
+ * against the journal's CURRENT entry (fragment/query/path forms per the
+ * URL standard; about: opaque join — see the jsbridge.c note). Returns 1
+ * with out filled, 0 on refusal. Never throws. */
+int jsbridge_hist_resolve_url(JsBridge *b, const char *raw,
+                              char *out, size_t outLen);
 
 #endif /* PLUTO_JSBIDGE_INTERNAL_H */

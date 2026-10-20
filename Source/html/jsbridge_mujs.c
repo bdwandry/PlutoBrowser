@@ -32,6 +32,7 @@
 #include "../core/logger.h"
 #include "../util/strbuf.h"
 #include "../core/pluto_mem.h"
+#include "../html/webstorage.h"
 #include "../html/dom.h"
 
 extern PlaydateAPI *pluto_pd(void);
@@ -354,8 +355,38 @@ static void push_element(js_State *J, DomNode *node)
         js_pushnull(J);
         return;
     }
+    /* API-P9: per-node wrapper cache (browser identity model — the XS
+     * NR lane's contract): ONE wrapper per node for the page's whole
+     * life, so `===` chains and any expando the page wrote survive
+     * across pushes. Cached wrapper = a registry-pinned userdata under
+     * a js_ref key (the xhr/timer pin contract); released at page close
+     * with the listeners. Fresh-per-page via the bridge memset(0). */
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    for (int i = b->elwCount - 1; i >= 0; i--)
+    {
+        if (b->elw[i].node == node && b->elw[i].ref)
+        {
+            js_getregistry(J, (const char *)b->elw[i].ref);
+            return;
+        }
+    }
     js_getregistry(J, "pluto.el.proto");
     js_newuserdatax(J, DOM_TAG, node, dom_has, dom_put, NULL, NULL);
+    if (b->elwCount < JSBRIDGE_ELW_MAX)
+    {
+        js_copy(J, -1);              /* dup for the registry pin */
+        const char *key = js_ref(J); /* pops the dup; returns stable key */
+        b->elw[b->elwCount].node = node;
+        b->elw[b->elwCount].ref = (void *)key;
+        b->elwCount++;
+    }
+    else if (!b->elwOverflow)
+    {
+        b->elwOverflow = 1;
+        logger_log("[elw] mujs wrapper cache full (%d) — fresh wrappers "
+                   "from here on",
+                   JSBRIDGE_ELW_MAX);
+    }
 }
 
 static DomNode *to_element(js_State *J, int idx)
@@ -393,6 +424,15 @@ static int dom_has(js_State *J, void *p, const char *name)
         if (!strcmp(name, "id"))
         {
             const char *v = dom_get_attr(n, "id");
+            js_pushstring(J, v ? v : "");
+            return 1;
+        }
+        if (!strcmp(name, "className"))
+        {
+            /* API-P9: the class attribute read (browser shape: mapped 1:1
+             * onto 'class', never NULL). The write rides the shared road
+             * in dom_put below. */
+            const char *v = dom_get_attr(n, "class");
             js_pushstring(J, v ? v : "");
             return 1;
         }
@@ -446,7 +486,82 @@ static int dom_has(js_State *J, void *p, const char *name)
         }
         if (!strcmp(name, "nodeType"))
         {
+            /* API-P6: the template's detached content fragment (and any
+             * detached "#template-content" node) reports 11 — made as an
+             * element for the machinery, but it IS the browser's
+             * DocumentFragment surface. Parent-NULL is part of the rule. */
+            if (!n->parent && n->tag && !strcmp(n->tag, "#template-content"))
+            {
+                js_pushnumber(J, 11);
+                return 1;
+            }
             js_pushnumber(J, 1);
+            return 1;
+        }
+        if (!strcmp(name, "content"))
+        {
+            /* API-P6: template.content — the element's DETACHED content
+             * fragment (nodeType 11). Parsed templates hold theirs from
+             * the builder; created ones materialize an EMPTY fragment on
+             * first access — the browser's always-a-fragment getter.
+             * Non-template elements read undefined, like browsers. */
+            if (n->tag && !strcmp(n->tag, "template"))
+            {
+                JsBridge *b = (JsBridge *)js_getcontext(J);
+                DomNode *frag = dom_template_content(b->dom, n);
+                if (!frag)
+                {
+                    js_pushundefined(J);
+                    return 1;
+                }
+                push_element(J, frag);
+                logger_log("[tpl] content -> node %d (children=%d)",
+                           frag->nodeId, frag->childCount);
+            }
+            else
+            {
+                js_pushundefined(J);
+            }
+            return 1;
+        }
+        if (!strcmp(name, "dataset"))
+        {
+            /* API-P6: fresh plain object per access over data-*
+             * attributes (camelCase keys; reads re-read the live
+             * attribute list each access; writes to the object do NOT
+             * write back — set attributes with setAttribute, the
+             * browser's own road). Same semantics as the other engines'
+             * getters. */
+            js_newobject(J);
+            for (int i = 0; i < n->attrCount; i++)
+            {
+                const char *k = n->attrs[i].key;
+                if (strncmp(k, "data-", 5) != 0)
+                {
+                    continue;
+                }
+                char camel[64];
+                int ci = 0;
+                for (const char *p = k + 5; *p && ci + 1 < (int)sizeof(camel);
+                     p++)
+                {
+                    if (*p == '-' && p[1])
+                    {
+                        p++;
+                        camel[ci++] = (*p >= 'a' && *p <= 'z')
+                                          ? (char)(*p - 32)
+                                          : *p;
+                    }
+                    else
+                    {
+                        camel[ci++] = *p;
+                    }
+                }
+                camel[ci] = '\0';
+                const char *v = dom_get_attr(n, k);
+                js_pushstring(J, v ? v : "");
+                js_setproperty(J, -2, camel);
+            }
             return 1;
         }
         if (!strcmp(name, "firstElementChild"))
@@ -516,6 +631,17 @@ static int dom_put(js_State *J, void *p, const char *name)
             js_error(J, "script did too much");
         }
         dom_set_attr(b->dom, n, "id", js_tostring(J, -1));
+        return 1;
+    }
+    if (!strcmp(name, "className"))
+    {
+        /* API-P9: the class write rides the shared road — same store as
+         * setAttribute('class'); the router owns the single budget
+         * charge (classList family shape). */
+        if (jsbridge_el_class_set(b, n, js_tostring(J, -1)) != 0)
+        {
+            js_error(J, "className assignment failed");
+        }
         return 1;
     }
     if (!strcmp(name, "textContent"))
@@ -644,37 +770,10 @@ static void js_document_getElementById(js_State *J)
         js_pushnull(J);
         return;
     }
-    /* Real `id` attribute first, then the runtime _dN key. */
-    DomNode *hit = NULL;
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
-    int top = 0;
-    stack[top++] = b->dom->root;
-    while (top > 0 && !hit)
-    {
-        DomNode *n = stack[--top];
-        if (n->kind == DOM_ELEMENT)
-        {
-            const char *v = dom_get_attr(n, "id");
-            if (v && strcmp(v, id) == 0)
-            {
-                hit = n;
-                break;
-            }
-        }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
-        {
-            break;
-        }
-        for (int i = 0; i < n->childCount; i++)
-        {
-            stack[top++] = n->children[i];
-        }
-    }
-    if (!hit && id[0] == '_' && id[1] == 'd')
-    {
-        hit = dom_node_by_id(b->dom, atoi(id + 2));
-    }
-    push_element(J, hit);
+    /* API-P6: shared O(depth) scan — the push-all-children walk here
+     * aborted whole once a body held 65+ element children (width, not
+     * depth), silently hiding every later id. Also document order now. */
+    push_element(J, dom_find_by_id(b->dom, id));
 }
 
 static void js_document_createElement(js_State *J)
@@ -814,7 +913,8 @@ static void js_el_appendChild(js_State *J)
     {
         js_error(J, "appendChild failed");
     }
-    js_pushundefined(J);
+    /* API-P6: browsers return the appended child. */
+    push_element(J, c);
 }
 
 static void js_el_removeChild(js_State *J)
@@ -827,7 +927,8 @@ static void js_el_removeChild(js_State *J)
     {
         js_error(J, "removeChild failed");
     }
-    js_pushundefined(J);
+    /* API-P6: browsers return the removed child. */
+    push_element(J, c);
 }
 
 /* ── SW5: insertBefore / querySelector(All) / classList-backed methods ──── */
@@ -843,7 +944,8 @@ static void js_el_insertBefore(js_State *J)
     {
         js_error(J, "insertBefore failed");
     }
-    js_pushundefined(J);
+    /* API-P6: browsers return the inserted child. */
+    push_element(J, c);
 }
 
 /* querySelector emit: muJS pushes wrappers straight onto the engine stack
@@ -877,6 +979,20 @@ static void js_el_querySelector(js_State *J)
     BUDGET_OR_THROW(b);
     push_element(J, (DomNode *)jsbridge_el_query_selector_first(
                         b, n, sel, scratch, sizeof(scratch)));
+}
+
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors; same shared parse + matcher as querySelector (the two can
+ * never disagree), null when nothing matches. */
+static void js_el_closest(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    const char *sel = js_tostring(J, 1);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    push_element(J, (DomNode *)jsbridge_el_closest(b, n, sel, scratch,
+                                                   sizeof(scratch)));
 }
 
 static void js_el_addEventListener(js_State *J)
@@ -999,6 +1115,8 @@ static void define_element_proto(js_State *J)
         js_setproperty(J, -2, "querySelector");
         js_newcfunction(J, js_el_querySelectorAll, "querySelectorAll", 1);
         js_setproperty(J, -2, "querySelectorAll");
+        js_newcfunction(J, js_el_closest, "closest", 1);
+        js_setproperty(J, -2, "closest");
         js_newcfunction(J, js_el_addEventListener, "addEventListener", 2);
         js_setproperty(J, -2, "addEventListener");
         js_newcfunction(J, js_el_get_by_tag, "getElementsByTagName", 1);
@@ -1042,10 +1160,121 @@ static void define_document(js_State *J, JsBridge *b)
 
 /* Forward declarations: mujs_init binds these globals before their bodies. */
 static void mujs_define_xhr(js_State *J);
+static void mujs_define_worker(js_State *J);
 static void js_setTimeout(js_State *J);
 static void js_setInterval(js_State *J);
 static void js_clearTimeout(js_State *J);
 static void js_clearInterval(js_State *J);
+
+/* ── API-P7: localStorage / sessionStorage (see webstorage.h) ──────────
+ * muJS idiom: each instance is a userdata whose payload IS the
+ * WsStore* (no kind indirection needed — one instance per store).
+ * Methods live on the "pluto.ws.proto" registry prototype; the has
+ * hook answers the live length getter. The engine's fresh-wrapper
+ * identity shape (see the P6 notes) applies here too — the browser's
+ * member semantics behave uniformly regardless. */
+#define WS_TAG "pluto.ws"
+
+static WsStore *to_store(js_State *J, int idx)
+{
+    return (WsStore *)js_touserdata(J, idx, WS_TAG);
+}
+
+static int ws_prop_has(js_State *J, void *p, const char *name)
+{
+    if (!strcmp(name, "length"))
+    {
+        js_pushnumber(J, ws_count((WsStore *)p));
+        return 1;
+    }
+    return 0;
+}
+
+static void js_ws_getItem(js_State *J)
+{
+    WsStore *s = to_store(J, 0);
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    BUDGET_OR_THROW(b);
+    const char *k = js_tostring(J, 1);
+    char out[WS_VAL_MAX];
+    int hit = s && ws_get(s, k, out, sizeof(out));
+    if (!hit)
+    {
+        logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
+    }
+    if (hit)
+    {
+        js_pushstring(J, out);
+    }
+    else
+    {
+        js_pushnull(J);
+    }
+}
+
+static void js_ws_setItem(js_State *J)
+{
+    WsStore *s = to_store(J, 0);
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    BUDGET_OR_THROW(b);
+    const char *k = js_tostring(J, 1);
+    const char *v = js_tostring(J, 2);
+    if (!ws_set(s, k, v))
+    {
+        /* The browser's QuotaExceededError road (4KB here, not 5MB). */
+        js_error(J, "QuotaExceededError: per-origin storage quota exceeded");
+    }
+}
+
+static void js_ws_removeItem(js_State *J)
+{
+    WsStore *s = to_store(J, 0);
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    BUDGET_OR_THROW(b);
+    ws_remove(s, js_tostring(J, 1));
+}
+
+static void js_ws_clear(js_State *J)
+{
+    WsStore *s = to_store(J, 0);
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    BUDGET_OR_THROW(b);
+    ws_clear(s);
+}
+
+static void js_ws_key(js_State *J)
+{
+    WsStore *s = to_store(J, 0);
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    BUDGET_OR_THROW(b);
+    char out[WS_KEY_MAX];
+    if (ws_key(s, (int)js_tonumber(J, 1), out, sizeof(out)))
+    {
+        js_pushstring(J, out);
+    }
+    else
+    {
+        js_pushnull(J);
+    }
+}
+
+static void define_storage_proto(js_State *J)
+{
+    js_newobject(J);
+    {
+        js_newcfunction(J, js_ws_getItem, "getItem", 1);
+        js_setproperty(J, -2, "getItem");
+        js_newcfunction(J, js_ws_setItem, "setItem", 2);
+        js_setproperty(J, -2, "setItem");
+        js_newcfunction(J, js_ws_removeItem, "removeItem", 1);
+        js_setproperty(J, -2, "removeItem");
+        js_newcfunction(J, js_ws_clear, "clear", 0);
+        js_setproperty(J, -2, "clear");
+        js_newcfunction(J, js_ws_key, "key", 1);
+        js_setproperty(J, -2, "key");
+    }
+    js_setregistry(J, "pluto.ws.proto");
+}
 
 static void define_globals(js_State *J, JsBridge *b, const char *baseUrl)
 {
@@ -1093,6 +1322,20 @@ static void define_globals(js_State *J, JsBridge *b, const char *baseUrl)
         js_setproperty(J, -2, "replace");
     }
     js_setglobal(J, "location");
+
+    /* API-P7: localStorage + sessionStorage — browser key/value stores,
+     * shared webstorage.c road. Instances = userdata payload = the
+     * WsStore* (each store bound to THIS document's origin); length is
+     * the has-hook getter; misses null; quota throws. */
+    ws_bind(baseUrl ? baseUrl : "");
+    define_storage_proto(J);
+    js_getregistry(J, "pluto.ws.proto");
+    js_newuserdatax(J, WS_TAG, ws_local(), ws_prop_has, NULL, NULL, NULL);
+    js_setglobal(J, "localStorage");
+    js_getregistry(J, "pluto.ws.proto");
+    js_newuserdatax(J, WS_TAG, ws_session(), ws_prop_has, NULL, NULL, NULL);
+    js_setglobal(J, "sessionStorage");
+    logger_log("[webstorage] globals bound (mujs): origin=%s", ws_origin());
 
     js_newcfunction(J, js_alert, "alert", 1);
     js_setglobal(J, "alert");
@@ -1287,6 +1530,7 @@ static int mujs_init(JsBridge *b, const char *baseUrl)
 
     define_globals(J, b, baseUrl);
     mujs_define_xhr(J);
+    mujs_define_worker(J);
     js_setlimit(J, JSBRIDGE_RUNLIMIT, JSBRIDGE_MAXALLOC);
     return 0;
 }
@@ -1387,6 +1631,16 @@ static void mujs_close(JsBridge *b)
     {
         JsListener *L = &b->listeners[i];
         js_unref(J, (const char *)L->ref);
+    }
+    /* API-P9: release the per-node wrapper cache pins (one js_ref per
+     * cached node) — same contract as the listener loop above; the
+     * bridge table itself is fresh (zeroed) on the next page attach. */
+    for (int i = 0; i < b->elwCount; i++)
+    {
+        if (b->elw[i].ref)
+        {
+            js_unref(J, (const char *)b->elw[i].ref);
+        }
     }
     /* Timer refs are released by the ROUTER via clear_timer_ref BEFORE
      * close (see js_doc_close) — nothing to unref here. */
@@ -1627,6 +1881,168 @@ static int mujs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     return 0;
 }
 
+/* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note
+ * in jsbridge_internal.h) ─────────────────────────────────────────────
+ * Same thin-glue contract as this file's XHR: wrapper userdata (tag
+ * "pluto.worker") boxes the stub's public id (0 = the documented
+ * delivery-less cap shape); methods live on the prototype; handler props
+ * land as own props (the xhr_put contract). The wrapper is PINNED in the
+ * registry at construct (js_ref → jsbridge_worker_pin) and the delivery
+ * reads the CURRENT onerror off it — browser at-fire semantics. The
+ * worker SCRIPT never compiles or runs. */
+#define WORKER_TAG "pluto.worker"
+
+static int worker_has(js_State *J, void *p, const char *name)
+{
+    (void)J;
+    (void)p;
+    (void)name;
+    return 0; /* no live reads; handler props land as own props */
+}
+
+static int worker_put(js_State *J, void *p, const char *name)
+{
+    (void)J;
+    (void)p;
+    (void)name;
+    return 0; /* handler props land as own props (xhr_put contract) */
+}
+
+/* Box finalizer: the wrapper's stub-id box is SDK-allocated. */
+static void worker_box_finalize(js_State *J, void *p)
+{
+    (void)J;
+    if (p)
+    {
+        JFree(p);
+    }
+}
+
+static void js_worker_postMessage(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    int *box = (int *)js_touserdata(J, 0, WORKER_TAG);
+    jsbridge_worker_post(b, box ? *box : 0);
+    js_pushundefined(J);
+}
+
+static void js_worker_terminate(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    int *box = (int *)js_touserdata(J, 0, WORKER_TAG);
+    jsbridge_worker_terminate(b, box ? *box : 0);
+    js_pushundefined(J);
+}
+
+/* Constructor: builds + RETURNS a fresh wrapper (muJS C-constructor
+ * contract; `new Worker()` and bare Worker() behave identically here —
+ * the prototype methods live on pluto.worker.proto either way), pins it
+ * in the registry for the cross-frame delivery. */
+static void js_worker_new(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    const char *url = js_tostring(J, 1); /* recorded, never resolved */
+    int id = jsbridge_worker_open(b, url); /* 0 = delivery-less (cap) */
+    int *box = (int *)JMalloc(sizeof(int));
+    if (!box)
+    {
+        js_error(J, "worker: out of memory");
+    }
+    *box = id;
+    js_getregistry(J, "pluto.worker.proto");
+    js_newuserdatax(J, WORKER_TAG, box, worker_has, worker_put, NULL,
+                    worker_box_finalize);
+    /* onerror/onmessage materialize as own null props (browser shape:
+     * `wk.onerror === null` before the page assigns anything). */
+    js_pushnull(J);
+    js_setproperty(J, -2, "onerror");
+    js_pushnull(J);
+    js_setproperty(J, -2, "onmessage");
+    if (id > 0)
+    {
+        js_copy(J, -1); /* pin the wrapper for cross-frame delivery */
+        const char *objRef = js_ref(J);
+        if (!objRef)
+        {
+            js_error(J, "worker: pin failed");
+        }
+        jsbridge_worker_pin(b, id, (void *)objRef);
+    }
+}
+
+static void mujs_define_worker(js_State *J)
+{
+    js_newobject(J); /* "pluto.worker.proto" */
+    {
+        js_newcfunction(J, js_worker_postMessage, "postMessage", 1);
+        js_setproperty(J, -2, "postMessage");
+        js_newcfunction(J, js_worker_terminate, "terminate", 0);
+        js_setproperty(J, -2, "terminate");
+    }
+    js_setregistry(J, "pluto.worker.proto");
+
+    /* newcconstructor consumes the pushed prototype object (rot2 idiom,
+     * same as the XHR lane). */
+    js_getregistry(J, "pluto.worker.proto");
+    js_newcconstructor(J, js_worker_new, js_worker_new, "Worker", 1);
+    js_setglobal(J, "Worker");
+}
+
+/* Worker vtable: release the pinned wrapper ref (slot inert). The ref is
+ * a registry key (see js_worker_new). */
+static void mujs_clear_worker_refs(JsBridge *b, void *objRef)
+{
+    js_State *J = (js_State *)b->implState;
+    if (!J || !objRef)
+    {
+        return;
+    }
+    js_unref(J, (const char *)objRef);
+}
+
+/* Delivery: worker.onerror(ev) with `this` = the pinned wrapper and
+ * ev = {message}. The CURRENT onerror is consulted at fire time; a stub
+ * without a callable onerror delivers nothing. Same bracket + contained
+ * error contract as mujs_run_xhr_ref (the wrapper pin keeps ONE extra
+ * value below the call frame compared to the XHR lane — popped both
+ * ways to stay balanced). */
+static int mujs_run_worker_ref(JsBridge *b, void *objRef,
+                               const JsWorkerStub *w)
+{
+    js_State *J = (js_State *)b->implState;
+    if (!J || !objRef || !w)
+    {
+        return 1;
+    }
+    js_setlimit(J, JSBRIDGE_RUNLIMIT, JSBRIDGE_MAXALLOC);
+    js_getregistry(J, (const char *)objRef); /* pinned wrapper */
+    js_getproperty(J, -1, "onerror");        /* fresh read at fire time */
+    if (js_iscallable(J, -1))
+    {
+        js_copy(J, -2);   /* `this` = wrapper */
+        js_newobject(J);  /* ev */
+        js_pushstring(J, w->message);
+        js_setproperty(J, -2, "message");
+        if (js_pcall(J, 1) != 0)
+        {
+            int fatal = !b->lastError[0];
+            bridge_take_error(b, J);
+            js_pop(J, 2); /* error + pinned wrapper */
+            return fatal ? -1 : 1;
+        }
+        js_pop(J, 2); /* result + pinned wrapper */
+        logger_log("[worker] onerror delivered #%d present=1", w->id);
+    }
+    else
+    {
+        js_pop(J, 2); /* handler value + pinned wrapper */
+        logger_log("[worker] onerror delivered #%d present=0 (silent — "
+                   "unhandled worker error)",
+                   w->id);
+    }
+    return 0;
+}
+
 const JsEngineImpl js_engine_mujs = {
     mujs_init,   mujs_run_script,     NULL, /* run_script_stream (R15: XS NR only) */
     mujs_dispatch_click,
@@ -1635,4 +2051,6 @@ const JsEngineImpl js_engine_mujs = {
     NULL, /* pump (R20: time-sliced split is XS NR only) */
     NULL, /* eval_pending (R27: no background eval) */
     NULL, /* mount_parked (R28: never parks) */
-    "muJS"};
+    "muJS",
+    NULL, NULL, /* dispatch_event / script_queue_drained (frozen engine) */
+    mujs_run_worker_ref, mujs_clear_worker_refs /* API-P8 */};

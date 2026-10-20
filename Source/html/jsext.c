@@ -404,6 +404,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].extIndex = JS_SCRIPT_DATA;
                 slots[count].tagStart = lt;
                 slots[count].tagLen = (size_t)(gt - lt + 1);
+                slots[count].isModule =
+                    jsbridge_script_type_is_module(lt, gt);
             }
             count++;
             pos = close + 8;
@@ -426,6 +428,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].extIndex = -1;
                 slots[count].tagStart = lt;
                 slots[count].tagLen = (size_t)(gt - lt + 1);
+                slots[count].isModule =
+                    jsbridge_script_type_is_module(lt, gt);
             }
             char *raw = tag_attr_value(afterName, gt, "src", 3);
             if (raw && raw[0] && extRaw)
@@ -473,6 +477,8 @@ int jsbridge_scan_scripts(const char *html, JsScriptSlot *slots, int slotMax,
                 slots[count].extIndex = -1;
                 slots[count].tagStart = lt;
                 slots[count].tagLen = (size_t)(gt - lt + 1);
+                slots[count].isModule =
+                    jsbridge_script_type_is_module(lt, gt);
             }
             count++;
             pos = close + 8;

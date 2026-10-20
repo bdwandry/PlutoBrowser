@@ -15,7 +15,7 @@ receipts (log rows, suites, deploys). Date-stamp every change at the bottom.
 | Area | Score | Status | Grounded by |
 |---|---|---|---|
 | JS language (XS NR engine) | ~95% | NOT STARTED | Real react bundles run end-to-end (TAP2 ×3, `jsErrors=0`); jsext suite 8/0; fork survives its own stack-limit engineering |
-| Engine's browser API surface | ~50% | NOT STARTED | DOM read/write, events, fetch/XHR, timers, storage live (TAP2 receipts). Missing: workers, full ES modules, scripted navigation (history/location), console polish |
+| Engine's browser API surface | ~96% | IN PROGRESS | DOM read/write, events **(receipted end-to-end Phase 1: submit/input/change dispatch, bubbling to document listeners, preventDefault honored)**, fetch **(real + receipted Phase 2: promise shape, local+wire receipts, setRequestHeader Content-Type wire lane, currentScript asserted)**, the page's own address **(receipted Phase 3: live location getters, pushState/replaceState in-engine journal with popstate/hashchange back-stack delivery, document.title set/get, pushState never navigates — `apihist: pass=7 miss=0`)**, console **(receipted Phase 4: every level tagged into the log file — `[console.log/warn/error/info/debug]` rows with printf substitution (%s/%d/%o/%%·out-of-args-literal) + the console-shape renderer (nested objects/arrays, `[1, 2, 3, 4, …5]`, depth-2 bounded) + assert browser semantics (truthy silent / falsey error row, never throws) + the panel stays clean — `apicon: pass=8 miss=0 sent=17`, `P4COUNT 17` = 16 rows + the documented silent assert)**, ES modules **(receipted Phase 5: the loader-side module lane — both scanners flag `<script type="module">` and the router transforms import/export in C before ANY engine sees the source, so every engine gets the same lane with the vendored engines untouched: IIFE module scope, import-first graph on a per-document ledger (cycle/depth/cap receipts), namespace objects `globalThis.__p5mod[<resolved URL>]`, named/default/star import forms, `export const/let/var/function/class` materialized after the body runs; imports resolve module-RELATIVELY through url_resolve (the journal's resolver) and fetch on the page's own roads — the `about:` store and the `file:` Data-dir loader rule with the flat file-road join; probe receipts `apimod: kids=3 refuse=PASS` (modin inline runs, modabs named bindings, modstar `* as ns`, and the path-only import on the opaque about: base refusing exactly as browsers refuse it — `./p5x.js` throws its honest load error), and the `file://modpage.html` bar proves the relative chain `import './p5rel.js'` → nested `./p5rel-child.js` runs children before the importer (`modpage: pass=2 miss=0 kids=2`); documented boundaries: export default/{list}/* cut whole with receipts, dynamic import() untouched, data:/http(s) module fetches refused synchronously, template ${} contents not re-lexed)**, DOM conveniences **(receipted Phase 6: `template.content` with the browser shape — the parsed template element stays reachable while its children parse into the DETACHED `#template-content` fragment (nodeType 11, parent-NULL: inert to getElementById/render/census; `content` materializes empty for created templates), `el.closest()` through the shared SW5 selector machinery (document-order self-then-ancestors, null for unusable selectors), `el.dataset` = a fresh camelCase snapshot per access (setAttribute is the write road), the append family returning its touched node per MDN — probe receipts `apidom: pass=6 miss=0` and the P0 `template` row flipping into `apisum: pass=12 miss=2` on all gates; the phase also repaired the id road — one shared O(depth) `dom_find_by_id` replaces the adapters' push-all-children getElementById walks that aborted whole once a node held 65+ element children, silently hiding every later id on wide bodies)**, timers, localStorage/sessionStorage **(receipted Phase 7: the shared webstorage road — localStorage persists per origin across boots, sessionStorage per run; origin rule `http(s)://authority` / one `file://` bucket / per-URL `about:` / opaque `"null"` fail-store; 4KB quota throws `QuotaExceededError` and stores nothing; `storage: PASS` + `[webstorage] quota:` + `visits` counter receipts on all three engines)**, workers **(receipted Phase 8: the contained-stub lane — the constructor SHIPS so `new Worker(url)` never dies on a ReferenceError; a stub constructs silently with the shape-complete object (`postMessage`/`terminate` functions, `onerror`/`onmessage` null) and tells the page via the standard async `onerror` path at the next pump with `ev = {message}`; the worker script never compiles or runs — `worker: PASS` + `[p8w] worker onerror` + `[worker] onerror delivered #1 present=1` on all three engines, `apisum: pass=14 miss=0` on XS)**, wrapper identity + the className accessor **(receipted Phase 9: the browser identity model now on every engine — ONE wrapper object per DOM node for the page's whole life, cached per node in a bridge-scoped table with engine-held refs (mujs registry keys unref'd at close; duktape stash-hidden heapptr pins; XS NR keeps its own P1-lane state arrays) so strict `===` chains and page-written expandos survive getElementById/parentNode/appendChild/insertBefore returns — the P6 apidom identity rows `closest`/`appendret` flip MISS→PASS on mujs and duktape — and `el.className` ships on all three engines through one shared write road (the classList family's snapshot/dirty-receipt contract, store identical to `setAttribute('class')`), `apidom: pass=7 miss=0` on all gates after the 7th `classnames` row)**. Missing: async http(s) module graphs (lane boundary, future work) |
 | HTML + CSS | ~95% | COMPLETE (residuals = documented device policies) | Phases 1–10 closed: selector language, external stylesheet fetch, `var()`/`calc()` resolution, full `@media` evaluation (MQ4/5 + link attrs + the standalone `css_media_holds` API now feeding `<source media>`), the spec-anchored positioning lane (`position`/offsets/`z-index` consumed), the overflow lane (visually-hidden recipe suppression, `text-overflow: ellipsis` + `-webkit-line-clamp` real line cuts, region refs as honest no-ops), the flex/grid container lane (`display:flex/grid` containers, gap mounts on the halved-px scale with rem/em fraction precision `.75rem` = 12px exact, `align-items/align-self: center` on real containers, the whole distribution family consumed), P7's landed generated content (`::before`/`::after` printing inline with quotes/attr()/escapes resolved, `::marker` feeding the li bullet path, `:root`/`:target`/`:disabled`/`:enabled`/`:checked`/`:placeholder-shown`/`:empty` honest matchers, the consumed-inert `::`-family + `:focus-visible`/`:focus-within` joining documented policies), P8's interactive set (spec-srcset candidate selection with the panel-width policy live on real Wikipedia thumbs, `<picture>` source ordering by media=, working reset buttons with walk-time default capture + the browser click→reset activation order, multiple-select accumulation + real name-repeated serialization, the summary-less details default label), and P9's fidelity polish (the shared `fresh_len_px` unit reader across every walk-side length consumer — rem margins land, `"50%"` margins refuse, vmin/vmax/ch/ex/pt widen the Q namespace, `@media` consumes vmin/vmax; CSS translate() = REAL paint offsets mounted per-block at the ten block-open lanes with % keyed to the element's own box and the inline-replaces-whole-value cascade, rotate/scale/skew/matrix/transform-origin = consumed census vocabulary; gradient dark-hero polarity now rides background gradients on the sheet route — dark gradient heroes invert) — probe v9 `PASS (0 fails)` (105+ rows: doc-field mounts, content/state battery, srcset picks + msel/reset model asserts, tf battery + invert/pct-margin rows, 120vmin MQ row). Gaps: generated text stays text (no per-line/per-char styling — `::first-line`/`::first-letter`/`::selection` = consumed-inert policy names), real 2-D distribution + raster transforms (rotate/scale/skew/matrix) = documented policy non-features (a 2-D compositor is the only honest home — trajectory line keeps them there), translate skips form widgets & separators by policy, focus states remain the always-match family (device truth: no persistent focus), template.content & the JS DOM surface stay out of the bridge (JS-phase item), `select size>1` = a one-line field (no multi-row widget on the flat panel), multiple-select deselection = the reset button (no pick-list UI); and P10's declarative end-event lane (`@keyframes`/`@-webkit-keyframes` registries (ident-only names, >24 chars refuse = the animation stays inert, never silently mis-fires), the `animation-name` value resolver (first registry-known token, numeric/functional/keyword-skipping), the `walk_anim_engage` companion at every block-open lane with the infinite/zero-count/paused guards and a per-(node,name) exactly-once dedupe map, `animationend`/`transitionend` delivered post-render as kind-4 listeners from an addEventListener vocabulary that exists for real in both element and document paths, `transitionend` armed by the walk-visible gate attributes (class/id flips noted through the JsBridge mutation-notes ring at nine tree-mutation sites, gated on the winner being non-`none`)) |
 | Forms & interaction | ~85% | NOT STARTED | The R56g–R58 arc: tap → typing → validation → in-place submit → POST → sent card → "Send another" restore, TAP2 baseline exact ×3 + device use |
 | Network | ~70% | NOT STARTED | Real HTTP client (POST/cookies/redirects/timeouts), snap cache, spill-to-disk bodies |
@@ -57,7 +57,7 @@ receipts (log rows, suites, deploys). Date-stamp every change at the bottom.
 | CSS layout richness (flexbox/grid depth, media queries) | First layout-heavy page that misrenders | partial |
 | Canvas 2D | First visual/graphics page | not built |
 | WebSockets / EventSource | First live-data page | not built |
-| Web workers | First site that blocks on compute | not built |
+| Web workers | First site that blocks on compute | **contained stub shipped, API-P8** (constructor + onerror receipt lane) |
 | Video/audio playback | First media page | not built |
 | Iframes as documents | First embed-heavy page | not built |
 
@@ -91,6 +91,352 @@ Legend: `[ ]` open / `[~]` in progress / `[x]` done (receipts logged below).
 - [x] P9 Fidelity polish: transforms/gradients/units *(M)* — **CLOSED 2026-10-19.** Three lanes, one shared engineering piece. **The shared unit reader (`fresh_len_px`, document.c):** every walk-side length consumer now answers lengths from one grammar — px/bare ×1, rem/em ×16 (browser root), vw ×400/100, vh ×240/100, **vmin (`CSS_VMINDIM` 240)/vmax (`CSS_VMAXDIM` 400)**, ch/ex ×8 (documented half-advance/x-height approximations — the engine ships no font metrics), pt ×4/3; % answers only in per-mille and only when the caller opts in; sign semantics per lane (negative gaps still refused — invalid CSS); fractions keep the P6 r/p fixed point (p ≤ 1000); **INT_MIN = not-a-length** (the -1 sentinel collided with a legitimately negative `-1px`; all consumers test < 0, so lanes are unchanged, and `parse_translate` now routes `pxv != INT_MIN` into the length lane). **Consumers rewired:** `walk_box_px` gains the fresh-reader fallback — **the P6 "rem margins" residual lands** (`margin-left:-.5rem`, `text-indent:1.25rem` and every other suffixed box length mounts); `gap_len_px` re-bodies through the reader keeping its 480→240 cap + no-neg + first-token-only; `box_num` rewired — **the legacy `"50%"`→25px wrong turn is repaired** (% refuses for margins, honest indent 0); inline margin longhands ride `box_num`; the @media Milli parser consumes vmin/vmax (120vmin = 288px holds at the 400×240 panel — fixture-proved). **Transform lane = real paint offsets:** `parse_translate` composes translate/translateX/translateY (px AND % on both axes; other fns skipped; unbalanced fns stop the read), `walk_tf_fill` mounts halved px + percent-of-own-box on the new `DocBlock.tfXpx/tfYpx/tfXpct/tfYpct` fields (memset-0 = absent) with the CSS cascade inline-beats-sheet (the INLINE value replaces the WHOLE transform property — a sheet translateY contributes nothing under an inline translateX); layout consumes through `tf_apply_items` across **ten branch lanes** (badge, heading (the h2 underline is created after the apply — separators are not transform targets), math, paragraph/quote with the rail riding via its line fields, list item, code box, image, table, meter) shifting the freshly emitted items only — completed branch-locally so later blocks never inherit a fake offset; **translate mounts as a real paint offset; rotate/scale/skew/matrix + transform-origin stay consumed census vocabulary** (a 2-D compositor is the only honest home — policy non-feature per the trajectory line); form widgets (input/select/textarea/hidden) and hr/li-rule separators skip by policy (tap targets, not layout boxes). Probe-found bug receipts (each fixed by a probe run): ① the fresh parser never advanced past unit letters (trailing-junk check voided EVERY token — rem gaps/margins were zeros), ② per-mille scale was ×1000 (100× over: `-50%` read as -50000‰; correct = ×10, `-50%` → -500‰), ③ translateY (axis 2) had NO write path (the sole argument never landed), ④ translate()'s first argument also wrote y (the second arg + a double-add read `translate(10%, -50%)` as y = +10% -50% = -40%). **Gradient polarity (the fix):** `css_gradient_luma` averages the resolved stop colors on the established 0..255 luminance scale (--130 of 255 = dark); `doc_is_inverted_style`, `walk_inverted`, AND the sheet route through apply_prop's `background-color` arm (the `background:` shorthand's first-stop color token fans out — `linear-gradient(#050505,…)` inverts the text like any dark background) — **dark gradient heroes no longer escape inverted detection by riding `background` instead of an attribute color**. **Probe v9 `PASS (0 fails)`, 11 new rows:** tf battery ×5 doc-field exact asserts (`xpx=6` 12px → half-scale; `ypx=-6` -0.75rem → -12 → -6; `xpct=5/ypct=-25` the % pair; `TFSHIFTR xpx=2` rotate skipped + 4px composed; `TFSHIFTWIN xpx=3, ypct=0` the whole-value inline win) + VMINHIT absent (the 120vmin MQ consumed) + GRADHERO present with `invert=1` + MRG2REM `top=16` (2rem) / MRG50PCT `indent=0` (the % refusal); tally byte-stable `sib=0 attrOp=0 pcls=0 medF=1 var=4 calc=2 prop=2` (every new declaration rides KNOWN vocabulary on purpose — transform/transform-origin joined `known_prop`); all P1–P8 canaries byte-stable (FGAPC rem-gap `gap=4` EXACT after the reader fix). **Gates (all four):** tap1 `RESULT inPlace=yes jsErrors=0 (was 0) blocks=23 errCard=1` byte-identical; HN blocks=11 links=225 fresh==rewalk stable, census all-zero, 0 ERROR rows; Bryan blocks=48 links=18 stable incl. rewalks with byte-identical all-zero census; **Wikipedia blocks=324 links=310 EXACT baseline, census EXACT `pcls=0 medF=0 var=5 calc=0 prop=17`** (the vector sheet's counted vocabulary untouched by the new known rows — transform/origin do not appear in the surviving census; live srcset 250→500px picks standing), fresh==rewalk, 0 ERROR rows. Scorecard 92→94. Plain production restored (0 errors; warnings = the documented 3× `baseUrl` + bundler/xs third-party set; boot green, **41KB idle stable across heartbeats**, refusals=0; sims killed after every run, count verified 0); device untouched; git user-locked. Residuals (documented): translate skips form widgets + separators by policy; `transform` on INLINE-only children (spans in flow) mounts only where a block opens; gradient polarity rides the registered color token (a gradient whose FIRST stop misrepresents the average — e.g. light-to-dark keyed white-first — leans on the inline route's full-value scan; the sheet shorthand route keys the first stop); vh/`handheld`-style exotic units (Q, dvw-family) refuse as unknown suffixes by design.
 - [x] P10 transitionend/animationend immediate-fire *(S)* — **CLOSED 2026-10-19.** The declarative animation/transition vocabulary now DELIVERS its end events, honoring Mdn.js-safe engine boundaries: **`@keyframes` registry** — engine-side `keyframes[24][25]` + count, collected at `css_parse_sheets`' `@`-skip branch via `css_keyframes_collect` (ident-only names, both `@keyframes` and `@-webkit-keyframes`; >24-char names refuse = the animation stays inert, never mis-fires); **value resolver** — `css_anim_registered_name` picks the first registry-known token, skipping numerics, `(`-functional notation, and the animation keyword set (`none/infinite/linear/ease…/forwards/backwards/both/running/paused`); **walker engage** — `walk_anim_engage` rides every block-open call site (companion after each of the ten `walk_tf_fill` sites): full cascade (inline style attr beats the engine winner) on `animation-name`/`animation`, guards = infinite/zero-iteration (`animation-iteration-count` first numeric token) and `paused` (`animation-play-state`), exactly-once dedupe via the DomResult `animFired[24]` (node,name) map, enqueue into `pendEnd[16]`, `DocBlock.animName` receipts; **the walker-instance bug the fixture caught:** fresh-parse walks wrote the dedupe map into the STACK DomResult while later renders map against the HEAP twin (double `animationend` on jsext) — Walker now carries `walkDom` (fresh = the promoted heap pointer, rewalk = its own) — fixed + re-proven; **transition lane** — the JsBridge mutation-notes ring (`mutNotes[24]`, noted at nine tree-mutation sites incl. the classList helpers which now escalate `domDirty` R58-parity) arms `transitionend` only when `document_node_transition_hot` reads a non-`none` `transition`(+`-property`) vehicle against the class/id attrs of the noted node; **deliver channel** — `p10_drain_end_events` runs in `render_done` after `log_render_result`: the animation lane dispatches per pendEnd entry then zeroes, the transition lane takes the mut notes, checks hot nodes, dispatches, and logs `[p10] animationend lane` / `[p10] transitionend lane: %d mutation(s), %d armed & dispatched` (both rows GATED — silent when nothing to drain, verified by Wikipedia's zero rows); **listener kind 4** — `animationend`/`transitionend` map to a stored listener class in BOTH addEventListener paths (element + document) with the matcher filtering by kind (NEVER kind 0 — `xs_dispatch_click` matches kind 0 without a type filter and would mis-deliver on every tap) — `PL10ANIMEND/PL10TRANS` fixtures render through stored listeners. **Receipts:** probe v10 `PASS (0 fails)` — ANIMLIFT engages (`anim pf`), ANFALLDOWN/ANIMPAUSE/ANIMINF stay field-absent (the guard battery), `keyframes pf known + nokey absent`, direct `transition=color .3s` resolution, `animationend lane: 1 run(s) dispatched`; about:jsext suite 8/0 with the mounted-animation receipt: `PL10ANIMMOUNT1` renders exactly-once (ext-script-created element + pre-append addEventListener + inline-victim static completion lost pre-listener = the documented browser-faithful race; the dedupe map blocks any re-dispatch), `PL10TRANS1` renders exactly-once via the classList-toggle timer; census/blocks/links byte-stable on every real page: tap1 `RESULT inPlace=yes jsErrors=0 (was 0) blocks=23 errCard=1` byte-identical (6 quiet `0 armed` lane rows), HN 11/225 fresh==rewalk + census all-zero + 0 ERROR rows, Bryan 48/18 byte-stable census + `[p10] transitionend lane: N mutation(s), 0 armed & dispatched` rows on the React-MDN surface, **Wikipedia 324/310 EXACT fresh==rewalk==snap + census byte-identical to P7/P9 (`pcls=0 medF=0 var=5 calc=0 prop=17`, propnames row identical)** — the earlier "prop 17→13" prediction was WRONG: the trimmed sheet's animation/transition decls sit inside streams that never count (dropped reduce media / past the engine cap), so the receipt = ZERO census perturbation, the strongest form; the one live-run links wiggle (309 vs 310, same binary) was closed by experiment: article unedited since 2026-10-13, back-to-back curls byte-identical, and `PLUTO_NR_AUTOTEST_FILE_URL=file://wikia.html` TWIN runs on the byte-fixed upstream snapshot render **324/310 byte-identical twice** (engine deterministic on fixed input; the wiggle was served-side chrome — `render-error(discarded)` = the pre-existing jsext-prefetch abort path inside the documented revisit-noise contract). Scorecard 94→95. Sims killed after every run (count verified 0); device untouched; git user-locked. Residuals (documented): static inline victims complete on the pre-script fresh walk (R54 pump = browser-faithful race; mounted scripted animations prove delivery), keyframes bodies stay skipped (registry = names only — no per-frame interpolation on a 1-bit flat panel), transitions need a walk-VISIBLE attr gate (JS-set styles house-registered separately), partially-filled classes score as full-name matches by the resolver's registry-first policy.
 - Target trajectory: 75 → ~80 → ~88 → ~94 → ~97 (last 3 = documented policy non-features)
+
+## Active roadmap — Engine's browser API surface → close (the API program, SIM-ONLY)
+
+Approved 2026-10-19. Order of operations (usage-weighted), sizes, and the bar each phase must clear
+before its row goes `[x]`. The Status column opened at **IN PROGRESS**; flips to COMPLETE only when
+API-P7 closes. **Simulator only for every phase** (device locked). Every change is written generally —
+no site-specific behavior anywhere. Standing receipt set each phase: `about:apiprobe` probe rows
+(as each phase lands, its row becomes an assertion) + jsext suite 8/0 + the four real-page gates
+byte-identical (tap1 `RESULT inPlace=yes jsErrors=0 blocks=23 errCard=1`; HN 11/225 all-zero census;
+Bryan 48/18 all-zero census; Wikipedia 324/310 with the `prop=17` census identical). The score moves
+only with receipts, at phase close.
+
+- [x] **API-P0 Baseline + `about:apiprobe` probe farm** *(S)* — **CLOSED 2026-10-19.** The capability battery page registered on Home Test Cases (appended last so the existing home-test harness assertions stay true) + in the README at creation. Baseline run on engine 4: **`apisum: pass=11 miss=3`** byte-stable across the rewalk, `ran=1 errs=0`. PASS rows: `domwrite` (functional creation check — NEW FACT: the bridge's `appendChild` returns a falsy value instead of the appended node per MDN shape; recorded for API-P6), `title`, `timers`, `xhr`, `listeners`, `promise`, **`fetch` (presence — and the log answers why: `[js] fetch shim: injecting (before script 1)` + `fetch shim: defined` — a shim ALREADY injects into page scripts on this engine; API-P2's job is vetting it into a real receipt, rehabilitating the session-plan's stale "no fetch" fact)**, `console` (presence — console.log exists on NR today, past-profile wrong), `location`, `history`, `currentscript`. MISS rows (planned/recorded): `storage` (setItem/getItem roundtrip fails on NR silently — String() tolerance tried, zero error rows — recorded as the new **API-P7** below; the old "storage live" fact does not survive today's measurement), `worker` (the planned contained-stub policy lane), `template` (API-P6 lane). Probe-bug receipts from v1 (each caught by its own run, fixed, re-run): domwrite v1 trusted appendChild's return value (labeled PASS-as-MISS while the page itself rendered) and storage v1 used strict `'1'` equality — both replaced with functional checks in v2. Real-page deltas: none (fixture + registration-only diff); the jsext standing gate re-verified 8/0 on the P0 build.
+- [x] **API-P1 Events that behave** *(M)* — `submit`/`input`/`change` fire through real handlers,
+  events bubble up the tree with correct `target`/`currentTarget`, `preventDefault` honored by the
+  pipeline. The non-JS fallback (tap → submit_form, zero dispatch) stays byte-identical — pages with
+  no listeners keep working exactly as today. **CLOSED 2026-10-19.** The phase's measurement finding:
+  the event machinery was ALREADY built (the TAP2/R arcs): `form_key_write` sets the value BEFORE it
+  dispatches (input, then change on commit — react's onChange reads target.value synchronously),
+  and `activate_form_block` (LRI_INPUT_SUBMIT) runs the browser activation order — a dispatched
+  `click` on the button first, then `submit` on the nearest `<form>`; `JSB_EVENT_SUPPRESSED`
+  (= a handler called `preventDefault()`) branches to the live re-walk, `rc == NONE` short-circuits
+  to the byte-identical native fallback, document-level listeners receive what bubbles. This phase
+  made it RECEIPTED: **(a) the Events battery** in `about:apiprobe` — a live form fixture
+  (`#evf`/`#evi`/`#evb`) with real listeners (field input/change counters, button click, a
+  `preventDefault()`-calling form submit handler, and document-level submit+click rows that only
+  count when the event BUBBLES past the target), painting `apisev: input=N change=N submit=N
+  bub=N btn=N doc=N`; **(b) the `[ev-test]` sim driver** (`PLUTO_EV_AUTOTEST`, main.c) driving the
+  REAL pipeline on the probe — one `form_key_snapshot` + `form_key_write` commit (the tap
+  autotest's own typed-field recipe), then `activate_form_block` on the stamped submit button;
+  verdict = counters parsed from the re-walked blocks PLUS doc-pointer identity (sameDoc = the
+  re-walk; newDoc would mean a reload had rebuilt the doc and reverted the field to markup).
+  **Receipts:** typing → `apisev: input=1 change=1 submit=0 bub=0 btn=0 doc=0`; press →
+  `[form] submit tap: click=1 … tag=button` → `[form] submit dispatch: rc=2` (SUPPRESSED =
+  preventDefault owned it) → `[ev-test] RESULT inPlace=sameDoc jsErrors=0 (before 0) blocks=27
+  (was 23) found=1 input=1 change=1 submit=1 bub=1 btn=1 doc=1` + `[ev-test] PASS: input+change+
+  submit all delivered, bubbling rows counted at document level, pd honored (suppress re-walk, no
+  reload)`; block arithmetic exact (21→23 on typing, →27 on press); the P0 battery byte-stable in
+  the same run (`apisum: pass=11 miss=3`). Gates on the P1 build: HN `blocks=11 links=225` ×2 and
+  Bryan `blocks=48 links=18` ×5 census-identical; Wikipedia byte-exact via the `FILE_URL` twin
+  (`served wikia.html (296562 bytes)`, census `var=5 calc=0 prop=17` + propnames row identical,
+  `324/310` fresh==rewalk==snap at the SAME frame rows #46/#99/#125, snap `bytes=198815` exact);
+  tap1 (TAP-only build + stack defines) `RESULT inPlace=yes jsErrors=0 (was 0) blocks=23
+  errCard=1` with the identical errCard text (#818 vs the P10 baseline #820); jsext suite
+  `8 passed, 0 failed`. The byte-identical pledge is STRUCTURAL here: zero engine code changed in
+  P1 (driver only observes; the battery = page data), and the tap1 gate re-proved the no-listener
+  fallback unchanged. Production build restored (0 errors; `ev-test`/`nr-autotest` strings back to
+  0 in `pdex.dylib`), boot-verified, sims killed + counted 0 after every run. Score 50→62.
+- [x] **API-P2 `fetch` for real** *(M)* — the existing HTTP client under a Promise-shaped `fetch`
+  (same timeouts, refusals, spill-to-disk paths inherited); `currentScript` filled correctly.
+  **CLOSED 2026-10-19.** The shim (an engine-owned script injecting before the page's first script,
+  inherited from the C4 arc) now earns its "real" through a general-purpose header lane + receipts:
+  **`setRequestHeader` went from missing to real** — added to the XMLHttpRequest prototype
+  (`xs_xhr_set_request_header`, browser ordering: any time before send, throw after), driving a
+  per-request header store (`reqCt/xhdrName/xhdrVal`: Content-Type override + a recorded-last
+  receipt pair); **the wire knob** — POST bodies now ride `http_request_ct` with the site's OWN
+  Content-Type (NULL keeps the historical `application/json`; every pre-existing path is
+  byte-identical); **the shim applies `opts.headers`** by forwarding every pair through
+  setRequestHeader (try/catch — a bad header can never kill the request). Non-content-type headers
+  are RECORDed + logged (the HTTP client exposes no extra-header surface: documented boundary,
+  never invented on the wire, never silently dropped). `currentScript` = A2's stamped
+  per-run synthetic script element (src attr walk, NULL outside a run) — now ASSERTED rather than
+  trusted: `getAttribute('src') === null` on the running inline script, plus the browser-faithful
+  NULL inside a settled promise callback. **Receipts — the probe:** `apisum: pass=11 miss=3`
+  byte-identical (the strengthened `currentscript` predicate still PASSes) + the new Fetch
+  receipts battery `apifetch: pass=4 miss=0` byte-stable across rewarks: `fetchbody: PASS`
+  (fetch about:apiprobe → ok=status 200 → text contains the page marker; the local-answer xhr
+  receipts `#1 open GET about:apiprobe` + `local ok (6225 bytes)` in the same run), `fetchjsonreject`
+  (r.json() rejects on HTML = the promise-rejection lane), `postct` (POST + a
+  `setRequestHeader('content-type', …)` override settles ok), `csasync` (`currentScript === null`
+  in the callback). **The wire receipt (the phase's crown):** the real send POST —
+  `[js] xhr #1 open POST https://server.bryanwandrych.com/send_email` →
+  `header content-type: application/json` (the site's OWN value through the new lane) →
+  `POST ct='application/json'` on the wire → `ok (17 bytes)` → sent card, TAP2 cycles closed.
+  **Gates on the Phase 2 build:** tap1 byte-identical (`RESULT inPlace=yes jsErrors=0 (was 0)
+  blocks=23 errCard=1` at the SAME frame #820 as the baseline), HN `11/225` ×2, Bryan `48/18` ×5,
+  Wikipedia FILE_URL twin byte-exact (324/310 fresh==rewalk==snap at identical frames #46/#99/#125,
+  snap `bytes=198815`, census + propnames identical), jsext suite `8 passed, 0 failed`. Real-page
+  parity intact everywhere because the site's handler already sent exactly the default content-type
+  — now its own value governs instead of the default. Production build restored (0 errors, harness
+  strings 0), boot-verified, sims killed + counted 0 after every run. Score 62→68.
+- [x] **API-P3 The page's own address** *(M)* — `location` reads, `history.pushState/replaceState`
+  recorded in an in-device journal with `popstate`/`hashchange` delivery, `document.title` set/get;
+  pushState NEVER causes a network navigation. **Done when:** a scripted address change renders in
+  the probe and `popstate` fires on recorded back-stacks.
+  **CLOSED 2026-10-19.** The address became an ENGINE-OWNED BOOK (the bridge's `histUrl[8][260]`
+  journal, entry 0 = the doc base seeded on first use) and the location surface went LIVE:
+  **`location` = 9 live getters** (`href/origin/protocol/host/hostname/port/pathname/search/hash`)
+  re-parsing the journal's current entry per read — the bridge-time snapshot builder is gone, so a
+  scripted push moves the whole surface on the next read; **`pushState/replaceState` = real
+  journal writes** (same-origin guard throws on a scheme+authority head mismatch like a browser's
+  SecurityError; relative forms resolve browser-faithfully — fragment keeps path+query and replaces
+  the fragment, query replaces the query and drops a fragment, paths root-resolve; `about:` bases
+  get the opaque-token join since url_resolve stranded bare `#x`/`?x`; push grows (re-push
+  truncates forward, capped ring), replace overwrites in place) — **and NEVER touch the wire**:
+  no http_* call, no pendingNav, no app address-bar change (structural: the router layer is
+  uninvolved by construction); **`back/forward/go` walk the journal** (clamped, boundary moves
+  no-op) and LATCH `popstate`/`hashchange` for the next engine-pump frame (metered, per-listener
+  xsTry isolation, contained aborts — the xhr-pump discipline); `popstate` fires at the WINDOW
+  with the new entry's state (element-registered ones never fire — browser-faithful); `hashchange`
+  fires only when the FRAGMENT field itself moved, carrying oldURL/newURL; `history.state`/`length`
+  = live getters over the journal (per-entry state pins, replace re-pins). `document.title` set/get
+  = now a REAL pair: the setter previously APPENDED to the title node's text ('API Probe' + 'Pluto
+  J3' = 'API ProbePluto J3') — fixed to `dom_set_text` (children replaced). **The shared parser
+  learned the about: opaque tails** (url_parse's about: branch was host=all/path=all with no
+  query/hash compartments: the probe's own page could never read its own search/hash) — field
+  replacement per the URL standard, network pages uninvolved. **Receipts — the probe's
+  Address journal battery, `apihist: pass=7 miss=0`** (byte-stable across rewarks):
+  `histpush` (#h11 join, state p=11 pin, length 2), `histreplace` (?a=2 query swap, fragment
+  dropped, length stays 2, state replaced), `histhashtop` (second push → length 3), `docsettitle`
+  (document.title set → get roundtrip), `histback` (back → the replaced entry: search '?a=2',
+  state p=12, **popstate fired once carrying p=12** (`lastPopState='12'`), **hashchange fired
+  once** for the `#h9`→'' hop), `histbase` (back to the seeded base: search '', state null,
+  pops≥2), `histforward` (forward re-enters the entry, pops≥3) — with `apisum: pass=11 miss=3`
+  byte-identical and `apifetch: pass=4 miss=0` unchanged. **Engine receipts:** `[js] history
+  pushState j=1 n=2 url='about:apiprobe#h11' (no network navigation)` → replaceState `j=1 n=2
+  url='about:apiprobe?a=2'` → pushState `j=2 n=3 url='about:apiprobe?a=2#h9'` → `back/forward →
+  j=1 …(popstate pending)` → `delivery: popstate fires=1 j=1` + `delivery: hashchange fires=1
+  'about:apiprobe?a=2#h9' → 'about:apiprobe?a=2'` → back to j=0 (popstate only — hashes equal) →
+  forward to j=1. **Gates on the Phase 3 build:** jsext `8 passed, 0 failed` (0 unexpected
+  errors), tap1 byte-identical (`RESULT inPlace=yes jsErrors=0 (was 0) blocks=23 errCard=1` +
+  errCard text), HN `11/225` ×2 at the same frames (#79/#166), Bryan `48/18` ×5, Wikipedia FILE_URL
+  twin byte-exact (census `var=5 calc=0 prop=17`, propnames row, 324/310 fresh==rewalk, snap
+  `bytes=198815`), ev-test PASS (`inPlace=sameDoc jsErrors=0 … found=1 input=1 change=1 submit=1
+  bub=1 btn=1 doc=1` — block numbers shifted only by the new battery's rows; the verdict counts
+  counters, not blocks). One sim-host observation, unrelated to the code (chronic across 2
+  consecutive runs at the same frame, self-healing before any metric): a site's own timer
+  aborts on the memory envelope AT the revisit reload boundary (`engine abort in timer callback`
+  → engine reset → the revisit flow re-runs clean ×5) — Bryan's pending timers fire at the
+  51MB-live host moment; no journal/delivery code is on that stack. Probe dump cap 24→40 in the
+  sim-only seam so the deep address rows render in receipts. Production build restored
+  (0 errors, harness strings 0), boot-verified (heartbeats live), sims killed + counted 0 after
+  every run. Score 68→74.
+- [x] **API-P4 console.log/warn/error** *(S)* — **CLOSED 2026-10-19.** The console surface became the
+  real log lane on NR: every method routes into the file with its own level tag (`[console.log]` /
+  `[console.info]` / `[console.debug]` / `[console.warn]` / `[console.error]` — the file is the
+  receipt surface, device truth; the rendered panel NEVER changes from a console call), printf-style
+  substitution rides the first string arg browser-faithfully (`%s/%d/%i/%f` to String, `%o/%O/%j`
+  the console shape, `%c` consumes silently, `%%` literal, an out-of-args token prints literally
+  like Chrome, extras append space-separated), objects/arrays render the console shape — top-level
+  strings bare, nested strings quoted, arrays `[a, b, …n]` (4 shown), objects `{k: v, …}` (6
+  own-enumerable keys via the engine's own iterator), functions `[Function]`, host objects honest
+  `[Object]`, depth 2 with bounded bytes (cycle-safe by depth construction) — and `console.assert(v,
+  …)` owns browser semantics: TRUTHY = silent (no row), FALSEY = an ERROR row
+  ('Assertion failed: …' with the SAME substitution lane), never throws. `info/debug/dir` are real
+  methods now; `count`, the group family, `time`, `trace` stay deliberately ABSENT (documented
+  boundary: an unknown method stays unknown; no fake surface). Implementation notes that carry
+  forward: array elements read via `xsGetIndex` and object values via `xsGetAt(keySlot)` —
+  `fxNewNameC` interns plain names, so string-built "0" ids MISS the index flavor (the fixture
+  caught it: `[7, 8, 9]` rendered as `[undefined, undefined, undefined]` in v1, exact after the
+  fix); line budget 320 bytes with the logger's 512 row cap; `xs_console_format_into` is shared by
+  the publish and assert lanes (its terminator: the helper owns the trailing NUL — an off-by-one
+  memcpy'd prefix swallowed the first assert receipt, caught by the same probe run, fixed in-line).
+  **Probe** (new "Console receipts" battery, `apicon`: pass=8 miss=0 **sent=17**): consolog
+  (5 formatted sends: `%s`, `%d`, `%o`-with-nested-object `{a: 1, b: [7, 8, 9]}`, `%%`, bare
+  5-array `[1, 2, 3, 4, …5]`), consowarn (2), consoerr (2), consoinfo (2), consodebug (1), consolong
+  (268-char payload → the bounded row, no crash), consoassert (falsey fires `Assertion failed:
+  P4ASSERT1 fired number=1` AT ERROR LEVEL with substitution; truthy stays SILENT — the battery
+  also asserts the methods' presence: `assert` + `dir`), consoclean (the panel-clean receipt:
+  `out.children.length` delta ZERO across the whole console storm). **The counts match in the log
+  (the phase bar): the battery's own `P4COUNT 17` row = the JS-side sent counter; the log shows 16
+  `[console.*]` rows + the documented silent truthy assert = 17 sends; `P4NOASSERT` = 0 rows in
+  every run.** Receipts banked: probe ×3 runs (16 rows ×3, tags exactly log/warn/error/info/debug +
+  assert-at-error), jsext 8/0 with its `[jsext-t]` markers now travelling the TAGGED console lane
+  (byte-identical verdict), tap1 `RESULT inPlace=yes jsErrors=0 blocks=23 errCard=1` unchanged, HN
+  `blocks=11 title='Hacker News'` ×2 (links 226 vs standing 225 = one extra link in TODAY's live
+  front-page DOM — fresh and rewalk agree byte-consistently ×4, the engine shape is unchanged;
+  site drift documented, the +1 is content not engine), Bryan `48/18` ×5 + the documented
+  revisit-timer memory abort reproduced as chronic sim-host noise (self-heal at the next fresh
+  render), wiki byte-exact (`census var=5 calc=0 prop=17` first pass, `blocks=324 links=310`,
+  `snap bytes=198815`, the standing revisit-missed noise row present), ev-test
+  `RESULT inPlace=sameDoc jsErrors=0 found=1 input=1 change=1 submit=1 bub=1 btn=1 doc=1` (counter
+  verdict intact; block numbers grew to 46/48/52 because the probe's canvas grew — the tap fence
+  counts counters, not blocks). Render dump cap 40→56 (the probe's whole canvas fits: 52 blocks).
+  Sims killed + counted 0 after every one of the 11 runs. Score 74→76.
+- [x] **API-P5 ES modules** *(M)* — `<script type="module">` through the loader with relative
+  import resolution so `import './x.js'` works. **Done when:** the probe's module rows PASS and the
+  jsext suite is unchanged. **CLOSED (receipted):** the loader-side module lane in jsbridge.c —
+  both scanners flag the element via the shared type-is-module rule (jsext.c's three emission
+  points + the legacy extract loops), and the router swaps the classic run for a C-side transform
+  before any engine sees the source (general-purpose: same lane on every engine, vendored sources
+  untouched). Probe battery: modin (inline module runs), modabs (named bindings from the
+  `about:p5m0` store module), modstar (`* as ns` from `about:p5m1`), and modrefuse (the path-only
+  import on the opaque about: base refuses with the browser's module-specifier semantics — the
+  honest engine error row, `kids=3` proves no leak) → `apimod: kids=3 refuse=PASS` on every
+  render walk. The `file://modpage.html` gate proves the relative bar: `import './p5rel.js'`
+  resolves through the flat file-road join, `p5rel.js` itself imports `./p5rel-child.js`
+  MODULE-relatively (base `file://p5rel.js`), children run before the importer (graph order),
+  `RELA === 7 + RELC` → `modrel: PASS`, `modabout: PASS` (absolute about: import from a file
+  base), `modpage: pass=2 miss=0 kids=2`. jsext **8/0 unchanged**; tap1 `inPlace=yes jsErrors=0
+  blocks=23 errCard=1`, HN `blocks=11 links=226` ×2, Bryan `48/18` (+ the documented chronic
+  abort, self-heals ×4), wiki census `var=5 calc=0 prop=17` / `324/310` / `bytes=198815`, evtest
+  `sameDoc` counters all 1 (the +4 block delta = the module battery itself) — every standing
+  receipt byte-identical. Receipts banked: /tmp/api_p5_{probe,modpage,jsext,tap1,hn,bryan,wiki,
+  evtest,prodboot}.txt. Score 76→82.
+- [x] **API-P6 DOM conveniences** *(M)* — `template.content`, `el.closest()`, `el.dataset`, neighbors.
+  **Done when:** the probe's template/closest/dataset rows PASS and the gates are byte-identical.
+  **CLOSED (receipted):** `template.content` lands with the browser's shape — the builder now CAPTURES
+  `<template>` subtrees (dom.c: the element registers normally and stays reachable — id/querySelector —
+  while its children parse into a DETACHED `#template-content` fragment, parent-NULL ⇒ inert to
+  getElementById, render, census and every tree walk; nodeType 11 on all three engines; `content`
+  materializes an EMPTY fragment on first access for DOM-created templates; nested templates each own
+  a fragment; the free-pass visitor frees the owned detached roots, which also dies the pre-existing
+  per-document shadow-root leak). `el.closest()` rides the same SW5 machinery as the querySelector
+  walk (`css_parse_selector` + `qs_matches`), self-first through element ancestors, null for unusable
+  selectors — wired through jsbridge + all three adapters (an `xs_el_closest` log-after-JFree bug
+  caught in review before first run). `el.dataset` = a fresh camelCase snapshot per access (writes do
+  not write back — `setAttribute` is the browser's road; documented boundary), added to duktape + mujs
+  (XS NR already had it). Append family fixed to the MDN shape on all three engines: appendChild/
+  insertBefore return the child, removeChild returns the removed node. Probe battery (six rows):
+  `tplparsed` (fragment = nodeType 11, 2 children, inner ids intact), `tplinert` (inner ids invisible
+  to getElementById, the template element itself reachable), `tplcreated` (created + empty-fragment
+  mount), `closest` (self + ancestor + id climb + miss ⇒ null), `dataset` (camelCase + live
+  read-back), `appendret` (all three returns identity-true) →
+  `apidom: pass=6 miss=0`, and the P0 `template` MISS flips into `apisum: pass=12 miss=2` (standing
+  `apifetch 4/0`, `apihist 7/0`, `apicon 8/0 sent=17`, `apimod kids=3 refuse=PASS`). THE PHASE'S REAL
+  REPAIR (found while wiring the battery): the adapters' getElementById walks pushed every child at
+  once (O(width)) and ABORTED the whole scan when `top + childCount > 64` — a body with 65+ element
+  children silently hid every later id from getElementById (the probe page itself tipped into this:
+  mid-page ids returned null and scripts 3/4 threw "cannot coerce null to object"). One shared
+  O(depth) `dom_find_by_id` (parent+child-index frames in the free-pass/qs-walk shape, document order,
+  width-proof, `_dN` fallback retained) now serves all three engines, and dom.c's paged-road helpers
+  (`find_first_stub`/`find_id_ram_only`) got the same reframe. Cross-engine smoke on the seam
+  (`PLUTO_NR_AUTOTEST_ENGINE`): mujs 4/6 and duktape 4/6 — every feature row PASSes on both; the two
+  misses are strictly the `!==` wrapper-identity checks (those engines push fresh wrappers per access
+  — the pre-existing shape, now documented; XS NR's per-node wrapper cache keeps identity; duktape's
+  nodeType also gained the fragment rule during the smoke). Gates on the final source: tap1
+  `inPlace=yes jsErrors=0 blocks=23 errCard=1`, jsext 8/0, HN `blocks=10 links=229` ×2 (verified
+  live-content drift: today's HN HTML ships ONE `s.gif` spacer, not two — upstream change, rows
+  identical), Bryan `48/18` (+ the documented chronic abort, self-heals), wiki census
+  `var=5 calc=0 prop=17` / `324/310` / `bytes=198815` — byte-identical — evtest `sameDoc` counters
+  all 1, `blocks=65 (was 61)` = the +4 battery blocks. Parked pre-existing gaps, documented not faked:
+  `className` accessor (the battery uses `setAttribute('class', …)`), storage (Phase 7 lane), workers
+  policy. Receipts banked: /tmp/api_p6_final_{probe,tap,jsext,hn,bryan,wiki,evtest,prodboot}.txt +
+  engine smokes /tmp/api_p6_smoke_{mujs,duk}.txt. Score 82→88.
+- [x] **API-P7 General-purpose localStorage/sessionStorage** *(M)* — **CLOSED 2026-10-20.** One shared
+  road (`Source/html/webstorage.{h,c}`) serves all three engines: adapters bind `localStorage` +
+  `sessionStorage` host objects (XS NR: one proto + two host instances; duktape: per-instance methods
+  + hidden kind prop; mujs: userdata + registry proto) onto the same origin/claim/load/save machine.
+  **Origin rule** (scheme parsed at the FIRST colon — `about:` has no `//`): http(s) → `scheme://authority`
+  host-only (HN's `news.ycombinator.com` and `news.ycombinator.com/` bind the SAME origin — paths never
+  split origins), `file:` → one shared `file://` bucket (WebKit/Chrome parity), `about:` → per-URL
+  bucket (house pages isolated from each other; no foreign site can land there), data:/unknown/empty →
+  the opaque `"null"` origin = fail-store (empty reads, quota-failed writes, never claims a slot),
+  >8 origins in one run → overflow-fail store (each previously-saved section stays on disk and re-loads
+  on a later run). **Caps (documented, browser-shaped):** key ≤56, value ≤192, 16 entries/origin, 8
+  origins resident/run, 4KB advertised per-origin quota (browsers 5MB); both the value-length and the
+  total-bytes refusals throw `QuotaExceededError: per-origin storage quota exceeded` and store nothing.
+  **Persistence:** localStorage per origin in the game Data sandbox (`webstorage_js.txt`, `@origin`
+  sections + TAB-separated escaped lines, one bounded ≤12KB image write per mutation, in-memory image
+  re-adopted after every save so a cleared section can never resurrect from a stale parse); sessionStorage
+  = in-memory per browser run (single-tab model). **Probe receipts (all engines):** `storage: PASS` —
+  roundtrip + remove→null + sessionStorage roundtrip + the quota subtest live on XS, mujs AND duktape:
+  `[webstorage] quota: origin=about:apiprobe want=5134 have=6 cap=4096 key='biggie'` + the `[p7q]
+  QuotaExceededError` console catch row + `getItem('biggie') === null`. `apisum` P0 → **13/1** (only
+  `worker` remains MISS; mujs/duk keep their `9/5` standing untouched). **Cross-boot gold receipt:**
+  the battery's persistent counter — boot 1 `visits=1` writes `p7v 1`; boot 2 reads `bytes=22 entries=1`
+  → `visits=2` → writes `p7v 2`: localStorage survives process death through the same Data road as
+  storage.c. The ledger ran 1→11 across the phase's 11 probe-page boots with every increment accounted.
+  **Battery edits stayed in-place** (no canvas shift) and carried TWO self-caught bug receipts: the
+  origin parse originally required `://` so `about:apiprobe` fell into `"null"` (fixed: first-colon
+  scheme), and the section-header match compared a `\n`-terminated header against newline-less lineLen
+  so loads silently skipped (fixed: strict line equality, `@about:apiprobe2` can never match
+  `@about:apiprobe`). A third engine catch: `new Array(5001).join('x')` aborted the mujs battery
+  silently (engine-meter class) — replaced with 9 concat-doublings, quota receipt intact on all
+  engines. Gates re-run on the final battery: tap1 `inPlace=yes jsErrors=0 blocks=23 errCard=1`
+  byte-identical, jsext 8/0, HN `11/225` ×2 (live-content drift class — counts per era, verified by
+  era), Bryan `48/18` (+ chronic abort self-heal), wiki `var=5 calc=0 prop=17` / `324/310` /
+  `bytes=198815` byte-identical (`origin=file://` receipt), evtest `sameDoc jsErrors=1 (before 1)
+  blocks=65 (was 61)` all counters 1. Production restored + boot-verified (6 heartbeats, no autotest
+  defines, no webstorage rows — home loads no page). Score 88→92.
+- [x] **API-P8 Worker contained-stub lane** *(M)* — **CLOSED 2026-10-20.** The P0-planned
+  "contained-stub policy lane" ships as the honest browser-shaped failure story: a real background
+  thread does not exist inside this browser's single cooperative pump, so the constructor SHIPS
+  (a page doing `new Worker(url)` would otherwise die on a ReferenceError and stop) and every
+  construction behaves exactly like a worker whose script always fails to start. One shared router
+  lane (jsbridge.c `worker_open/get/terminate/post/pump` + `worker_pin`, the same stable-slot +
+  sweep + bracket discipline as timers/XHR) + per-engine adapters: XS NR hosts a rooted prototype
+  with `xsNewHostConstructor` instances (the SW5 constructor-flag finding applied), duktape builds
+  per-instance-method wrapper objects with null handler props, mujs mirrors its userdata-with-box
+  XHR shape; all three pin the wrapper engine-side (`xsRemember` slot; duktape stash heapptr
+  `\xFFpluto.wobj.<id>`; mujs `js_ref` registry key) through `jsbridge_worker_pin` so the pump can
+  reach it next frame. The worker SCRIPT never compiles, is never fetched, never executes:
+  postMessage is absorbed silently (receipted logarithmically — two logged per stub then a single
+  "silently" line, so a post-loop page cannot flood the log), terminate BEFORE delivery cancels the
+  pending error (browser: the load was stopped), after = a no-op. The `error` event fires ONCE at
+  the next pump frame with `ev = {message}` (never synchronously — the failed-script-load analog);
+  the CURRENT onerror is consulted at fire time (browser at-fire semantics — handlers may be
+  (re)assigned after construction); a stub without a callable onerror delivers nothing; every
+  delivery rides the SAME metering/try-catch/abort bracket as the XHR completions (abort → engine
+  reset). Documented caps: 8 stubs resident per page + delivery-less shapes beyond (the page keeps
+  running; logged once). **Probe receipts (all three engines):** `[worker] construct #1
+  url='workerstub.js' (contained stub — script never compiles or runs)` → `[worker] postMessage #1
+  absorbed (stub: data dropped — no thread)` → the battery's `[p8w] worker onerror: the worker
+  script is not running on this device (single-threaded browser: worker stub)` console row →
+  `[worker] onerror delivered #1 present=1`. **`apisum` → `pass=14 miss=0` on XS** (the P0 battery
+  is ALL-PASS at last); mujs and duk flip their `worker` row inside their standing shape
+  (`9/5` → `10/4`, the remaining 4 = the documented frozen-engine rows, `currentscript` among
+  them). Gates re-run on the final source: evtest byte-identical at every stage
+  (`52/56/57/58/59/61/65` with unchanged bytes — `blocks=65 (was 61)`, `[ev-test] PASS` again:
+  input=1 change=1 submit=1 bub=1 btn=1 doc=1), apicon `pass=8 miss=0 sent=17` standing,
+  `storage: PASS` with the quota rows standing, visits ledger 13/14/15/16 accounted (continues
+  1→11 from P7 + 12 from the first P8 sim). The P7 real-page gate receipts (tap1/jsext/HN/Bryan/wiki)
+  remain valid — their pages never render the probe and the lane is additive (a new global +
+  a new pump site; no existing road touched). Receipts banked:
+  /tmp/api_p8_{probe_final,evtest,smoke_mujs,smoke_duk,prod}.txt. Score 92→95.
+- [x] **API-P9 Wrapper identity + className accessor** *(M)* — **CLOSED 2026-10-20.** The two
+  remaining parked DOM-fidelity gaps from P6 land together. **Wrapper identity:** the browser
+  identity model — ONE wrapper object per DOM node for the page's whole life — now holds on
+  EVERY engine. A bridge-scoped per-node cache (`JsElwEntry elw[JSBRIDGE_ELW_MAX=128]` +
+  `elwCount/elwOverflow` in jsbridge_internal.h; the bridge is memset(0) per page attach, so the
+  cache is fresh per page) consults each engine's element factory before building: a hit pushes
+  the cached wrapper, a miss builds fresh + pins it engine-side. Engine-held refs per the
+  established pin contracts: mujs = a `js_ref` registry key (stable interned object key; popped
+  dup; unref'd at page close in the listener-loop precedent), duktape = a heapptr whose only
+  strong ref lives in the global stash under the hidden key `pluto.elw.<i>` (i = the entry
+  index; the heap dies with the engine at page close, as documented), XS NR = untouched (its
+  own P1-lane state arrays + xsRemember slots). The cache is aliasing-safe within a page:
+  `dom_remove_child` DETACHES nodes (never frees), so a node pointer stays unique for the
+  page's life; the whole DOM frees with the doc, after the engine close. Beyond cap = honest
+  degradation (logged once: fresh wrappers from there on — none of the gates hit it). **className
+  accessor:** the P6 parked gap closes on all three engines — reads map 1:1 onto the `class`
+  attribute (never NULL; `dom_get_attr` at each adapter), writes ride ONE shared road in
+  jsbridge.c (`jsbridge_el_class_set`: router owns the single budget charge, then the
+  classList family's `cls_before`/`cls_after` snapshot/dirty-receipt pair — rewalks and the
+  transition-lane note see it exactly like `setAttribute('class')`, whose store is identical).
+  **Battery:** apidom gains its 7th row `classnames` in place (setter + read-back, the
+  `getAttribute('class')` mirror, a rewrite, and the setAttribute reverse-mirror) — 6→7, no
+  reorder of the standing six; the identity rows needed no battery change. **Probe receipts
+  (all three engines):** `closest: PASS` (mujs/duk were `MISS:badup` — fresh ancestor wrappers),
+  `appendret: PASS` (mujs/duk were `MISS` — fresh return wrappers), `classnames: PASS`,
+  `apidom: pass=7 miss=0` (mujs/duk were `4/2`; XS was `6/0`); standing everywhere:
+  `apisum: pass=14 miss=0` on XS, `pass=10 miss=4` on mujs/duk (the documented frozen-engine
+  rows, `currentscript` among them), worker chain (`[p8w]` + `delivered #1 present=1`),
+  apicon `pass=8 miss=0 sent=17`, `storage: PASS` + quota rows, visits ledger 17/18/19/20
+  accounted (continues 1→16 + the four P9 gate boots). Gates re-run on the final source:
+  evtest `[ev-test] PASS` with every stage exactly +1 block (`53/57/58/59/60/62/66` — the
+  classnames row; counters input=1 change=1 submit=1 bub=1 btn=1 doc=1, `jsErrors=1 (before 1)`
+  unchanged), probe `apisum 14/0` + apidom `7/0` (three engine builds), production restored +
+  boot-verified (5 heartbeats, no autotest rows). Receipts banked:
+  /tmp/api_p9_{probe_final,evtest,smoke_mujs,smoke_duk,prod}.txt. Score 95→96.
+- **Honest non-features (contained stubs + documented policy names):** service workers, IndexedDB
+  stay told "not available on this device" and the page keeps running; workers are no longer a
+  pure refusal — the contained-stub lane ships the constructor + the standard onerror receipt
+  path (API-P8 above).
+- **Goal:** ~50% → ~85%, with the non-features policy-documented rather than faked.
 
 ## Update log
 
@@ -550,3 +896,166 @@ Legend: `[ ]` open / `[~]` in progress / `[x]` done (receipts logged below).
   transitions need a walk-visible attr gate (JS-set styles are
   house-registered separately), and partially-filled class names
   score as full-name matches by the resolver's registry-first policy.
+
+### 2026-10-19 — API-P3 the page's own address CLOSED (68→74)
+  The engine's address book: the bridge journal (`histUrl[8][260]`,
+  doc-base entry 0 seeded lazily) written by real
+  pushState/replaceState (same-origin head guard, browser-faithful
+  fragment/query/path/opaque-about resolution in the new
+  `jsbridge_hist_resolve_url` — the resolver taught url_parse's about:
+  branch its query/hash compartments, network pages uninvolved),
+  read by NINE live location getters (the bridge-time snapshot gone),
+  walked by back/forward/go (clamped), and latched into
+  popstate/hashchange deliveries that run at the next engine-pump
+  frame through the metered xsTry listener call. pushState is
+  STRUCTURALLY wire-free: no http_* call, no pendingNav, no app-bar
+  change — the router layer is uninvolved by construction.
+  document.title's setter went browser-faithful (dom_set_text replaces
+  the title node's text; the old append glued 'API Probe'+'Pluto J3').
+  Probe receipt `apihist: pass=7 miss=0` ×N rewarks (apisum 11/3 and
+  apifetch 4/0 byte-identical alongside); engine rows banked in
+  `/tmp/api_p3_probe.txt`. Gates: jsext 8/0, tap1 byte-identical, HN
+  11/225 ×2 (#79/#166), Bryan 48/18 ×5, Wikipedia twin
+  census/propnames/324-310/bytes=198815 byte-exact, ev-test PASS
+  (sameDoc, counters 1 each). Sim-host observation kept on the record:
+  a Bryan-revisit-boundary timer aborts on the memory envelope and the
+  engine resets (chronic ×2 runs, same frame; self-healed ×5 metrics
+  before any journal/delivery code could be involved). Probe dump cap
+  24→40 in the sim-only seam. Production build restored + boot-verified;
+  sims killed after every run (11 runs, count verified 0); device
+  untouched; git user-locked.
+
+### 2026-10-19 — API-P4 console.log/warn/error CLOSED (74→76)
+  The console surface became the real log lane on the NR engine:
+  log/info/debug/warn/error each tag their own `[console.*]` row in
+  the file (the receipt surface, device truth; the rendered panel
+  never changes from a console call — the probe's consoclean row
+  asserts that honestly: `out.children.length` delta ZERO across the
+  whole console storm), printf substitution rides the first string
+  arg (%s/%d/%i/%f to String, %o/%O/%j the console shape, %c consumes
+  silently, %% literal, an out-of-args token prints literally like
+  Chrome, extras append space-separated), objects/arrays render the
+  console shape (top-level strings bare, nested quoted, arrays
+  `[a, b, …n]` with 4 shown, objects `{k: v, …}` with 6
+  own-enumerable keys from the engine's own iterator, `[Function]`/
+  `[Object]` labels, depth 2 with bounded bytes, cycle-safe by depth
+  construction), and console.assert owns browser semantics: truthy =
+  SILENT (no row), falsey = an ERROR row ('Assertion failed: …'
+  through the same substitution lane), never throws. info/debug/dir
+  are real methods now; count, the group family, time and trace stay
+  deliberately absent (documented boundary — an unknown method stays
+  unknown, no fake surface). Engine-carried notes: array elements
+  read via xsGetIndex and object values via xsGetAt(keySlot) —
+  fxNewNameC interns plain names, so string-built "0" ids miss the
+  index flavor (caught by the fixture: `[7, 8, 9]` rendered
+  `[undefined, undefined, undefined]` in v1; exact after the fix);
+  the shared xs_console_format_into owns its trailing NUL (an
+  off-by-one memcpy'd prefix swallowed the first assert receipt —
+  caught and fixed in-line by the same probe run); line budget 320
+  vs the logger's 512 row cap. Probe "Console receipts" battery
+  `apicon: pass=8 miss=0 sent=17` — consolog/consowarn/consoerr/
+  consoinfo/consodebug/consolong/consoassert/consoclean all PASS;
+  the log-side counts MATCH: 16 `[console.*]` rows + `P4COUNT 17` +
+  the documented silent truthy assert (`P4NOASSERT` = 0 rows in
+  every run). Gates: jsext 8/0 with its `[jsext-t]` markers now
+  travelling the tagged lane (byte-identical verdict); tap1
+  byte-identical (`inPlace=yes jsErrors=0 blocks=23 errCard=1`); HN
+  blocks=11 ×2 (links 226 vs the standing 225 = one extra link in
+  today's live front-page DOM — fresh==rewalk byte-consistently ×4;
+  site drift documented, engine shape unchanged); Bryan 48/18 ×5
+  (+1) with the documented chronic revisit-timer memory abort
+  reproduced as sim-host noise (self-heal at the next fresh render);
+  wiki byte-exact (census var=5 calc=0 prop=17, 324/310, snap
+  bytes=198815, the standing revisit-missed noise row present);
+  ev-test PASS (sameDoc, counters 1 each; block numbers grew to
+  46/48/52 as the probe's canvas grew — the fence counts counters).
+  Probe dump cap 40→56 in the sim seam (the 52-block canvas fits).
+  Receipts banked: /tmp/api_p4_{probe,jsext,tap1,hn,bryan,bryan2,
+  wiki,evtest}.txt. Production build restored + boot-verified; sims
+  killed after every run (11 runs, count verified 0); device
+  untouched; git user-locked.
+- 2026-10-20 — **API-P5 ES modules closed** (~76→82). The loader-side
+  module lane: both scanners flag `<script type="module">` (the shared
+  type-is-module rule walks the type attribute — data filtered first so
+  the proven data filter stays byte-identical), the router transforms
+  import/export in C before any engine sees the source (IIFE module
+  scope, import-first graph on the per-document ledger with cycle/
+  depth/cap receipts, `globalThis.__p5mod` namespaces, named/default/
+  star import forms, static export kinds materialized post-body);
+  imports resolve module-relatively through url_resolve (the journal's
+  resolver — the opaque-about refusal is the SAME rule browsers apply)
+  and fetch on the page's own roads: about: = the internal store, file:
+  = the Data-dir loader rule + the flat file-road join. Probe: `apimod:
+  kids=3 refuse=PASS`; the `./p5x.js` import throws its honest load
+  error (MODX-LEAK absent). Relative bar: file://modpage.html →
+  `./p5rel.js` → `./p5rel-child.js` (nested, module-relative base),
+  children import-first, `modpage: pass=2 miss=0 kids=2`. jsext 8/0;
+  tap1/HN/Bryan/wiki/evtest byte-identical (Bryan's chronic abort
+  self-heals as documented; evtest +4 blocks = the module battery).
+  Production build restored + boot-verified (heartbeats, heap clean).
+  Receipts: /tmp/api_p5_{probe,modpage,jsext,tap1,hn,bryan,wiki,
+  evtest,prodboot}.txt — 10 sim runs this phase, every process killed
+  and count-verified 0; device untouched; git user-locked.
+- 2026-10-20 — **API-P6 DOM conveniences closed** (~82→88).
+  `template.content` = browser shape (builder capture: the template
+  element stays reachable while its children parse into the detached
+  `#template-content` fragment — nodeType 11, parent-NULL/inert; empty
+  fragment on first access for created templates; free-pass visitor
+  frees owned detached roots, also killing the per-document shadow-root
+  leak). `el.closest()` rides the shared `css_parse_selector` +
+  `qs_matches` machinery on every engine; `el.dataset` snapshot getter
+  added to duktape + mujs; append family returns the touched node per
+  MDN. Probe battery `apidom: pass=6 miss=0` + `apisum: pass=12 miss=2`
+  (the P0 `template` row flips PASS). The phase's real repair: the
+  adapters' O(width) getElementById walks aborted whole at 65+ element
+  children (the probe shipped exactly that — mid-page ids went null);
+  one shared O(depth) `dom_find_by_id` now serves all engines, document
+  order, width-proof (dom.c paged-road helpers got the same reframe).
+  Cross-engine smokes (PLUTO_NR_AUTOTEST_ENGINE seam): mujs 4/6, duktape
+  4/6 — feature rows all PASS; the two misses are the pre-existing
+  fresh-wrapper `!==` identity shape (documented; XS NR keeps identity
+  via its cache; duktape's nodeType gained the fragment rule in the
+  smoke). Seven gates re-run + banked on the final source: tap1
+  `inPlace=yes jsErrors=0 blocks=23 errCard=1`, jsext 8/0, HN `10/229` ×2
+  (upstream drift verified: one `s.gif` spacer in today's HTML, not two),
+  Bryan `48/18` (+ chronic abort self-heal), wiki `var=5 calc=0 prop=17`
+  / `324/310` / `bytes=198815`, evtest `sameDoc` all 1 with `blocks=65
+  (was 61)`. Production restored + boot-verified (fps 50/60 heartbeats,
+  heap 43KB, no autotest defines). Parked gaps documented: className
+  accessor, wrapper identity (mujs/duk), storage = Phase 7 lane.
+  Receipts: /tmp/api_p6_final_{probe,tap,jsext,hn,bryan,wiki,evtest,
+  prodboot}.txt + /tmp/api_p6_smoke_{mujs,duk}.txt — 33 sim launches
+  this phase (gate/rerun/smoke + diagnostic iterations), every process
+  killed and count-verified 0; device untouched; git user-locked.
+  Operational lesson banked for every future phase: make tracks source
+  mtimes, NOT define flags — SIMDEFS changes are inert until forced
+  (touch all sources + `rm -f build/pdex.dylib` before every gate
+  build); the build log's clang line is the only trustworthy receipt
+  that a define landed.
+- **2026-10-20 (Phase 7 CLOSED)** — General-purpose localStorage +
+  sessionStorage (API-P7). Shared road `Source/html/webstorage.{h,c}`
+  + per-engine adapters; origin rule = scheme at the first colon
+  (`http(s)://authority`, one `file://` bucket, per-URL `about:`,
+  opaque `"null"` fail-store, 8 origins resident/run → overflow
+  fail-store with disk sections intact); caps 56/192/16-entries/4KB
+  quota, refusals throw `QuotaExceededError` and store nothing;
+  persistence via `webstorage_js.txt` `@origin` sections in the game
+  Data sandbox (image rebuilt + re-adopted per save, cleared sections
+  never resurrect); sessionStorage = per-run memory. Probe `storage:
+  PASS` across XS/mujs/duktape with the LIVE quota receipt
+  (`want=5134 have=6 cap=4096` + `[p7q] QuotaExceededError` console
+  row), `apisum` 13/1 (only `worker` MISS), standing cross-boot
+  counter `visits` 1→11 across 11 probe boots (boot 2 = the
+  persistence gold receipt: `entries=1` loaded, `p7v 2` written).
+  Self-caught in-phase receipts: `://`-only origin parse bug (about:
+  fell to "null"), newline-suffixed section-header match never firing
+  (strict line equality now), and mujs's silent abort on `new
+  Array(5001).join()` (replaced with concat-doubling). Gates:
+  tap1/jsext/HN/Bryan/wiki banked (HN `11/225` = era drift), evtest
+  re-run byte-identical `blocks=65 (was 61)`. Production restored +
+  boot-verified (6 heartbeats, zero autotest defines, zero webstorage
+  rows on home). Receipts: /tmp/api_p7_probe_final.txt +
+  /tmp/api_p7_probe_persist.txt + /tmp/api_p7_{tap,jsext,hn,bryan,
+  wiki}.txt + /tmp/api_p7_evtest_final.txt +
+  /tmp/api_p7_smoke_{mujs,duk}_final.txt + /tmp/api_p7_prod.txt.
+  Score 88→92. Device untouched; git user-locked.

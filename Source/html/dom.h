@@ -5,9 +5,13 @@
  * Converts the flat token stream from the tokenizer into a lightweight DOM
  * tree with the Lua reference's simplified WHATWG rules preserved exactly:
  *   - VOID elements never get children/closing tags.
- *   - SKIP_SUBTREE (template/head/selectedcontent) drops the whole subtree
- *     until the matching close tag, with the reference's 500-token safety
+ *   - SKIP_SUBTREE (selectedcontent today) drops the whole subtree until
+ *     the matching close tag, with the reference's 500-token safety
  *     valve quirk preserved (reset WITHOUT consuming the token).
+ *     <template> is handled separately since API-P6: the element stays
+ *     in the tree (id/querySelector reach) while its children parse
+ *     into a DETACHED content fragment (browser-faithful inert content;
+ *     see the templateContent field + dom.c's builder branch).
  *   - implied end tags: p (before blocks), li, dt/dd, tr/row-sections,
  *     td/th, option; stray elements dropped per the reference helpers.
  *   - nested <a> closes the outer anchor.
@@ -39,6 +43,18 @@ typedef enum
 } DomKind;
 
 typedef struct DomNode DomNode;
+
+/* Iterative depth-capped scan frame (the house shape: parent + child
+ * index held instead of pushing every child at once — the old push-all
+ * shape's peak was top + WIDTH at the widest node, so a body with 65+
+ * element children truncated the whole scan at DOM_SEARCH_MAX_DEPTH and
+ * silently hid every later id from getElementById). Kept beside the cap
+ * so every scan picks the same rules. */
+typedef struct
+{
+    DomNode *node;
+    int nextChild;
+} DomScanFrame;
 
 typedef struct
 {
@@ -83,6 +99,16 @@ struct DomNode
      * detached fragment, so frozen engines are untouched. */
     DomNode *shadowRoot; /* on the HOST element: its open shadow root */
     DomNode *shadowHost; /* on the SHADOW ROOT node: owning element */
+    /* API-P6: <template> content — a DETACHED fragment node (parent
+     * NULL, tag "#template-content") owned by the template element.
+     * Browser-faithful inert content: the parsed children never reach
+     * the render tree, the id lookup or any parent-connected walk, while
+     * the element itself stays reachable (id/querySelector like any
+     * browser). NULL until a parsed template fills it in the builder or
+     * a created template materializes it lazily (dom_template_content).
+     * Freed with the document: dom_free_result walks these owned
+     * detached roots first (this covers the shadow roots too). */
+    DomNode *templateContent; /* on the TEMPLATE element: its fragment */
 };
 
 /* Phase 10 dedupe-map cap: 24 completed (element, animation-name) pairs per
@@ -276,7 +302,24 @@ DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
                                   const char *sel, char *scratch,
                                   size_t scratchSize);
 
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors; first match wins, NULL = no match. Same parse + matcher
+ * as dom_query_selector_first (one scratch rule, same shapes). */
+DomNode *dom_closest(const DomResult *dom, DomNode *start, const char *sel,
+                     char *scratch, size_t scratchSize);
 
+/* ── API-P6: <template>.content — the element's detached content
+ * fragment (materialized empty on first access for created templates).
+ * NULL for a non-template element or on allocation failure. */
+DomNode *dom_template_content(DomResult *dom, DomNode *el);
+
+/* ── API-P6: document.getElementById road — ONE shared O(depth) scan the
+ * engine adapters all call (the push-all-children copies that predate this
+ * aborted their whole walk once a node held 65+ element children — a wide
+ * body silently hid every later id from getElementById). Document order,
+ * elements only, depth capped at DOM_SEARCH_MAX_DEPTH; width never
+ * truncates. Falls back to the runtime _dN node-id road. */
+DomNode *dom_find_by_id(DomResult *dom, const char *id);
 
 /* Release all storage owned by a DomResult (tree, attrs, arena). */
 void dom_free_result(DomResult *res);

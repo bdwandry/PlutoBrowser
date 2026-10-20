@@ -796,6 +796,11 @@ static void js_timers_update(void)
      * this frame by http_update; completions it settled are pending here). */
     int xhrMutations = 0;
     (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    /* API-P8: worker stub error deliveries — the same frame-later analog
+     * of a failed script load; never fires inside the constructing script. */
+    int wkMutations = 0;
+    (void)jsbridge_worker_pump(g_pageJs, &wkMutations);
+    xhrMutations = xhrMutations || wkMutations;
     /* innerHTML wrapper assignments (XS (No Recursion)): the shared
      * engines never set the latch, so the extra take is a no-op for
      * them. Swap the layout to the fresh subtree (fallback restore swaps
@@ -1967,6 +1972,225 @@ static void nr_autotest_tap_tick(void)
 #endif /* PLUTO_NR_AUTOTEST_TAP */
 #endif /* PLUTO_NR_AUTOTEST */
 
+#if defined(PLUTO_EV_AUTOTEST)
+/* [ev-test]: API-P1 event-battery driver (sim only; build with URL-mode
+ * navigated to about:apiprobe). The probe's Events battery registers real
+ * handlers on its own fixture (#evf/#evi/#evb + document-level rows); this
+ * machine then drives the REAL pipeline: one form_key_write commit (input +
+ * change dispatch), then activate_form_block on the probe's stamped submit
+ * button (the tap → click-dispatch → form-submit-dispatch chain, B5
+ * activation order). Verdict = the page's own counters painted into the
+ * "apisev:" sum row (parsed from the re-walked blocks) + doc-pointer
+ * identity: the form's submit handler calls preventDefault() so the
+ * pipeline must branch at JSB_EVENT_SUPPRESSED into the live re-walk
+ * (sameDoc) instead of submit_form's reload (newDoc — a reload rebuilds
+ * the doc from markup, counters zeroed, field value reverted to "seed").
+ * No engine change: this driver only OBSERVES the event lanes API-P1
+ * verifies. */
+static int g_evPhase = 0; /* 0=settle, 1=type, 2=press, 3=verdict, 4=done */
+static unsigned g_evFrames = 0;
+static int g_evErrsBefore = 0;
+static DocParseResult *g_evDocBefore = NULL;
+static int g_evBlocksBefore = -1;
+
+static void ev_type_pass(void)
+{
+    const LayoutItem *f = NULL;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->type == LRI_INPUT_FIELD && it->name && it->inputType &&
+            strcmp(it->inputType, "text") == 0)
+        {
+            f = it;
+            break;
+        }
+    }
+    if (!f)
+    {
+        logger_log("[ev-test] FAIL: no text field item on the probe page");
+        g_evPhase = 4;
+        return;
+    }
+    logger_log("[ev-test] type: name='%s' inputType=%s placeholder='%.16s'",
+               f->name, f->inputType, f->placeholder ? f->placeholder : "");
+    form_key_snapshot(f);
+    form_key_write("pluto", 1 /* commit → input + change dispatch */);
+    g_evPhase = 2;
+    g_evFrames = 0;
+    /* next tick: fresh scan after the dispatched handlers' re-walk settles */
+}
+
+static void ev_press_pass(void)
+{
+    const LayoutItem *target = NULL;
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->type == LRI_INPUT_SUBMIT && it->block &&
+            ((const DocBlock *)it->block)->srcNode &&
+            form_node_ancestor(
+                (DomNode *)((const DocBlock *)it->block)->srcNode))
+        {
+            target = it;
+            break;
+        }
+    }
+    if (!target)
+    {
+        logger_log("[ev-test] FAIL: no stamped form submit button");
+        g_evPhase = 4;
+        return;
+    }
+    DomNode *src = (DomNode *)((const DocBlock *)target->block)->srcNode;
+    g_evDocBefore = currentDoc;
+    g_evBlocksBefore = currentDoc->blockCount;
+    g_evErrsBefore = currentDoc->jsErrors;
+    logger_log("[ev-test] press: submitting via activate_form_block "
+               "tag=%s blocks=%d",
+               src->tag ? src->tag : "?", g_evBlocksBefore);
+    activate_form_block(target); /* click + submit dispatch (B5 order) */
+    g_evPhase = 3;
+    g_evFrames = 0;
+}
+
+/* Scan the live blocks for the battery's sum row and parse its counters. */
+static int ev_blocks_parse_sum(int *nin, int *nchg, int *nsub, int *nbub,
+                               int *nbtn, int *ndoc)
+{
+    if (!currentDoc || !currentDoc->blocks)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk)
+        {
+            continue;
+        }
+        char text[160];
+        size_t off = 0;
+        text[0] = '\0';
+        for (int ii = 0; ii < blk->inlineCount && off < sizeof(text) - 1;
+             ii++)
+        {
+            const char *t = (blk->inlines[ii] && blk->inlines[ii]->text)
+                                ? blk->inlines[ii]->text
+                                : "";
+            size_t tl = strlen(t);
+            if (tl > sizeof(text) - 1 - off)
+            {
+                tl = sizeof(text) - 1 - off;
+            }
+            memcpy(text + off, t, tl);
+            off += tl;
+        }
+        text[off] = '\0';
+        const char *p = strstr(text, "apisev: input=");
+        if (!p)
+        {
+            continue;
+        }
+        if (sscanf(p, "apisev: input=%d change=%d submit=%d bub=%d "
+                       "btn=%d doc=%d",
+                   nin, nchg, nsub, nbub, nbtn, ndoc) == 6)
+        {
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void ev_verdict(void)
+{
+    int nin = -1, nchg = -1, nsub = -1, nbub = -1, nbtn = -1, ndoc = -1;
+    int found = ev_blocks_parse_sum(&nin, &nchg, &nsub, &nbub, &nbtn, &ndoc);
+    int sameDoc = currentDoc == g_evDocBefore;
+    int all = found && nin >= 1 && nchg >= 1 && nsub >= 1 && nbub >= 1 &&
+              nbtn >= 1 && ndoc >= 1;
+    logger_log("[ev-test] RESULT inPlace=%s jsErrors=%d (before %d) "
+               "blocks=%d (was %d) found=%d input=%d change=%d submit=%d "
+               "bub=%d btn=%d doc=%d",
+               sameDoc ? "sameDoc" : "newDoc",
+               currentDoc ? currentDoc->jsErrors : -1, g_evErrsBefore,
+               currentDoc ? currentDoc->blockCount : -1, g_evBlocksBefore,
+               found, nin, nchg, nsub, nbub, nbtn, ndoc);
+    if (all && sameDoc)
+    {
+        logger_log("[ev-test] PASS: input+change+submit all delivered, "
+                   "bubbling rows counted at document level, pd honored "
+                   "(suppress re-walk, no reload)");
+    }
+    else if (!sameDoc)
+    {
+        logger_log("[ev-test] FAIL: doc replaced after submit press — "
+                   "preventDefault did not own the default action");
+    }
+    else
+    {
+        logger_log("[ev-test] FAIL: counters incomplete (found=%d)", found);
+    }
+    g_evPhase = 4;
+}
+
+static void ev_autotest_tick(void)
+{
+    if (g_evPhase == 4 || isRendering)
+    {
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc || !g_pageJs)
+    {
+        g_evFrames = 0; /* boot nav still in flight */
+        return;
+    }
+    ++g_evFrames;
+    if (g_evPhase == 0)
+    {
+        if (jsbridge_eval_pending(g_pageJs))
+        {
+            if (g_evFrames > 3600)
+            {
+                logger_log("[ev-test] FAIL: eval never completed");
+                g_evPhase = 4;
+            }
+            return;
+        }
+        if (g_evFrames < 360)
+        {
+            return; /* settle: the battery scripts finish their pumps */
+        }
+        g_evPhase = 1;
+        g_evFrames = 0;
+        g_evErrsBefore = currentDoc->jsErrors;
+        logger_log("[ev-test] phase 1: typing one commit into the probe "
+                   "field (url=%.70s blocks=%d)",
+                   currentDoc->baseUrl, currentDoc->blockCount);
+        return;
+    }
+    if (g_evPhase == 1)
+    {
+        ev_type_pass();
+        return;
+    }
+    if (g_evPhase == 2)
+    {
+        ev_press_pass();
+        return;
+    }
+    if (g_evPhase == 3)
+    {
+        if (g_evFrames < 120)
+        {
+            return; /* let the submit handlers' re-walks land */
+        }
+        ev_verdict();
+    }
+}
+#endif /* PLUTO_EV_AUTOTEST */
+
 /* Static error buffer: tasks fire onError(data) with the task's data pointer
  * (see tasks.c), so the real message travels through this side channel. */
 static char g_renderErrMsg[192];
@@ -2225,7 +2449,7 @@ static void home_test_autotest_tick(void)
          * navigation path. Steer with the CRANK (one reading-order step
          * per call, clamps at the last selectable item — no skipped
          * indices, always terminates). */
-        int target = 1 + storage_bookmark_count() + 5;
+        int target = 1 + storage_bookmark_count() + 6;
         if (home_page_selected_index() != target && g_homeTestPresses < 40)
         {
             home_page_handle_crank(HOME_CRANK_STEP_PX);
@@ -2265,8 +2489,8 @@ static void home_test_autotest_tick(void)
     {
         const HttpTestPage *pages = NULL;
         http_test_pages(&pages);
-        const char *want = (pages && pages[5].name) ? pages[5].name
-                                                    : "about:cssprobe";
+        const char *want = (pages && pages[6].name) ? pages[6].name
+                                                    : "about:apiprobe";
         if (currentDoc->baseUrl && strcmp(currentDoc->baseUrl, want) == 0)
         {
             logger_log("[hometest-autotest] PASS: Test Cases card opened %s "
@@ -4202,7 +4426,11 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     {
         return;
     }
-    int shown = doc->blockCount < 24 ? doc->blockCount : 24;
+    int shown = doc->blockCount < 64 ? doc->blockCount : 64; /* API-P3: the
+     * address battery paints deep (blocks 24+); API-P4 adds the console
+     * battery (9 more rows); API-P6 adds the DOM-conveniences battery
+     * (6 rows + header + fixture) — the probe dump wants the whole
+     * canvas */
     for (int bi = 0; bi < shown; bi++)
     {
         DocBlock *blk = doc->blocks[bi];
@@ -7574,6 +7802,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_NR_AUTOTEST_TAP)
     nr_autotest_tap_tick();
+#endif
+
+#if defined(PLUTO_EV_AUTOTEST) && defined(PLUTO_NR_AUTOTEST)
+    ev_autotest_tick();
 #endif
 
 #if defined(PLUTO_PAGE_AUTOTEST)

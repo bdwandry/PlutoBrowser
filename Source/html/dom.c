@@ -174,13 +174,13 @@ static int is_skip_subtree(const char *tag)
     /* R17: <head> is no longer skipped — its metadata children (<link>,
      * <meta>, <base>) must exist in the DOM because pages address them by
      * id (favicon swaps, canonical-link updates) and getElementById must
-     * find them like any browser. The render walker already no-ops these
-     * tags, so nothing leaks into the visual page. <template> stays skipped
-     * (inert content per HTML spec — browsers keep it out of getElementById
-     * reach too). */
+     * find them like any browser. API-P6: <template> left this table —
+     * the builder keeps the element (browsers reach it by id and
+     * querySelector) and parses its children into the element's DETACHED
+     * content fragment (the browser's inert content; see the builder's
+     * template branch). */
     (void)tag;
-    return strcmp(tag, "template") == 0 ||
-           strcmp(tag, "selectedcontent") == 0;
+    return strcmp(tag, "selectedcontent") == 0;
 }
 
 /* Legacy void elements (WHATWG §13.1.2, non-conforming-but-void list):
@@ -698,7 +698,32 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
             const char *tag = tok->name ? tok->name : "";
             if (tok->isClosing)
             {
-                if (!is_void(tag) && !is_legacy_void(tag) && !is_skip_subtree(tag))
+                if (strcmp(tag, "template") == 0)
+                {
+                    /* API-P6: pop back through the TOPMOST open content
+                     * fragment (the innermost open template). A stray
+                     * </template> with no open template stays ignored —
+                     * the old skip behavior's inertness for malformed
+                     * markup. Elements that never closed inside the
+                     * content stay owned by the fragment (their parent
+                     * pointers keep them attached through it). */
+                    int fragTop = -1;
+                    for (int d = stack.count - 1; d > 0; d--)
+                    {
+                        DomNode *dn = stack.items[d];
+                        if (dn->tag && strcmp(dn->tag, "#template-content") == 0)
+                        {
+                            fragTop = d;
+                            break;
+                        }
+                    }
+                    if (fragTop > 0)
+                    {
+                        stack.count = fragTop;
+                    }
+                }
+                else if (!is_void(tag) && !is_legacy_void(tag) &&
+                         !is_skip_subtree(tag))
                 {
                     pop_to_tag(&stack, tag);
                 }
@@ -717,6 +742,54 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
                 {
                     skipDepth = 1;
                     skipTag = tag;
+                }
+                else if (strcmp(tag, "template") == 0)
+                {
+                    /* API-P6: <template> keeps its ELEMENT (browsers
+                     * reach it by id/querySelector — the old behavior
+                     * dropped it whole) but its children parse into a
+                     * DETACHED content fragment: parent NULL keeps them
+                     * out of the render tree, the id lookup, the census
+                     * and every parent-connected walk — the browser's
+                     * inert content, byte-identical rendering. The
+                     * fragment rides the builder stack as the append
+                     * target; the matching close pops back through it,
+                     * and NESTED templates each push their own fragment
+                     * (an inner </template> pops only to the topmost
+                     * fragment). */
+                    DomNode *el = node_new();
+                    if (!el)
+                    {
+                        goto fail;
+                    }
+                    el->kind = DOM_ELEMENT;
+                    el->tag = arena_dup(arena, tag, strlen(tag));
+                    el->parent = stack.items[stack.count - 1];
+                    if (!el->tag || copy_attrs(el, tok, arena) != 0 ||
+                        node_append_child(stack.items[stack.count - 1], el) != 0)
+                    {
+                        goto fail;
+                    }
+                    count++;
+                    out->elemNodes++;
+                    DomNode *frag = node_new();
+                    if (!frag)
+                    {
+                        goto fail;
+                    }
+                    frag->kind = DOM_ELEMENT;
+                    frag->tag = arena_dup(arena, "#template-content", 17);
+                    if (!frag->tag)
+                    {
+                        goto fail;
+                    }
+                    frag->parent = NULL; /* detached: inert by construction */
+                    el->templateContent = frag;
+                    if (stack_push(&stack, frag) != 0)
+                    {
+                        goto fail;
+                    }
+                    count++;
                 }
                 else if (is_void(tag) || is_legacy_void(tag))
                 {
@@ -1021,6 +1094,65 @@ int dom_node_id(const DomResult *dom, DomNode *node)
     return node->nodeId;
 }
 
+/* ── API-P6: document.getElementById road — ONE shared O(depth) scan used
+ * by every engine adapter (the push-all-children copies that predate this
+ * truncated their whole walk once a body held 65+ element children and the
+ * id path silently returned null for every later section; the probe page
+ * shipped exactly that shape). Document-order (children 0..N-1), elements
+ * only, depth capped at DOM_SEARCH_MAX_DEPTH — width never truncates.
+ * Falls back to the runtime _dN node-id road exactly like the adapters
+ * did. */
+DomNode *dom_find_by_id(DomResult *dom, const char *id)
+{
+    if (!dom || !dom->root || !id)
+    {
+        return NULL;
+    }
+    DomNode *hit = NULL;
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
+    int top = 0;
+    frames[0].node = dom->root;
+    frames[0].nextChild = 0;
+    while (top >= 0 && !hit)
+    {
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->kind == DOM_ELEMENT)
+        {
+            const char *v = dom_get_attr(n, "id");
+            if (v && strcmp(v, id) == 0)
+            {
+                hit = n;
+                break;
+            }
+        }
+        if (frames[top].nextChild >= n->childCount)
+        {
+            top--;
+            continue;
+        }
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
+        {
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        /* deeper than the cap: that subtree stays unreachable (same
+         * contract as before) — but the WIDTH no longer truncates wide
+         * bodies, which is what bit the probe page. */
+    }
+    if (!hit && id[0] == '_' && id[1] == 'd')
+    {
+        hit = dom_node_by_id(dom, atoi(id + 2));
+    }
+    return hit;
+}
+
 /* First stub (pagedKey != 0) in the tree, iterative. */
 static DomNode *find_first_stub(DomNode *root)
 {
@@ -1028,23 +1160,37 @@ static DomNode *find_first_stub(DomNode *root)
     {
         return NULL;
     }
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
     int top = 0;
-    stack[top++] = root;
-    while (top > 0)
+    frames[0].node = root;
+    frames[0].nextChild = 0;
+    while (top >= 0)
     {
-        DomNode *n = stack[--top];
-        if (n->pagedKey)
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->pagedKey)
         {
             return n;
         }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
+        if (frames[top].nextChild >= n->childCount)
         {
-            return NULL;
+            top--;
+            continue;
         }
-        for (int i = 0; i < n->childCount; i++)
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
         {
-            stack[top++] = n->children[i];
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        else if (c->pagedKey)
+        {
+            return c; /* depth cap: this wide subtree's own stub still counts */
         }
     }
     return NULL;
@@ -1054,27 +1200,41 @@ static DomNode *find_first_stub(DomNode *root)
  * any paged-out stubs (the common case stays zero-flash-cost). */
 static DomNode *find_id_ram_only(DomResult *dom, int id)
 {
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
     int top = 0;
-    stack[top++] = dom->root;
-    while (top > 0)
+    frames[0].node = dom->root;
+    frames[0].nextChild = 0;
+    while (top >= 0)
     {
-        DomNode *n = stack[--top];
-        if (n->pagedKey)
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->pagedKey)
         {
             continue; /* stub: skip (its restored children keep their ids) */
         }
-        if (n->nodeId == id)
+        if (frames[top].nextChild == 0 && n->nodeId == id)
         {
             return n;
         }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
+        if (frames[top].nextChild >= n->childCount)
         {
-            return NULL; /* pathological breadth; give up rather than grow */
+            top--;
+            continue;
         }
-        for (int i = 0; i < n->childCount; i++)
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
         {
-            stack[top++] = n->children[i];
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        else if (c->nodeId == id)
+        {
+            return c; /* depth cap: still recognize the id's last frame */
         }
     }
     return NULL;
@@ -2092,6 +2252,75 @@ DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
     return q.count > 0 ? q.found : NULL;
 }
 
+/* ── API-P6: <template>.content — the element's detached content
+ * fragment. Parsed templates carry theirs from the builder; created
+ * templates (createElement('template')) materialize an EMPTY fragment
+ * on first access — the browser's always-a-DocumentFragment content
+ * getter. The fragment is a DomNode (kind element, tag
+ * "#template-content", parent NULL) so every bridge reads it with the
+ * ordinary node machinery; nodeType on it reports 11 per the adapters'
+ * fragment rule. */
+DomNode *dom_template_content(DomResult *dom, DomNode *el)
+{
+    if (!dom || !el || el->kind != DOM_ELEMENT || !el->tag ||
+        strcmp(el->tag, "template") != 0)
+    {
+        return NULL; /* non-template elements have no content, like browsers */
+    }
+    if (el->templateContent)
+    {
+        return el->templateContent;
+    }
+    DomNode *frag = node_new();
+    if (!frag)
+    {
+        return NULL;
+    }
+    frag->kind = DOM_ELEMENT;
+    frag->tag = arena_dup((Arena *)dom->_arena, "#template-content", 17);
+    if (!frag->tag)
+    {
+        PLUTO_FREE(frag);
+        return NULL;
+    }
+    frag->parent = NULL;
+    el->templateContent = frag;
+    return frag;
+}
+
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors only, first match wins (NULL = no match, never an
+ * exception for an unusable selector). Same parse + compound matcher
+ * as the querySelector walk, so the two can never disagree. */
+DomNode *dom_closest(const DomResult *dom, DomNode *start, const char *sel,
+                     char *scratch, size_t scratchSize)
+{
+    (void)dom;
+    if (!start || !sel || !scratch || scratchSize == 0)
+    {
+        return NULL;
+    }
+    CssSimple parts[CSS_QS_MAX_COMPOUNDS];
+    unsigned char combs[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts, combs);
+    if (np <= 0)
+    {
+        return NULL; /* unusable selector → null result */
+    }
+    for (DomNode *n = start; n; n = n->parent)
+    {
+        if (n->kind != DOM_ELEMENT)
+        {
+            continue; /* text/comment levels: match only element ancestors */
+        }
+        if (qs_matches(parts, combs, np, n))
+        {
+            return n;
+        }
+    }
+    return NULL;
+}
+
 /* Iterative free (explicit stack). The previous recursive version recursed
  * once per DOM depth; a deep page could overflow the game-task stack during
  * teardown on device (same class of failure as the P18 watchdog crash). */
@@ -2159,12 +2388,99 @@ static void free_node_recursive(DomNode *root)
     PLUTO_FREE(st);
 }
 
+/* ── API-P6: owned detached subtrees — template content fragments and
+ * the SW shadow roots are parent-NULL subtrees the main tree free pass
+ * never reaches (they'd leak per document; the shadow roots predate
+ * this fix). One iterative visit: for every element reached, free its
+ * owned detached root FIRST — walking INTO it for ITS owned fields
+ * (a template inside a shadow root, a fragment inside a fragment) —
+ * then wholesale-free the detached tree with the ordinary free. The
+ * visit itself stays iterative (the P18 stack rule: the free pass may
+ * run on the game task against a deep page). Detached-in-detached
+ * chains resolve in one pass because the visit descends through the
+ * detached root's own children before freeing it. */
+typedef struct
+{
+    DomNode *node;
+    int nextChild;
+} OwnFrame;
+
+static void free_owned_detached_visit(DomNode *root)
+{
+    if (!root)
+    {
+        return;
+    }
+    int cap = 64;
+    int top = 0;
+    OwnFrame *st = (OwnFrame *)PLUTO_MALLOC(sizeof(OwnFrame) * (size_t)cap);
+    if (!st)
+    {
+        return; /* nothing we can do; allocator is out */
+    }
+    st[top].node = root;
+    st[top].nextChild = 0;
+    while (top >= 0)
+    {
+        DomNode *n = st[top].node;
+        if (st[top].nextChild < n->childCount)
+        {
+            DomNode *c = n->children[st[top].nextChild];
+            st[top].nextChild++;
+            if (c)
+            {
+                if (top + 1 >= cap)
+                {
+                    cap *= 2;
+                    OwnFrame *grown =
+                        (OwnFrame *)PLUTO_MALLOC(sizeof(OwnFrame) * (size_t)cap);
+                    if (!grown)
+                    {
+                        PLUTO_FREE(st);
+                        return;
+                    }
+                    memcpy(grown, st, sizeof(OwnFrame) * (size_t)top);
+                    PLUTO_FREE(st);
+                    st = grown;
+                }
+                top++;
+                st[top].node = c;
+                st[top].nextChild = 0;
+            }
+        }
+        else
+        {
+            /* pop: hand any owned detached subtree to the iterative free
+             * (its own visit descended it first — see below). To keep one
+             * recursive-shaped helper out of the game-task stack, the
+             * descent runs through THIS same function before the free. */
+            if (n->shadowRoot)
+            {
+                DomNode *d = n->shadowRoot;
+                n->shadowRoot = NULL;
+                free_owned_detached_visit(d);
+                free_node_recursive(d);
+            }
+            if (n->templateContent)
+            {
+                DomNode *d = n->templateContent;
+                n->templateContent = NULL;
+                free_owned_detached_visit(d);
+                free_node_recursive(d);
+            }
+            top--;
+        }
+    }
+    PLUTO_FREE(st);
+}
+
 void dom_free_result(DomResult *res)
 {
     if (!res)
     {
         return;
     }
+    free_owned_detached_visit(res->root);
     free_node_recursive(res->root);
     Arena *arena = (Arena *)res->_arena;
     if (arena)

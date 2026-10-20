@@ -39,6 +39,7 @@
 #include "../util/strbuf.h"
 #include "../core/pluto_mem.h"
 #include "../html/dom.h"
+#include "../html/webstorage.h"
 
 extern PlaydateAPI *pluto_pd(void);
 #define JMalloc(n) pluto_mem_realloc(NULL, (n))
@@ -52,6 +53,10 @@ static int duk_xhr_abort(duk_context *ctx);
 static void duk_push_xhr(duk_context *ctx, JsBridge *b);
 static void duktape_define_xhr(duk_context *ctx, JsBridge *b);
 static int duk_xhr_id(duk_context *ctx);
+static void duk_push_worker(duk_context *ctx, JsBridge *b, int id);
+static int duk_worker_postmessage(duk_context *ctx);
+static int duk_worker_terminate(duk_context *ctx);
+static void duktape_define_worker(duk_context *ctx, JsBridge *b);
 
 
 /* ── heap allocators: route engine memory through the SDK ────────────────── */
@@ -241,6 +246,16 @@ static duk_ret_t duk_el_get_children(duk_context *ctx)
 static duk_ret_t duk_el_get_nodeType(duk_context *ctx)
 {
     DomNode *n = this_node(ctx);
+    /* API-P6: the template's detached content fragment reports 11 —
+     * made as an element for the machinery, but it IS the browser's
+     * DocumentFragment surface. Parent-NULL is part of the rule (same
+     * rule as the XS NR and muJS getters). */
+    if (n && n->kind == DOM_ELEMENT && !n->parent && n->tag &&
+        !strcmp(n->tag, "#template-content"))
+    {
+        duk_push_int(ctx, 11);
+        return 1;
+    }
     duk_push_int(ctx, (n && n->kind == DOM_ELEMENT) ? 1 : 3);
     return 1;
 }
@@ -254,6 +269,32 @@ static duk_ret_t duk_el_set_id(duk_context *ctx)
     if (n && n->kind == DOM_ELEMENT)
     {
         dom_set_attr(b->dom, n, "id", duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+/* API-P9: className accessor pair — the read is the class attribute
+ * (never NULL; mapped 1:1 onto 'class', browser shape), the write goes
+ * through the shared class road with the classList family shape (the
+ * router owns the single budget charge; identical store to
+ * setAttribute('class')). Closes the P6 parked gap on this engine. */
+static duk_ret_t duk_el_get_className(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    const char *v = n ? dom_get_attr(n, "class") : NULL;
+    duk_push_string(ctx, v ? v : "");
+    return 1;
+}
+static duk_ret_t duk_el_set_className(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        if (jsbridge_el_class_set(b, n, duk_to_string(ctx, 0)) != 0)
+        {
+            duk_error(ctx, DUK_ERR_ERROR, "className assignment failed");
+        }
     }
     return 0;
 }
@@ -337,7 +378,9 @@ static duk_ret_t duk_el_appendChild(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "appendChild failed");
     }
-    return 0;
+    /* API-P6: browsers return the appended child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 static duk_ret_t duk_el_removeChild(duk_context *ctx)
 {
@@ -349,7 +392,9 @@ static duk_ret_t duk_el_removeChild(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "removeChild failed");
     }
-    return 0;
+    /* API-P6: browsers return the removed child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 /* ── SW5: insertBefore / querySelector(All) (methods) ───────────────────── */
 static duk_ret_t duk_el_insertBefore(duk_context *ctx)
@@ -363,7 +408,9 @@ static duk_ret_t duk_el_insertBefore(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "insertBefore failed");
     }
-    return 0;
+    /* API-P6: browsers return the inserted child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 
 /* querySelector emit: Duktape pushes wrappers into the array being built
@@ -408,6 +455,88 @@ static duk_ret_t duk_el_querySelector(duk_context *ctx)
     duk_push_element(ctx, b,
                      (DomNode *)jsbridge_el_query_selector_first(
                          b, n, sel, scratch, sizeof(scratch)));
+    return 1;
+}
+
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors; same parse + matcher as querySelector (the two can never
+ * disagree). NULL result pushes null, per browsers. */
+static duk_ret_t duk_el_closest(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    duk_push_element(ctx, b,
+                     (DomNode *)jsbridge_el_closest(b, n, sel, scratch,
+                                                    sizeof(scratch)));
+    return 1;
+}
+
+/* ── API-P6: template.content (getter) — the element's detached content
+ * fragment; created templates materialize an EMPTY fragment on first
+ * access. Non-template elements read undefined, like browsers. */
+static duk_ret_t duk_el_get_content(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "template") != 0)
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    DomNode *frag = dom_template_content(b->dom, n);
+    if (!frag)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "template content unavailable");
+    }
+    duk_push_element(ctx, b, frag);
+    logger_log("[tpl] content -> node %d (children=%d)", frag->nodeId,
+               frag->childCount);
+    return 1;
+}
+
+/* ── API-P6: dataset (getter) — a fresh plain object per access mapping
+ * data-* attributes to camelCase keys (read-through from the live
+ * attribute list, same semantics as the XS engine's getter; direct
+ * writes to the object do NOT write back — set attributes with
+ * setAttribute like the browser's own pattern). */
+static duk_ret_t duk_el_get_dataset(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    duk_idx_t obj = duk_push_object(ctx);
+    if (!n)
+    {
+        return 1; /* empty object like the other engines' NULL path */
+    }
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        const char *k = n->attrs[i].key;
+        if (strncmp(k, "data-", 5) != 0)
+        {
+            continue;
+        }
+        char camel[64];
+        int ci = 0;
+        for (const char *p = k + 5; *p && ci + 1 < (int)sizeof(camel); p++)
+        {
+            if (*p == '-' && p[1])
+            {
+                p++;
+                camel[ci++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+            }
+            else
+            {
+                camel[ci++] = *p;
+            }
+        }
+        camel[ci] = '\0';
+        const char *v = dom_get_attr(n, k);
+        duk_push_string(ctx, v ? v : "");
+        duk_put_prop_string(ctx, obj, camel);
+    }
     return 1;
 }
 
@@ -840,6 +969,19 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         duk_push_null(ctx);
         return;
     }
+    /* API-P9: the per-node wrapper cache — browser identity model (ONE
+     * wrapper per node for the page's whole life, so strict `===` chains
+     * and page-written expandos survive accesses; same contract XS NR
+     * holds). Hit = push the stash-pinned heapptr; miss = build fresh
+     * and pin below. See the JsElwEntry note in jsbridge_internal.h. */
+    for (int i = b->elwCount - 1; i >= 0; i--)
+    {
+        if (b->elw[i].node == node && b->elw[i].ref)
+        {
+            duk_push_heapptr(ctx, b->elw[i].ref);
+            return;
+        }
+    }
     duk_idx_t obj = duk_push_object(ctx);
     duk_push_pointer(ctx, (void *)node);
     duk_put_prop_string(ctx, obj, DUK_NODE_PROP);
@@ -853,6 +995,7 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
     } accs[] = {
         {"tagName", duk_el_get_tagName, NULL},
         {"id", duk_el_get_id, duk_el_set_id},
+        {"className", duk_el_get_className, duk_el_set_className},
         {"textContent", duk_el_get_textContent, duk_el_set_textContent},
         {"innerHTML", duk_el_get_innerHTML, duk_el_set_innerHTML},
         {"parentNode", duk_el_get_parentNode, NULL},
@@ -863,6 +1006,8 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"nextElementSibling", duk_el_get_nextElementSibling, NULL},
         {"classList", duk_el_get_classList, NULL},
         {"style", duk_el_get_style, NULL},
+        {"content", duk_el_get_content, NULL},
+        {"dataset", duk_el_get_dataset, NULL},
     };
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
@@ -899,6 +1044,7 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"insertBefore", duk_el_insertBefore, 2},
         {"querySelector", duk_el_querySelector, 1},
         {"querySelectorAll", duk_el_querySelectorAll, 1},
+        {"closest", duk_el_closest, 1},
         {"addEventListener", duk_el_addEventListener, 2},
         {"getElementsByTagName", duk_el_getElementsByTagName, 1},
     };
@@ -907,7 +1053,30 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         duk_push_c_function(ctx, methods[i].fn, methods[i].nargs);
         duk_put_prop_string(ctx, obj, methods[i].name);
     }
-    (void)b;
+
+    /* API-P9: pin the fresh wrapper in the global stash (GC-safe, the
+     * listener-pin contract) and remember its stable heapptr — the ONLY
+     * strong live ref; the heap dies with the engine at page close. */
+    if (b->elwCount < JSBRIDGE_ELW_MAX)
+    {
+        char key[32];
+        snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.elw.%d"),
+                 b->elwCount);
+        duk_push_global_stash(ctx);
+        duk_dup(ctx, -2); /* the fresh wrapper under the stash */
+        duk_put_prop_string(ctx, -2, key);
+        duk_pop(ctx); /* stash */
+        b->elw[b->elwCount].node = node;
+        b->elw[b->elwCount].ref = duk_get_heapptr(ctx, -1);
+        b->elwCount++;
+    }
+    else if (!b->elwOverflow)
+    {
+        b->elwOverflow = 1;
+        logger_log("[elw] duk wrapper cache full (%d) — fresh wrappers "
+                   "from here on",
+                   JSBRIDGE_ELW_MAX);
+    }
 }
 
 /* ── console ─────────────────────────────────────────────────────────────── */
@@ -995,40 +1164,10 @@ static DomNode *first_element(DomNode *n, const char *tag)
 
 static DomNode *find_element_by_id(JsBridge *b, const char *id)
 {
-    if (!b->dom || !b->dom->root || !id)
-    {
-        return NULL;
-    }
-    DomNode *hit = NULL;
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
-    int top = 0;
-    stack[top++] = b->dom->root;
-    while (top > 0 && !hit)
-    {
-        DomNode *n = stack[--top];
-        if (n->kind == DOM_ELEMENT)
-        {
-            const char *v = dom_get_attr(n, "id");
-            if (v && strcmp(v, id) == 0)
-            {
-                hit = n;
-                break;
-            }
-        }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
-        {
-            break;
-        }
-        for (int i = 0; i < n->childCount; i++)
-        {
-            stack[top++] = n->children[i];
-        }
-    }
-    if (!hit && id[0] == '_' && id[1] == 'd')
-    {
-        hit = dom_node_by_id(b->dom, atoi(id + 2));
-    }
-    return hit;
+    /* API-P6: road moved to the shared O(depth) scan (dom_find_by_id) —
+     * the former push-all-children walk aborted whole once a body held
+     * 65+ element children, hiding every later id from getElementById. */
+    return dom_find_by_id(b->dom, id);
 }
 
 static duk_ret_t duk_document_getElementById(duk_context *ctx)
@@ -1246,6 +1385,94 @@ static duk_ret_t duk_clearInterval(duk_context *ctx)
     return 1;
 }
 
+/* ── API-P7: localStorage / sessionStorage (see webstorage.h) ────────── */
+#define WS_DUK_KIND_KEY "\xff" "wsKind" /* hidden per-instance store kind */
+
+/* The store this call belongs to: local (kind 0) or session (kind 1). */
+static WsStore *duk_storage_of(duk_context *ctx)
+{
+    WsStore *s = ws_local();
+    duk_push_this(ctx);
+    if (duk_is_object(ctx, -1))
+    {
+        duk_get_prop_string(ctx, -1, WS_DUK_KIND_KEY);
+        if (duk_is_number(ctx, -1) && duk_get_int(ctx, -1) == 1)
+        {
+            s = ws_session();
+        }
+        duk_pop(ctx);
+    }
+    duk_pop(ctx);
+    return s;
+}
+
+static duk_ret_t duk_storage_getItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    const char *k = duk_to_string(ctx, 0);
+    char out[WS_VAL_MAX];
+    int hit = s && ws_get(s, k, out, sizeof(out));
+    if (!hit)
+    {
+        logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
+    }
+    if (hit)
+    {
+        duk_push_string(ctx, out);
+    }
+    else
+    {
+        duk_push_null(ctx);
+    }
+    return 1;
+}
+
+static duk_ret_t duk_storage_setItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    const char *k = duk_to_string(ctx, 0);
+    const char *v = duk_to_string(ctx, 1);
+    if (!ws_set(s, k, v))
+    {
+        /* The browser's QuotaExceededError road (4KB here, not 5MB). */
+        duk_error(ctx, DUK_ERR_ERROR,
+                  "QuotaExceededError: per-origin storage quota exceeded");
+    }
+    return 0;
+}
+
+static duk_ret_t duk_storage_removeItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    ws_remove(s, duk_to_string(ctx, 0));
+    return 0;
+}
+
+static duk_ret_t duk_storage_clear(duk_context *ctx)
+{
+    ws_clear(duk_storage_of(ctx));
+    return 0;
+}
+
+static duk_ret_t duk_storage_key(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    char out[WS_KEY_MAX];
+    if (ws_key(s, (int)duk_to_int(ctx, 0), out, sizeof(out)))
+    {
+        duk_push_string(ctx, out);
+        return 1;
+    }
+    duk_push_null(ctx);
+    return 1;
+}
+
+static duk_ret_t duk_storage_getLength(duk_context *ctx)
+{
+    duk_push_int(ctx, ws_count(duk_storage_of(ctx)));
+    return 1;
+}
+
 static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
 {
     /* window: identity alias for the global object. */
@@ -1297,6 +1524,38 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
     put_method(ctx, loc, "replace", duk_location_assign, 1);
     duk_put_global_lstring(ctx, "location", 8);
 
+    /* API-P7: localStorage + sessionStorage — the browser's key/value
+     * stores driven by the shared webstorage.c road (same origin rule,
+     * caps and persistence file as the other engines). Two instances,
+     * methods on each; the kind (0=local / 1=session) rides the hidden
+     * "\xffwsKind" property read through duk_push_this. length is a
+     * live getter; getItem misses return null; setItem quota-fails
+     * with the browser's QuotaExceededError road. */
+    ws_bind(baseUrl ? baseUrl : "");
+    for (int sk = 0; sk < 2; sk++)
+    {
+        duk_idx_t so = duk_push_object(ctx);
+        put_method(ctx, so, "getItem", duk_storage_getItem, 1);
+        put_method(ctx, so, "setItem", duk_storage_setItem, 2);
+        put_method(ctx, so, "removeItem", duk_storage_removeItem, 1);
+        put_method(ctx, so, "clear", duk_storage_clear, 0);
+        put_method(ctx, so, "key", duk_storage_key, 1);
+        duk_push_string(ctx, "length");
+        duk_push_c_function(ctx, duk_storage_getLength, 0);
+        duk_def_prop(ctx, so, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_SET_ENUMERABLE);
+        duk_push_int(ctx, sk);
+        duk_put_prop_lstring(ctx, so, "\xff" "wsKind", 7);
+        if (sk)
+        {
+            duk_put_global_lstring(ctx, "sessionStorage", 14);
+        }
+        else
+        {
+            duk_put_global_lstring(ctx, "localStorage", 12);
+        }
+    }
+    logger_log("[webstorage] globals bound (duktape): origin=%s", ws_origin());
+
     /* window/global methods (explicit global push: the stack is empty
      * after the put_global calls above). */
     duk_push_global_object(ctx);
@@ -1330,6 +1589,7 @@ static int duktape_init(JsBridge *b, const char *baseUrl)
     duk_pop(ctx);
     define_globals(ctx, b, baseUrl);
     duktape_define_xhr(ctx, b);
+    duktape_define_worker(ctx, b);
     return 0;
 }
 
@@ -1715,6 +1975,174 @@ static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
     duk_put_global_string(ctx, "XMLHttpRequest");
 }
 
+/* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note
+ * in jsbridge_internal.h) ─────────────────────────────────────────────
+ * Same thin-glue contract as this bridge's XHR: wrapper = plain object,
+ * the stub's public id rides a hidden pointer prop (0 = the documented
+ * delivery-less cap shape); methods are per-instance; onerror/onmessage
+ * materialize as null so a fresh stub reads `null` for both. The OBJECT
+ * is pinned in the stash at construct (heapptr key pluto.wobj.<id>) and
+ * the delivery reads the CURRENT onerror off it — browser at-fire
+ * semantics. The worker SCRIPT never compiles or runs. */
+#define DUK_WORKER_ID_PROP "\xFF" "pluto.wkid"
+
+static void duk_push_worker(duk_context *ctx, JsBridge *b, int id)
+{
+    (void)b;
+    duk_idx_t obj = duk_push_object(ctx);
+    duk_push_pointer(ctx, (void *)(intptr_t)id);
+    duk_put_prop_string(ctx, obj, DUK_WORKER_ID_PROP);
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, obj, "onerror");
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, obj, "onmessage");
+    duk_push_c_function(ctx, duk_worker_postmessage, 1);
+    duk_put_prop_string(ctx, obj, "postMessage");
+    duk_push_c_function(ctx, duk_worker_terminate, 0);
+    duk_put_prop_string(ctx, obj, "terminate");
+}
+
+static int duk_worker_id(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, DUK_WORKER_ID_PROP);
+    int id = (int)(intptr_t)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    return id;
+}
+
+static int duk_worker_postmessage(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    jsbridge_worker_post(b, duk_worker_id(ctx));
+    return 0;
+}
+
+static int duk_worker_terminate(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    jsbridge_worker_terminate(b, duk_worker_id(ctx));
+    return 0;
+}
+
+/* Constructor global: new Worker(url) / Worker(url) → stub wrapper. */
+static duk_ret_t duk_worker_new(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *url = duk_to_string(ctx, 0); /* recorded, never resolved */
+    int id = jsbridge_worker_open(b, url); /* 0 = delivery-less (cap) */
+    duk_push_worker(ctx, b, id);
+    if (id > 0)
+    {
+        /* Pin the wrapper object for the cross-frame delivery. */
+        char key[40];
+        snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.wobj.%d"), id);
+        void *hp = duk_get_heapptr(ctx, -1);
+        duk_push_global_stash(ctx);
+        duk_dup(ctx, -2);
+        duk_put_prop_string(ctx, -2, key);
+        duk_pop(ctx); /* stash */
+        jsbridge_worker_pin(b, id, hp);
+    }
+    return 1;
+}
+
+static void duktape_define_worker(duk_context *ctx, JsBridge *b)
+{
+    (void)b;
+    duk_push_c_function(ctx, duk_worker_new, 1);
+    duk_push_object(ctx); /* prototype for instances */
+    {
+        duk_push_null(ctx);
+        duk_put_prop_string(ctx, -2, "onerror");
+        duk_push_null(ctx);
+        duk_put_prop_string(ctx, -2, "onmessage");
+    }
+    duk_put_prop_string(ctx, -2, "prototype");
+    duk_put_global_string(ctx, "Worker");
+}
+
+/* Worker vtable: delete the stub's stash pin whose heapptr matches. */
+static void duktape_clear_worker_refs(JsBridge *b, void *objRef)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !objRef)
+    {
+        return;
+    }
+    duk_push_global_stash(ctx);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    while (duk_next(ctx, -1, 1))
+    {
+        const char *k = duk_get_string(ctx, -2);
+        void *hp = NULL;
+        char kb[40];
+        if (k && strstr(k, "\xFF" "pluto.wobj."))
+        {
+            hp = duk_get_heapptr(ctx, -1);
+            snprintf(kb, sizeof(kb), "%s", k); /* key dies with the slot */
+        }
+        duk_pop_2(ctx); /* key + value */
+        if (hp && hp == objRef)
+        {
+            duk_del_prop_string(ctx, -2, kb); /* -2 = the stash */
+            break;
+        }
+    }
+    duk_pop(ctx); /* enum */
+    duk_pop(ctx); /* stash */
+}
+
+/* Delivery: worker.onerror(ev) with `this` = the pinned wrapper and
+ * ev = {message}. The CURRENT onerror is consulted at fire time; a stub
+ * without a callable onerror delivers nothing. Same bracket + contained
+ * error contract as duktape_run_xhr_ref. */
+static int duktape_run_worker_ref(JsBridge *b, void *objRef,
+                                  const JsWorkerStub *w)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !objRef || !w)
+    {
+        return 1;
+    }
+    duk_push_heapptr(ctx, objRef);
+    duk_get_prop_string(ctx, -1, "onerror");
+    if (duk_is_callable(ctx, -1))
+    {
+        void *fnHp = duk_get_heapptr(ctx, -1);
+        duk_pop_2(ctx); /* fn value + wrapper */
+        if (fnHp)
+        {
+            duk_push_heapptr(ctx, fnHp);  /* method */
+            duk_push_heapptr(ctx, objRef); /* this */
+            duk_push_object(ctx);          /* ev */
+            duk_push_string(ctx, w->message);
+            duk_put_prop_string(ctx, -2, "message");
+            if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
+            {
+                int firstErr = !b->lastError[0];
+                bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+                duk_pop(ctx);
+                return firstErr ? -1 : 1;
+            }
+            duk_pop(ctx); /* result */
+            logger_log("[worker] onerror delivered #%d present=1", w->id);
+        }
+        else
+        {
+            logger_log("[worker] onerror delivered #%d present=1 "
+                       "(non-heapptr callable — undelivered)", w->id);
+        }
+    }
+    else
+    {
+        duk_pop_2(ctx); /* handler value + wrapper */
+        logger_log("[worker] onerror delivered #%d present=0 (silent — "
+                   "unhandled worker error)", w->id);
+    }
+    return 0;
+}
+
 /* XHR vtable: delete the stash pins whose heapptrs match. */
 static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
 {
@@ -1786,4 +2214,6 @@ const JsEngineImpl js_engine_duktape = {
     NULL, /* pump (R20: time-sliced split is XS NR only) */
     NULL, /* eval_pending (R27: no background eval) */
     NULL, /* mount_parked (R28: never parks) */
-    "Duktape"};
+    "Duktape",
+    NULL, NULL, /* dispatch_event / script_queue_drained (frozen engine) */
+    duktape_run_worker_ref, duktape_clear_worker_refs /* API-P8 */};

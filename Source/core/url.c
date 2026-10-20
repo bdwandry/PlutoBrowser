@@ -307,18 +307,69 @@ int url_parse(const char *urlString, UrlParsed *out)
     if (strncmp(raw, "about:", 6) == 0)
     {
         const char *sub = raw + 6;
+        /* API-P3: browsers split the OPAQUE token's query/hash tails
+         * ('about:probe?a=2#h9' → token 'probe', search '?a=2',
+         * hash '#h9') so the SAME fields carry history-journal state
+         * for about: pages as for any scheme. Everything before the
+         * first '?'/'#' stays the old shape (host = token,
+         * path = '/'+token); only the tail characters move into the
+         * query/hash fields — network pages never parse about: URLs,
+         * and url_resolve's opaque about: behavior is unchanged. */
+        const char *hashPos = strchr(sub, '#');
+        const char *queryPos = strchr(sub, '?');
+        size_t tokenLen = strlen(sub);
+        if (hashPos && (size_t)(hashPos - sub) < tokenLen)
+        {
+            tokenLen = (size_t)(hashPos - sub);
+        }
+        if (queryPos && (size_t)(queryPos - sub) < tokenLen)
+        {
+            tokenLen = (size_t)(queryPos - sub);
+        }
+        char token[256];
+        if (tokenLen >= sizeof(token))
+        {
+            tokenLen = sizeof(token) - 1;
+        }
+        memcpy(token, sub, tokenLen);
+        token[tokenLen] = '\0';
         snprintf(out->normalized, sizeof(out->normalized), "%s", raw);
         strcpy(out->scheme, "about");
-        snprintf(out->host, sizeof(out->host), "%s", sub);
+        snprintf(out->host, sizeof(out->host), "%s", token);
         out->port = 0;
-        snprintf(out->path, sizeof(out->path), "/%s", sub);
+        snprintf(out->path, sizeof(out->path), "/%s", token);
         strcpy(out->query, "");
         strcpy(out->hash, "");
-        snprintf(out->fullPath, sizeof(out->fullPath), "/%s", sub);
+        /* query compartment: after '?' up to '#'/end — only when the
+         * '?' actually precedes the fragment ('#x?y' keeps '?y' inside
+         * the hash) */
+        if (queryPos && (!hashPos || queryPos < hashPos))
+        {
+            const char *qEnd = strchr(queryPos, '#');
+            size_t qlen = qEnd ? (size_t)(qEnd - queryPos - 1) : strlen(queryPos + 1);
+            if (qlen >= sizeof(out->query))
+            {
+                qlen = sizeof(out->query) - 1;
+            }
+            memcpy(out->query, queryPos + 1, qlen);
+            out->query[qlen] = '\0';
+        }
+        /* hash compartment: after the FIRST '#', whatever remains */
+        if (hashPos)
+        {
+            snprintf(out->hash, sizeof(out->hash), "%s", hashPos + 1);
+        }
+        /* path tail: query and/or hash re-attach for fullPath in URL
+         * order ('/probe?a=2#h9'), which is exactly the raw layout once
+         * the compartments' side rails ('?','%23') are re-attached */
+        snprintf(out->fullPath, sizeof(out->fullPath), "%s%s%s%s%s", out->path,
+                 out->query[0] ? "?" : "", out->query,
+                 out->hash[0] ? "#" : "", out->hash);
         out->isSsl = 1;
         url_free(raw);
         return 0;
     }
+
 
     static char scheme[12]; /* BSS: initialized explicitly below (stack hoist) */
     scheme[0] = 'h'; scheme[1] = 't'; scheme[2] = 't'; scheme[3] = 'p'; scheme[4] = 's'; scheme[5] = '\0';

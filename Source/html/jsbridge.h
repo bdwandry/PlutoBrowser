@@ -157,6 +157,11 @@ typedef struct
      * for legacy tag-less scans (engine behavior unchanged then). */
     const char *tagStart;
     size_t tagLen;
+    /* API-P5: `type="module"` element → the loader-side module lane
+     * handles the body (imports resolved/fetched/mapped in C, exports
+     * materialized on a namespace object), not the engine's classic
+     * run. Set by both scanners at scan time. */
+    int isModule;
 } JsScriptSlot;
 
 typedef struct JsBridge JsBridge;
@@ -278,11 +283,21 @@ int jsbridge_el_query_selector_all(JsBridge *b, void *el, const char *sel,
  * both to `null`). */
 void *jsbridge_el_query_selector_first(JsBridge *b, void *el, const char *sel,
                                        char *scratch, size_t scratchSize);
+/* API-P6: Element.closest — the element itself first, then element
+ * ancestors; first match or NULL (same null-for-unusable rule as
+ * querySelector, one shared matcher). */
+void *jsbridge_el_closest(JsBridge *b, void *el, const char *sel,
+                          char *scratch, size_t scratchSize);
 /* classList: 0 ok, -1 failure; toggle returns 1 added / 0 removed / -1. */
 int jsbridge_el_class_has(void *el, const char *token);
 int jsbridge_el_class_add(JsBridge *b, void *el, const char *token);
 int jsbridge_el_class_remove(JsBridge *b, void *el, const char *token);
 int jsbridge_el_class_toggle(JsBridge *b, void *el, const char *token);
+/* API-P9: THE className write road — the class attribute set through the
+ * same snapshot/dirty-receipt pair as the classList mutations (identical
+ * store to setAttribute('class'); the read side stays dom_get_attr at
+ * the adapters). */
+int jsbridge_el_class_set(JsBridge *b, void *el, const char *value);
 
 /* Diagnostics accessors (logging/telemetry). */
 int jsbridge_listener_count(const JsBridge *bridge);
@@ -362,6 +377,12 @@ int jsbridge_timers_pending(const JsBridge *bridge, unsigned nowMs);
  * through mutationsOut (may be NULL) when a completion wrote DOM — the
  * caller schedules the standard re-render. Returns deliveries made. */
 int jsbridge_xhr_pump(JsBridge *bridge, int *mutationsOut);
+
+/* API-P8: deliver every pending worker stub's `error` event once (the
+ * browser's failed-script-load analog, fired at the next frame — never
+ * synchronously). Main.c pumps right after jsbridge_xhr_pump; same
+ * bracket + re-render contract. Returns deliveries made. */
+int jsbridge_worker_pump(JsBridge *bridge, int *mutationsOut);
 
 /* Select the engine for ALL subsequently attached pages: JS_ENGINE_MUJS
  * (default), JS_ENGINE_DUKTAPE, JS_ENGINE_QUICKJS or JS_ENGINE_XS. Any

@@ -1104,6 +1104,548 @@ static const char CSSPROBE_HTML[] =
     "<p>[css-skip] expected: sib=0 attrOp=0 pcls=0 medF=1 var=4 calc=2 prop=2</p>\n"
     "</body></html>";
 
+/* ── about:apiprobe — engine browser-API capability probe (API program) ──
+ * Engine-driven capability farm: the inline script runs the battery through
+ * the LIVE bridge on whatever engine serves the page, appends one row per
+ * capability ("name: PASS|MISS") plus the summary line "apisum: pass=N
+ * miss=M" (the API mirror of the [css-skip] census tally). P0 = the
+ * baseline run: rows record what exists TODAY. Later API phases flip their
+ * named row to an assertion as the lane lands — P1 adds submit/input/
+ * change + bubbling rows, P2 vets the fetch shim ([js] fetch shim:
+ * injecting — infrastructure already present) and turns the fetch row
+ * functional, P3 location/history, P4 console, P5 module rows, P6
+ * template/closest/dataset. Zero network dependence.
+ * API-P2 (closed): the Fetch receipts battery below turns fetch into
+ * full receipts on LOCALLY SERVED pages — about: refs answer from the
+ * internal page store through the SAME xhr path a network page uses,
+ * settling 200 without a socket (device parity). Rows: fetchbody
+ * (fetch about:apiprobe → .ok true/.status 200 → text contains the page
+ * marker), fetchjsonreject (r.json() must reject on non-JSON HTML = the
+ * rejection lane works), postct (POST + a setRequestHeader
+ * content-type override settles ok — on real wire POSTs the override
+ * rides http_request_ct), csasync (document.currentScript is NULL
+ * inside a settled-promise callback = browser-faithful context
+ * clearing; A2 fills currentScript only during a script run). The
+ * battery paints "apifetch: pass=N miss=M" after all four rows settle;
+ * a shim-less engine prints the fail-side sum immediately. Recorded
+ * gap (unchanged): appendChild returns falsy instead of the node —
+ * the DOM-conveniences phase's item. API-P1: the
+ * bridge's appendChild returns a falsy value rather than the appended
+ * node (MDN shape) — noted for the DOM-conveniences phase. API-P1: the
+ * Events battery below adds a live form fixture (#evf/#evi/#evb) whose
+ * JS-side counters paint "apisev: input=N change=N submit=N bub=N btn=N
+ * doc=N" — input/change on the field, click on the button, submit with
+ * preventDefault() on the form, and document-level submit/click rows that
+ * only count if the dispatched event BUBBLES past the target. The
+ * [ev-test] sim driver in main.c types one commit and presses the button
+ * through the real tap pipeline, then asserts the counters ≥ 1 each and
+ * that the doc pointer never changed (pd honored → live re-walk, not a
+ * reload). API-P3 (closed): the Address journal battery below drives
+ * the engine's address book end-to-end WITHOUT any network navigation —
+ * pushState/replaceState enter their entries through the in-engine
+ * journal (fragment/query/opaque-about joins resolve browser-faithfully;
+ * cross-origin heads are refused), the LIVE location getters re-derive
+ * href/hash/search per read, back/forward walk the recorded stack, and
+ * popstate (with the per-entry state) + hashchange (with oldURL/newURL)
+ * deliver from the journal at the next pump frame. Rows: histpush
+ * (#join, state pin, length 2), histreplace (query swap, length stays,
+ * old state replaced), histhashtop (stack grows to 3), docsettitle
+ * (document.title set/get lane), histback (journal back → the replaced
+ * entry's state p=12, popstate fired once carrying it, hashchange
+ * fired once for the "#h9"→"" hop), histbase (back to the seeded doc
+ * base, state null), histforward (forward re-enters the recorded
+ * entry, popstate again). Paints "apihist: pass=N miss=M" after all
+ * seven rows settle. pushState NEVER touches the wire: no http_* call,
+ * no app address-bar change — the journal feeds location reads and the
+ * back-stack events only.
+ * API-P4 (closed): the Console receipts battery drives the real log
+ * lane end-to-end — every send lands a tagged [console.*] row in the
+ * FILE (the receipt surface; the rendered panel never changes), with
+ * printf substitution (%s/%d/%o/%% + an out-of-args token printing
+ * literally) and the console-shape renderer for objects/arrays
+ * ('[a, b, …n]' / '{k: v, …}', depth-2 bounded). assert = browser
+ * semantics: falsey → an ERROR-level 'Assertion failed: …' row that
+ * carries the substitution, truthy → SILENT (the battery's
+ * P4NOASSERT exercise). consoclean proves the panel-clean half
+ * (out.children.length delta ZERO across the storm), and the battery's
+ * own `P4COUNT` send prints the JS-side sent counter — the log's
+ * console-row count vs it MATCH (17 sends = 16 rows + the documented
+ * silent assert), which is the phase's done-when. Paints
+ * "apicon: pass=N miss=M sent=S".
+ * API-P5 (closed): the Module receipts battery — <script type="module">
+ * rides the loader-side lane: inline modules run (modin), static
+ * imports resolve through url_resolve against the document base and
+ * fetch from the internal page store (modabs = named bindings out of
+ * about:p5m0; modstar = the *-import namespace object of about:p5m1),
+ * and the graph runs import-FIRST in declaration order (children load
+ * before the body — the receipts assert both values landed). The
+ * refusal receipt (modrefuse): a path-only './p5x.js' import on this
+ * OPAQUE about: base must NOT run its module (the browser's own
+ * module-specifier refusal — the journal rule, kept faithful). The
+ * closing classic script counts outm's children: exactly 3 = the modin
+ * marker + the two PASS rows (a leak child or a missing row breaks the
+ * count). Paints "apimod: kids=K refuse=PASS|FAIL".
+ * API-P6 (closed): the DOM-conveniences battery adds six rows —
+ * tplparsed/tplinert/tplcreated (template.content: template children
+ * parse into a DETACHED fragment, parent-NULL, invisible to
+ * getElementById; created templates materialize an empty fragment),
+ * closest (self + ancestor climb, miss ⇒ null), dataset (camelCase
+ * snapshot, live read-back), appendret (appendChild/removeChild return
+ * the node per MDN). Paints "apidom: pass=N miss=M" and lifts the P0
+ * template row out of PASS-miss bookkeeping (apisum 12/2).
+ * API-P9 (closed): the parked pair lands. The classnames row (seventh
+ * row; 6->7) exercises the className accessor end to end — setter +
+ * read-back, the getAttribute('class') mirror, a rewrite and the
+ * setAttribute reverse-mirror — closing the P6 parked gap (the battery
+ * no longer needs the setAttribute detour). The closest/appendret rows
+ * double as the wrapper-identity gate on every engine: the one-wrapper
+ * per-node cache (browser identity model) makes their `===` chains PASS
+ * on mujs/duktape too (they MISSed with fresh wrappers per access
+ * before P9; XS NR held its own per-node cache since P1).
+ * API-P7 (closed): the storage row became a full receipts battery on
+ * the shared webstorage road — localStorage/sessionStorage roundtrip +
+ * remove→null + a quota subtest (a 5120-char construction must throw
+ * QuotaExceededError and store NOTHING: the catch paints "[p7q]" into
+ * the log and the row passes only when the value stayed absent) + an
+ * UNPAINTED persistent counter: "visits" increments localStorage on
+ * every probe boot and prints "[p7] store: visits=N local=L session=S"
+ * to the log (not the canvas, so snapshots stay stable) — the live
+ * proof of cross-boot persistence through the Data-sandbox file. The
+ * canvas row itself stays one in-place line: no block shifts.
+ * API-P8 (closed): the worker row became the contained-stub lane —
+ * the Worker constructor SHIPS (a missing constructor would kill the
+ * calling script on a ReferenceError) and every construction behaves
+ * like a worker whose script always fails to start: the row constructs
+ * 'workerstub.js', asserts the shape-complete object (typeof the
+ * postMessage/terminate members === 'function', onerror/onmessage
+ * null), assigns an onerror that logs "[p8w] worker onerror: <msg>"
+ * when the stub tells the page at the NEXT pump frame with
+ * ev = {message}, and postMessages 'ping' (absorbed — no thread). The
+ * worker script NEVER compiles, is never fetched, never executes; the
+ * battery rows add no terminate here, so the delivery receipt lands
+ * after the row (browsers: terminate-before-load-failure silences the
+ * error). Paints "worker: PASS"; apisum reaches 14/0 on XS (the full
+ * P0 battery), 10/4 on mujs/duk (their documented standing rows). */
+static const char APIPROBE_HTML[] =
+    "<!DOCTYPE html><html><head><title>API Probe</title><style>\n"
+    "body { background: white; color: black; }\n"
+    "h1 { font-size: 2em; }\n"
+    ".sum { font-weight: bold; }\n"
+    "</style></head><body>\n"
+    "<h1>API Probe</h1>\n"
+    "<p>Engine browser-API capability battery — P0 baseline run.</p>\n"
+    "<p class=\"sum\" id=\"apisum\">apisum: pending</p>\n"
+    "<div id=\"out\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('out');\n"
+    "  var sumEl = document.getElementById('apisum');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var npass = 0, nmiss = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    if (verdict === 'PASS') { npass = npass + 1; } else { nmiss = nmiss + 1; }\n"
+    "  }\n"
+    "  function iscallable(v) { return typeof v === 'function'; }\n"
+    "  try { row('domwrite', (function () { var p2 = document.createElement('p'); p2.textContent = 'ok'; return p2 && p2.textContent === 'ok'; })() ? 'PASS' : 'MISS'); } catch (e) { row('domwrite', 'MISS'); }\n"
+    "  try { row('title', document.title === 'API Probe' ? 'PASS' : 'MISS'); } catch (e) { row('title', 'MISS'); }\n"
+    "  try { row('timers', iscallable(setTimeout) && iscallable(setInterval) && iscallable(clearTimeout) ? 'PASS' : 'MISS'); } catch (e) { row('timers', 'MISS'); }\n"
+    "  try { localStorage.setItem('apiprobe', '1'); var st = localStorage.getItem('apiprobe'); localStorage.removeItem('apiprobe'); var gone = localStorage.getItem('apiprobe'); sessionStorage.setItem('apiseed', '2'); var sst = sessionStorage.getItem('apiseed'); sessionStorage.removeItem('apiseed'); var caught = false; try { var big = 'xxxxxxxxxx'; big = big + big; big = big + big; big = big + big; big = big + big; big = big + big; big = big + big; big = big + big; big = big + big; big = big + big; localStorage.setItem('biggie', big); localStorage.removeItem('biggie'); } catch (qe) { console.log('[p7q] ' + (qe && qe.message ? qe.message : qe)); caught = String(qe && qe.message ? qe.message : qe).indexOf('Quota') !== -1; } var ok = typeof localStorage !== 'undefined' && typeof sessionStorage !== 'undefined' && String(st) === '1' && gone === null && String(sst) === '2' && caught && localStorage.getItem('biggie') === null; if (ok) { var pv = parseInt(localStorage.getItem('p7v'), 10); if (isNaN(pv) || pv < 0) { pv = 0; } pv = pv + 1; localStorage.setItem('p7v', String(pv)); console.log('[p7] store: visits=' + pv + ' local=' + localStorage.length + ' session=' + sessionStorage.length); } row('storage', ok ? 'PASS' : 'MISS'); } catch (e) { row('storage', 'MISS'); }\n"
+    "  try { row('xhr', typeof XMLHttpRequest !== 'undefined' && iscallable(XMLHttpRequest) ? 'PASS' : 'MISS'); } catch (e) { row('xhr', 'MISS'); }\n"
+    "  try { row('listeners', document.addEventListener && iscallable(document.addEventListener) ? 'PASS' : 'MISS'); } catch (e) { row('listeners', 'MISS'); }\n"
+    "  try { row('promise', typeof Promise !== 'undefined' && iscallable(Promise) ? 'PASS' : 'MISS'); } catch (e) { row('promise', 'MISS'); }\n"
+    "  try { row('fetch', typeof fetch !== 'undefined' && iscallable(fetch) ? 'PASS' : 'MISS'); } catch (e) { row('fetch', 'MISS'); }\n"
+    "  try { row('console', typeof console !== 'undefined' && console.log && iscallable(console.log) ? 'PASS' : 'MISS'); } catch (e) { row('console', 'MISS'); }\n"
+    "  try { var wok = false, wsh = ''; try { var wk = new Worker('workerstub.js'); wok = true; wsh = (typeof wk === 'object' && typeof wk.postMessage === 'function' && typeof wk.terminate === 'function' && wk.onerror === null && wk.onmessage === null) ? 'ok' : 'shape'; wk.onerror = function (evw) { console.log('[p8w] worker onerror: ' + (evw && evw.message ? evw.message : evw)); }; wk.postMessage('ping'); } catch (we) { wsh = 'ctor:' + String(we && we.message ? we.message : we); } row('worker', (typeof Worker !== 'undefined' && iscallable(Worker) && wok && wsh === 'ok') ? 'PASS' : 'MISS'); } catch (e) { row('worker', 'MISS'); }\n"
+    "  try { row('location', typeof location !== 'undefined' ? 'PASS' : 'MISS'); } catch (e) { row('location', 'MISS'); }\n"
+    "  try { row('history', typeof history !== 'undefined' ? 'PASS' : 'MISS'); } catch (e) { row('history', 'MISS'); }\n"
+    "  try { var tpl = document.createElement('template'); row('template', tpl && tpl.content ? 'PASS' : 'MISS'); } catch (e) { row('template', 'MISS'); }\n"
+    "  try { row('currentscript', (function () { var cs = document.currentScript; return !!cs && typeof cs.getAttribute === 'function' && cs.getAttribute('src') === null; })() ? 'PASS' : 'MISS'); } catch (e) { row('currentscript', 'MISS'); }\n"
+    "  sumEl.textContent = 'apisum: pass=' + npass + ' miss=' + nmiss;\n"
+    "})();\n"
+    "</script>\n"
+    "<h2>Events battery</h2>\n"
+    "<form id=\"evf\">\n"
+    "  <input id=\"evi\" type=\"text\" name=\"ev\" value=\"seed\">\n"
+    "  <button id=\"evb\" type=\"submit\">Send</button>\n"
+    "</form>\n"
+    "<p class=\"sum\" id=\"apisev\">apisev: pending</p>\n"
+    "<div id=\"outev\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var form = document.getElementById('evf');\n"
+    "  var field = document.getElementById('evi');\n"
+    "  var btn = document.getElementById('evb');\n"
+    "  var out = document.getElementById('outev');\n"
+    "  var sumEl = document.getElementById('apisev');\n"
+    "  if (!form || !field || !btn || !out || !sumEl) { return; }\n"
+    "  var nin = 0, nchg = 0, nsub = 0, nbub = 0, nbtn = 0, ndoc = 0;\n"
+    "  function paint(tag) {\n"
+    "    sumEl.textContent = 'apisev: input=' + nin + ' change=' + nchg + ' submit=' + nsub + ' bub=' + nbub + ' btn=' + nbtn + ' doc=' + ndoc;\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = 'ev:' + tag;\n"
+    "    out.appendChild(d);\n"
+    "  }\n"
+    "  field.addEventListener('input', function () { nin = nin + 1; paint('input'); });\n"
+    "  field.addEventListener('change', function () { nchg = nchg + 1; paint('change'); });\n"
+    "  btn.addEventListener('click', function () { nbtn = nbtn + 1; paint('click'); });\n"
+    "  form.addEventListener('submit', function (e) { nsub = nsub + 1; if (e && e.preventDefault) { e.preventDefault(); } paint('submit'); });\n"
+    "  document.addEventListener('submit', function () { nbub = nbub + 1; paint('bub'); });\n"
+    "  document.addEventListener('click', function () { ndoc = ndoc + 1; paint('docclick'); });\n"
+    "})();\n"
+    "</script>\n"
+    "<h2>Fetch receipts</h2>\n"
+    "<p class=\"sum\" id=\"apifetch\">apifetch: pending</p>\n"
+    "<div id=\"outf\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outf');\n"
+    "  var sumEl = document.getElementById('apifetch');\n"
+    "  if (!out || !sumEl || typeof fetch !== 'function') { sumEl.textContent = 'apifetch: pass=0 miss=4'; return; }\n"
+    "  var npass = 0, nmiss = 0, ndone = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    if (verdict === 'PASS') { npass = npass + 1; } else { nmiss = nmiss + 1; }\n"
+    "    ndone = ndone + 1;\n"
+    "    if (ndone >= 4) { sumEl.textContent = 'apifetch: pass=' + npass + ' miss=' + nmiss; }\n"
+    "  }\n"
+    "  fetch('about:apiprobe').then(function (r) {\n"
+    "    if (r && r.ok === true && r.status === 200) {\n"
+    "      return r.text().then(function (t) {\n"
+    "        row('fetchbody', t && t.length > 100 && t.indexOf('API Probe') >= 0 ? 'PASS' : 'MISS');\n"
+    "      });\n"
+    "    }\n"
+    "    row('fetchbody', 'MISS');\n"
+    "  }).catch(function (e) { row('fetchbody', 'MISS'); });\n"
+    "  fetch('about:cssprobe').then(function (r) {\n"
+    "    return r.json().then(function () { row('fetchjsonreject', 'MISS'); }, function () { row('fetchjsonreject', 'PASS'); });\n"
+    "  }).catch(function () { row('fetchjsonreject', 'PASS'); });\n"
+    "  fetch('about:blank', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'a=1&b=2' }).then(function (r) { row('postct', r && r.ok ? 'PASS' : 'MISS'); }).catch(function () { row('postct', 'MISS'); });\n"
+    "  fetch('about:blank').then(function () { row('csasync', document.currentScript === null ? 'PASS' : 'MISS'); }).catch(function () { row('csasync', 'MISS'); });\n"
+    "})();\n"
+    "</script>\n"
+    "<h2>Address journal</h2>\n"
+    "<p class=\"sum\" id=\"apihist\">apihist: pending</p>\n"
+    "<div id=\"outh\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outh');\n"
+    "  var sumEl = document.getElementById('apihist');\n"
+    "  if (!out || !sumEl || !history || !history.pushState) { sumEl.textContent = 'apihist: pass=0 miss=7'; return; }\n"
+    "  var npass = 0, nmiss = 0, ndone = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    if (verdict === 'PASS') { npass = npass + 1; } else { nmiss = nmiss + 1; }\n"
+    "    ndone = ndone + 1;\n"
+    "    if (ndone >= 7) { sumEl.textContent = 'apihist: pass=' + npass + ' miss=' + nmiss; }\n"
+    "  }\n"
+    "  var pops = 0, hashchg = 0, lastPopState = 'no-event';\n"
+    "  try { window.addEventListener('popstate', function (e) { pops = pops + 1; lastPopState = (e && e.state && typeof e.state.p === 'number') ? String(e.state.p) : 'bad'; }); } catch (e0) {}\n"
+    "  try { window.addEventListener('hashchange', function (e) { hashchg = hashchg + 1; }); } catch (e1) {}\n"
+    "  var t0 = 'ok';\n"
+    "  try {\n"
+    "    history.pushState({ p: 11 }, '', '#h11');\n"
+    "    if (location.hash !== '#h11') t0 = 'bad';\n"
+    "    if (location.href.indexOf('#h11') < 0) t0 = 'bad';\n"
+    "    if (!history.state || history.state.p !== 11) t0 = 'bad';\n"
+    "    if (history.length !== 2) t0 = 'bad';\n"
+    "  } catch (e) { t0 = 'thr'; }\n"
+    "  row('histpush', t0 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t1 = 'ok';\n"
+    "  try {\n"
+    "    history.replaceState({ p: 12 }, '', '?a=2');\n"
+    "    if (location.search !== '?a=2') t1 = 'bad';\n"
+    "    if (location.hash !== '') t1 = 'bad';\n"
+    "    if (!history.state || history.state.p !== 12) t1 = 'bad';\n"
+    "    if (history.length !== 2) t1 = 'bad';\n"
+    "  } catch (e) { t1 = 'thr'; }\n"
+    "  row('histreplace', t1 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t2 = 'ok';\n"
+    "  try {\n"
+    "    history.pushState({ p: 13 }, '', '#h9');\n"
+    "    if (location.hash !== '#h9') t2 = 'bad';\n"
+    "    if (location.search !== '?a=2') t2 = 'bad';\n"
+    "    if (history.length !== 3) t2 = 'bad';\n"
+    "  } catch (e) { t2 = 'thr'; }\n"
+    "  row('histhashtop', t2 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t3 = 'ok';\n"
+    "  try { document.title = 'Pluto J3'; if (document.title !== 'Pluto J3') t3 = 'bad'; } catch (e) { t3 = 'thr'; }\n"
+    "  row('docsettitle', t3 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  try { history.back(); } catch (e) {}\n"
+    "  setTimeout(function () {\n"
+    "    var t4 = 'ok';\n"
+    "    try {\n"
+    "      if (location.search !== '?a=2') t4 = 'bad';\n"
+    "      if (location.hash !== '') t4 = 'bad';\n"
+    "      if (!history.state || history.state.p !== 12) t4 = 'bad';\n"
+    "      if (pops !== 1) t4 = 'bad';\n"
+    "      if (lastPopState !== '12') t4 = 'bad';\n"
+    "      if (hashchg !== 1) t4 = 'bad';\n"
+    "    } catch (e) { t4 = 'thr'; }\n"
+    "    row('histback', t4 === 'ok' ? 'PASS' : 'MISS');\n"
+    "    try { history.back(); } catch (e2) {}\n"
+    "    setTimeout(function () {\n"
+    "      var t5 = 'ok';\n"
+    "      try {\n"
+    "        if (location.href.indexOf('about:apiprobe') !== 0) t5 = 'bad';\n"
+    "        if (location.search !== '') t5 = 'bad';\n"
+    "        if (location.href.indexOf('?a=2') >= 0) t5 = 'bad';\n"
+    "        if (history.state !== null) t5 = 'bad';\n"
+    "        if (pops < 2) t5 = 'bad';\n"
+    "      } catch (e) { t5 = 'thr'; }\n"
+    "      row('histbase', t5 === 'ok' ? 'PASS' : 'MISS');\n"
+    "      try { history.forward(); } catch (e3) {}\n"
+    "      setTimeout(function () {\n"
+    "        var t6 = 'ok';\n"
+    "        try {\n"
+    "          if (location.search !== '?a=2') t6 = 'bad';\n"
+    "          if (pops < 3) t6 = 'bad';\n"
+    "        } catch (e) { t6 = 'thr'; }\n"
+    "        row('histforward', t6 === 'ok' ? 'PASS' : 'MISS');\n"
+    "      }, 90);\n"
+    "    }, 90);\n"
+    "  }, 90);\n"
+    "})();\n"
+    "</script>\n"
+    "<h2>Console receipts</h2>\n"
+    "<p class=\"sum\" id=\"apicon\">apicon: pending</p>\n"
+    "<div id=\"outc\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outc');\n"
+    "  var sumEl = document.getElementById('apicon');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var npass = 0, nmiss = 0, sent = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    if (verdict === 'PASS') { npass = npass + 1; } else { nmiss = nmiss + 1; }\n"
+    "  }\n"
+    "  var t0 = 'ok';\n"
+    "  try {\n"
+    "    console.log('P4LOG1 %s body', 'str'); sent = sent + 1;\n"
+    "    console.log('P4LOG2 %d nums', 42); sent = sent + 1;\n"
+    "    console.log('P4LOG3 %o shapes', { a: 1, b: [7, 8, 9] }); sent = sent + 1;\n"
+    "    console.log('P4LOG4 100%% literal'); sent = sent + 1;\n"
+    "    console.log('P4LOG5', [1, 2, 3, 4, 5]); sent = sent + 1;\n"
+    "  } catch (e) { t0 = 'thr'; }\n"
+    "  row('consolog', t0 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t1 = 'ok';\n"
+    "  try {\n"
+    "    console.warn('P4WARN1 %s level', 'warn'); sent = sent + 1;\n"
+    "    console.warn('P4WARN2 plain'); sent = sent + 1;\n"
+    "  } catch (e) { t1 = 'thr'; }\n"
+    "  row('consowarn', t1 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t2 = 'ok';\n"
+    "  try {\n"
+    "    console.error('P4ERR1 code=%d', 7); sent = sent + 1;\n"
+    "    console.error('P4ERR2 plain'); sent = sent + 1;\n"
+    "  } catch (e) { t2 = 'thr'; }\n"
+    "  row('consoerr', t2 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t3 = 'ok';\n"
+    "  try {\n"
+    "    console.info('P4INFO1 %s %s', 'i1', 'i2'); sent = sent + 1;\n"
+    "    console.info('P4INFO2 plain'); sent = sent + 1;\n"
+    "  } catch (e) { t3 = 'thr'; }\n"
+    "  row('consoinfo', t3 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t4 = 'ok';\n"
+    "  try { console.debug('P4DBG1 debug-level'); sent = sent + 1; } catch (e) { t4 = 'thr'; }\n"
+    "  row('consodebug', t4 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var longstr = '';\n"
+    "  for (var li = 0; li < 26; li = li + 1) { longstr = longstr + 'abcdefghij'; }\n"
+    "  var t5 = 'ok';\n"
+    "  try { console.log('P4LONGR ' + longstr); sent = sent + 1; } catch (e) { t5 = 'thr'; }\n"
+    "  row('consolong', t5 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var before = out.children.length;\n"
+    "  var t6 = 'ok';\n"
+    "  try {\n"
+    "    if (typeof console.assert !== 'function' || typeof console.dir !== 'function') t6 = 'absent';\n"
+    "    console.assert(0 === 1, 'P4ASSERT1 fired number=%d', 1); sent = sent + 1;\n"
+    "    console.assert(true, 'P4NOASSERT must stay silent'); sent = sent + 1;\n"
+    "    console.dir({ k: 'P4DIR1' }); sent = sent + 1;\n"
+    "  } catch (e) { t6 = 'thr'; }\n"
+    "  var after = out.children.length;\n"
+    "  row('consoassert', t6 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  row('consoclean', after === before ? 'PASS' : 'MISS');\n"
+    "  sent = sent + 1;\n"
+    "  console.log('P4COUNT ' + sent);\n"
+    "  sumEl.textContent = 'apicon: pass=' + npass + ' miss=' + nmiss + ' sent=' + sent;\n"
+    "})();\n"
+    "</script>\n"
+    "<h2>Module receipts</h2>\n"
+    "<p class=\"sum\" id=\"apimod\">apimod: pending</p>\n"
+    "<div id=\"outm\"></div>\n"
+    "<script type=\"module\">\n"
+    "var d0 = document.createElement('p');\n"
+    "d0.textContent = 'mod: modin ran';\n"
+    "var om = document.getElementById('outm');\n"
+    "if (om) { om.appendChild(d0); }\n"
+    "</script>\n"
+    "<script type=\"module\">\n"
+    "import { P5A, p5b, P5C } from 'about:p5m0';\n"
+    "import * as nsM1 from 'about:p5m1';\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outm');\n"
+    "  if (!out) { return; }\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "  }\n"
+    "  var t0 = 'ok';\n"
+    "  try {\n"
+    "    if (P5A !== 41) t0 = 'bad';\n"
+    "    if (typeof p5b !== 'function' || p5b() !== 1) t0 = 'bad';\n"
+    "    if (P5C !== 'two') t0 = 'bad';\n"
+    "  } catch (e) { t0 = 'thr'; }\n"
+    "  row('modabs', t0 === 'ok' ? 'PASS' : 'MISS');\n"
+    "  var t1 = 'ok';\n"
+    "  try {\n"
+    "    if (!nsM1 || typeof nsM1 !== 'object' || nsM1.P5D !== 1) t1 = 'bad';\n"
+    "  } catch (e) { t1 = 'thr'; }\n"
+    "  row('modstar', t1 === 'ok' ? 'PASS' : 'MISS');\n"
+    "})();\n"
+    "</script>\n"
+    "<script type=\"module\">\n"
+    "import { ZZ } from './p5x.js';\n"
+    "var dl = document.createElement('p');\n"
+    "dl.textContent = 'MODX-LEAK';\n"
+    "var om = document.getElementById('outm');\n"
+    "if (om) { om.appendChild(dl); }\n"
+    "</script>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outm');\n"
+    "  var sumEl = document.getElementById('apimod');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var kids = out.children.length;\n"
+    "  var verdict = (kids === 3) ? 'PASS' : 'FAIL';\n"
+    "  sumEl.textContent = 'apimod: kids=' + kids + ' refuse=' + verdict;\n"
+    "})();\n"
+    "</script>\n"
+    "<!-- API-P6: parsed-template fixture — the element stays reachable\n"
+    "     (id/querySelector per browsers) while its children parse into\n"
+    "     the DETACHED content fragment; the ids inside never reach\n"
+    "     getElementById or the render tree. -->\n"
+    "<template id=\"tplx\"><p id=\"tplinnerA\">A</p><p id=\"tplinnerB\">B</p></template>\n"
+    "<h2>DOM conveniences (P6)</h2>\n"
+    "<p class=\"sum\" id=\"apidom\">apidom: pending</p>\n"
+    "<div id=\"outd2\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('outd2');\n"
+    "  var sumEl = document.getElementById('apidom');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var npass = 0, nmiss = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    if (verdict.indexOf('PASS') === 0) npass = npass + 1; else nmiss = nmiss + 1;\n"
+    "  }\n"
+    "  function check(name, cond) { row(name, cond ? 'PASS' : 'MISS'); }\n"
+    "  var t0 = 'ok';\n"
+    "  try {\n"
+    "    var tpl = document.getElementById('tplx');\n"
+    "    var c = tpl ? tpl.content : null;\n"
+    "    if (!c) { t0 = 'nocontent'; }\n"
+    "    else {\n"
+    "      if (c.nodeType !== 11) { t0 = 'badkind:' + c.nodeType + ':' + typeof c.nodeType; }\n"
+    "      var kk = c.children ? c.children.length : -99;\n"
+    "      if (kk !== 2) { t0 = 'badkids:' + kk + ':' + typeof kk; }\n"
+    "      else {\n"
+    "        if (c.children[0].id !== 'tplinnerA') { t0 = 'badid:' + c.children[0].id; }\n"
+    "        if (c.children[1].id !== 'tplinnerB') { t0 = 'badid2:' + c.children[1].id; }\n"
+    "      }\n"
+    "    }\n"
+    "  } catch (e) { t0 = 'thr:' + (e && e.message ? e.message : '?'); }\n"
+    "  if (t0 === 'ok') { row('tplparsed', 'PASS:nt=' + c.nodeType + ' kids=' + c.children.length); } else { row('tplparsed', 'MISS:' + t0); }\n"
+    "  var t1 = 'ok';\n"
+    "  try {\n"
+    "    if (document.getElementById('tplinnerA') !== null) { t1 = 'leak'; }\n"
+    "    if (document.getElementById('tplx') === null) { t1 = 'elemmiss'; }\n"
+    "  } catch (e) { t1 = 'thr'; }\n"
+    "  check('tplinert', t1 === 'ok');\n"
+    "  var t2 = 'ok';\n"
+    "  try {\n"
+    "    var tpl2 = document.createElement('template');\n"
+    "    var c2 = tpl2.content;\n"
+    "    if (!c2 || c2.nodeType !== 11 || c2.children.length !== 0) { t2 = 'bad'; }\n"
+    "    var pn = document.createElement('p');\n"
+    "    c2.appendChild(pn);\n"
+    "    if (c2.children.length !== 1) { t2 = 'badmount'; }\n"
+    "    if (tpl2.children.length !== 0) { t2 = 'badleak'; }\n"
+    "  } catch (e) { t2 = 'thr'; }\n"
+    "  check('tplcreated', t2 === 'ok');\n"
+    "  var t3 = 'ok';\n"
+    "  try {\n"
+    "    var host = document.getElementById('outd2');\n"
+    "    var w = document.createElement('div'); w.setAttribute('class', 'clswrap');\n"
+    "    w.setAttribute('data-m', 'wrap');\n"
+    "    var inr = document.createElement('div'); inr.setAttribute('class', 'clsinner');\n"
+    "    w.appendChild(inr);\n"
+    "    host.appendChild(w);\n"
+    "    var up = inr.closest('.clswrap');\n"
+    "    if (up === null) { t3 = 'badnone'; }\n"
+    "    else {\n"
+    "      if (up.getAttribute('data-m') !== 'wrap') { t3 = 'badnode'; }\n"
+    "      if (up !== w) { t3 = 'badident'; }\n"
+    "    }\n"
+    "    if (inr.closest('.clsinner') !== inr) { t3 = 'badself'; }\n"
+    "    if (inr.closest('#outd2') !== host) { t3 = 'badup'; }\n"
+    "    if (inr.closest('.nope-xx') !== null) { t3 = 'badnope'; }\n"
+    "  } catch (e) { t3 = 'thr'; }\n"
+    "  if (t3 === 'ok') { row('closest', 'PASS'); } else { row('closest', 'MISS:' + t3); }\n"
+    "  var t4 = 'ok';\n"
+    "  try {\n"
+    "    var ds = document.createElement('p');\n"
+    "    ds.setAttribute('data-alpha', 'one');\n"
+    "    ds.setAttribute('data-max-rows', '7');\n"
+    "    if (!ds.dataset || ds.dataset.alpha !== 'one') { t4 = 'badread'; }\n"
+    "    if (ds.dataset.maxRows !== '7') { t4 = 'badcamel'; }\n"
+    "    ds.setAttribute('data-new-key', 'zz');\n"
+    "    if (ds.dataset.newKey !== 'zz') { t4 = 'badlive'; }\n"
+    "  } catch (e) { t4 = 'thr'; }\n"
+    "  check('dataset', t4 === 'ok');\n"
+    "  var t5 = 'ok';\n"
+    "  try {\n"
+    "    var par = document.createElement('div');\n"
+    "    var kid = document.createElement('p');\n"
+    "    kid.setAttribute('data-k', 'k1');\n"
+    "    var r1 = par.appendChild(kid);\n"
+    "    if (!r1 || r1 !== kid || r1.getAttribute('data-k') !== 'k1') { t5 = 'badappend'; }\n"
+    "    var r2 = par.removeChild(kid);\n"
+    "    if (!r2 || r2 !== kid) { t5 = 'badremove'; }\n"
+    "    var ref = document.createElement('p');\n"
+    "    par.appendChild(ref);\n"
+    "    var kid2 = document.createElement('p');\n"
+    "    var r3 = par.insertBefore(kid2, ref);\n"
+    "    if (!r3 || r3 !== kid2) { t5 = 'badinsert'; }\n"
+    "  } catch (e) { t5 = 'thr'; }\n"
+    "  check('appendret', t5 === 'ok');\n"
+    "  var t6 = 'ok';\n"
+    "  try {\n"
+    "    var cn = document.createElement('p');\n"
+    "    cn.className = 'pie green';\n"
+    "    if (cn.className !== 'pie green') { t6 = 'badwrite'; }\n"
+    "    if (cn.getAttribute('class') !== 'pie green') { t6 = 'badmirror'; }\n"
+    "    cn.className = 'solo';\n"
+    "    if (cn.className !== 'solo' || cn.getAttribute('class') !== 'solo') { t6 = 'badrewrite'; }\n"
+    "    cn.setAttribute('class', 'a b');\n"
+    "    if (cn.className !== 'a b') { t6 = 'badreverse'; }\n"
+    "  } catch (e) { t6 = 'thr'; }\n"
+    "  check('classnames', t6 === 'ok');\n"
+    "  sumEl.textContent = 'apidom: pass=' + npass + ' miss=' + nmiss;\n"
+    "})();\n"
+    "</script></body></html>\n";
+
 static const InternalPage INTERNAL_PAGES[] = {
     { "about:home", "PlutoBrowser",
       "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
@@ -1113,6 +1655,19 @@ static const InternalPage INTERNAL_PAGES[] = {
     { "about:javascript", "JavaScript Test Suite", JSTEST_HTML },
     { "about:jsext", "Full JS Test Suite", JSEXTTEST_HTML },
     { "about:cssprobe", "CSS Probe", CSSPROBE_HTML },
+    { "about:apiprobe", "API Probe", APIPROBE_HTML },
+    /* API-P5: fixture MODULES served from the same store road fetch()
+     * and xhr use. Import-only — deliberately NOT in the PageDirectory:
+     * the battery imports them by absolute key. */
+    { "about:p5m0", "P5 Module M0",
+      "export const P5A = 41;\n"
+      "export function p5b() { return 1; }\n"
+      "export let P5C = 'two';\n"
+      "export var P5U = 'unused-shape';\n" },
+    { "about:p5m1", "P5 Module M1",
+      "export const P5D = 1;\n"
+      "export var P5E = 'e1';\n"
+      "export function p5f(x) { return x + 1; }\n" },
 };
 
 /* Read-only directory view (http_client.h): name + title per internal page,
@@ -1125,6 +1680,7 @@ static const HttpTestPage TEST_PAGES[] = {
     { "about:javascript", "JavaScript Test Suite" },
     { "about:jsext", "Full JS Test Suite" },
     { "about:cssprobe", "CSS Probe" },
+    { "about:apiprobe", "API Probe" },
 };
 
 size_t http_internal_page_body(const char *url, const char **bodyOut)
