@@ -1282,6 +1282,14 @@ static void define_globals(js_State *J, JsBridge *b, const char *baseUrl)
     js_pushglobal(J);
     js_setglobal(J, "window");
 
+    /* ES2020 identity alias: muJS has no `globalThis`, but ES modules
+     * (the transform prelude) and the dynamic-import shim build the
+     * traversal state on it exactly like a browser global. Without this
+     * every module body silently died at the prelude's first reference
+     * (receipted by the P10 body-error lane). */
+    js_pushglobal(J);
+    js_setglobal(J, "globalThis");
+
     define_element_proto(J);
     define_document(J, b);
 
@@ -1502,6 +1510,10 @@ static void mujs_run_script(JsBridge *b, const char *src, size_t len, int index)
         {
             b->errs++;
             bridge_take_error(b, J);
+            /* P10: receipt EVERY throw — the sticky first-error channel
+             * alone made per-body errors invisible (probe battery silences). */
+            logger_log("[js] script %d threw: %.96s", index,
+                       js_trystring(J, -1, "error"));
             js_pop(J, 1);
         }
         else
@@ -1714,6 +1726,20 @@ static int xhr_put(js_State *J, void *p, const char *name)
     return 0; /* handler props land as own props, pinned at send */
 }
 
+/* API-P10: dynamic-import bridge native — delegates to the shared core
+ * (jsbridge_dyn_request in jsbridge.c) and pushes the status STRING
+ * ("k:<key>" / "p:<id>" / "x:<msg>"). Two args: spec, base. */
+static int js_dyn_request(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    const char *spec = js_tostring(J, 1);
+    const char *base = js_tostring(J, 2);
+    char out[JSBRIDGE_MOD_KEY_MAX + 24];
+    jsbridge_dyn_request(b, spec, base, out, sizeof(out));
+    js_pushstring(J, out);
+    return 1;
+}
+
 static void js_xhr_open(js_State *J)
 {
     JsBridge *b = (JsBridge *)js_getcontext(J);
@@ -1828,6 +1854,14 @@ static void mujs_define_xhr(js_State *J)
     js_newcconstructor(J, js_xmlhttprequest_new, js_xmlhttprequest_new,
                        "XMLHttpRequest", 0);
     js_setglobal(J, "XMLHttpRequest");
+
+    /* API-P10: the dynamic-import bridge — the __p5dynimport shim calls
+     * this ONE native; the reply is the status string protocol
+     * ("k:<key>" resolved / "p:<id>" ticket / "x:<msg>" refused, see
+     * jsbridge.c). No module work may run inside this call: the module
+     * pump owns every bracket. */
+    js_newcfunction(J, js_dyn_request, "__p5modRequest", 2);
+    js_setglobal(J, "__p5modRequest");
 }
 
 /* XHR vtable: release the pinned completion + wrapper refs (slot inert).

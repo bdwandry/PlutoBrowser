@@ -1941,6 +1941,20 @@ static duk_ret_t duk_xmlhttprequest_new(duk_context *ctx)
     return 1;
 }
 
+/* API-P10: dynamic-import bridge native — delegates to the shared core
+ * (jsbridge_dyn_request in jsbridge.c); status-string reply protocol
+ * ("k:<key>" resolved / "p:<id>" ticket / "x:<msg>" refused). */
+static duk_ret_t duk_dyn_request(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *spec = duk_to_string(ctx, 0);
+    const char *base = duk_to_string(ctx, 1);
+    char out[JSBRIDGE_MOD_KEY_MAX + 24];
+    jsbridge_dyn_request(b, spec, base, out, sizeof(out));
+    duk_push_string(ctx, out);
+    return 1;
+}
+
 static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
 {
     duk_push_c_function(ctx, duk_xmlhttprequest_new, 0);
@@ -1973,6 +1987,11 @@ static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
     }
     duk_put_prop_string(ctx, -2, "prototype");
     duk_put_global_string(ctx, "XMLHttpRequest");
+
+    /* API-P10: the dynamic-import bridge — one native over the shared
+     * core; status-string reply protocol (see jsbridge_internal.h). */
+    duk_push_c_function(ctx, duk_dyn_request, 2);
+    duk_put_global_string(ctx, "__p5modRequest");
 }
 
 /* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note

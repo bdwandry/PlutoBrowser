@@ -1176,7 +1176,11 @@ static const char CSSPROBE_HTML[] =
  * rides the loader-side lane: inline modules run (modin), static
  * imports resolve through url_resolve against the document base and
  * fetch from the internal page store (modabs = named bindings out of
- * about:p5m0; modstar = the *-import namespace object of about:p5m1),
+ * about:p5m0; modstar = the *-import namespace object of about:p5m1);
+ * P10 note: the store fixtures stay on the const/let/function forms —
+ * the LIST export form (`export {name, name as alias}`) materializes
+ * since P10 (aliases included, `export {list} from` still refuses),
+ * receipts in jsbridge.c.
  * and the graph runs import-FIRST in declaration order (children load
  * before the body — the receipts assert both values landed). The
  * refusal receipt (modrefuse): a path-only './p5x.js' import on this
@@ -1185,6 +1189,29 @@ static const char CSSPROBE_HTML[] =
  * closing classic script counts outm's children: exactly 3 = the modin
  * marker + the two PASS rows (a leak child or a missing row breaks the
  * count). Paints "apimod: kids=K refuse=PASS|FAIL".
+ * API-P10 (closed): the async lane battery adds four module scripts —
+ * moddyn (dynamic import('about:p5m0'): the promise resolves with the
+ * namespace, asserts P5A==41 + the function + P5C; moddynid rides in the
+ * same module: a SECOND import( of the SAME key must return the SAME
+ * namespace object (===)). modmiss (import('about:p5miss') REJECTS with
+ * the browser message class "Failed to fetch dynamically imported
+ * module: <spec>" — the assertion is the rejection text). modnet
+ * (import() of the PINNED https CDN module punycode@2.1.1 — fetched the
+ * module lane (router transport, single-flight), drained through the
+ * standing transform where the P10 LIST-EXPORT form
+ * (export {local, local as exported}) materializes the 6 named exports,
+ * then asserts encode/decode real; network-failed → assert the promise
+ * REJECTED instead: conditional-PASS either way, the log branch
+ * "[apimod] modnet: fetched/rejected/no dynamic-import path documents
+ * which). The row helpers (apimodWrite/apimodRecount) live on
+ * globalThis — module scripts have separate scopes, and a throw inside
+ * a promise handler rejects the .then chain itself (an honest unhandled
+ * rejection), so the writers are globals. Frozen engines feature-detect
+ * the import path (no __p5dynimport shim or no Promise class) and write
+ * honest MISS rows instead of throwing (kids=5 refuse=FAIL on mujs/duk;
+ * kids=7 refuse=PASS on XS). The closing classic script recounts: 7 =
+ * the modin marker + modabs + modstar + the four async rows (a leak
+ * child or a missing row breaks the count).
  * API-P6 (closed): the DOM-conveniences battery adds six rows —
  * tplparsed/tplinert/tplcreated (template.content: template children
  * parse into a DETACHED fragment, parent-NULL, invisible to
@@ -1514,6 +1541,91 @@ static const char APIPROBE_HTML[] =
     "})();\n"
     "</script>\n"
     "<script type=\"module\">\n"
+    "var firstNs = null;\n"
+    "/* P10 row helpers live on globalThis so EVERY battery module (separate\n"
+    " * module scopes) uses the same writers — a throw inside a promise\n"
+    " * handler would reject the .then chain itself (an honest unhandled\n"
+    " * rejection at the engine), so the helpers must never miss. */\n"
+    "globalThis.apimodWrite = function (name, verdict) {\n"
+    "  var out = document.getElementById('outm');\n"
+    "  if (!out) { return; }\n"
+    "  var d = document.createElement('p');\n"
+    "  d.textContent = name + ': ' + verdict;\n"
+    "  out.appendChild(d);\n"
+    "};\n"
+    "globalThis.apimodRecount = function () {\n"
+    "  var out = document.getElementById('outm');\n"
+    "  var sumEl = document.getElementById('apimod');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var kids = out.children.length;\n"
+    "  var verdict = (kids === 7) ? 'PASS' : 'FAIL';\n"
+    "  sumEl.textContent = 'apimod: kids=' + kids + ' refuse=' + verdict;\n"
+    "};\n"
+    "if (typeof __p5dynimport !== 'function' || typeof Promise !== 'function') {\n"
+    "  /* frozen engine: no dynamic-import path — assert the rows honestly\n"
+    "   * instead of reference-throwing (feature detect, per browsers). */\n"
+    "  apimodWrite('moddyn', 'MISS');\n"
+    "  apimodRecount();\n"
+    "  apimodWrite('moddynid', 'MISS');\n"
+    "  apimodRecount();\n"
+    "}\n"
+    "else {\n"
+    "import('about:p5m0').then(function (ns) {\n"
+    "  firstNs = ns;\n"
+    "  var ok = !!(ns && ns.P5A === 41 && typeof ns.p5b === 'function' && ns.P5C === 'two');\n"
+    "  apimodWrite('moddyn', ok ? 'PASS' : 'MISS');\n"
+    "  apimodRecount();\n"
+    "}, function (e) {\n"
+    "  apimodWrite('moddyn', 'MISS');\n"
+    "  apimodRecount();\n"
+    "});\n"
+    "import('about:p5m0').then(function (ns2) {\n"
+    "  var ok = !!(firstNs && ns2 === firstNs);\n"
+    "  apimodWrite('moddynid', ok ? 'PASS' : 'MISS');\n"
+    "  apimodRecount();\n"
+    "}, function (e) {\n"
+    "  apimodWrite('moddynid', 'MISS');\n"
+    "  apimodRecount();\n"
+    "});\n"
+    "}\n"
+    "</script>\n"
+    "<script type=\"module\">\n"
+    "if (typeof __p5dynimport !== 'function' || typeof Promise !== 'function') {\n"
+    "  apimodWrite('modmiss', 'MISS');\n"
+    "  apimodRecount();\n"
+    "}\n"
+    "else {\n"
+    "import('about:p5miss').then(function (ns) {\n"
+    "  apimodWrite('modmiss', 'MISS');\n"
+    "  apimodRecount();\n"
+    "}, function (e) {\n"
+    "  var ok = !!(e && typeof e.message === 'string' &&\n"
+    "    e.message.indexOf('about:p5miss') >= 0);\n"
+    "  apimodWrite('modmiss', ok ? 'PASS' : 'MISS');\n"
+    "  apimodRecount();\n"
+    "});\n"
+    "}\n"
+    "</script>\n"
+    "<script type=\"module\">\n"
+    "if (typeof __p5dynimport !== 'function' || typeof Promise !== 'function') {\n"
+    "  console.log('[apimod] modnet: no dynamic-import path (engine ceiling)');\n"
+    "  apimodWrite('modnet', 'MISS');\n"
+    "  apimodRecount();\n"
+    "}\n"
+    "else {\n"
+    "import('https://cdn.jsdelivr.net/npm/punycode@2.1.1/punycode.es6.js').then(function (ns) {\n"
+    "  console.log('[apimod] modnet: fetched (namespace on the wire road)');\n"
+    "  var ok = !!(ns && (typeof ns.encode === 'function' || typeof ns.decode === 'function'));\n"
+    "  apimodWrite('modnet', ok ? 'PASS' : 'MISS');\n"
+    "  apimodRecount();\n"
+    "}, function (e) {\n"
+    "  console.log('[apimod] modnet: rejected (offline or engine ceiling) msg=' + (e && e.message ? e.message : 'none'));\n"
+    "  apimodWrite('modnet', e ? 'PASS' : 'MISS');\n"
+    "  apimodRecount();\n"
+    "});\n"
+    "}\n"
+    "</script>\n"
+    "<script type=\"module\">\n"
     "import { ZZ } from './p5x.js';\n"
     "var dl = document.createElement('p');\n"
     "dl.textContent = 'MODX-LEAK';\n"
@@ -1526,7 +1638,7 @@ static const char APIPROBE_HTML[] =
     "  var sumEl = document.getElementById('apimod');\n"
     "  if (!out || !sumEl) { return; }\n"
     "  var kids = out.children.length;\n"
-    "  var verdict = (kids === 3) ? 'PASS' : 'FAIL';\n"
+    "  var verdict = (kids === 7) ? 'PASS' : 'FAIL';\n"
     "  sumEl.textContent = 'apimod: kids=' + kids + ' refuse=' + verdict;\n"
     "})();\n"
     "</script>\n"

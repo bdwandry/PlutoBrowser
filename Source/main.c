@@ -796,6 +796,11 @@ static void js_timers_update(void)
      * this frame by http_update; completions it settled are pending here). */
     int xhrMutations = 0;
     (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    /* API-P10: the async module lane — deliveries (already settled this
+     * frame by http_update) drain through the standing module bracket,
+     * the transport head starts the next wire fetch while the client is
+     * idle, watchdogs age parked fetches, and __p5dynq tickets settle. */
+    jsbridge_modules_pump(g_pageJs, nowMs);
     /* API-P8: worker stub error deliveries — the same frame-later analog
      * of a failed script load; never fires inside the constructing script. */
     int wkMutations = 0;
@@ -1207,6 +1212,19 @@ static void nr_revisit_autotest_tick(void)
         {
             logger_log("[nr-autotest] about: probe page — snapshot-revisit "
                        "phases skipped (snap_skip_url by design)");
+            g_nrSnapPhase = 3;
+            return;
+        }
+        if (strncmp(currentUrlObj->normalized, "file:", 5) == 0)
+        {
+            /* file: fixtures (P5 module fixture pages, P10's async-lane
+             * page) are local test documents: the row text is the
+             * assertion, and the async module chain lands AFTER first
+             * render — a revisit would either serve the pre-chain
+             * snapshot with no JS eval or tear the page down mid-fetch.
+             * Same design as the about: probe skip. */
+            logger_log("[nr-autotest] file: fixture page — snapshot-revisit "
+                       "phases skipped (local test page)");
             g_nrSnapPhase = 3;
             return;
         }
@@ -5393,8 +5411,33 @@ static size_t pluto_load_local_file(const char *fileUrl)
     SDFile *fp = pd->file->open(path, kFileReadData);
     if (!fp)
     {
-        logger_log("[file] open failed: %s", path);
-        return 0;
+        /* URL normalization appends the empty-path '/' to file: URLs
+         * (file://x.html → file://x.html/), but when the referent is a
+         * FILE the slashed open just ENOTDIRs. One unslashed retry keeps
+         * stray-slash file URLs loadable (receipted both ways). */
+        size_t plen = strlen(path);
+        char trimmed[1024];
+        if (plen > 1 && plen < sizeof(trimmed) && path[plen - 1] == '/')
+        {
+            memcpy(trimmed, path, plen + 1);
+            while (plen > 0 && trimmed[plen - 1] == '/')
+            {
+                plen--;
+            }
+            trimmed[plen] = '\0';
+            fp = pd->file->open(trimmed, kFileReadData);
+            if (fp)
+            {
+                logger_log("[file] slashed path retried as '%s' (opened)",
+                           trimmed);
+                path = trimmed;
+            }
+        }
+        if (!fp)
+        {
+            logger_log("[file] open failed: %s", path);
+            return 0;
+        }
     }
     pd->file->seek(fp, 0, SEEK_END);
     int flen = pd->file->tell(fp);

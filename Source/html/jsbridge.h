@@ -324,6 +324,14 @@ void jsbridge_deferred_pump(JsBridge *bridge, int *mutationsOut);
  * a mid-flight bundler split is engine-busy via impl->eval_pending).
  * mutationsOut (may be NULL) is set when the entry consumed DOM budget. */
 void jsbridge_script_queue_pump(JsBridge *bridge, int *mutationsOut);
+/* API-P10: per-frame module pump — the async http(s) module lane +
+ * dynamic import() settlement. Drives the transport head (one wire fetch
+ * while the page's client is idle, the R53 single-flight contract kept
+ * byte-exact for page requests), the deliveries (drain = the standing
+ * module transform+run; the ledger commits), the parent cascade, the
+ * watchdogs (~20s requeue once on silence/supersession, ~40s terminal)
+ * and the __p5dynq ticket deliveries (tiny evals in the bracket). */
+void jsbridge_modules_pump(JsBridge *bridge, unsigned nowMs);
 /* R20: per-frame ENGINE pump — resumes background engine work that must
  * be spread across frames to keep the device run loop alive (the XS-NR
  * fork's time-sliced bundler split). Call once per frame next to the

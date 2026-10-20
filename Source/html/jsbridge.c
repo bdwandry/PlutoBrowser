@@ -2158,7 +2158,7 @@ void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut)
  *     the cycle/cap receipts.
  *
  * Documented boundaries (typed gaps, per the program's honesty rule):
- *   - `export default`, `export {list}`, `export * [from]` do not
+ *   - `export default`, `export * [from]`, `export {list} from` do not
  *     materialize: the statement is removed and the refusal logged;
  *   - dynamic `import()` is left untouched — the engine throws at
  *     runtime like any unknown global today;
@@ -2174,7 +2174,7 @@ void jsbridge_deferred_pump(JsBridge *b, int *mutationsOut)
 
 #define JSBRIDGE_MOD_SRC_MAX (16 * 1024)   /* one module's fetched source */
 #define JSBRIDGE_MOD_BUILT_MAX (20 * 1024) /* prelude + body + postludes */
-#define JSBRIDGE_MOD_IMPORTS 6             /* imports per module */
+/* JSBRIDGE_MOD_IMPORTS moved to jsbridge_internal.h (API-P10 flight table) */
 #define JSBRIDGE_MOD_NAMES 6               /* named bindings per import */
 #define JSBRIDGE_MOD_EXPORTS 12            /* exported names per module */
 #define JSBRIDGE_MOD_SPANS 40              /* removal spans per module */
@@ -2201,6 +2201,10 @@ typedef struct
     ModImport imp[JSBRIDGE_MOD_IMPORTS];
     int exportCount;
     char exp[JSBRIDGE_MOD_EXPORTS][JSBRIDGE_MOD_NAME_MAX];
+    /* API-P10: export {local, local as exported} — the LOCAL binding per
+     * export name (== exp[i] unless the `as` alias renames). The build's
+     * postludes materialize __p5mod[key][exp[i]] from expLocal[i]. */
+    char expLocal[JSBRIDGE_MOD_EXPORTS][JSBRIDGE_MOD_NAME_MAX];
     int xDefault, xList, xStar, xDyn, xOther;
     int spanCount;
     struct
@@ -2208,6 +2212,16 @@ typedef struct
         size_t at; /* inclusive */
         size_t end; /* exclusive */
     } cut[JSBRIDGE_MOD_SPANS];
+    /* API-P10: dynamic `import(` RENAME spans — the word's span is copied
+     * as `__p5di` by mod_build's body copy (see its prelude). Never inside
+     * a cut span: cuts hold top-level statements, rename spans live
+     * inside expression positions; both come from the same token scan. */
+    int renCount;
+    struct
+    {
+        size_t at; /* inclusive — the `import` word start */
+        size_t end; /* exclusive — the word end (6 bytes later) */
+    } ren[JSBRIDGE_MOD_SPANS];
     /* graph phase output (children resolved and run BEFORE the build): */
     char impKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
     unsigned char impLoaded[JSBRIDGE_MOD_IMPORTS];
@@ -2523,6 +2537,7 @@ static int ml_token(const char *src, size_t len, size_t *pp, char *word,
  * (the caller fails the import loudly — the engine then reports the
  * raw source). */
 static void mod_add_cut(ModScan *m, size_t at, size_t end);
+static void mod_add_ren(ModScan *m, size_t at, size_t end);
 
 /* Named-binding list after '{'. On success *pp sits past the closing
  * '}' and the slots are copied into `slot`; a malformed list returns 0
@@ -2700,8 +2715,13 @@ static void mod_parse_import(const char *src, size_t len, size_t at,
     if (q < len && src[q] == '(')
     {
         m->xDyn++;
-        logger_log("[module] dynamic import() unrewritten (runtime surface "
-                   "stays unknown)");
+        /* API-P10: dynamic import() now REWRITES to the bound __p5di
+         * helper (mod_build renames the word span and prelude-defines
+         * the closure over this module's own import base). The call's
+         * argument list copies through untouched. */
+        mod_add_ren(m, at, at + 6);
+        logger_log("[module] dynamic import() -> __p5di rename span "
+                   "(count %d)", m->xDyn);
         *nextOut = at + 6;
         return;
     }
@@ -2874,6 +2894,26 @@ static void mod_add_cut(ModScan *m, size_t at, size_t end)
     m->spanCount++;
 }
 
+/* API-P10: record an `import` word span for the `__p5di` rename at
+ * emission time. Overflow leaves the call UNREWRITTEN (the engine's own
+ * reserved-word handling answers, the documented P5 boundary behavior). */
+static void mod_add_ren(ModScan *m, size_t at, size_t end)
+{
+    if (at >= end || m->renCount >= JSBRIDGE_MOD_SPANS)
+    {
+        if (m->renCount >= JSBRIDGE_MOD_SPANS)
+        {
+            logger_log("[module] scan overflow (rename table full) — "
+                       "dynamic import() left unrewritten at byte %zu",
+                       at);
+        }
+        return;
+    }
+    m->ren[m->renCount].at = at;
+    m->ren[m->renCount].end = end;
+    m->renCount++;
+}
+
 static void mod_add_export(ModScan *m, const char *name)
 {
     if (!name[0])
@@ -2888,6 +2928,30 @@ static void mod_add_export(ModScan *m, const char *name)
         return;
     }
     snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s", name);
+    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+             name);
+    m->exportCount++;
+}
+
+/* API-P10: the export {local [as exported]} pair form — the build
+ * materializes name → the LOCAL binding (defaults to the same name). */
+static void mod_add_export_pair(ModScan *m, const char *local,
+                                const char *name)
+{
+    if (!name[0] || !local[0])
+    {
+        return;
+    }
+    if (m->exportCount >= JSBRIDGE_MOD_EXPORTS)
+    {
+        logger_log("[module] export-name cap %d hit ('%s' not materialized "
+                   "— the declaration still runs)",
+                   JSBRIDGE_MOD_EXPORTS, name);
+        return;
+    }
+    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s", name);
+    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+             local);
     m->exportCount++;
 }
 
@@ -3083,25 +3147,118 @@ static void mod_parse_export(const char *src, size_t len, size_t at,
                    "still runs — documented boundary)");
         return;
     }
-    if (tok == 0 && (c0 == '{' || c0 == '*'))
+    if (tok == 0 && c0 == '{')
     {
-        if (c0 == '{')
+        /* API-P10: export {local[, local [as exported]]} — the LOCAL
+         * list form lands for real now: the statement cuts away, the
+         * listed bindings stay plain const/var/function locals in the
+         * body, and mod_build's exp postludes materialize each name
+         * from its local binding (aliases included). The `from`
+         * re-export form stays a documented boundary (receipted). */
+        char pairLocal[JSBRIDGE_MOD_EXPORTS][JSBRIDGE_MOD_NAME_MAX];
+        char pairAlias[JSBRIDGE_MOD_EXPORTS][JSBRIDGE_MOD_NAME_MAX];
+        int pairCount = 0;
+        int pairOverflow = 0;
+        int bad = 0;
+        int fromForm = 0;
+        size_t q = p; /* already past '{' */
+        logger_log("[module] export {list} parsing (P10 list form)");
+        while (q < len)
+        {
+            char word2[JSBRIDGE_MOD_NAME_MAX];
+            char c0b2 = 0;
+            size_t st2 = 0;
+            int t2 = ml_token(src, len, &q, word2, sizeof(word2), &c0b2,
+                              &st2);
+            if (t2 < 0)
+            {
+                bad = 1; /* EOF inside the list */
+                break;
+            }
+            if (t2 == 0 && c0b2 == '}')
+            {
+                break; /* the list closed */
+            }
+            if (t2 == 0 && c0b2 == ',')
+            {
+                continue;
+            }
+            if (t2 != 1)
+            {
+                bad = 1; /* only idents (and , } ) fit this grammar */
+                break;
+            }
+            /* the local name; an optional `as alias` may follow */
+            if (pairCount >= JSBRIDGE_MOD_EXPORTS)
+            {
+                pairOverflow = 1;
+            }
+            else
+            {
+                snprintf(pairLocal[pairCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+                         word2);
+                snprintf(pairAlias[pairCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+                         word2);
+            }
+            size_t peek = ml_space_at(src, len, q);
+            size_t wEnd = 0;
+            if (ml_word_at(src, len, peek, "as", 2, &wEnd))
+            {
+                q = wEnd;
+                t2 = ml_token(src, len, &q, word2, sizeof(word2), &c0b2,
+                              &st2);
+                if (t2 != 1)
+                {
+                    bad = 1; /* `as` without the alias name */
+                    break;
+                }
+                if (pairCount < JSBRIDGE_MOD_EXPORTS)
+                {
+                    snprintf(pairAlias[pairCount], JSBRIDGE_MOD_NAME_MAX,
+                             "%s", word2);
+                }
+            }
+            pairCount++;
+        }
+        /* the from-peek: `export {…} from 'spec'` = the re-export form */
+        if (!bad && q < len)
+        {
+            char word3[8];
+            char c0b3 = 0;
+            size_t st3 = 0;
+            int t3 = ml_token(src, len, &q, word3, sizeof(word3), &c0b3,
+                              &st3);
+            if (t3 == 1 && strcmp(word3, "from") == 0)
+            {
+                fromForm = 1;
+                /* skip the specifier without disturbing the scan state:
+                 * the cut already removes the statement through ';'. */
+            }
+        }
+        if (fromForm || bad || pairOverflow)
         {
             m->xList++;
-            logger_log("[module] export {list} unref (removed; the module "
-                       "still runs — documented boundary)");
+            logger_log("[module] export {list}%s unref (removed; the module "
+                       "still runs — documented boundary)",
+                       fromForm ? " from" : (bad ? " (syntax)" : " (cap)"));
+            size_t send = ml_stmt_end(src, len, p);
+            mod_add_cut(m, at, send);
+            *nextOut = send;
+            return;
         }
-        else
+        for (int i = 0; i < pairCount; i++)
         {
-            m->xStar++;
-            logger_log("[module] export * [from] unref (removed; the "
-                       "module still runs — documented boundary)");
+            mod_add_export_pair(m, pairLocal[i], pairAlias[i]);
         }
         size_t send = ml_stmt_end(src, len, p);
         mod_add_cut(m, at, send);
         *nextOut = send;
+        logger_log("[module] export {list} registered %zd name%s (P10 list "
+                   "form)",
+                   (long)pairCount, pairCount == 1 ? "" : "s");
         return;
     }
+    if (tok == 0 && c0 == '*')
     logger_log("[module] export head unrecognized at byte %zu — left for "
                "the engine's SyntaxError", at);
     *nextOut = at + 6;
@@ -3152,7 +3309,8 @@ static void mod_scan(const char *src, size_t len, ModScan *m)
             continue;
         }
         if (ml_isidchar((unsigned char)c) &&
-            (p == 0 || !ml_isidchar((unsigned char)src[p - 1])))
+            (p == 0 || !ml_isidchar((unsigned char)src[p - 1])) &&
+            (p == 0 || src[p - 1] != '.'))
         {
             if (depth == 0)
             {
@@ -3168,6 +3326,30 @@ static void mod_scan(const char *src, size_t len, ModScan *m)
                     continue;
                 }
                 (void)wEnd;
+            }
+            else
+            {
+                /* API-P10: dynamic import() INSIDE nested scopes — any
+                 * `import` word followed by `(` renames; statements here
+                 * stay unparseable (engines raise their own SyntaxError
+                 * for a bare import keyword mid-expression, unchanged).
+                 * Strings/comments/templates/regex already skimmed above,
+                 * so no false renames. */
+                size_t wEnd = 0;
+                if (ml_word_at(src, len, p, "import", 6, &wEnd))
+                {
+                    size_t q = ml_space_at(src, len, wEnd);
+                    if (q < len && src[q] == '(')
+                    {
+                        m->xDyn++;
+                        mod_add_ren(m, p, wEnd);
+                        logger_log("[module] dynamic import() (nested) -> "
+                                   "__p5di rename span (count %d)",
+                                   m->xDyn);
+                        p = wEnd;
+                        continue;
+                    }
+                }
             }
             while (p < len && ml_isidchar((unsigned char)src[p]))
             {
@@ -3254,7 +3436,8 @@ static void mod_outj(ModOut *o, const char *s)
  *   __p5mod init; (function(){ import preludes; BODY; export
  *   postludes; })(); */
 static char *mod_build(const char *src, size_t len, const ModScan *m,
-                       const char *key, size_t *builtLenOut)
+                       const char *key, const char *importBase,
+                       size_t *builtLenOut)
 {
     char *buf = (char *)JMalloc(JSBRIDGE_MOD_BUILT_MAX);
     if (!buf)
@@ -3267,6 +3450,17 @@ static char *mod_build(const char *src, size_t len, const ModScan *m,
     mod_outs(&o, "globalThis.__p5mod[\"");
     mod_outj(&o, key);
     mod_outs(&o, "\"] = {};\n(function(){\n");
+
+    if (m->renCount > 0)
+    {
+        /* API-P10: the bound dynamic-import helper — one per module
+         * scope, capturing THIS module's own import base so the call
+         * site keeps its single argument (the spec). */
+        mod_outs(&o, "var __p5di = function (spec) { return "
+                     "globalThis.__p5dynimport(spec, \"");
+        mod_outj(&o, importBase ? importBase : key);
+        mod_outs(&o, "\"); };\n");
+    }
 
     for (int i = 0; i < m->importCount; i++)
     {
@@ -3316,6 +3510,9 @@ static char *mod_build(const char *src, size_t len, const ModScan *m,
     }
 
     size_t p = 0;
+    int renIdx = 0; /* next rename span (spans come sorted; renames are
+                     * never inside cut spans, so sequential matching
+                     * holds even with cuts interleaved). */
     while (p < len)
     {
         size_t end = 0;
@@ -3323,12 +3520,24 @@ static char *mod_build(const char *src, size_t len, const ModScan *m,
         if (end > p + 1)
         {
             p = end; /* inside a cut span — skip to its end */
+            continue;
         }
-        else
+        if (renIdx < m->renCount && p == m->ren[renIdx].at)
         {
-            mod_out(&o, src + p, 1);
-            p++;
+            /* API-P10: emit the bound helper name in place of the
+             * `import` keyword; the call's arguments copy onwards. */
+            mod_outs(&o, "__p5di");
+            p = m->ren[renIdx].end;
+            renIdx++;
+            continue;
         }
+        while (renIdx < m->renCount && m->ren[renIdx].at <= p)
+        {
+            renIdx++; /* skipped past (defensive: can't happen — renames
+                       * never overlap cuts — keep invariant anyway) */
+        }
+        mod_out(&o, src + p, 1);
+        p++;
     }
 
     for (int i = 0; i < m->exportCount; i++)
@@ -3338,7 +3547,7 @@ static char *mod_build(const char *src, size_t len, const ModScan *m,
         mod_outs(&o, "\"][\"");
         mod_outj(&o, m->exp[i]);
         mod_outs(&o, "\"] = ");
-        mod_outs(&o, m->exp[i]);
+        mod_outs(&o, m->expLocal[i]);
         mod_outs(&o, "; } catch (__p5e) {}\n");
     }
     mod_outs(&o, "})();\n");
@@ -3498,8 +3707,62 @@ static int mod_finish_run(JsBridge *b, const char *src, size_t srcLen,
             JSBRIDGE_MOD_KEY_MAX, index);
     }
 
+    /* API-P10: any child still IN FLIGHT (run_key returned 2 = a remote
+     * module enqueued on the flight lane) defers this module's build+run
+     * to the drain. mod_build never sees a pending child — with children
+     * pending, the build's impLoaded==0 rows would read as REFUSALS and
+     * emit throws, and the module would run half-loaded. Return the
+     * pending contract instead and hand the caller the pending child
+     * keys (deduped) for its flight park. */
+    b->modPendCount = 0;
+    memset(b->modPendKeys, 0, sizeof(b->modPendKeys));
+    for (int i = 0; i < m->importCount; i++)
+    {
+        if (m->impLoaded[i] != 2 || !m->impKeys[i][0])
+        {
+            continue;
+        }
+        int dup = 0;
+        for (int j = 0; j < b->modPendCount; j++)
+        {
+            if (strcmp(b->modPendKeys[j], m->impKeys[i]) == 0)
+            {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup)
+        {
+            continue;
+        }
+        if (b->modPendCount < JSBRIDGE_MOD_IMPORTS)
+        {
+            snprintf(b->modPendKeys[b->modPendCount],
+                     JSBRIDGE_MOD_KEY_MAX, "%s", m->impKeys[i]);
+            b->modPendCount++;
+        }
+        else
+        {
+            logger_log("[module] pending-children cap %d hit on '%s' "
+                       "(imports per module) — refusing one graph edge "
+                       "(imports per module = %d)",
+                       JSBRIDGE_MOD_IMPORTS, key, JSBRIDGE_MOD_IMPORTS);
+            JFree(m);
+            return 0;
+        }
+    }
+    if (b->modPendCount > 0)
+    {
+        logger_log("[module] pending: '%s' waits on %d remote child%s "
+                   "(first '%s')", key, b->modPendCount,
+                   b->modPendCount == 1 ? "" : "ren",
+                   b->modPendKeys[0]);
+        JFree(m);
+        return 2;
+    }
+
     size_t builtLen = 0;
-    char *built = mod_build(src, srcLen, m, key, &builtLen);
+    char *built = mod_build(src, srcLen, m, key, importBase, &builtLen);
     int impCount = m->importCount;
     int expCount = m->exportCount;
     JFree(m);
@@ -3508,7 +3771,14 @@ static int mod_finish_run(JsBridge *b, const char *src, size_t srcLen,
         logger_log("[module] build failed: %s", key);
         return 0;
     }
+    int preErrs = b->errs;
     impl->run_script(b, built, builtLen, index);
+    if (b->errs != preErrs && b->lastError[0])
+    {
+        /* P10: a thrown module body used to vanish silently on engines
+         * without XS's abort receipts — surface the body error here. */
+        logger_log("[module] body error in '%s': %.96s", key, b->lastError);
+    }
     JFree(built);
     logger_log("[module] ran key='%s' bytes=%zu imports=%d exports=%d "
                "(script #%d)",
@@ -3636,6 +3906,25 @@ static int mod_resolve_key(const char *spec, const char *base, char *key,
                        abs);
         }
     }
+    else if (strncmp(abs, "http://", 7) == 0 || strncmp(abs, "https://", 8) == 0)
+    {
+        /* API-P10: the wire roads are NOW served — resolved module-relative
+         * exactly like about:/file above, then fetched on the async
+         * flight lane (one at a time behind the page's own client;
+         * jsbridge_modules_pump drives it). */
+        if (strlen(abs) < keyn)
+        {
+            snprintf(key, keyn, "%s", abs);
+            ok = 1;
+            logger_log("[module] http serve: '%s' -> the P10 flight lane",
+                       abs);
+        }
+        else
+        {
+            logger_log("[module] refuse (key cap %d): '%s'",
+                       (int)keyn - 1, abs);
+        }
+    }
     else if (strncmp(abs, "data:", 5) == 0)
     {
         logger_log("[module] refuse (data: module): '%s'", spec);
@@ -3643,14 +3932,24 @@ static int mod_resolve_key(const char *spec, const char *base, char *key,
     else
     {
         logger_log("[module] refuse (scheme unserved on this lane): '%s' — "
-                   "async module graph is future work", abs);
+                   "only about:/file:/http(s) roads exist", abs);
     }
     JFree(abs);
     return ok;
 }
 
 /* Graph node: resolve → ledger (cycle/cap guard) → fetch → transform →
- * run. Children nest via mod_finish_run BEFORE the importer builds. */
+ * run. Children nest via mod_finish_run BEFORE the importer builds.
+ * API-P10: returns 2 = PENDING when the module cannot finish synchronously
+ * because a REMOTE child is on the flight lane (the caller parks holding
+ * its source; the drain re-enters with every child reusable). */
+static int mod_flight_enqueue(JsBridge *b, const char *key, int depth,
+                              int index);
+static void mod_park_parent(JsBridge *b, const char *key,
+                            const char *importBase, const char *src,
+                            size_t srcLen, int depth, int index);
+static void mod_ledger_commit(JsBridge *b, const char *key, int rc);
+static void jsbridge_dyn_shim_maybe(JsBridge *b, int index);
 static int jsbridge_module_run_key(JsBridge *b, const char *spec,
                                    const char *importBase, int depth,
                                    char *keyOut, size_t keyOutn, int index)
@@ -3689,6 +3988,15 @@ static int jsbridge_module_run_key(JsBridge *b, const char *spec,
         logger_log("[module] refuse (cycle): '%s' (depth %d)", key, depth);
         return 0;
     }
+    if (idx >= 0 && b->modState[idx] == 3)
+    {
+        /* API-P10: already parked/flighting — the importing module waits
+         * exactly like a browser's importer (the graph engine that
+         * started the load will finish it at the pump). */
+        logger_log("[module] pending remote: '%s' already flighting "
+                   "(depth %d)", key, depth);
+        return 2;
+    }
     if (idx < 0)
     {
         idx = mod_ledger_add(b, key);
@@ -3700,6 +4008,34 @@ static int jsbridge_module_run_key(JsBridge *b, const char *spec,
         }
     }
     b->modState[idx] = 1;
+
+    /* API-P10: http(s) rides the async flight lane — the sync lane never
+     * served the wire roads (the old refusal receipt stays in
+     * mod_fetch_source's docs). Book the flight and hand the caller the
+     * pending contract; the module pump drives start → delivery → drain
+     * → ledger commit → parent cascade. */
+    if (strncmp(key, "http://", 7) == 0 || strncmp(key, "https://", 8) == 0)
+    {
+        int booked = mod_flight_enqueue(b, key, depth, index);
+        int idx2 = mod_ledger_find(b, key);
+        if (booked < 0)
+        {
+            logger_log("[module] refuse (flight cap %d): '%s'",
+                       JSBRIDGE_MOD_FLIGHT_MAX, key);
+            if (idx2 >= 0)
+            {
+                b->modState[idx2] = 2; /* failed loads stay failed */
+                b->modOk[idx2] = 0;
+            }
+            return 0;
+        }
+        if (idx2 >= 0)
+        {
+            b->modState[idx2] = 3; /* remote-flighting */
+            b->modOk[idx2] = 0;
+        }
+        return 2;
+    }
 
     char *src = (char *)JMalloc(JSBRIDGE_MOD_SRC_MAX);
     if (!src)
@@ -3713,17 +4049,17 @@ static int jsbridge_module_run_key(JsBridge *b, const char *spec,
     {
         ok = mod_finish_run(b, src, len, key, key, depth, index);
     }
-    JFree(src);
-    int idx2 = mod_ledger_find(b, key);
-    if (idx2 >= 0)
+    if (ok == 2)
     {
-        if (!ok)
-        {
-            logger_log("[module] failed (stays refused for this "
-                       "document): '%s'", key);
-        }
-        b->modState[idx2] = 2; /* done — failed loads stay failed */
+        /* P10: a LOCAL road parked on pending REMOTE grandchildren — the
+         * flight lane holds the copied source; this slot goes to state 3
+         * so a second importer ALSO waits (pending, not cycle). */
+        mod_park_parent(b, key, key, src, len, depth, index);
+        JFree(src);
+        return 2;
     }
+    JFree(src);
+    mod_ledger_commit(b, key, ok);
     return ok;
 }
 
@@ -3759,15 +4095,817 @@ static void jsbridge_module_root(JsBridge *b, const char *src, size_t len,
         return;
     }
     b->modState[idx] = 1;
+    /* P10: the dynamic-import shim runs BEFORE the first module body on
+     * the page (the shim defines __p5dynimport/__p5dynq; pages without
+     * modules never pay for the injection). */
+    jsbridge_dyn_shim_maybe(b, index);
     int ok = mod_finish_run(b, src, len, key, importBase, 0, index);
-    if (!ok)
+    if (ok == 2)
+    {
+        /* P10: the root parks holding its body while remote children
+         * load; the ledger stays parked (state 3 set in the park) and
+         * the drain at parking-clear re-runs the FULL lane (children
+         * then reuse from the ledger). */
+        mod_park_parent(b, key, importBase, src, len, 0, index);
+        logger_log("[module] root parked on remote children: '%s'", key);
+        return;
+    }
+    if (ok == 0)
     {
         logger_log("[module] root failed: '%s'", key);
     }
-    int idx2 = mod_ledger_find(b, key);
-    if (idx2 >= 0)
+    mod_ledger_commit(b, key, ok);
+}
+
+/* ══ API-P10: the async module lane ═════════════════════════════════════
+ * http(s) module graphs + dynamic import(). The transport stays in THIS
+ * router (http_client.c untouched): the client is single-flight (Lua
+ * cancel-first parity, R53 graveyard), so the lane serializes ONE wire
+ * fetch behind `http_is_loading()==0` + a lane-side head, with a per-
+ * flight watchdog (requeue once after ~20s of silence — a superseded
+ * module fetch delivers NO callback at all, so silence is the only
+ * detectable supersession; terminal refuse after ~40s). Page-level
+ * fetches keep byte-identical contracts; the graph = delivery → local
+ * children inline → remote children enrolled as flights → drain when
+ * pendCount clears → ledger done → cascade decrements parked parents. */
+
+#define MF_WAIT_START 0 /* booked; client not started yet */
+#define MF_FETCHING   1 /* on the wire */
+#define MF_HOLD       2 /* bytes delivered; drain pending */
+#define MF_PARKED     3 /* parent holding while remote children load */
+#define MF_ERRSTOP    4 /* error receipt arrived; retry/refuse decision */
+#define MOD_WATCH_REQUEUE_MS 20000u
+#define MOD_WATCH_TERMINAL_MS 40000u
+
+/* The __p5dynimport shim (shipped once per page before the first module
+ * body). Engine-agnostic: JS over the per-engine __p5modRequest native.
+ * muJS has no native Promise, so a small ES5 substitute rides along —
+ * gates exercise exactly the .then(onr)/.then(,onj) shapes the battery
+ * uses; chains defer through the router timers (setTimeout 0). */
+static const char g_modShimSrc[] =
+    "/* pluto dynamic-import shim (API-P10, engine-owned) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.__p5dynimport === 'function') { return; }\n"
+    "  if (typeof g.__p5modRequest !== 'function') { return; }\n"
+    "  function P5P(fn) {\n"
+    "    if (!(this instanceof P5P)) { return new P5P(fn); }\n"
+    "    var me = this; me.s = 0; me.v = null; me.t = [];\n"
+    "    function step(st, v) {\n"
+    "      if (me.s) { return; } me.s = st; me.v = v;\n"
+    "      var w = me.t; me.t = [];\n"
+    "      for (var i = 0; i < w.length; i++) { w[i](); }\n"
+    "    }\n"
+    "    function ok(v) { step(1, v); }\n"
+    "    function bad(e) { step(2, e); }\n"
+    "    me.then = function (rf, jf) {\n"
+    "      var self = me;\n"
+    "      return new P5P(function (o2, b2) {\n"
+    "        var run = function () {\n"
+    "          var f = (self.s === 2) ? jf : rf;\n"
+    "          if (typeof f !== 'function') {\n"
+    "            if (self.s === 2) { b2(self.v); } else { o2(self.v); }\n"
+    "            return;\n"
+    "          }\n"
+    "          var r;\n"
+    "          try { r = f(self.v); } catch (e) { b2(e); return; }\n"
+    "          if (r && r.then) { r.then(o2, b2); } else { o2(r); }\n"
+    "        };\n"
+    "        if (self.s) { setTimeout(run, 0); }\n"
+    "        else { self.t.push(run); }\n"
+    "      });\n"
+    "    };\n"
+    "    me['catch'] = function (f) { return me.then(null, f); };\n"
+    "    try { fn(ok, bad); } catch (e) { bad(e); }\n"
+    "  }\n"
+    "  var Use = (typeof Promise === 'function') ? Promise : P5P;\n"
+    "  g.__p5dynimport = function (spec, base) {\n"
+    "    return new Use(function (res, rej) {\n"
+    "      var st;\n"
+    "      try { st = g.__p5modRequest(String(spec), String(base)); }\n"
+    "      catch (e) { rej(new TypeError('dynamic import bridge failed')); "
+    "return; }\n"
+    "      if (typeof st !== 'string') {\n"
+    "        rej(new TypeError('dynamic import: bad bridge reply')); return;\n"
+    "      }\n"
+    "      if (st.charAt(0) === 'k') {\n"
+    "        var key = st.slice(2);\n"
+    "        res((g.__p5mod || {})[key]);\n"
+    "      }\n"
+    "      else if (st.charAt(0) === 'p') {\n"
+    "        var id = st.slice(2);\n"
+    "        var q = g.__p5dynq || (g.__p5dynq = {});\n"
+    "        q[id] = { r: res, j: rej };\n"
+    "      }\n"
+    "      else { rej(new TypeError(st.slice(2))); }\n"
+    "    });\n"
+    "  };\n"
+    "  g.__p5dynq = g.__p5dynq || {};\n"
+    "})(globalThis);\n";
+
+static void jsbridge_dyn_shim_maybe(JsBridge *b, int index)
+{
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->run_script || b->dynShimDone)
     {
-        b->modState[idx2] = 2;
+        return;
+    }
+    b->dynShimDone = 1;
+    logger_log("[module] p10 shim: injecting (before module script %d)",
+               index);
+    impl->run_script(b, g_modShimSrc, sizeof(g_modShimSrc) - 1, index);
+    logger_log("[module] p10 shim: %s",
+               b->dynShimDone ? "latched" : "unlatched");
+}
+
+/* Ledger landing for any finish point (P10): state 2 + the ok byte that
+ * tells dynamic deliveries resolve vs reject (failed loads stay refused
+ * for the document, the standing P5 reuse contract). */
+static void mod_ledger_commit(JsBridge *b, const char *key, int rc)
+{
+    int idx = mod_ledger_find(b, key);
+    if (idx >= 0)
+    {
+        b->modOk[idx] = (rc == 1);
+        b->modState[idx] = 2;
+    }
+    if (rc == 0)
+    {
+        logger_log("[module] failed (stays refused for this document): "
+                   "'%s'", key);
+    }
+}
+
+/* Book a REMOTE module flight (idempotent by ledger key). Returns 0
+ * booked (fresh or already in the table), -1 = table full (honest
+ * refusal; the caller marks the ledger failed). */
+static int mod_flight_enqueue(JsBridge *b, const char *key, int depth,
+                              int index)
+{
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        if (b->modFlight[i].set &&
+            strcmp(b->modFlight[i].key, key) == 0)
+        {
+            logger_log("[module] net: flight already booked '%s'", key);
+            return 0;
+        }
+    }
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        JsModFlight *f = &b->modFlight[i];
+        if (f->set)
+        {
+            continue;
+        }
+        memset(f, 0, sizeof(*f));
+        f->set = 1;
+        f->state = MF_WAIT_START;
+        snprintf(f->key, JSBRIDGE_MOD_KEY_MAX, "%s", key);
+        /* A module's own import base = its own URL (children resolve
+         * against the module file, the standard relative rule). */
+        snprintf(f->importBase, JSBRIDGE_MOD_KEY_MAX, "%s", key);
+        f->depth = depth;
+        f->index = index;
+        f->epoch = (unsigned)b->xhrBudgetEpoch;
+        logger_log("[module] net: enqueue remote module '%s' (depth %d) "
+                   "(script #%d)", key, depth, index);
+        return 0;
+    }
+    logger_log("[module] net: flight table full (cap %d) for '%s'",
+               JSBRIDGE_MOD_FLIGHT_MAX, key);
+    return -1;
+}
+
+/* Park a module whose children include REMOTE loads: holds the source
+ * copy, records the pending child keys (mod_finish_run's deduped
+ * scratch), flips the ledger to state 3 (parked — a second importer of
+ * this key gets the pending contract, not the cycle refusal). Reused for
+ * roots (fresh copy) and delivered remote children (src already held). */
+static void mod_park_parent(JsBridge *b, const char *key,
+                            const char *importBase, const char *src,
+                            size_t srcLen, int depth, int index)
+{
+    if (b->modPendCount <= 0)
+    {
+        logger_log("[module] park refused (no pending children): '%s'",
+                   key);
+        return;
+    }
+    JsModFlight *f = NULL;
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        if (b->modFlight[i].set &&
+            strcmp(b->modFlight[i].key, key) == 0)
+        {
+            f = &b->modFlight[i];
+            break;
+        }
+    }
+    if (!f)
+    {
+        for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+        {
+            if (!b->modFlight[i].set)
+            {
+                f = &b->modFlight[i];
+                break;
+            }
+        }
+    }
+    if (!f)
+    {
+        logger_log("[module] refuse (flight table full) parking '%s' — "
+                   "the node fails, children fly orphaned", key);
+        mod_ledger_commit(b, key, 0);
+        return;
+    }
+    if (!f->src)
+    {
+        char *hold = (char *)JMalloc(srcLen + 1);
+        if (!hold)
+        {
+            logger_log("[module] park OOM: '%s' — fails honestly", key);
+            mod_ledger_commit(b, key, 0);
+            return;
+        }
+        memcpy(hold, src, srcLen);
+        hold[srcLen] = '\0';
+        f->src = hold;
+        f->srcLen = srcLen;
+        if (!f->set)
+        {
+            f->set = 1;
+            f->depth = depth;
+            f->index = index;
+            f->state = MF_PARKED;
+            snprintf(f->key, JSBRIDGE_MOD_KEY_MAX, "%s", key);
+            f->epoch = (unsigned)b->xhrBudgetEpoch;
+        }
+    }
+    f->state = MF_PARKED;
+    snprintf(f->importBase, JSBRIDGE_MOD_KEY_MAX, "%s",
+             importBase ? importBase : key);
+    for (int i = 0; i < b->modPendCount && i < JSBRIDGE_MOD_IMPORTS; i++)
+    {
+        snprintf(f->childKeys[i], JSBRIDGE_MOD_KEY_MAX, "%s",
+                 b->modPendKeys[i]);
+    }
+    f->pendCount = b->modPendCount;
+    int idx = mod_ledger_find(b, key);
+    if (idx >= 0)
+    {
+        b->modState[idx] = 3; /* parked-pending (more importers wait too) */
+        b->modOk[idx] = 0;
+    }
+    logger_log("[module] parked '%s' on %d remote child(ren) (first "
+               "'%s')", key, f->pendCount, f->childKeys[0]);
+}
+
+static void mod_flight_process(JsBridge *b, JsModFlight *f, int depth);
+static void mod_pump_dynq(JsBridge *b);
+
+/* Free a drained/refused flight slot. */
+static void mod_flight_free(JsBridge *b, JsModFlight *f)
+{
+    (void)b;
+    if (f->src)
+    {
+        JFree(f->src);
+    }
+    memset(f, 0, sizeof(*f));
+}
+
+/* The cascade: every parked parent waiting on this key decrements; a
+ * parent reaching 0 drains right here (its own completion cascades one
+ * level deeper — depth stays under the flight count). */
+static void mod_pump_cascade(JsBridge *b, const char *doneKey, int depth)
+{
+    if (depth > JSBRIDGE_MOD_FLIGHT_MAX + 2)
+    {
+        logger_log("[module] cascade depth cap hit at '%s' (flight count "
+                   "%d) — stopping deeper drains (documented bound)",
+                   doneKey, JSBRIDGE_MOD_FLIGHT_MAX);
+        return;
+    }
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        JsModFlight *f = &b->modFlight[i];
+        if (!f->set || f->state != MF_PARKED || f->pendCount <= 0)
+        {
+            continue;
+        }
+        for (int j = 0; j < JSBRIDGE_MOD_IMPORTS; j++)
+        {
+            if (f->childKeys[j][0] &&
+                strcmp(f->childKeys[j], doneKey) == 0)
+            {
+                f->childKeys[j][0] = '\0'; /* consume the one wait */
+                f->pendCount--;
+                logger_log("[module] cascade: '%s' settled child '%s' "
+                           "(pending %d)", f->key, doneKey, f->pendCount);
+                break;
+            }
+        }
+        if (f->pendCount == 0)
+        {
+            mod_flight_process(b, f, depth + 1);
+        }
+    }
+}
+
+/* Drain one flight: the standing lane (transform → import-first body →
+ * export materialization) re-runs with every child now reusable or
+ * failed; failures abort the body exactly as the sync lane always did
+ * (the throw prelude). Flight freeing + ledger commit + parent cascade
+ * ride the rc contract. depth bounds the drain-at-cascade recursion. */
+static void mod_flight_process(JsBridge *b, JsModFlight *f, int depth)
+{
+    if (!f || !f->set || !f->src)
+    {
+        return;
+    }
+    char doneKey[JSBRIDGE_MOD_KEY_MAX];
+    snprintf(doneKey, sizeof(doneKey), "%s", f->key);
+    if (b->inModRun)
+    {
+        logger_log("[module] drain blocked (a module body is running): "
+                   "'%s'", f->key);
+        return;
+    }
+    b->inModRun = 1;
+    logger_log("[module] drain: '%s' (bytes %zu, depth %d)", f->key,
+               f->srcLen, f->depth);
+    int preErrs = b->errs;
+    int rc = mod_finish_run(b, f->src, f->srcLen, f->key, f->importBase,
+                            f->depth, f->index);
+    b->inModRun = 0;
+    if (rc == 1 && b->errs != preErrs)
+    {
+        /* P10 honesty rule: the module body failed to compile or threw
+         * at runtime — the namespace never materialized, so the graph
+         * FAILED like a browser's failed module fetch (the dynamic
+         * promise rejects; static importers fail with the standing
+         * throw prelude). The sync lane's own P5 receipts are untouched
+         * (this rule applies from the drain only). */
+        logger_log("[module] drain body error on '%s' (errs %d -> %d) — "
+                   "graph failed honestly", f->key, preErrs, b->errs);
+        rc = 0;
+    }
+    if (rc == 2)
+    {
+        /* Defensive: children STILL pending at drain — re-park (this is
+         * reachable only when a fresh remote edge appeared inside a
+         * refused-scope import tree; the contract still finishes). */
+        if (b->modPendCount > 0)
+        {
+            mod_park_parent(b, f->key, f->importBase, f->src, f->srcLen,
+                            f->depth, f->index);
+            logger_log("[module] drain re-parked '%s' on %d pending",
+                       f->key, b->modPendCount);
+        }
+        else
+        {
+            f->state = MF_HOLD; /* reprocess next pump */
+            logger_log("[module] drain pending without list: '%s' — "
+                       "reprocessed next pump", f->key);
+        }
+        return;
+    }
+    mod_ledger_commit(b, f->key, rc);
+    mod_flight_free(b, f);
+    mod_pump_cascade(b, doneKey, depth);
+}
+
+/* Wire receipts (the client's callbacks; http_client.c stays untouched).
+ * The lane owns exclusive head starts, so the delivery either belongs to
+ * the head flight or is stale (page navigation, epoch mismatch) and is
+ * ignored with a receipt. */
+static JsBridge *g_modJsb = NULL;      /* the bridge that started it */
+static int g_modFlightIdx = -1;        /* the head flight's table slot */
+
+static void mod_http_error(JsBridge *b, const char *key, const char *msg)
+{
+    b->modFetchBusy = 0;
+    JsModFlight *f = &b->modFlight[g_modFlightIdx];
+    if (g_modFlightIdx >= 0 && g_modFlightIdx < JSBRIDGE_MOD_FLIGHT_MAX &&
+        f->set)
+    {
+        f->state = MF_ERRSTOP; /* the pump decides retry vs refuse */
+    }
+    logger_log("[module] net: error%s%s: %s", key ? " for '" : "",
+               key ? key : "", msg);
+}
+
+static void mod_http_ok(int status, char **headerKeys, char **headerVals,
+                        int headerCount, const char *body, size_t bodyLen,
+                        const char *url)
+{
+    (void)headerKeys;
+    (void)headerVals;
+    (void)headerCount;
+    (void)url;
+    JsBridge *b = g_modJsb;
+    if (!b || !b->modFetchBusy || g_modFlightIdx < 0)
+    {
+        logger_log("[module] net: orphan delivery ignored (no head)");
+        return;
+    }
+    JsModFlight *f = &b->modFlight[g_modFlightIdx];
+    if (!f->set || f->state != MF_FETCHING ||
+        f->epoch != (unsigned)b->xhrBudgetEpoch)
+    {
+        logger_log("[module] net: stale delivery ignored (slot/epoch)");
+        b->modFetchBusy = 0;
+        return;
+    }
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    snprintf(key, sizeof(key), "%s", f->key);
+    b->modFetchBusy = 0;
+    if (!body || bodyLen == 0)
+    {
+        mod_http_error(b, key, "empty body");
+        return;
+    }
+    if (status < 200 || status >= 300)
+    {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "HTTP status %d", status);
+        mod_http_error(b, key, msg);
+        return;
+    }
+    if (bodyLen > JSBRIDGE_MOD_SRC_MAX)
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "body %zu over lane source cap %d",
+                 bodyLen, JSBRIDGE_MOD_SRC_MAX);
+        mod_http_error(b, key, msg);
+        return;
+    }
+    char *hold = (char *)JMalloc(bodyLen + 1);
+    if (!hold)
+    {
+        mod_http_error(b, key, "delivery OOM");
+        return;
+    }
+    memcpy(hold, body, bodyLen);
+    hold[bodyLen] = '\0';
+    f->src = hold;
+    f->srcLen = bodyLen;
+    f->state = MF_HOLD;
+    logger_log("[module] net: delivered %zu bytes status=%d for '%s'",
+               bodyLen, status, key);
+}
+
+static void mod_http_err(const char *message)
+{
+    JsBridge *b = g_modJsb;
+    if (!b || !b->modFetchBusy || g_modFlightIdx < 0)
+    {
+        logger_log("[module] net: orphan error ignored: %s",
+                   message ? message : "(no message)");
+        return;
+    }
+    JsModFlight *f = &b->modFlight[g_modFlightIdx];
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    snprintf(key, sizeof(key), "%s", f->key);
+    mod_http_error(b, key, message ? message : "(no message)");
+}
+
+static void mod_flight_handle_error(JsBridge *b, JsModFlight *f,
+                                    unsigned nowMs)
+{
+    char doneKey[JSBRIDGE_MOD_KEY_MAX];
+    snprintf(doneKey, sizeof(doneKey), "%s", f->key);
+    if (!f->retried)
+    {
+        f->retried = 1;
+        f->state = MF_WAIT_START;
+        f->startMs = nowMs;
+        logger_log("[module] net: '%s' requeued once (watchdog/error)",
+                   f->key);
+        return;
+    }
+    logger_log("[module] net: '%s' terminal after retry — refused for "
+               "this document", f->key);
+    mod_ledger_commit(b, f->key, 0);
+    mod_flight_free(b, f);
+    mod_pump_cascade(b, doneKey, 1);
+}
+
+/* The per-frame module pump: deliveries → watchdog/error decisions →
+ * the next wire head (client idle only) → dynamic-import tickets. */
+void jsbridge_modules_pump(JsBridge *b, unsigned nowMs)
+{
+    if (!b || !b->doc || b->inModRun)
+    {
+        return;
+    }
+    /* P10 diagnostic: a 1Hz flight-state snapshot while any flight is
+     * armed (the freeze paths never log otherwise). */
+    {
+        static unsigned modDiagMs = 0;
+        int armed = 0;
+        for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+        {
+            if (b->modFlight[i].set)
+            {
+                armed = 1;
+                break;
+            }
+        }
+        if (armed && nowMs - modDiagMs >= 1000u)
+        {
+            modDiagMs = nowMs;
+            for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+            {
+                JsModFlight *fd = &b->modFlight[i];
+                if (!fd->set)
+                {
+                    continue;
+                }
+                logger_log("[module] pump-diag: slot %d '%.48s' state=%d "
+                           "pend=%d srcLen=%zu epoch=%u page=%u busy=%d",
+                           i, fd->key, fd->state, fd->pendCount, fd->srcLen,
+                           fd->epoch, (unsigned)b->xhrBudgetEpoch,
+                           b->modFetchBusy);
+            }
+        }
+    }
+    if (b->modFetchStop)
+    {
+        b->modFetchStop = 0;
+        if (!b->modFetchBusy && g_modFlightIdx >= 0)
+        {
+            JsModFlight *f = &b->modFlight[g_modFlightIdx];
+            if (f->set && f->state == MF_FETCHING)
+            {
+                f->state = MF_ERRSTOP;
+            }
+        }
+    }
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        JsModFlight *f = &b->modFlight[i];
+        if (f->set && f->state == MF_HOLD)
+        {
+            mod_flight_process(b, f, 1);
+        }
+    }
+    for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+    {
+        JsModFlight *f = &b->modFlight[i];
+        if (!f->set || f->state == MF_WAIT_START)
+        {
+            continue;
+        }
+        if (f->epoch != (unsigned)b->xhrBudgetEpoch)
+        {
+            /* page navigation: the whole table is stale — sweep */
+            logger_log("[module] net: stale flight sweep '%s'", f->key);
+            mod_flight_free(b, f);
+            continue;
+        }
+        if (f->state == MF_FETCHING)
+        {
+            if (f->startMs == 0)
+            {
+                f->startMs = nowMs;
+            }
+            if (nowMs >= f->startMs + (f->retried ? MOD_WATCH_TERMINAL_MS
+                                                  : MOD_WATCH_REQUEUE_MS))
+            {
+                if (!f->retried)
+                {
+                    f->retried = 1;
+                    f->state = MF_WAIT_START;
+                    f->startMs = nowMs;
+                    logger_log("[module] net: watchdog ~20s: '%s' "
+                               "requeued once", f->key);
+                    continue;
+                }
+                logger_log("[module] net: watchdog ~40s terminal: "
+                           "'%s'", f->key);
+                mod_flight_handle_error(b, f, nowMs);
+            }
+            continue;
+        }
+        if (f->state == MF_ERRSTOP)
+        {
+            mod_flight_handle_error(b, f, nowMs);
+        }
+    }
+    if (!b->modFetchBusy && !b->modFetchStop)
+    {
+        for (int i = 0; i < JSBRIDGE_MOD_FLIGHT_MAX; i++)
+        {
+            JsModFlight *f = &b->modFlight[i];
+            if (!f->set || f->state != MF_WAIT_START ||
+                f->epoch != (unsigned)b->xhrBudgetEpoch)
+            {
+                continue;
+            }
+            if (http_is_loading())
+            {
+                /* the page owns the wire — this head waits (receipted
+                 * every pump: quiet-spam guard, one row) */
+                if (f->retried || i == 0)
+                {
+                    logger_log("[module] net: head '%s' defers (page "
+                               "fetch owns the client)", f->key);
+                }
+                break;
+            }
+            HttpCallbacks cbs;
+            memset(&cbs, 0, sizeof(cbs));
+            cbs.onSuccess = mod_http_ok;
+            cbs.onError = mod_http_err;
+            g_modJsb = b;
+            g_modFlightIdx = i;
+            b->modFetchBusy = 1;
+            int startRc = http_get(f->key, &cbs);
+            if (startRc == 0)
+            {
+                /* 0 = the client refused to start (validation/OOM/state
+                 * machine) — 1 = the request is on the head (possibly
+                 * still in the access-arm wait), the delivery receipt
+                 * completes it either way. */
+                logger_log("[module] net: start refused rc=0 for '%s'",
+                           f->key);
+                b->modFetchBusy = 0;
+                f->state = MF_ERRSTOP;
+                b->modFetchStop = 1;
+            }
+            else
+            {
+                f->state = MF_FETCHING;
+                f->startMs = nowMs;
+                logger_log("[module] net: fetch start '%s'", f->key);
+            }
+            break;
+        }
+    }
+    mod_pump_dynq(b);
+}
+
+/* The dynamic-import bridge (native __p5modRequest core). Returns the
+ * status STRING the shim parses: "k:<key>" resolved now, "p:<id>" a
+ * ticket the pump settles, "x:<msg>" refused with the browser's message
+ * class. NO module work runs here (native bracket = never re-entrant).
+ * Declared in jsbridge_internal.h; each adapter registers the global. */
+void jsbridge_dyn_request(JsBridge *b, const char *spec, const char *base,
+                          char *out, size_t outn)
+{
+    out[0] = '\0';
+    if (!b || !b->doc)
+    {
+        snprintf(out, outn, "x:dynamic import before page attach");
+        return;
+    }
+    if (!spec || !spec[0])
+    {
+        snprintf(out, outn, "x:empty module specifier");
+        return;
+    }
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    if (!mod_resolve_key(spec, base, key, sizeof(key)))
+    {
+        logger_log("[module] dyn: resolve refused '%s' (base '%s')", spec,
+                   base ? base : "(nourl)");
+        snprintf(out, outn, "x:Failed to resolve module specifier: %.90s",
+                 spec);
+        return;
+    }
+    int idx = mod_ledger_find(b, key);
+    if (idx >= 0 && b->modState[idx] == 2 && b->modOk[idx])
+    {
+        logger_log("[module] dyn: immediate '%s'", key);
+        snprintf(out, outn, "k:%s", key);
+        return;
+    }
+    if (b->dynQCount >= JSBRIDGE_DYNQ_MAX)
+    {
+        logger_log("[module] dyn: ticket table full (cap %d) — '%s' "
+                   "refused", JSBRIDGE_DYNQ_MAX, spec);
+        snprintf(out, outn, "x:dynamic import queue full");
+        return;
+    }
+    if (idx < 0)
+    {
+        idx = mod_ledger_add(b, key);
+        if (idx < 0)
+        {
+            logger_log("[module] dyn: ledger cap on '%s'", key);
+            snprintf(out, outn, "x:module graph at ledger cap");
+            return;
+        }
+    }
+    int id = ++b->dynIdSeq;
+    b->dynQ[b->dynQCount].set = 1;
+    b->dynQ[b->dynQCount].id = id;
+    snprintf(b->dynQ[b->dynQCount].key, JSBRIDGE_MOD_KEY_MAX, "%s", key);
+    b->dynQ[b->dynQCount].state = 0;
+    b->dynQCount++;
+    logger_log("[module] dyn: import('%s') base '%s' -> ticket #%d key "
+               "'%s'", spec, base ? base : "(nourl)", id, key);
+    snprintf(out, outn, "p:%d", id);
+}
+
+/* JS-string escape for injected keys inside the settle evals. */
+static void mod_jsesc(char *dst, size_t cap, const char *s)
+{
+    size_t d = 0;
+    for (const char *p = s; p && *p && d + 2 < cap; p++)
+    {
+        if (*p == '\\' || *p == '"')
+        {
+            dst[d++] = '\\';
+        }
+        dst[d++] = *p;
+    }
+    dst[d] = '\0';
+}
+
+/* Ticket settlements: start unstarted lanes (locals drain inline here;
+ * remotes enqueue), then land resolution/rejection through the shim's
+ * __p5dynq registry — a tiny eval, in the pump bracket, never inside
+ * the native. */
+static void mod_pump_dynq(JsBridge *b)
+{
+    if (b->dynQCount == 0 || b->inModRun)
+    {
+        return;
+    }
+    const JsEngineImpl *impl = js_bridge_impl(b);
+    if (!impl || !impl->run_script)
+    {
+        return;
+    }
+    for (int i = 0; i < JSBRIDGE_DYNQ_MAX; i++)
+    {
+        if (!b->dynQ[i].set)
+        {
+            continue;
+        }
+        char key[JSBRIDGE_MOD_KEY_MAX];
+        snprintf(key, sizeof(key), "%s", b->dynQ[i].key);
+        int id = b->dynQ[i].id;
+        if (b->dynQ[i].state == 0)
+        {
+            b->dynQ[i].state = 1;
+            b->inModRun = 1;
+            int preErrs = b->errs;
+            int rc = jsbridge_module_run_key(b, key, key, 0, NULL, 0, 0);
+            b->inModRun = 0;
+            if (rc == 1 && b->errs != preErrs)
+            {
+                /* P10 honesty rule (drain parity): the local module body
+                 * failed to compile/throw — commit failed so the ticket
+                 * settles as a rejection, never as "resolved undefined". */
+                mod_ledger_commit(b, key, 0);
+                logger_log("[module] dyn ticket body error on '%s' — "
+                           "rejects honestly", key);
+            }
+            logger_log("[module] dyn: ticket #%d lane rc=%d key '%s'",
+                       id, rc, key);
+        }
+        int idx = mod_ledger_find(b, key);
+        if (idx < 0 || b->modState[idx] != 2)
+        {
+            continue; /* still flighting/parked — settles on commit */
+        }
+        char kesc[JSBRIDGE_MOD_KEY_MAX * 2];
+        mod_jsesc(kesc, sizeof(kesc), key);
+        char eval[JSBRIDGE_MOD_KEY_MAX * 2 + 160];
+        char eval2[JSBRIDGE_MOD_KEY_MAX * 2 + 200];
+        if (b->modOk[idx])
+        {
+            snprintf(eval, sizeof(eval),
+                     "var q = globalThis.__p5dynq || {}; "
+                     "var e = q[%d]; "
+                     "if (e && typeof e.r === 'function') { "
+                     "e.r((globalThis.__p5mod || {})['%s']); } "
+                     "q[%d] = null;",
+                     id, kesc, id);
+            logger_log("[module] dyn: ticket #%d resolves '%s'", id, key);
+        }
+        else
+        {
+            snprintf(eval, sizeof(eval),
+                     "var q = globalThis.__p5dynq || {}; "
+                     "var e = q[%d]; "
+                     "if (e && typeof e.j === 'function') { "
+                     "e.j(new TypeError('Failed to fetch dynamically "
+                     "imported module: %s')); } "
+                     "q[%d] = null;",
+                     id, kesc, id);
+            logger_log("[module] dyn: ticket #%d rejects '%s'", id, key);
+        }
+        (void)eval2;
+        b->inModRun = 1;
+        impl->run_script(b, eval, strlen(eval), 0);
+        b->inModRun = 0;
+        memset(&b->dynQ[i], 0, sizeof(b->dynQ[i]));
+        b->dynQCount--;
     }
 }
 

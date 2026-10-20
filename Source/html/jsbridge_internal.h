@@ -257,9 +257,41 @@ typedef struct
  * transform runs in C before any engine sees the source). Keys = the
  * RESOLVED import URLs (about: store keys, file: Data-dir paths); an
  * inline module gets a synthetic "<docUrl>#p5mi<N>" key (inline modules
- * are not addressable, so their namespace is theirs alone). */
-#define JSBRIDGE_MAX_MODULES 8
+ * are not addressable, so their namespace is theirs alone).
+ * API-P10: 12 — the standing probe battery grew four async-lane module
+ * scripts (moddyn/moddynid/modmiss/modnet) + their store children, so
+ * the old 8-slot graph cap refused honest edges (receipted run 1). */
+#define JSBRIDGE_MAX_MODULES 12
 #define JSBRIDGE_MOD_KEY_MAX 128
+#define JSBRIDGE_MOD_IMPORTS 6 /* P10: imports per module (single def) */
+
+/* API-P10: async http(s) module graphs. The flight table holds the lane's
+ * in-flight remote modules plus parents parked while their children load
+ * (ONE entry per pending role — see jsbridge.c). Sources are HEAP copies
+ * (the cap stays JSBRIDGE_MOD_SRC_MAX in jsbridge.c) so the table outside
+ * a loading graph costs only its headers. dynQ = dynamic-import()
+ * settlement tickets; both tables are fresh per page (bridge memset(0)). */
+#define JSBRIDGE_MOD_FLIGHT_MAX 6
+#define JSBRIDGE_DYNQ_MAX 4
+
+typedef struct JsModFlight
+{
+    int set;      /* slot in use */
+    int state;    /* 1 = fetching (no src yet), 2 = holding/pending
+                   * children, 3 = drained (slot free at pump sweep) */
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    char importBase[JSBRIDGE_MOD_KEY_MAX];
+    char *src;    /* heap copy of this module's source (held) */
+    size_t srcLen;
+    int depth;
+    int index;
+    int pendCount;                                /* remote children left */
+    char childKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
+    unsigned char impLoaded[JSBRIDGE_MOD_IMPORTS];
+    unsigned epoch;   /* page epoch at enqueue; stale deliveries drop */
+    unsigned startMs; /* pump clock at fetch start (watchdog) */
+    unsigned char retried; /* watchdog requeue-once latch */
+} JsModFlight;
 
 struct JsBridge
 {
@@ -326,6 +358,36 @@ struct JsBridge
     JsElwEntry elw[JSBRIDGE_ELW_MAX];
     int elwCount;
     int elwOverflow; /* >ELW_MAX nodes this page (logged once) */
+
+    /* API-P10: async module lane (see the JsModFlight note above).
+     * modFlight = the in-flight remote modules + parked parents; the
+     * ledger's modState gains 3 = remote-flighting. dynQ = dynamic
+     * import() settlement tickets (id = a counter handed to the shim's
+     * __p5modRequest; delivery = a tiny __p5dynq eval at the pump).
+     * modFetchQueued = the ONE module fetch serialized lane-side;
+     * dynShimDone = the per-page __p5dynimport shim latch. */
+    JsModFlight modFlight[JSBRIDGE_MOD_FLIGHT_MAX];
+    int modFlightCount; /* used slots (active + parked) */
+    int modFetchBusy;   /* a module fetch owns the client right now */
+    int modFetchStop;   /* receipted module-fetch error seen (drop the head) */
+    struct
+    {
+        int set;
+        int id;
+        char key[JSBRIDGE_MOD_KEY_MAX];
+        unsigned char state; /* 0 pending, 1 resolved, 2 rejected */
+    } dynQ[JSBRIDGE_DYNQ_MAX];
+    int dynQCount;
+    int dynIdSeq;    /* last __p5modRequest ticket id handed out */
+    int dynShimDone; /* the __p5dynimport shim ran once on this page */
+    int inModRun;    /* a module body is on the stack (nest guard) */
+
+    /* P10 scratch: mod_finish_run fills these right before returning 2
+     * (pending) — the resolved keys of REMOTE children still in flight.
+     * Duplicated keys dedupe into ONE flight wait (a double import is a
+     * single load). */
+    int modPendCount;
+    char modPendKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
 
     /* API-P3: the in-engine address journal (see the JSBRIDGE_HIST_* note
      * above). histCount 0 = unseeded; entry 0 = the doc base seed. */
@@ -397,6 +459,11 @@ struct JsBridge
      * synthetic keys for inline modules. */
     char modKeys[JSBRIDGE_MAX_MODULES][JSBRIDGE_MOD_KEY_MAX];
     unsigned char modState[JSBRIDGE_MAX_MODULES];
+    /* API-P10: per-ledger success byte for the dynamic delivery path
+     * (modState 2 cannot distinguish a loaded module from a refused
+     * one — failed loads stay reusable per the standing P5 contract).
+     * 1 = the body ran; 0 = refused/failed (namespace missing). */
+    unsigned char modOk[JSBRIDGE_MAX_MODULES];
     int modCount;
     int modSeq;
 };
@@ -410,6 +477,16 @@ typedef enum
     JS_ENGINE_XS = 3,
     JS_ENGINE_XS_NR = 4 /* XS (No Recursion): heap-bounded walkers fork */
 } JsEngine;
+
+/* API-P10: the dynamic-import bridge core (declared here so every
+ * engine adapter registers its own tiny native wrapper over it). The
+ * shim's __p5dynimport calls the native; the reply is a status STRING:
+ * "k:<key>" = resolved now (namespace on globalThis.__p5mod),
+ * "p:<id>" = a ticket the module pump settles via __p5dynq evals,
+ * "x:<msg>" = refused with the browser's message class. Never runs
+ * module work inside the engine call (the pump owns brackets). */
+void jsbridge_dyn_request(JsBridge *b, const char *spec, const char *base,
+                          char *out, size_t outn);
 
 /* Exported from jsbridge.h so main.c/settings can select the engine; the
  * enum here is the shared definition. */

@@ -799,6 +799,10 @@ static void xs_worker_new(xsMachine *the);
 static void xs_worker_postMessage(xsMachine *the);
 static void xs_worker_terminate(xsMachine *the);
 
+/* API-P10: dynamic-import bridge native — status-string reply protocol
+ * (see jsbridge_internal.h); delegates to the shared core in jsbridge.c. */
+static void xs_dyn_request(xsMachine *the);
+
 /* ── accessors (this = element wrapper) ────────────────── */
 
 static void xs_el_get_tagName(xsMachine *the)
@@ -6586,6 +6590,10 @@ static int xs_init(JsBridge *b, const char *baseUrl)
             xsDefine(xglob, xsID("Worker"),
                      xsNewHostConstructor(xs_worker_new, 1, st->workerProto),
                      xsDefault);
+            /* API-P10: the dynamic-import bridge (status-string protocol;
+             * the __p5dynimport shim calls it — see jsbridge_internal.h). */
+            xsDefine(xglob, xsID("__p5modRequest"),
+                     xsNewHostFunction(xs_dyn_request, 2), xsDefault);
         }
         xsEndHost(m);
     }
@@ -10784,6 +10792,20 @@ static void xs_close(JsBridge *b)
  * rule applies to the ref POINTER, and slots here are small ints; encode
  * slot+1 anyway to stay uniform with the other engines). Caps + budgets
  * live in the router (jsbridge.c). No native Promise in XS → no fetch(). */
+/* API-P10: dynamic-import bridge native — delegates to the shared core
+ * (jsbridge_dyn_request); returns the status STRING the shim parses. */
+static void xs_dyn_request(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    const char *spec = xsToString(xsArg(0));
+    const char *base = xsToString(xsArg(1));
+    char out[JSBRIDGE_MOD_KEY_MAX + 24];
+    jsbridge_dyn_request(b, spec ? spec : "", base ? base : "", out,
+                         sizeof(out));
+    xsResult = xsString(out);
+}
+
 static void xs_xhr_open(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
