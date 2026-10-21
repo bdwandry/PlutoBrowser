@@ -56,6 +56,7 @@
 #include "html/document.h"
 #include "html/css.h" /* Phase 1.5: stylesheet-scan API + caps */
 #include "html/jsbridge.h"
+#include "html/jsbridge_internal.h" /* Forms-Phase 3: the shared validity layer */
 #include "html/jsext.h"
 #include "html/readability.h"
 #include "keyboard/keyboard.h"
@@ -312,16 +313,31 @@ static void render_body(const char *body, const char *url, int addToHistory);
 static void toggle_details(const char *dkey);
 static void activate_form_block(const LayoutItem *item);
 static void submit_form(const char *formAction, const LayoutItem *inputBlock);
+/* Forms-Phase 6: the driver's dialog tap maps a DomNode onto its layout
+ * item (defined with the form item helpers, used early by the phase). */
+static const LayoutItem *form_item_by_node(DomNode *node);
 static void open_keyboard_for_input(const LayoutItem *item);
 static void form_kb_did_hide(void *ud);
 /* Form keyboard target key (defined with the keyboard code, used early by
  * the formclick autotest). */
 static void form_key_snapshot(const LayoutItem *item);
 static void form_key_write(const char *text, int commit);
+static void form_kb_ok_commit(const char *text);
 static const char *form_item_value(const LayoutItem *item);
 static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
 static DomNode *form_node_ancestor(DomNode *n);
+/* Forms-Phase 4: the form API host hooks (registered at boot) + the
+ * implicit-submission chain the keyboard's Enter commits ride. The
+ * bridge rides the call so mid-parse scripts (a battery page running
+ * its inline form API calls before g_pageJs exists) still dispatch
+ * through their own machine. */
+static int pluto_host_form_reset(JsBridge *b, void *formNode);
+static int pluto_host_form_wire(JsBridge *b, void *formNode,
+                                void *submitterNode, int wantGate,
+                                int wantSubmitEvent);
+static void pluto_form_enter_commit(void);
+static int form_gate_general(JsBridge *b, DomNode *formNode, DomNode *submitterNode);
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap);
 static void http_on_progress(int cur, int total);
 static void http_on_success(int status, char **headerKeys, char **headerVals,
@@ -594,6 +610,11 @@ static int g_fbInFlight;
 static DomNode *g_fbSaved[FB_SAVED_MAX];
 static int g_fbSavedCount;
 static int g_fbSummaryOn;
+/* Forms-Phase 6: WHICH form owns the sent-card summary. The R56g
+ * "Send another" restore stays scoped to that form — another form's
+ * submit while the summary shows is its own submit (browser truth),
+ * not a card dismissal. */
+static DomNode *g_fbSummaryForm;
 
 static void page_swap_doc(RenderTask *rt)
 {
@@ -645,6 +666,7 @@ static void page_swap_doc(RenderTask *rt)
         g_fbDom = NULL;
         g_fbInFlight = 0;
         g_fbSummaryOn = 0;
+        g_fbSummaryForm = NULL;
         g_fbSavedCount = 0;
         /* Page boundary: re-base the funnel's live counter to the tracked
          * truth — drift across this page's engine churn would otherwise
@@ -2885,6 +2907,615 @@ static void formclick_autotest_tick(void)
                        "'%s' / '%s'", s0, s1);
         }
         g_formClickTestPhase = 5;
+        return;
+    }
+}
+#endif
+
+#if defined(PLUTO_FORMVAL_AUTOTEST)
+/* Forms-Phase 3 driver (simulator-only): prove the NATIVE validation
+ * layer on the about:formval real page — no JS validation logic there,
+ * the page's script only paints an invalid counter.
+ *   phase 1: tap submit on an EMPTY required field → the gate must
+ *            BLOCK (URL stays about:formval, nothing on the wire) and
+ *            the non-bubbling invalid event must fire once (the painted
+ *            counter reads invalidcount=1 after a re-walk);
+ *   phase 2: type through the real keyboard lane (form_key_snapshot +
+ *            form_key_write — the tap/keyboard path a user rides);
+ *   phase 3: tap submit again → the submit must now GO (the standard
+ *            GET wire navigates to about:formprobe — Forms-Phase 6
+ *            makes the query the browser-true form data set: the typed
+ *            pair(s) once, no legacy re-append);
+ *   phase 4: the dialog-method hold (Forms-Phase 6) — tap the battery
+ *            page's #fpdlg (method="dialog") submit button through the
+ *            SAME activation lane: with no ancestor dialog element the
+ *            submission is the spec's no-op and the URL must not move.
+ * PASS/FAIL lands in pluto.log via [formval-autotest] lines. */
+static int g_formvalPhase = 0; /* 0=nav, 1=blocked, 2=type, 3=pass, 4=done */
+static unsigned g_formvalFrames = 0;
+static char g_formvalHoldUrl[640] = ""; /* Forms-Phase 6: the hold snapshot */
+
+/* Forms-Phase 6: a bounded DOM walk matching an element's own id
+ * attribute (the same walk shape the Phase-4 helpers use). The fpdlg
+ * submit button is the dialog-hold tap target on the battery page. */
+static DomNode *formval_find_node_by_id(const char *wantId)
+{
+    DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
+    if (!dom || !dom->root || !wantId)
+    {
+        return NULL;
+    }
+    DomNode *stack[32];
+    int top = 0;
+    stack[top++] = dom->root;
+    while (top > 0)
+    {
+        DomNode *n = stack[--top];
+        if (!n)
+        {
+            continue;
+        }
+        if (n->kind == DOM_ELEMENT)
+        {
+            const char *id = dom_get_attr(n, "id");
+            if (id && strcmp(id, wantId) == 0)
+            {
+                return n;
+            }
+        }
+        for (int i = n->childCount - 1; i >= 0 && top < 32; i--)
+        {
+            if (n->children[i])
+            {
+                stack[top++] = n->children[i];
+            }
+        }
+    }
+    return NULL;
+}
+static void formval_autotest_tick(void)
+{
+    if (g_formvalPhase == 4 || isRendering)
+    {
+        return;
+    }
+    if (g_formvalPhase == 0)
+    {
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formval", 13) == 0)
+        {
+            g_formvalPhase = 1;
+            g_formvalFrames = 0;
+            return;
+        }
+        if (++g_formvalFrames == 1)
+        {
+            navigate_to("about:formval");
+        }
+        else if (g_formvalFrames > 600)
+        {
+            logger_log("[formval-autotest] FAIL: never reached about:formval");
+            g_formvalPhase = 4;
+        }
+        return;
+    }
+    if (currentState != STATE_PAGE || !currentDoc)
+    {
+        return;
+    }
+    /* phases 1..21 ride the formval page; phases 31..33 are the POST-nav
+     * verdicts (the submit navigated away — run them wherever we are) */
+    if (g_formvalPhase != 31 && g_formvalPhase != 32 && g_formvalPhase != 33 &&
+        strncmp(currentDoc->baseUrl, "about:formval", 13) != 0)
+    {
+        return;
+    }
+    if (++g_formvalFrames < 30)
+    {
+        return; /* let the page settle ~0.5s */
+    }
+    if (g_formvalPhase == 1)
+    {
+        const LayoutItem *submit = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_SUBMIT)
+            {
+                submit = it;
+                break;
+            }
+        }
+        if (!submit)
+        {
+            logger_log("[formval-autotest] FAIL: submit item not found");
+            g_formvalPhase = 4;
+            return;
+        }
+        logger_log("[formval-autotest] tap submit (empty required)");
+        activate_form_block(submit);
+        g_formvalFrames = 0;
+        g_formvalPhase = 2;
+        return;
+    }
+    if (g_formvalPhase == 2)
+    {
+        /* Verdict for the blocked tap: URL unchanged + the page painted
+         * invalidcount=1 (re-walk so the laid text shows the update). */
+        int urlHeld =
+            currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formval", 13) == 0 &&
+            !strchr(currentDoc->baseUrl, '?');
+        if (!urlHeld)
+        {
+            logger_log("[formval-autotest] FAIL: empty submit left the page "
+                       "(url=%s)", currentDoc ? currentDoc->baseUrl : "?");
+            g_formvalPhase = 4;
+            return;
+        }
+        page_rewalk_now();
+        /* the painted-text scan runs after the next settle window */
+        g_formvalFrames = 0;
+        g_formvalPhase = 21;
+        return;
+    }
+    if (g_formvalPhase == 21)
+    {
+        int painted = 0;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_TEXT && it->text &&
+                strncmp(it->text, "invalidcount=", 13) == 0)
+            {
+                if (strcmp(it->text, "invalidcount=1") == 0)
+                {
+                    painted = 1;
+                }
+            }
+        }
+        if (painted)
+        {
+            logger_log("[formval-autotest] PASS: blocked at the native gate, "
+                       "URL unchanged, invalid painted 1");
+        }
+        else
+        {
+            logger_log("[formval-autotest] FAIL: invalid count not painted "
+                       "(expected invalidcount=1)");
+        }
+        /* phase 2 proper: type through the real keyboard lane */
+        const LayoutItem *user = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_FIELD && it->name &&
+                strcmp(it->name, "user") == 0)
+            {
+                user = it;
+                break;
+            }
+        }
+        if (!user)
+        {
+            logger_log("[formval-autotest] FAIL: user field not found");
+            g_formvalPhase = 4;
+            return;
+        }
+        form_key_snapshot(user);
+        form_key_write("Pluto", 1 /* commit → input + change */);
+        page_rewalk_now(); /* rebuild under the live attr value */
+        g_formvalFrames = 0;
+        g_formvalPhase = 3;
+        return;
+    }
+    if (g_formvalPhase == 3)
+    {
+        const LayoutItem *submit = NULL;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_INPUT_SUBMIT)
+            {
+                submit = it;
+                break;
+            }
+        }
+        if (!submit)
+        {
+            logger_log("[formval-autotest] FAIL: submit item gone");
+            g_formvalPhase = 4;
+            return;
+        }
+        logger_log("[formval-autotest] tap submit (typed value)");
+        activate_form_block(submit);
+        g_formvalFrames = 0;
+        g_formvalPhase = 31;
+        return;
+    }
+    if (g_formvalPhase == 31)
+    {
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formprobe", 15) == 0)
+        {
+            logger_log("[formval-autotest] PASS: valid submit navigated the "
+                       "GET wire (url=%s)", currentDoc->baseUrl);
+        }
+        else
+        {
+            logger_log("[formval-autotest] FAIL: valid submit did not "
+                       "navigate (url=%s)",
+                       currentDoc ? currentDoc->baseUrl : "?");
+        }
+        /* Forms-Phase 6: now the dialog-method hold on the battery page
+         * the GET landed on. */
+        g_formvalPhase = 32;
+        g_formvalFrames = 0;
+        return;
+    }
+    if (g_formvalPhase == 32)
+    {
+        if (!currentDoc ||
+            strncmp(currentDoc->baseUrl, "about:formprobe", 15) != 0)
+        {
+            if (++g_formvalFrames > 600)
+            {
+                logger_log("[formval-autotest] FAIL: the dialog tap never "
+                           "found the battery page (url=%s)",
+                           currentDoc ? currentDoc->baseUrl : "?");
+                g_formvalPhase = 4;
+            }
+            return;
+        }
+        if (++g_formvalFrames < 30)
+        {
+            return; /* let the battery page settle */
+        }
+        DomNode *btn = formval_find_node_by_id("fpdlgb");
+        if (!btn)
+        {
+            logger_log("[formval-autotest] FAIL: #fpdlgb button not found");
+            g_formvalPhase = 4;
+            return;
+        }
+        const LayoutItem *it = form_item_by_node(btn);
+        if (!it)
+        {
+            logger_log("[formval-autotest] FAIL: dialog submit item not "
+                       "found in the layout");
+            g_formvalPhase = 4;
+            return;
+        }
+        snprintf(g_formvalHoldUrl, sizeof(g_formvalHoldUrl), "%s",
+                 currentDoc->baseUrl);
+        logger_log("[formval-autotest] tap method=dialog submit (hold "
+                   "expected, url=%s)", g_formvalHoldUrl);
+        activate_form_block(it);
+        g_formvalFrames = 0;
+        g_formvalPhase = 33;
+        return;
+    }
+    if (g_formvalPhase == 33)
+    {
+        /* The hold verdict: 30 settle frames, no navigation, URL
+         * byte-identical (the node-id lookup rides the layout re-walk
+         * the document-level click listener can paint — both sides of
+         * the build parity are safe to compare). */
+        if (currentDoc && strcmp(currentDoc->baseUrl, g_formvalHoldUrl) == 0)
+        {
+            logger_log("[formval-autotest] PASS: method=dialog held the "
+                       "page (url=%s unchanged)", currentDoc->baseUrl);
+        }
+        else
+        {
+            logger_log("[formval-autotest] FAIL: method=dialog left the "
+                       "page (url=%s, was %s)",
+                       currentDoc ? currentDoc->baseUrl : "?",
+                       g_formvalHoldUrl);
+        }
+        g_formvalPhase = 4;
+        return;
+    }
+}
+#endif
+
+#if defined(PLUTO_FORMENTER_AUTOTEST)
+/* Forms-Phase 4 driver (simulator-only): the Enter/reset/submit-API
+ * battery on the about:formval real page. Each flavor asserts right
+ * where a browser would:
+ *   phase 1: requestSubmit-flavor (gate+event+wire) on the empty
+ *            required field → the native gate BLOCKS (URL held,
+ *            invalidcount=1 painted after the re-walk);
+ *   phase 2: submit() flavor (no gate, no event) on the SAME state →
+ *            the wire navigates despite the invalid field — the
+ *            two flavors diverge, exactly like a browser;
+ *   phase 3: navigate back to about:formval (fresh walk);
+ *   phase 4: type "Pluto" through the real keyboard lane — NO re-walk
+ *            in between (the block's walk-time default stays "");
+ *   phase 5: form.reset() (the host hook) → the typed value returns
+ *            to "" (block + value attribute + focused echo restored,
+ *            no events);
+ *   phase 6: retype via the OK-commit lane (form_kb_ok_commit — the
+ *            exact did_hide journey) → the Enter chain rides the
+ *            default submit button (click → gate → submit → wire);
+ *   phase 7: the navigation landed on about:formprobe?user=EnterValid
+ *            (&age= — Forms-Phase 6 makes the query the browser-true
+ *            form data set; the old legacy walk skipped the empty
+ *            number pair).
+ * PASS/FAIL lands in pluto.log via [forment-autotest] lines. */
+static int g_formentPhase = 0; /* 0..7 as listed, 9 = done */
+static unsigned g_formentFrames = 0;
+
+/* The formval page's single form (id="fv") — found by a bounded walk. */
+static DomNode *forment_find_form_fv(void)
+{
+    DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
+    if (!dom || !dom->root)
+    {
+        return NULL;
+    }
+    DomNode *stack[24];
+    int top = 0;
+    stack[top++] = dom->root;
+    while (top > 0)
+    {
+        DomNode *n = stack[--top];
+        if (!n)
+        {
+            continue;
+        }
+        if (n->kind == DOM_ELEMENT && n->tag &&
+            strcmp(n->tag, "form") == 0)
+        {
+            const char *id = dom_get_attr(n, "id");
+            if (id && strcmp(id, "fv") == 0)
+            {
+                return n;
+            }
+        }
+        for (int i = n->childCount - 1; i >= 0 && top < 24; i--)
+        {
+            if (n->children[i])
+            {
+                stack[top++] = n->children[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static const LayoutItem *forment_user_field(void)
+{
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->type == LRI_INPUT_FIELD && it->name &&
+            strcmp(it->name, "user") == 0)
+        {
+            return it;
+        }
+    }
+    return NULL;
+}
+
+static void forment_autotest_tick(void)
+{
+    if (g_formentPhase == 9 || isRendering)
+    {
+        return;
+    }
+    if (g_formentPhase == 0)
+    {
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formval", 13) == 0)
+        {
+            g_formentPhase = 1;
+            g_formentFrames = 0;
+            return;
+        }
+        if (++g_formentFrames == 1)
+        {
+            logger_log("[forment-autotest] navigate to about:formval");
+            navigate_to("about:formval");
+        }
+        else if (g_formentFrames > 600)
+        {
+            logger_log("[forment-autotest] FAIL: never reached about:formval");
+            g_formentPhase = 9;
+        }
+        return;
+    }
+    /* Phases 2/3/7 ride whichever page the wire landed on; everything
+     * else drives the about:formval page itself. */
+    if (g_formentPhase != 2 && g_formentPhase != 3 && g_formentPhase != 7 &&
+        (currentState != STATE_PAGE || !currentDoc ||
+         strncmp(currentDoc->baseUrl, "about:formval", 13) != 0))
+    {
+        return;
+    }
+    if (++g_formentFrames < 30)
+    {
+        return; /* let the page settle ~0.5s */
+    }
+    if (g_formentPhase == 1)
+    {
+        DomNode *form = forment_find_form_fv();
+        if (!form)
+        {
+            logger_log("[forment-autotest] FAIL: #fv form node not found");
+            g_formentPhase = 9;
+            return;
+        }
+        logger_log("[forment-autotest] requestSubmit flavor on the empty "
+                   "required field");
+        (void)pluto_host_form_wire(g_pageJs, form, NULL, 1, 1);
+        page_rewalk_now();
+        g_formentFrames = 0;
+        g_formentPhase = 11; /* assert lane (formval numbering tail) */
+        return;
+    }
+    if (g_formentPhase == 11)
+    {
+        int urlHeld = currentDoc && !strchr(currentDoc->baseUrl, '?');
+        int painted = 0;
+        for (int i = 0; i < layout_get_item_count(); i++)
+        {
+            const LayoutItem *it = layout_item_at(i);
+            if (it && it->type == LRI_TEXT && it->text &&
+                strcmp(it->text, "invalidcount=1") == 0)
+            {
+                painted = 1;
+            }
+        }
+        if (urlHeld && painted)
+        {
+            logger_log("[forment-autotest] PASS: requestSubmit blocked at "
+                       "the native gate (invalid painted, URL held)");
+        }
+        else
+        {
+            logger_log("[forment-autotest] %s: FAIL url=%s painted=%d",
+                       "requestSubmit block", currentDoc ? currentDoc->baseUrl : "?",
+                       painted);
+        }
+        /* The submit() flavor on the SAME state: no gate, no event. */
+        DomNode *form = forment_find_form_fv();
+        if (!form)
+        {
+            logger_log("[forment-autotest] FAIL: #fv form gone before the "
+                       "submit() flavor");
+            g_formentPhase = 9;
+            return;
+        }
+        logger_log("[forment-autotest] submit() flavor — skips validation");
+        (void)pluto_host_form_wire(g_pageJs, form, NULL, 0, 0);
+        g_formentFrames = 0;
+        g_formentPhase = 2;
+        return;
+    }
+    if (g_formentPhase == 2)
+    {
+        DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
+        (void)dom;
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formprobe?", 16) == 0)
+        {
+            logger_log("[forment-autotest] PASS: submit() sent the wire "
+                       "despite the invalid field (url=%s) — the flavors "
+                       "diverge",
+                       currentDoc->baseUrl);
+            g_formentPhase = 3;
+            g_formentFrames = 0;
+            return;
+        }
+        if (++g_formentFrames > 600)
+        {
+            logger_log("[forment-autotest] FAIL: submit() did not navigate "
+                       "(url=%s)", currentDoc ? currentDoc->baseUrl : "?");
+            g_formentPhase = 3;
+            g_formentFrames = 0;
+        }
+        return;
+    }
+    if (g_formentPhase == 3)
+    {
+        logger_log("[forment-autotest] navigate back to about:formval (fresh "
+                   "walk)");
+        navigate_to("about:formval");
+        g_formentFrames = 0;
+        g_formentPhase = 4;
+        return;
+    }
+    if (g_formentPhase == 4)
+    {
+        const LayoutItem *user = forment_user_field();
+        if (!user)
+        {
+            logger_log("[forment-autotest] FAIL: user field not found");
+            g_formentPhase = 9;
+            return;
+        }
+        form_key_snapshot(user);
+        form_key_write("Pluto", 1 /* commit → input + change */);
+        const char *v = form_item_value(user);
+        if (v && strcmp(v, "Pluto") == 0)
+        {
+            logger_log("[forment-autotest] Yes: typed 'Pluto' (item value "
+                       "read back, no re-walk)");
+            g_formentPhase = 5;
+        }
+        else
+        {
+            logger_log("[forment-autotest] FAIL: typed value not readable "
+                       "(got '%s')", v ? v : "(null)");
+            g_formentPhase = 9;
+        }
+        g_formentFrames = 0;
+        return;
+    }
+    if (g_formentPhase == 5)
+    {
+        DomNode *form = forment_find_form_fv();
+        if (!form)
+        {
+            logger_log("[forment-autotest] FAIL: #fv form gone at reset");
+            g_formentPhase = 9;
+            return;
+        }
+        logger_log("[forment-autotest] form.reset() hook");
+        int changed = pluto_host_form_reset(g_pageJs, form);
+        const LayoutItem *user = forment_user_field();
+        const char *v = user ? form_item_value(user) : NULL;
+        if (changed && v && v[0] == '\0')
+        {
+            logger_log("[forment-autotest] PASS: form.reset() restored the "
+                       "walk-time default (typed 'Pluto' → '')");
+        }
+        else
+        {
+            logger_log("[forment-autotest] FAIL: reset state changed=%d "
+                       "value='%s'",
+                       changed, v ? v : "(null)");
+        }
+        g_formentPhase = 6;
+        g_formentFrames = 0;
+        return;
+    }
+    if (g_formentPhase == 6)
+    {
+        const LayoutItem *user = forment_user_field();
+        if (!user)
+        {
+            logger_log("[forment-autotest] FAIL: user field gone at Enter");
+            g_formentPhase = 9;
+            return;
+        }
+        logger_log("[forment-autotest] OK-commit → implicit Enter chain");
+        form_key_snapshot(user);
+        form_kb_ok_commit("EnterValid");
+        g_formentFrames = 0;
+        g_formentPhase = 7;
+        return;
+    }
+    if (g_formentPhase == 7)
+    {
+        if (currentDoc &&
+            strncmp(currentDoc->baseUrl, "about:formprobe?", 16) == 0 &&
+            strstr(currentDoc->baseUrl, "user=EnterValid"))
+        {
+            logger_log("[forment-autotest] PASS: Enter rode the default "
+                       "button through the full chain (url=%s)",
+                       currentDoc->baseUrl);
+            g_formentPhase = 9;
+            return;
+        }
+        if (++g_formentFrames > 600)
+        {
+            logger_log("[forment-autotest] FAIL: Enter chain did not submit "
+                       "(url=%s)",
+                       currentDoc ? currentDoc->baseUrl : "?");
+            g_formentPhase = 9;
+        }
         return;
     }
 }
@@ -6031,6 +6662,18 @@ static int fb_ieq(const char *a, const char *b)
     return *a == *b;
 }
 
+/* Forms-Phase 6: the standing receipt family names the resolved method
+ * (the IDL keyword upper-cased); the dialog keyword rides its own road
+ * this phase, so the receipt keeps three honest names. */
+static const char *fb_method_log_name(const char *idl)
+{
+    if (idl && strcmp(idl, "dialog") == 0)
+        return "DIALOG";
+    if (idl && strcmp(idl, "post") == 0)
+        return "POST";
+    return "GET";
+}
+
 /* The HTML5 email-input rule (any browser spec shape, not site data):
  * no whitespace, one @ not at the ends, a last dot in the domain that
  * isn't first/last. */
@@ -6385,6 +7028,9 @@ static void fb_summary_build(DomResult *dom, DomNode *form)
     else
         logger_log("[fbform] summary: Send another button MISSING (alloc)");
     g_fbSummaryOn = 1;
+    /* Forms-Phase 6: the summary's owning form (the R56g restore guard
+     * keys on it — scoped, not global). */
+    g_fbSummaryForm = form;
     page_rewalk_now();
 }
 
@@ -6400,6 +7046,7 @@ static void fb_summary_restore(DomResult *dom, DomNode *form)
         logger_log("[fbform] WARNING: no saved children to restore");
     g_fbSavedCount = 0;
     g_fbSummaryOn = 0;
+    g_fbSummaryForm = NULL;
     g_fbCard = NULL; /* detached; re-created on the next success */
     page_rewalk_now();
 }
@@ -6454,34 +7101,15 @@ static void fb_on_error(const char *message)
 
 /* application/x-www-form-urlencoded serializer (spec): space → '+',
  * letters/digits/`-_.` verbatim, everything else %XX-hex. Appends into
- * `out` at *used, always NUL-terminates, truncates at cap-4. */
+ * `out` at *used, always NUL-terminates, truncates at cap-4.
+ * Forms-Phase 5: the byte loop now lives in the shared bridge core
+ * (jsbridge_urlenc_cpy — ONE escaper feeds the standing favicon-bypass
+ * routes AND the FormData wire road), wrapped here so every standing
+ * caller keeps its exact shape and byte behavior. */
 static void fb_urlenc_append(const char *raw, char *out, size_t cap,
                              size_t *used)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    size_t u = *used;
-    for (; *raw && u + 4 < cap; raw++)
-    {
-        char c = *raw;
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
-            c == '~')
-        {
-            out[u++] = c;
-        }
-        else if (c == ' ')
-        {
-            out[u++] = '+';
-        }
-        else
-        {
-            out[u++] = '%';
-            out[u++] = hex[((unsigned char)c >> 4) & 0xF];
-            out[u++] = hex[(unsigned char)c & 0xF];
-        }
-    }
-    out[u] = '\0';
-    *used = u;
+    jsbridge_urlenc_cpy(raw, out, cap, used);
 }
 
 /* name=value&name2=value2 over the collected fields (the DOM names are
@@ -6636,7 +7264,10 @@ static int fb_fields_valid(const FormSite *site, DomResult *dom,
 /* Returns 1 when the fallback OWNS the submit, 0 = no route (no form
  * action, no site profile) → the caller keeps the byte-identical legacy
  * static GET path — exactly what a script-less browser did. */
-static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
+static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
+                               const char *actionOverride,
+                               const char *methodOverride,
+                               int skipValidation, DomNode *submitterNode)
 {
     DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
     const FormSite *site;
@@ -6651,8 +7282,10 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
         return 0;
     }
     /* R56g: the summary is showing — this entry comes from the "Send
-     * another" button (click→submit, rc=0 = no JS). Restore the form. */
-    if (g_fbSummaryOn)
+     * another" button (click→submit, rc=0 = no JS). Restore the form.
+     * Forms-Phase 6: scoped to the summary's OWN form — another form's
+     * submit rides its own route (its method may be dialog/GET/POST). */
+    if (g_fbSummaryOn && form == g_fbSummaryForm)
     {
         fb_summary_restore(dom, form);
         return 1;
@@ -6671,8 +7304,37 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
         logger_log("[fbform] no named control fields — old static action");
         return 0;
     }
-    if (!fb_fields_valid(site, dom, form))
+    /* Forms-Phase 4: the submit() method road skips the profile-arc
+     * required-field check too (browser truth: submit() bypasses ALL
+     * constraint validation, not just the Phase-3 gate). The tap lane
+     * passes skipValidation=0 — byte-identical standing behavior; its
+     * empty-required case is already caught by the Phase-3 gate
+     * upstream. */
+    if (!skipValidation && !fb_fields_valid(site, dom, form))
         return 1; /* the validation card is up; the form stays */
+    /* Forms-Phase 6: METHOD=DIALOG resolves BEFORE any route selection.
+     * The spec's dict-defining description: the submission is "intended
+     * to close the dialog box in which the form finds itself, if any,
+     * and otherwise not submit" — the action attribute and the site
+     * profile are IRRELEVANT to that intent (an actionless dialog form
+     * holds, an action-bearing one also holds). The constraint gate and
+     * the cancelable submit event already ran upstream (the tap lane /
+     * the wire). This page shape has no ancestor <dialog>, so the
+     * submission is the honest no-op: the page holds, nothing
+     * navigates — the formval driver receipts the hold. */
+    {
+        const char *dm = (methodOverride && methodOverride[0])
+                             ? methodOverride
+                             : form_node_attr(form, "method");
+        if (strcmp(jsbridge_form_method_idl(dm), "dialog") == 0)
+        {
+            const char *dact = form_node_attr(form, "action");
+            logger_log("[fbform] method=dialog — no ancestor dialog "
+                       "element: the page holds (action=%.80s)",
+                       dact && dact[0] ? dact : "(none)");
+            return 1;
+        }
+    }
     fb_summary_persist(site);
     /* ── ROUTE: first match wins ─────────────────────────────────────
      * a. the form has its own action → the HTML-standard submission
@@ -6683,14 +7345,22 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
      * c. neither → the legacy static-page GET behavior unchanged. */
     {
         char actionAbs[224];
+        /* Forms-Phase 4: the submitter's stamped overrides ride the
+         * route (browser truth: a submit button's formAction/formMethod
+         * replace the form's own for THAT submission). The tap lane
+         * passes NULL/NULL — byte-identical standing behavior. */
+        const char *override = (actionOverride && actionOverride[0])
+                                   ? actionOverride
+                                   : NULL;
         const char *action = form_node_attr(form, "action");
         actionAbs[0] = '\0';
-        if (action && action[0])
+        const char *resolved = override ? override : action;
+        if (resolved && resolved[0])
         {
             char *abs = url_resolve(
                 (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
                                                     : "",
-                action);
+                resolved);
             if (abs)
             {
                 snprintf(actionAbs, sizeof(actionAbs), "%s", abs);
@@ -6699,14 +7369,29 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
         }
         if (actionAbs[0])
         {
-            const char *m = form_node_attr(form, "method");
-            methodGet =
-                (!m || !m[0] || fb_ieq(m, "get"));
+            /* Forms-Phase 6: the effective method resolves through the
+             * shared IDL reflection (the submitter's formMethod override
+             * first, then the form's method attribute), so a JS read of
+             * form.method and a wire route cannot disagree. The dialog
+             * method already returned upstream — what reaches the route
+             * block is GET or POST only. */
+            const char *m =
+                (methodOverride && methodOverride[0]) ? methodOverride
+                                                      : form_node_attr(form, "method");
+            const char *idlMethod =
+                jsbridge_form_method_idl(m);
+            methodGet = strcmp(idlMethod, "get") == 0;
             snprintf(ep, sizeof(ep), "%s", actionAbs);
             snprintf(ct, sizeof(ct), "%s",
                      "application/x-www-form-urlencoded");
+            if (override || methodOverride)
+            {
+                logger_log("[fbform] submitter override action=%.80s "
+                           "method=%s",
+                           ep, fb_method_log_name(idlMethod));
+            }
             logger_log("[fbform] route=standard action=%.80s method=%s",
-                       ep, methodGet ? "GET" : "POST");
+                       ep, fb_method_log_name(idlMethod));
         }
         else if (site && site->endpoint[0])
         {
@@ -6725,15 +7410,43 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
             return 0;
         }
     }
+    /* Forms-Phase 6: the dialog-method hold happens BEFORE the route
+     * block (see the early resolution above) — every shape (action
+     * present or not, profile matched or not) holds the same way. */
     if (methodGet)
     {
-        /* GET submission: navigate to action?<name=value&...> */
+        /* Forms-Phase 6: the GET submission is the browser-true query —
+         * the SAME one-rulebook form data set the POST body carries
+         * (the submitter pair rides a real activation), serialized with
+         * the standing escaper. The double-append shape is gone: the
+         * legacy fb-collector chunk (id-fallback names) no longer rides
+         * the query, and this branch no longer hands the finished URL
+         * to submit_form to append the layout's own copy a second time.
+         * enctype is IGNORED here (the GET query is always the
+         * urlencoded shape — the browser's own rule).
+         * The commit rides the standing pending-nav lane (the same
+         * deferred commit submit_form left for the frame loop): a GET
+         * from a tap or a script chain must not free the layout/doc
+         * mid-walk. An action that already carries a query joins with
+         * '&' (the browser's own append); an empty data set leaves the
+         * action bare. */
         char enc[FB_BODY_CAP];
-        char url[FB_BODY_CAP + 128];
-        fb_pairs_urlenc(enc, sizeof(enc));
-        snprintf(url, sizeof(url), "%.900s?%.1200s", ep, enc);
+        char url[640];
+        size_t off = strlen(ep);
+        if (off >= sizeof(url))
+            off = sizeof(url) - 1;
+        memcpy(url, ep, off);
+        url[off] = '\0';
+        jsbridge_form_data_urlenc(g_pageJs, form, submitterNode,
+                                  enc, sizeof(enc));
+        if (enc[0])
+        {
+            const char *join = strchr(url, '?') ? "&" : "?";
+            snprintf(url + off, sizeof(url) - off, "%s%s", join, enc);
+        }
         logger_log("[fbform] GET submit → url=%.110s", url);
-        submit_form(url, item);
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", url);
         return 1;
     }
     {
@@ -6741,10 +7454,58 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item)
         int started;
         if (routeProfile && site->bodyJson)
             fb_pairs_json(site, g_fbBody, sizeof(g_fbBody));
-        else
+        else if (routeProfile)
             fb_pairs_urlenc(g_fbBody, sizeof(g_fbBody));
+        else
+        {
+            /* Forms-Phase 5: the route-standard POST body is the SAME
+             * browser-true form data set the JS FormData constructor
+             * builds — one collector, two roads (the parity bar). The
+             * submitter pair rides a real activation (browser truth:
+             * the submitter button contributes its pair); form.submit()
+             * and the battery road pass NULL submitter. */
+            /* Forms-Phase 6: the submitter's effective enctype picks
+             * the serializer the browser would run. urlencoded stays
+             * the standing road; text/plain rides the raw CRLF wire
+             * (its honest Content-Type); multipart stays the
+             * documented policy boundary (no file picker, no encoder —
+             * the body rides urlencoded and says so on the record). */
+            const char *etr = submitterNode
+                                  ? form_node_attr((DomNode *)submitterNode,
+                                                   "formenctype")
+                                  : NULL;
+            if (!etr || !etr[0])
+                etr = form_node_attr(form, "enctype");
+            const char *encl = jsbridge_form_enctype_idl(etr);
+            int textPlain = strcmp(encl, "text/plain") == 0;
+            int multipart = strcmp(encl, "multipart/form-data") == 0;
+            if (textPlain)
+            {
+                jsbridge_form_data_plain(g_pageJs, form, submitterNode,
+                                         g_fbBody, sizeof(g_fbBody));
+                snprintf(ct, sizeof(ct), "%s", "text/plain;charset=UTF-8");
+            }
+            else
+            {
+                if (multipart)
+                {
+                    logger_log("[fbform] enctype=multipart/form-data — "
+                               "policy boundary (no file picker, no "
+                               "encoder): the body rides urlencoded");
+                }
+                jsbridge_form_data_urlenc(g_pageJs, form, submitterNode,
+                                          g_fbBody, sizeof(g_fbBody));
+            }
+        }
         logger_log("[fbform] POST %s body=%u (%s)", ep,
                    (unsigned)strlen(g_fbBody), ct);
+        if (!routeProfile)
+        {
+            /* Forms-Phase 5 receipt: the browser-true body bytes on the
+             * record (pairs in tree order; the battery pairs this with
+             * the page-side FormData recount). */
+            logger_log("[fbform] POST body bytes=%s", g_fbBody);
+        }
         g_fbDom = dom;
         fb_card_insert(dom, form,
                        (site && site->sending[0]) ? site->sending
@@ -6960,10 +7721,15 @@ static void open_keyboard_for_input(const LayoutItem *item)
                      (unsigned int)(item->value ? strlen(item->value) : 0));
 }
 
+static int g_formKbOkayPressed = 0; /* last will_hide's OK flag (Phase 4) */
 static void form_kb_will_hide(int okButtonPressed, void *ud)
 {
     (void)ud;
-    (void)okButtonPressed;
+    /* Forms-Phase 4: remember WHY the keyboard hid. OK = the Enter
+     * commit → implicit submission follows the change commit (the
+     * browser's Enter order). A plain dismissal (tapping elsewhere)
+     * commits without submitting. */
+    g_formKbOkayPressed = okButtonPressed ? 1 : 0;
 }
 
 static void form_kb_did_hide(void *ud)
@@ -6986,6 +7752,21 @@ static void form_kb_did_hide(void *ud)
                 txt[it->maxlength] = '\0';
             }
             form_key_write(txt, 1 /* commit → input + change */);
+            if (g_formKbOkayPressed)
+            {
+                /* Forms-Phase 4: the browser's Enter order — the commit
+                 * (input+change) just ran; implicit submission follows
+                 * when the field belongs to a form. textarea fields
+                 * never implicitly submit (pluto_form_enter_commit
+                 * checks). */
+                logger_log("[form] keyboard OK commit → enter chain");
+                pluto_form_enter_commit();
+            }
+            else
+            {
+                logger_log("[form] keyboard dismissed commit (no submit)");
+            }
+            g_formKbOkayPressed = 0;
             pluto_free(txt);
         }
     }
@@ -7017,6 +7798,18 @@ static void form_kb_text_changed(void *ud)
     }
 }
 
+/* Forms-Phase 4 (autotest lane): the keyboard's OK commit exactly as
+ * form_kb_did_hide rides it — the change commit, then the Enter-implicit
+ * chain (pluto_form_enter_commit checks the field's form, the textarea
+ * exception and the default button). The driver calls this to exercise
+ * a real user's OK press without opening the OS keyboard. */
+static void form_kb_ok_commit(const char *text)
+{
+    form_key_write(text, 1 /* commit → input + change */);
+    logger_log("[form] enter: OK commit driver lane");
+    pluto_form_enter_commit();
+}
+
 /* ── activateFormBlock (port) ───────────────────────────────────────────── */
 /* Phase 8: the host side of a type=reset activation (the browser's
  * form.reset()): every same-form control returns to the walk-time
@@ -7025,7 +7818,13 @@ static void form_kb_text_changed(void *ud)
  * Disabled controls reset too (spec: reset is not a submit filter).
  * Returns 1 when any control state changed — the only thing worth a
  * re-walk. Scope = the tapped item's formAction string, the same
- * same-form test the submit serializer uses. */
+ * same-form test the submit serializer uses.
+ * Forms-Phase 4: text restore now reaches BOTH other stores — the
+ * node's value ATTRIBUTE (the typing carrier; without this a re-walk
+ * resurrects the typed text over the block restore) and the focused
+ * item's owned value (the keyboard echo). Restores fire no events —
+ * a browser's reset() fires none (the reset EVENT rides the button,
+ * not the restore). */
 static int host_form_reset(const LayoutItem *item)
 {
     const char *fa = (item && item->formAction) ? item->formAction : "";
@@ -7050,6 +7849,18 @@ static int host_form_reset(const LayoutItem *item)
             if (b->value != b->defaultValue)
             {
                 b->value = b->defaultValue; /* arena alias of the walk value */
+                /* Forms-Phase 4: the value attr carries typed text —
+                 * restore it so the next re-walk keeps the default. */
+                DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom
+                                            : NULL;
+                if (dom && b->srcNode)
+                {
+                    dom_set_attr(dom, (DomNode *)b->srcNode, "value",
+                                 b->defaultValue ? b->defaultValue : "");
+                }
+                /* The focused item's owned echo follows the restore. */
+                layout_set_input_value(it, b->defaultValue ? b->defaultValue
+                                                           : "");
                 changed = 1;
             }
             break;
@@ -7087,6 +7898,337 @@ static int host_form_reset(const LayoutItem *item)
         }
     }
     return changed;
+}
+
+static int form_gate_general(JsBridge *b, DomNode *formNode,
+                             DomNode *submitterNode)
+{
+    if (!b || !formNode || formNode->kind != DOM_ELEMENT)
+    {
+        return 1; /* no bridge / no form: standing behavior */
+    }
+    if (dom_get_attr((DomNode *)formNode, "novalidate") ||
+        (submitterNode && dom_get_attr(submitterNode, "formnovalidate")))
+    {
+        return 1;
+    }
+    static DomNode *offenders[8]; /* bss scratch — single-threaded caller */
+    JsbValidity first;
+    memset(&first, 0, sizeof(first));
+    int n = jsbridge_form_check(b, formNode, offenders, 8, &first);
+    if (n == 0)
+    {
+        return 1;
+    }
+    for (int i = 0; i < n && i < 8; i++)
+    {
+        /* Fire-and-forget: the block verdict is the C evaluation, not
+         * the event's return. */
+        (void)jsbridge_dispatch_element_event(b, offenders[i], "invalid");
+    }
+    logger_log("[form] submit blocked by validation (%d): %s", n,
+               first.message);
+    return 0;
+}
+
+/* Forms-Phase 3: the native submit gate — the browser runs constraint
+ * validation on the click's default action BEFORE any submit event can
+ * dispatch. novalidate on the <form> or formNovalidate on the button
+ * skips it; offenders fire their non-bubbling `invalid` events (the
+ * kind-6 road: the live NR engine delivers, frozen engines dissolve
+ * the delivery per the standing boundary) and the submit BLOCKS at the
+ * source — no submit dispatch, no wire, nothing sent. Boundary: the
+ * gate rides the page's engine bridge (the rules read the same live
+ * DOM as the JS surface); a page with JS runs it, a script-less page
+ * keeps the standing byte-identical static behavior. */
+static int form_submit_gate_pass(DomNode *btnNode)
+{
+    if (!g_pageJs)
+    {
+        return 1; /* no bridge: standing static behavior */
+    }
+    DomNode *form = form_node_ancestor(btnNode);
+    return form_gate_general(g_pageJs, form, btnNode);
+}
+
+/* ── Forms-Phase 4: the form API host hooks ─────────────────────────────── *
+ * Browser truth: HTMLFormElement.reset() restores every control to its
+ * walk-time default and fires NO events; submit() skips validation AND
+ * the submit event; requestSubmit([submitter]) runs the full chain —
+ * the constraint gate (novalidate/formNovalidate honored), then the
+ * cancelable submit event, then the wire (the submitter's formAction/
+ * formMethod overrides ride along). The Enter-implicit chain reuses the
+ * same wire with no submitter. All roads mark domDirty through the
+ * standing rewalk road — queued render tasks, never mid-script walks. */
+
+/* Layout item back-lookup by source node: the only item-level state the
+ * wire needs is the submitter's stamped formAction/formMethod pair. */
+static const LayoutItem *form_item_by_node(DomNode *node)
+{
+    if (!node)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->block && ((const DocBlock *)it->block)->srcNode == node)
+        {
+            return it;
+        }
+    }
+    return NULL;
+}
+
+/* The implicit-submission default button: the FIRST submit button in
+ * tree order under the form (input type=submit/image and button
+ * elements whose type is submit or defaulted). Iterative stack walk —
+ * no recursion on the 64KB game-task stack. */
+static DomNode *form_default_button(DomNode *formNode)
+{
+    if (!formNode)
+    {
+        return NULL;
+    }
+    DomNode *stack[24]; /* bounded — the game-task stack is 64KB */
+    int top = 0;
+    for (int i = 0; i < formNode->childCount && top < 24; i++)
+    {
+        stack[top++] = formNode->children[i];
+    }
+    while (top > 0)
+    {
+        DomNode *c = stack[--top];
+        if (!c || c->kind != DOM_ELEMENT)
+        {
+            continue;
+        }
+        if (c->tag)
+        {
+            if (!strcmp(c->tag, "button"))
+            {
+                /* <button> defaults to type=submit */
+                const char *t = dom_get_attr(c, "type");
+                if (!t || !t[0] || !strcmp(t, "submit"))
+                {
+                    return c;
+                }
+            }
+            else if (!strcmp(c->tag, "input"))
+            {
+                const char *t = dom_get_attr(c, "type");
+                if (t && (!strcmp(t, "submit") || !strcmp(t, "image")))
+                {
+                    return c;
+                }
+            }
+            else if (!strcmp(c->tag, "form"))
+            {
+                continue; /* nested forms break containment */
+            }
+        }
+        for (int j = c->childCount - 1; j >= 0; j--)
+        {
+            if (c->children[j] && top < 24)
+            {
+                stack[top++] = c->children[j];
+            }
+        }
+    }
+    return NULL;
+}
+
+/* The form.reset() hook (JS method road + the reset-button upgrade):
+ * the walk-time-default restore over the form's whole scope. The block
+ * road covers the walked page (taps live on blocks); a pre-walk call
+ * finds no matching items and the DOM attrs already ARE the defaults —
+ * a browser-true two-armed no-op. Returns 1 when anything changed. */
+static int pluto_host_form_reset(JsBridge *b, void *formNode)
+{
+    (void)b;
+    DomNode *form = (DomNode *)formNode;
+    if (!form || form->kind != DOM_ELEMENT || !form->tag ||
+        strcmp(form->tag, "form") != 0)
+    {
+        return 0;
+    }
+    for (int i = 0; i < layout_get_item_count(); i++)
+    {
+        const LayoutItem *it = layout_item_at(i);
+        if (it && it->block && ((const DocBlock *)it->block)->srcNode &&
+            form_node_ancestor((DomNode *)((const DocBlock *)it->block)->srcNode) ==
+                form)
+        {
+            int changed = host_form_reset(it);
+            logger_log("[form] form.reset(): %s",
+                       changed ? "walk-time defaults restored"
+                               : "already at defaults, nothing changed");
+            return changed;
+        }
+    }
+    logger_log("[form] form.reset(): no walked controls (pre-walk call, "
+               "DOM state already defaults)");
+    return 0;
+}
+
+/* The submission-chain hook. wantGate runs the constraint layer first
+ * (blocked = no submit event wired, offenders fired); wantSubmitEvent
+ * dispatches the cancelable submit; SUPPRESSED = a handler owns the
+ * submission (rewalk, no wire). Otherwise the wire routes exactly like
+ * the tap lane: pluto_form_fallback (standard action GET/POST with the
+ * submitter's formAction/formMethod overrides, then the data-driven
+ * site profile), and its legacy fallthrough rides submit_form (the
+ * formless self-GET, the button's name=value pair included). */
+static int pluto_host_form_wire(JsBridge *b, void *formNode,
+                                void *submitterNode, int wantGate,
+                                int wantSubmitEvent)
+{
+    DomNode *form = (DomNode *)formNode;
+    DomNode *submitter = (DomNode *)submitterNode;
+    if (!form || form->kind != DOM_ELEMENT || !form->tag ||
+        strcmp(form->tag, "form") != 0)
+    {
+        return 0;
+    }
+    logger_log("[form] wire requested: form=%s submitter=%s gate=%d event=%d",
+               form->tag, submitter && submitter->tag ? submitter->tag : "none",
+               wantGate, wantSubmitEvent);
+    /* Reset activation (the submitter is a type=reset control): the
+     * browser order is the cancelable reset event on the form, then the
+     * restore. The gate and the wire do not apply to resets. */
+    const char *st = submitter && submitter->tag ? submitter->tag : NULL;
+    int isReset = 0;
+    if (st && !strcmp(st, "button") &&
+        dom_get_attr(submitter, "type") &&
+        !strcmp(dom_get_attr(submitter, "type"), "reset"))
+    {
+        isReset = 1;
+    }
+    else if (st && !strcmp(st, "input"))
+    {
+        const char *t = dom_get_attr(submitter, "type");
+        if (t && !strcmp(t, "reset"))
+        {
+            isReset = 1;
+        }
+    }
+    if (isReset)
+    {
+        if (g_pageJs)
+        {
+            int rr = jsbridge_dispatch_element_event(b, form, "reset");
+            logger_log("[form] reset event: rc=%d", rr);
+            if (rr == JSB_EVENT_SUPPRESSED)
+            {
+                page_rewalk_now(); /* a reset handler owns the restore */
+                return 0;
+            }
+        }
+        const LayoutItem *ri = form_item_by_node(submitter);
+        int changed = ri ? host_form_reset(ri) : pluto_host_form_reset(b, form);
+        if (changed)
+        {
+            page_rewalk_now();
+        }
+        logger_log("[form] reset performed (%s)",
+                   changed ? "changed" : "already default");
+        return changed;
+    }
+    /* (1) the constraint gate — browser order: validation precedes the
+     * submit event on every path that honors it. */
+    if (wantGate && !form_gate_general(b, form, submitter))
+    {
+        return 0;
+    }
+    /* (2) the cancelable submit event — over the whole form (the
+     * page's bridge owns the delivery even mid-parse). Frozen engines
+     * dissolve the delivery (standing boundary) and NONE falls through
+     * to the wire, matching a page with no listeners. */
+    if (wantSubmitEvent && b)
+    {
+        int rc = jsbridge_dispatch_element_event(b, form, "submit");
+        logger_log("[form] submit dispatch: rc=%d", rc);
+        if (rc == JSB_EVENT_SUPPRESSED)
+        {
+            page_rewalk_now(); /* onSubmit handled the submission */
+            return 0;
+        }
+    }
+    /* (3) the wire — the submitter's stamped overrides ride the route. */
+    const LayoutItem *sub = form_item_by_node(submitter);
+    if (sub && !sub->disabled)
+    {
+        int conducted =
+            pluto_form_fallback(form, sub, sub->formAction, sub->formMethod,
+                                !wantGate,
+                                (sub && sub->block)
+                                    ? ((DocBlock *)sub->block)->srcNode
+                                    : NULL);
+        if (conducted)
+        {
+            return 1;
+        }
+    }
+    if (pluto_form_fallback(form, NULL, NULL, NULL, !wantGate, NULL))
+    {
+        return 1;
+    }
+    /* (4) legacy route: no action attr, no site profile — the browser's
+     * own submission to the form's resolved action (the current URL for
+     * an empty action), the submitter pair included. */
+    logger_log("[form] wire legacy route: submit_form self GET");
+    submit_form(sub ? sub->formAction : "", sub);
+    return 1;
+}
+
+/* The Enter-implicit chain (the keyboard's OK commit). Browser truth:
+ * implicit submission on a TEXT field rides the form's default button
+ * when one exists (its click + activation: the click, then the gate
+ * honoring its formNovalidate, then the submit event, then the wire);
+ * with no submit button the form itself is submitted (gate, event,
+ * wire, no submitter pair). textarea never implicitly submits. */
+static void pluto_form_enter_commit(void)
+{
+    const LayoutItem *it = form_key_item();
+    if (!it)
+    {
+        return;
+    }
+    if (it->inputType && strcmp(it->inputType, "textarea") == 0)
+    {
+        logger_log("[form] enter on textarea: newline, no implicit submit");
+        return;
+    }
+    DomNode *n = form_key_node();
+    if (!n)
+    {
+        return;
+    }
+    DomNode *form = form_node_ancestor(n);
+    if (!form)
+    {
+        return; /* formless field: nothing to submit */
+    }
+    DomNode *btn = form_default_button(form);
+    if (btn)
+    {
+        const LayoutItem *bi = form_item_by_node(btn);
+        if (bi)
+        {
+            logger_log("[form] enter: implicit submission rides the default "
+                       "button (tag=%s)",
+                       btn->tag ? btn->tag : "?");
+            activate_form_block(bi); /* the full tap chain: click → … */
+            return;
+        }
+        /* The button exists in the DOM but is not a walked item (a
+         * pre-walk commit). Run the chain minus the click dispatch. */
+        logger_log("[form] enter: default button unwalked — direct chain");
+        pluto_host_form_wire(g_pageJs, form, btn, 1, 1);
+        return;
+    }
+    logger_log("[form] enter: no submit button — direct implicit submission");
+    pluto_host_form_wire(g_pageJs, form, NULL, 1, 1);
 }
 
 static void activate_form_block(const LayoutItem *item)
@@ -7164,11 +8306,19 @@ static void activate_form_block(const LayoutItem *item)
                 DomNode *formNode = form_node_ancestor(srcNode);
                 if (formNode)
                 {
-                    /* Whatever a handler did NOT prevent, the button's
-                     * own reset fires after the click (the browser
-                     * order); the host reset is the same for both
-                     * rc==NONE (no handler ran) and rc==NAVIGATE
-                     * (handlers ran, none prevented). */
+                    /* Forms-Phase 4: the browser order is click, then
+                     * the cancelable `reset` event on the form, then
+                     * the restore. A handler cancelling the reset owns
+                     * the form (rewalk); NONE and NAVIGATE both fall
+                     * through to the host restore. */
+                    int re = jsbridge_dispatch_element_event(
+                        g_pageJs, formNode, "reset");
+                    logger_log("[form] reset event dispatch: rc=%d", re);
+                    if (re == JSB_EVENT_SUPPRESSED)
+                    {
+                        page_rewalk_now(); /* a reset handler owns it */
+                        break;
+                    }
                     if (host_form_reset(item))
                     {
                         logger_log("[form] reset performed");
@@ -7184,6 +8334,13 @@ static void activate_form_block(const LayoutItem *item)
             DomNode *formNode = form_node_ancestor(srcNode);
             if (formNode)
             {
+                /* Forms-Phase 3: the native gate runs on the default
+                 * action, between the click and the submit event (the
+                 * browser order). Blocked = no submit dispatch. */
+                if (!form_submit_gate_pass((DomNode *)srcNode))
+                {
+                    break;
+                }
                 rc = jsbridge_dispatch_element_event(g_pageJs, formNode, "submit");
                 logger_log("[form] submit dispatch: rc=%d", rc);
                 if (rc == JSB_EVENT_SUPPRESSED)
@@ -7203,7 +8360,11 @@ static void activate_form_block(const LayoutItem *item)
                 {
                     logger_log("[form] submit unhandled — native fallback "
                                "attempt");
-                    if (pluto_form_fallback(formNode, item))
+                    if (pluto_form_fallback(formNode, item, NULL, NULL, 0,
+                                            (item && item->block)
+                                                ? ((DocBlock *)item->block)
+                                                      ->srcNode
+                                                : NULL))
                         break;
                 }
             }
@@ -7225,6 +8386,7 @@ static void activate_form_block(const LayoutItem *item)
     case LRI_CHECKBOX_FIELD:
     {
         DocBlock *block = (DocBlock *)item->block;
+        int wasChecked = block->checked;
         if (block->radio)
         {
             for (int i = 0; i < layout_get_item_count(); i++)
@@ -7243,11 +8405,41 @@ static void activate_form_block(const LayoutItem *item)
             block->checked = !block->checked;
         }
         layout_set_selected_input(item);
+        /* Forms-Phase 2: a user toggle delivers input, then change (the
+         * browser's activation order — the toggle moves the checkedness
+         * first; a re-tap on an already-checked radio moves nothing and
+         * fires nothing, exactly like a browser's no-op re-click). The
+         * events ride the field's own source node, mirroring the
+         * form_key_write contract: change only counts when input's
+         * dispatch found no handler (r falls back to r2), and a handler
+         * that mutated the live DOM re-walks the page. The JS .checked
+         * WRITE accessor fires no events — only USER toggles do. */
+        if (block->checked != wasChecked)
+        {
+            void *srcNode = block->srcNode;
+            if (g_pageJs && srcNode)
+            {
+                int r =
+                    jsbridge_dispatch_element_event(g_pageJs, srcNode, "input");
+                int r2 =
+                    jsbridge_dispatch_element_event(g_pageJs, srcNode, "change");
+                if (r == JSB_EVENT_NONE)
+                {
+                    r = r2;
+                }
+                if (r == JSB_EVENT_SUPPRESSED)
+                {
+                    page_rewalk_now(); /* a handler mutated the live DOM */
+                }
+            }
+        }
         break;
     }
     case LRI_SELECT_FIELD:
     {
         DocBlock *block = (DocBlock *)item->block;
+        int wasSi = block->selectedIndex;
+        int picked = 0; /* an accumulate actually changed the pick set */
         int n = block->optionCount;
         if (n > 0)
         {
@@ -7266,7 +8458,11 @@ static void activate_form_block(const LayoutItem *item)
                      * option.selected) is the way back. */
                     if (block->multiple)
                     {
-                        opt->selected = 1;
+                        if (!opt->selected)
+                        {
+                            opt->selected = 1;
+                            picked = 1;
+                        }
                     }
                     break;
                 }
@@ -7274,6 +8470,33 @@ static void activate_form_block(const LayoutItem *item)
             }
         }
         layout_set_selected_input(item);
+        /* Forms-Phase 2: a user pick delivers input, then change (the
+         * browser's activation order — the selection moves first; when
+         * the cycle arrives nowhere new and nothing got marked, the
+         * state did not change and nothing fires). Same dispatch
+         * contract as the checkbox lane and form_key_write: change only
+         * counts when input's dispatch found no handler, and a handler
+         * that mutated the live DOM re-walks the page. */
+        if (g_pageJs &&
+            (block->selectedIndex != wasSi || picked))
+        {
+            void *srcNode = block->srcNode;
+            if (srcNode)
+            {
+                int r =
+                    jsbridge_dispatch_element_event(g_pageJs, srcNode, "input");
+                int r2 =
+                    jsbridge_dispatch_element_event(g_pageJs, srcNode, "change");
+                if (r == JSB_EVENT_NONE)
+                {
+                    r = r2;
+                }
+                if (r == JSB_EVENT_SUPPRESSED)
+                {
+                    page_rewalk_now(); /* a handler mutated the live DOM */
+                }
+            }
+        }
         break;
     }
     default:
@@ -7829,6 +9052,12 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_FORMCLICK_AUTOTEST)
     formclick_autotest_tick();
+#endif
+#if defined(PLUTO_FORMVAL_AUTOTEST)
+    formval_autotest_tick();
+#endif
+#if defined(PLUTO_FORMENTER_AUTOTEST)
+    forment_autotest_tick();
 #endif
 
 #if defined(PLUTO_JS_TIMERS_AUTOTEST)
@@ -8818,6 +10047,10 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
         /* Phase 14: address bar module init. */
         address_bar_init();
+
+        /* Forms-Phase 4: the form API host hooks — reset/submit/
+         * requestSubmit/click roads run through main.c's wire. */
+        jsbridge_set_form_hosts(pluto_host_form_reset, pluto_host_form_wire);
 
         pdtimer_init(pd);
         http_client_init(pd);

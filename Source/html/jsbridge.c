@@ -6287,6 +6287,1250 @@ int jsbridge_timers_pending(const JsBridge *b, unsigned nowMs)
     return n;
 }
 
+/* ── Forms-Phase 3: the native constraint validation layer ──────────────── *
+ * Browser truth underneath page JS: every submit attempt and every
+ * checkValidity()/reportValidity() consults these rules — a page's own
+ * JS validation keeps working above this layer untouched. The stores
+ * are the two-armed model: typed text/JS writes live on the value
+ * ATTRIBUTE; user taps live on the DocBlock; pre-walk scripts see the
+ * markup attributes alone. The JSBV_* flag bits and the JsbValidity
+ * struct live in jsbridge_internal.h (adapters consume both). */
+
+static int jsbv_absent_int(void)
+{
+    return -2147483647;
+}
+
+/* The willValidate candidate rule (browser): submittable-and-not-barred
+ * controls. Hidden/button/submit/reset/image inputs and <button> are
+ * barred; disabled controls are barred; text-family readonly barred; a
+ * multiple select barred. (Fieldset-inherited disabled does NOT bar
+ * here: standing `.disabled` reflection is own-attribute only.) */
+int jsbridge_form_will_validate(JsBridge *b, DomNode *n)
+{
+    (void)b;
+    if (!n || n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return 0;
+    }
+    if (strcmp(n->tag, "input") == 0)
+    {
+        const char *tv = dom_get_attr(n, "type");
+        const char *t = (tv && tv[0]) ? tv : "text";
+        if (strcmp(t, "hidden") == 0 || strcmp(t, "button") == 0 ||
+            strcmp(t, "submit") == 0 || strcmp(t, "reset") == 0 ||
+            strcmp(t, "image") == 0)
+        {
+            return 0;
+        }
+        if (dom_get_attr(n, "disabled"))
+        {
+            return 0;
+        }
+        if (dom_get_attr(n, "readonly"))
+        {
+            const char *ro[] = {"text", "search", "email", "url",
+                                "password", "tel", "number"};
+            for (size_t i = 0; i < sizeof(ro) / sizeof(ro[0]); i++)
+            {
+                if (strcmp(t, ro[i]) == 0)
+                {
+                    return 0;
+                }
+            }
+        }
+        return 1;
+    }
+    if (strcmp(n->tag, "textarea") == 0)
+    {
+        return !dom_get_attr(n, "disabled") && !dom_get_attr(n, "readonly");
+    }
+    if (strcmp(n->tag, "select") == 0)
+    {
+        return !dom_get_attr(n, "disabled") && !dom_get_attr(n, "multiple");
+    }
+    return 0;
+}
+
+/* The LIVE value of a control for the rules:
+ * text-family input → the value attribute; textarea → its concatenated
+ * DOM text; select → the selected option's value attribute else its
+ * text — from the LIVE block when one exists (taps move the block),
+ * else the markup `selected` option, else the first option (the
+ * browser's default-selection rule); toggles → "" (their missing-ness
+ * is about checkedness, handled in the evaluator). */
+static void jsbv_value_of(JsBridge *b, DomNode *n, char *out, size_t cap)
+{
+    out[0] = '\0';
+    const char *tag = (n && n->kind == DOM_ELEMENT && n->tag) ? n->tag : NULL;
+    if (!tag)
+    {
+        return;
+    }
+    if (strcmp(tag, "textarea") == 0)
+    {
+        doc_concat_node_text(n, out, cap);
+        return;
+    }
+    if (strcmp(tag, "select") == 0)
+    {
+        DocBlock *blk = NULL;
+        if (b && b->doc)
+        {
+            for (int i = 0; i < b->doc->blockCount && !blk; i++)
+            {
+                DocBlock *it = b->doc->blocks[i];
+                if (it && it->srcNode == (void *)n)
+                {
+                    blk = it;
+                }
+            }
+        }
+        if (blk && blk->options && blk->optionCount > 0)
+        {
+            DocOption *o = NULL;
+            if (blk->multiple)
+            {
+                for (int k = 0; k < blk->optionCount && !o; k++)
+                {
+                    DocOption *c = blk->options[k];
+                    if (c && !c->group && c->selected)
+                    {
+                        o = c;
+                    }
+                }
+            }
+            else
+            {
+                int si = blk->selectedIndex;
+                if (si >= 1 && si <= blk->optionCount)
+                {
+                    o = blk->options[si - 1];
+                }
+            }
+            if (o && !o->group)
+            {
+                const char *v = (o->value && o->value[0]) ? o->value : o->text;
+                snprintf(out, cap, "%s", v ? v : "");
+            }
+            return;
+        }
+        const char *pick = NULL;
+        DomNode *first = NULL;
+        for (int i = 0; i < n->childCount; i++)
+        {
+            DomNode *c = n->children[i];
+            if (!c || c->kind != DOM_ELEMENT || !c->tag ||
+                strcmp(c->tag, "option") != 0)
+            {
+                continue;
+            }
+            if (!first)
+            {
+                first = c;
+            }
+            if (dom_get_attr(c, "selected"))
+            {
+                pick = dom_get_attr(c, "value");
+                if (!pick)
+                {
+                    char tbuf[256];
+                    doc_concat_node_text(c, tbuf, sizeof(tbuf));
+                    snprintf(out, cap, "%s", tbuf);
+                    return;
+                }
+                snprintf(out, cap, "%s", pick);
+                return;
+            }
+        }
+        if (first)
+        {
+            const char *v = dom_get_attr(first, "value");
+            if (v)
+            {
+                snprintf(out, cap, "%s", v);
+                return;
+            }
+            doc_concat_node_text(first, out, cap);
+        }
+        return;
+    }
+    /* input family: the attr store */
+    const char *v = dom_get_attr(n, "value");
+    snprintf(out, cap, "%s", v ? v : "");
+}
+
+static int jsbv_attr_int(DomNode *n, const char *key, int *present)
+{
+    const char *v = dom_get_attr(n, key);
+    *present = 0;
+    if (!v || !v[0])
+    {
+        return jsbv_absent_int();
+    }
+    char *end = NULL;
+    long val = strtol(v, &end, 10);
+    if (end == v)
+    {
+        return jsbv_absent_int();
+    }
+    *present = 1;
+    return (int)val;
+}
+
+/* Any checked radio with the group's name, by DOM attr road. */
+static int jsbv_group_attr_checked(DomNode *n, const char *name, int depth)
+{
+    if (!n || depth > 16)
+    {
+        return 0;
+    }
+    if (n->kind == DOM_ELEMENT && n->tag && strcmp(n->tag, "input") == 0)
+    {
+        const char *tv = dom_get_attr(n, "type");
+        if (tv && strcmp(tv, "radio") == 0)
+        {
+            const char *nm = dom_get_attr(n, "name");
+            if (nm && name && strcmp(nm, name) == 0 &&
+                dom_get_attr(n, "checked"))
+            {
+                return 1;
+            }
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        if (jsbv_group_attr_checked(n->children[i], name, depth + 1))
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The doc-wide radio group pick check: the LIVE block road first (taps
+ * flip blocks), else the markup attribute road. */
+static int jsbv_group_checked(JsBridge *b, DomNode *n, const char *name)
+{
+    if (!name || !name[0])
+    {
+        return 0;
+    }
+    if (b && b->doc)
+    {
+        for (int i = 0; i < b->doc->blockCount; i++)
+        {
+            DocBlock *blk = b->doc->blocks[i];
+            if (blk && blk->radio && blk->name &&
+                strcmp(blk->name, name) == 0 && blk->checked)
+            {
+                return 1;
+            }
+        }
+    }
+    if (n && n->parent)
+    {
+        DomNode *root = n;
+        while (root->parent)
+        {
+            root = root->parent;
+        }
+        return jsbv_group_attr_checked(root, name, 0);
+    }
+    return 0;
+}
+
+/* The checkbox/radio live checked state (block road, attr fallback). */
+static int jsbv_checked_of(JsBridge *b, DomNode *n)
+{
+    if (b && b->doc)
+    {
+        for (int i = 0; i < b->doc->blockCount; i++)
+        {
+            DocBlock *blk = b->doc->blocks[i];
+            if (blk && blk->srcNode == (void *)n && !blk->radio)
+            {
+                return blk->checked;
+            }
+        }
+    }
+    return dom_get_attr(n, "checked") != NULL;
+}
+
+static int jsbv_isspace_str(const char *s)
+{
+    while (*s)
+    {
+        if (!isspace((unsigned char)*s))
+        {
+            return 0;
+        }
+        s++;
+    }
+    return 1;
+}
+
+/* The one rule evaluator. Fills flags + the browser's first-failure
+ * message. Barred controls come back trivially valid. */
+void jsbridge_form_validity_eval(JsBridge *b, DomNode *n, JsbValidity *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!jsbridge_form_will_validate(b, n))
+    {
+        return;
+    }
+    const char *tag = n->tag ? n->tag : "";
+    const char *type = dom_get_attr(n, "type");
+    if (!type || !type[0])
+    {
+        type = "text";
+    }
+    unsigned flags = 0;
+    char value[384];
+    jsbv_value_of(b, n, value, sizeof(value));
+    size_t vlen = strlen(value);
+    if (vlen >= sizeof(value))
+    {
+        vlen = sizeof(value) - 1;
+    }
+
+    /* — badInput (number type only on this panel); trailing whitespace
+     * parses clean, browser-style — */
+    double num = 0;
+    int numOk = 0;
+    if (strcmp(tag, "input") == 0 && strcmp(type, "number") == 0 &&
+        vlen > 0)
+    {
+        char *end = NULL;
+        num = strtod(value, &end);
+        if (end && (!end[0] || jsbv_isspace_str(end)))
+        {
+            numOk = 1;
+        }
+        else
+        {
+            flags |= JSBV_BADINPUT;
+        }
+    }
+    /* — valueMissing (browser: the control must ALSO carry required —
+     * an empty optional control is valid, never a mismatch) — */
+    if (!flags)
+    {
+        const char *rq = dom_get_attr(n, "required");
+        if (strcmp(tag, "input") == 0)
+        {
+            if (strcmp(type, "checkbox") == 0)
+            {
+                if (rq && !jsbv_checked_of(b, n))
+                {
+                    flags |= JSBV_VALUEMISSING;
+                }
+            }
+            else if (strcmp(type, "radio") == 0)
+            {
+                const char *nm = dom_get_attr(n, "name");
+                if (rq && nm && !jsbv_group_checked(b, n, nm))
+                {
+                    flags |= JSBV_VALUEMISSING;
+                }
+            }
+            else if (vlen == 0 && rq)
+            {
+                flags |= JSBV_VALUEMISSING;
+            }
+        }
+        else if (vlen == 0 && rq)
+        {
+            flags |= JSBV_VALUEMISSING;
+        }
+    }
+    /* — typeMismatch (email/url shapes, non-empty values) — */
+    if (!flags && strcmp(tag, "input") == 0 && vlen > 0)
+    {
+        if (strcmp(type, "email") == 0)
+        {
+            const char *at = strchr(value, '@');
+            int ok = at && at != value && at[1] && !strchr(value, ' ') &&
+                     strchr(at + 1, '.');
+            if (!ok)
+            {
+                flags |= JSBV_TYPEMISMATCH;
+            }
+        }
+        else if (strcmp(type, "url") == 0)
+        {
+            int ok = (value[0] >= 'a' && value[0] <= 'z') ||
+                     (value[0] >= 'A' && value[0] <= 'Z');
+            size_t i = 1;
+            while (ok && value[i] && value[i] != ':' &&
+                   ((value[i] >= 'a' && value[i] <= 'z') ||
+                    (value[i] >= 'A' && value[i] <= 'Z') ||
+                    (value[i] >= '0' && value[i] <= '9') ||
+                    value[i] == '+' || value[i] == '-' || value[i] == '.'))
+            {
+                i++;
+            }
+            ok = ok && value[i] == ':' && i >= 1 && i <= 32;
+            if (!ok)
+            {
+                flags |= JSBV_TYPEMISMATCH;
+            }
+        }
+    }
+    /* — patternMismatch (all input types, non-empty value) — */
+    if (!flags && strcmp(tag, "input") == 0 && vlen > 0)
+    {
+        const char *pat = dom_get_attr(n, "pattern");
+        if (pat && !css_pattern_matches(pat, value))
+        {
+            flags |= JSBV_PATTERNMISMATCH;
+        }
+    }
+    /* — tooLong / tooShort (value attribute + writes = the dirty store;
+     * a browser bars attribute-set defaults, our writes ARE the attr —
+     * browser-identical for the assigned case, documented) — */
+    int hasML = 0, hasNL = 0;
+    int maxl = jsbv_attr_int(n, "maxlength", &hasML);
+    int minl = jsbv_attr_int(n, "minlength", &hasNL);
+    int lenable = strcmp(tag, "input") == 0 || strcmp(tag, "textarea") == 0;
+    if (!flags && lenable && hasML && maxl >= 0 && (int)vlen > maxl)
+    {
+        flags |= JSBV_TOOLONG;
+    }
+    if (!flags && lenable && hasNL && minl >= 0 && vlen > 0 &&
+        (int)vlen < minl)
+    {
+        flags |= JSBV_TOOSHORT;
+    }
+    /* — rangeUnderflow / rangeOverflow (number type on this panel).
+     * min/max parse as doubles (browser-true); unparseable bounds are
+     * ignored, exactly a browser's silent invalid-attribute rule. */
+    int hasMin = 0, hasMax = 0;
+    double mn = 0, mx = 0;
+    const char *mv = dom_get_attr(n, "min");
+    if (mv && mv[0])
+    {
+        char *e = NULL;
+        double d = strtod(mv, &e);
+        if (e && !e[0])
+        {
+            hasMin = 1;
+            mn = d;
+        }
+    }
+    mv = dom_get_attr(n, "max");
+    if (mv && mv[0])
+    {
+        char *e = NULL;
+        double d = strtod(mv, &e);
+        if (e && !e[0])
+        {
+            hasMax = 1;
+            mx = d;
+        }
+    }
+    if (!flags && numOk && strcmp(tag, "input") == 0 &&
+        strcmp(type, "number") == 0)
+    {
+        if (hasMin && num < mn)
+        {
+            flags |= JSBV_RANGEUNDERFLOW;
+        }
+        else if (hasMax && num > mx)
+        {
+            flags |= JSBV_RANGEOVERFLOW;
+        }
+    }
+    /* stepMismatch / customError never fire (panel boundaries, standing
+     * policy rows). */
+
+    out->flags = flags;
+    if (flags & JSBV_VALUEMISSING)
+    {
+        snprintf(out->message, sizeof(out->message), "Fill in this field.");
+    }
+    else if (flags & JSBV_BADINPUT)
+    {
+        snprintf(out->message, sizeof(out->message), "Enter a number.");
+    }
+    else if (flags & JSBV_TYPEMISMATCH)
+    {
+        snprintf(out->message, sizeof(out->message),
+                 strcmp(type, "url") == 0 ? "Enter a URL."
+                                          : "Enter an email address.");
+    }
+    else if (flags & JSBV_PATTERNMISMATCH)
+    {
+        snprintf(out->message, sizeof(out->message), "Match the requested format.");
+    }
+    else if (flags & JSBV_TOOLONG)
+    {
+        snprintf(out->message, sizeof(out->message),
+                 "Shorten this text to %d characters or fewer.", maxl);
+    }
+    else if (flags & JSBV_TOOSHORT)
+    {
+        snprintf(out->message, sizeof(out->message), "Use %d characters or more.", minl);
+    }
+    else if (flags & JSBV_RANGEUNDERFLOW)
+    {
+        snprintf(out->message, sizeof(out->message),
+                 "Value must be greater than or equal to %g.", mn);
+    }
+    else if (flags & JSBV_RANGEOVERFLOW)
+    {
+        snprintf(out->message, sizeof(out->message),
+                 "Value must be less than or equal to %g.", mx);
+    }
+}
+
+/* Form-level gate: count the invalid candidates among the submittable
+ * controls below formNode; the first `cap` offenders land in the
+ * caller's array. Returns the count (0 = the form validates). */
+int jsbridge_form_check(JsBridge *b, DomNode *formNode, DomNode **offenders,
+                        int cap, JsbValidity *validityOut)
+{
+    if (!b || !formNode || !offenders || cap <= 0)
+    {
+        return 0;
+    }
+    int cnt = 0;
+    int fill = 0;
+    static DomNode *queue[64]; /* bss scratch — single-threaded caller */
+    int qn = 0;
+    for (int i = 0; i < formNode->childCount && qn < 64; i++)
+    {
+        queue[qn++] = formNode->children[i];
+    }
+    int qh = 0;
+    while (qh < qn)
+    {
+        DomNode *c = queue[qh++];
+        if (!c || c->kind != DOM_ELEMENT)
+        {
+            continue;
+        }
+        if (c->tag && !strcmp(c->tag, "form"))
+        {
+            for (int i = 0; i < c->childCount && qn < 64; i++)
+            {
+                queue[qn++] = c->children[i];
+            }
+            continue; /* nested forms are not parts of THIS form */
+        }
+        JsbValidity v;
+        jsbridge_form_validity_eval(b, c, &v);
+        if (v.flags)
+        {
+            if (fill < cap)
+            {
+                offenders[fill++] = c;
+            }
+            if (validityOut && cnt == 0)
+            {
+                *validityOut = v; /* the FIRST offender's message */
+            }
+            cnt++;
+        }
+        for (int i = 0; i < c->childCount && qn < 64; i++)
+        {
+            queue[qn++] = c->children[i];
+        }
+    }
+    return cnt;
+}
+
+/* ── Forms-Phase 4: the HTMLFormElement API host hooks ──────────────────── *
+ * The router holds the two function pointers registered by main.c at boot;
+ * the engine bridges call the public roads below from their form-element
+ * methods. The BRIDGE rides the call (a mid-parse script has no host
+ * g_pageJs yet — the page's own machine is the delivery context). No hook
+ * = a bridge running under test scaffolding without the host — the roads
+ * report "nothing happened" (0) and never throw. Nodes arrive as live
+ * DomNode pointers matching jsbridge.h's element handles. */
+static JsbFormHostReset g_hostFormReset = NULL;
+static JsbFormHostWire g_hostFormWire = NULL;
+
+void jsbridge_set_form_hosts(JsbFormHostReset resetFn, JsbFormHostWire wireFn)
+{
+    g_hostFormReset = resetFn;
+    g_hostFormWire = wireFn;
+    logger_log("[form] host hooks registered (reset=%p wire=%p)",
+               (void *)resetFn, (void *)wireFn);
+}
+
+int jsbridge_form_host_reset(JsBridge *b, void *formNode)
+{
+    return g_hostFormReset ? g_hostFormReset(b, formNode) : 0;
+}
+
+int jsbridge_form_host_wire(JsBridge *b, void *formNode, void *submitterNode,
+                            int wantGate, int wantSubmitEvent)
+{
+    return g_hostFormWire ? g_hostFormWire(b, formNode, submitterNode,
+                                           wantGate, wantSubmitEvent)
+                          : 0;
+}
+
+/* Forms-Phase 4 `elements` backing: every descendant input/textarea/
+ * select/button of the form node in tree order (browser association:
+ * descendants ride the enclosing form; the form= attribute association
+ * is out of scope this phase). Nested forms break containment exactly
+ * like the validity gate's walk. Returns the collected count. */
+int jsbridge_form_controls_collect(DomNode *formNode, void **out, int cap)
+{
+    if (!formNode || !out || cap <= 0)
+    {
+        return 0;
+    }
+    int cnt = 0;
+    static DomNode *queue[128]; /* bss scratch — single-threaded caller */
+    int qn = 0;
+    for (int i = 0; i < formNode->childCount && qn < 128; i++)
+    {
+        queue[qn++] = formNode->children[i];
+    }
+    int qh = 0;
+    while (qh < qn)
+    {
+        DomNode *c = queue[qh++];
+        if (!c || c->kind != DOM_ELEMENT)
+        {
+            continue;
+        }
+        int hit = 0;
+        if (c->tag)
+        {
+            if (!strcmp(c->tag, "input") || !strcmp(c->tag, "textarea") ||
+                !strcmp(c->tag, "select") || !strcmp(c->tag, "button"))
+            {
+                hit = 1;
+            }
+            else if (!strcmp(c->tag, "form"))
+            {
+                /* nested forms are not parts of THIS form's elements */
+                continue;
+            }
+        }
+        if (hit && cnt < cap)
+        {
+            out[cnt++] = c;
+        }
+        for (int i = 0; i < c->childCount && qn < 128; i++)
+        {
+            queue[qn++] = c->children[i];
+        }
+    }
+    return cnt;
+}
+
+/* ── Forms-Phase 5: FormData → the ONE form-data rulebook ────────────────
+ * `new FormData(form[, submitter])` on every Forms engine AND the
+ * route-standard POST body serialize through THIS collector, so the
+ * JS-side form-data bytes and the actual POST wire bytes cannot drift:
+ * one rulebook, two roads (the phase bar).
+ *
+ * The rules are the browser's form data set, written browser-true:
+ *  - tree-order DFS (depth-first pre-order — document order, NOT the
+ *    BFS order of the Phase-4 `elements` walker);
+ *  - nested <form> elements excluded (a form is never part of itself);
+ *  - controls disabled by a `disabled` FIELDSET ancestor are excluded;
+ *  - a control participates only with a NON-EMPTY `name` attribute —
+ *    strict names, NOT the fb-walk's id fallback (that fallback belongs
+ *    to the profile arc, not to the browser);
+ *  - `disabled` / aria-disabled="true" excluded (the agreement recorded
+ *    for this engine family);
+ *  - radios/checkboxes only when checked, value attr defaulting to
+ *    "on" (the browser's own default);
+ *  - type=file skipped (no file picker — the standing POLICY row);
+ *    type=image skipped (click coords only exist on real activation);
+ *  - button/submit/reset contribute a pair ONLY as the submitter (the
+ *    activation click / the ctor's second argument), value attr else
+ *    "Submit" for submit / "" for reset / button text for button —
+ *    the browser's own defaults;
+ *  - select → the LIVE selected option (block when taps moved it, else
+ *    the markup selected option, else the first) via jsbv_value_of,
+ *    one entry per select (multiple rows are the standing one-line
+ *    POLICY); textarea → its live DOM text;
+ *  - the submitter must be a form descendant (the browser's
+ *    NotFoundError family — contained as an errCode). */
+
+/* A control whose pair rides the form data set (fieldset handled as a
+ * disabler only — the fieldset's own name entry is the standing note). */
+static int fd_is_control(const char *tag)
+{
+    return tag && (!strcmp(tag, "input") || !strcmp(tag, "textarea") ||
+                   !strcmp(tag, "select") || !strcmp(tag, "button"));
+}
+
+static int fd_aria_disabled(DomNode *n)
+{
+    const char *a = dom_get_attr(n, "aria-disabled");
+    return a && !strcmp(a, "true");
+}
+
+/* The value read for the plain lanes — jsbv_value_of is the phase-3
+ * LIVE probe (select block first, textarea text, input attr). */
+static void fd_walk(JsBridge *b, DomNode *n, DomNode *submitter,
+                    int fsDisabled, int depth, FdPair *out, int cap,
+                    int *cnt)
+{
+    if (!n || n->kind != DOM_ELEMENT || !n->tag || depth > 24)
+    {
+        return;
+    }
+    const char *tag = n->tag;
+    if (depth > 0 && !strcmp(tag, "form"))
+    {
+        return; /* nested form: not this form's data (the root passes) */
+    }
+    if (!strcmp(tag, "fieldset"))
+    {
+        if (dom_get_attr(n, "disabled"))
+        {
+            fsDisabled = 1; /* the browser's whole-fieldset disablement */
+        }
+    }
+    else if (fd_is_control(tag) && !fsDisabled &&
+             !dom_get_attr(n, "disabled") && !fd_aria_disabled(n))
+    {
+        const char *nm = dom_get_attr(n, "name");
+        if (nm && nm[0])
+        {
+            char type[16] = "";
+            if (!strcmp(tag, "input"))
+            {
+                const char *ty = dom_get_attr(n, "type");
+                snprintf(type, sizeof(type), "%s",
+                         (ty && ty[0]) ? ty : "text");
+            }
+            else if (!strcmp(tag, "textarea"))
+            {
+                snprintf(type, sizeof(type), "textarea");
+            }
+            else if (!strcmp(tag, "select"))
+            {
+                snprintf(type, sizeof(type), "select");
+            }
+            else
+            {
+                snprintf(type, sizeof(type), "button");
+            }
+            /* The lanes: toggles/gates first, then the value probes. */
+            if (!strcmp(type, "file") || !strcmp(type, "image"))
+            {
+                /* file: no picker (standing POLICY); image: coords exist
+                 * only on a real activation we cannot observe. */
+            }
+            else if (!strcmp(type, "submit") || !strcmp(type, "reset") ||
+                     !strcmp(type, "button"))
+            {
+                if (n == submitter && *cnt < cap)
+                {
+                    FdPair *p = &out[(*cnt)++];
+                    snprintf(p->name, sizeof(p->name), "%s", nm);
+                    const char *v = dom_get_attr(n, "value");
+                    if (v)
+                    {
+                        snprintf(p->value, sizeof(p->value), "%s", v);
+                    }
+                    else if (!strcmp(tag, "button"))
+                    {
+                        /* <button> defaults to its text content. */
+                        char tbuf[JSBRIDGE_FD_VALUE];
+                        doc_concat_node_text(n, tbuf, sizeof(tbuf));
+                        snprintf(p->value, sizeof(p->value), "%s", tbuf);
+                    }
+                    else
+                    {
+                        snprintf(p->value, sizeof(p->value), "%s",
+                                 !strcmp(type, "submit") ? "Submit" : "");
+                    }
+                }
+            }
+            else if (!strcmp(type, "checkbox") || !strcmp(type, "radio"))
+            {
+                if (dom_get_attr(n, "checked") && *cnt < cap)
+                {
+                    FdPair *p = &out[(*cnt)++];
+                    snprintf(p->name, sizeof(p->name), "%s", nm);
+                    const char *v = dom_get_attr(n, "value");
+                    snprintf(p->value, sizeof(p->value), "%s",
+                             (v && v[0]) ? v : "on");
+                }
+            }
+            else if (*cnt < cap)
+            {
+                FdPair *p = &out[(*cnt)++];
+                snprintf(p->name, sizeof(p->name), "%s", nm);
+                jsbv_value_of(b, n, p->value, sizeof(p->value));
+            }
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        fd_walk(b, n->children[i], submitter, fsDisabled, depth + 1, out,
+                cap, cnt);
+    }
+}
+
+int jsbridge_form_data_collect(JsBridge *b, void *formNode,
+                               void *submitterNode, FdPair *out, int cap)
+{
+    DomNode *form = (DomNode *)formNode;
+    if (!form || form->kind != DOM_ELEMENT || !form->tag ||
+        strcmp(form->tag, "form") != 0)
+    {
+        return -1; /* not-a-form (the browser's TypeError family) */
+    }
+    if (submitterNode)
+    {
+        DomNode *s = (DomNode *)submitterNode;
+        int found = 0;
+        for (DomNode *p = s->parent; p; p = p->parent)
+        {
+            if (p == form)
+            {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+        {
+            return -2; /* submitter outside the form */
+        }
+    }
+    if (!out || cap <= 0)
+    {
+        return 0;
+    }
+    int cnt = 0;
+    fd_walk(b, form, (DomNode *)submitterNode, 0, 0, out, cap, &cnt);
+    return cnt;
+}
+
+/* ── Fixed-store ops (shared by all three engine layers) ──────────────── */
+
+FormDataEntry *jsbridge_form_data_construct(JsBridge *b, void *formNode,
+                                            void *submitterNode,
+                                            int *errCode)
+{
+    int err = 0;
+    FormDataEntry *e = NULL;
+    if (b)
+    {
+        if (!formNode)
+        {
+            /* Browser truth: the form argument became optional — a bare
+             * `new FormData()` claims an EMPTY instance (no pairs). */
+            for (int i = 0; i < JSBRIDGE_FD_MAX && !e; i++)
+            {
+                if (!b->fd[i].used)
+                {
+                    e = &b->fd[i];
+                }
+            }
+            if (!e)
+            {
+                err = 3;
+            }
+            else
+            {
+                e->used = 1;
+                e->npairs = 0;
+                memset(e->pairs, 0, sizeof(e->pairs));
+            }
+        }
+        else
+        {
+            /* Probe validity first so a full store never masks a
+             * TypeError. */
+            int cnt = jsbridge_form_data_collect(b, formNode,
+                                                 submitterNode, NULL, 0);
+            if (cnt == -1)
+            {
+                err = 1;
+            }
+            else if (cnt == -2)
+            {
+                err = 2;
+            }
+            else
+            {
+                for (int i = 0; i < JSBRIDGE_FD_MAX && !e; i++)
+                {
+                    if (!b->fd[i].used)
+                    {
+                        e = &b->fd[i];
+                    }
+                }
+                if (!e)
+                {
+                    err = 3;
+                }
+                else
+                {
+                    e->used = 1;
+                    e->npairs = 0;
+                    memset(e->pairs, 0, sizeof(e->pairs));
+                    e->npairs = jsbridge_form_data_collect(
+                        b, formNode, submitterNode, e->pairs,
+                        JSBRIDGE_FD_PAIRS);
+                }
+            }
+        }
+    }
+    if (errCode)
+    {
+        *errCode = err;
+    }
+    return e;
+}
+
+void jsbridge_form_data_append(FormDataEntry *e, const char *name,
+                               const char *value)
+{
+    if (!e || e->npairs >= JSBRIDGE_FD_PAIRS)
+    {
+        return; /* pair cap: dropped honestly (standing policy shape) */
+    }
+    FdPair *p = &e->pairs[e->npairs++];
+    snprintf(p->name, sizeof(p->name), "%s", name ? name : "");
+    snprintf(p->value, sizeof(p->value), "%s", value ? value : "");
+}
+
+const char *jsbridge_form_data_get(const FormDataEntry *e, const char *name)
+{
+    if (e && name)
+    {
+        for (int i = 0; i < e->npairs; i++)
+        {
+            if (strcmp(e->pairs[i].name, name) == 0)
+            {
+                return e->pairs[i].value;
+            }
+        }
+    }
+    return NULL;
+}
+
+int jsbridge_form_data_has(const FormDataEntry *e, const char *name)
+{
+    return jsbridge_form_data_get(e, name) != NULL;
+}
+
+int jsbridge_form_data_set(FormDataEntry *e, const char *name,
+                           const char *value)
+{
+    if (!e)
+    {
+        return 0;
+    }
+    int hit = -1;
+    for (int i = 0; i < e->npairs; i++)
+    {
+        if (strcmp(e->pairs[i].name, name) == 0)
+        {
+            if (hit < 0)
+            {
+                hit = i;
+            }
+            else
+            {
+                /* drop the later duplicates */
+                memmove(&e->pairs[i], &e->pairs[i + 1],
+                        sizeof(FdPair) * (size_t)(e->npairs - i - 1));
+                e->npairs--;
+                i--;
+            }
+        }
+    }
+    if (hit >= 0)
+    {
+        snprintf(e->pairs[hit].value, sizeof(e->pairs[hit].value), "%s",
+                 value ? value : "");
+        return 1;
+    }
+    int before = e->npairs;
+    jsbridge_form_data_append(e, name, value); /* browser set = append */
+    return e->npairs > before;
+}
+
+int jsbridge_form_data_delete(FormDataEntry *e, const char *name)
+{
+    if (!e || !name)
+    {
+        return 0;
+    }
+    int removed = 0;
+    for (int i = 0; i < e->npairs; i++)
+    {
+        if (strcmp(e->pairs[i].name, name) == 0)
+        {
+            memmove(&e->pairs[i], &e->pairs[i + 1],
+                    sizeof(FdPair) * (size_t)(e->npairs - i - 1));
+            e->npairs--;
+            i--;
+            removed = 1;
+        }
+    }
+    return removed;
+}
+
+int jsbridge_form_data_count(const FormDataEntry *e)
+{
+    return e ? e->npairs : 0;
+}
+
+const FdPair *jsbridge_form_data_at(const FormDataEntry *e, int i)
+{
+    if (e && i >= 0 && i < e->npairs)
+    {
+        return &e->pairs[i];
+    }
+    return NULL;
+}
+
+FormDataIter *jsbridge_form_data_iter(JsBridge *b, FormDataEntry *e,
+                                      int *full)
+{
+    if (full)
+    {
+        *full = 0;
+    }
+    if (!e)
+    {
+        return NULL;
+    }
+    if (!b)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < JSBRIDGE_FD_ITER_MAX; i++)
+    {
+        if (!b->fdi[i].used)
+        {
+            b->fdi[i].used = 1;
+            b->fdi[i].entry = e;
+            b->fdi[i].idx = 0;
+            return &b->fdi[i];
+        }
+    }
+    if (full)
+    {
+        *full = 1;
+    }
+    return NULL;
+}
+
+FormDataEntry *jsbridge_form_data_iter_entry(const FormDataIter *it)
+{
+    return it ? it->entry : NULL;
+}
+
+/* ── The one x-www-form-urlencoded escaper ──────────────────────────────
+ * Byte rules UNCHANGED from the standing main.c serializer (letters/
+ * digits/-_.~ verbatim, space → '+', everything else %XX-hex). The
+ * standing JS-side page serializer agrees on the A-Za-z0-9-_ .~ set,
+ * so the battery's in-page recount cannot drift from this core.
+ * Appends into out at *used, always NUL-terminates, truncates at
+ * cap-4 — exactly the standing fb_urlenc_append contract. */
+void jsbridge_urlenc_cpy(const char *raw, char *out, size_t cap,
+                         size_t *used)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t u = *used;
+    for (; *raw && u + 4 < cap; raw++)
+    {
+        char c = *raw;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+            c == '~')
+        {
+            out[u++] = c;
+        }
+        else if (c == ' ')
+        {
+            out[u++] = '+';
+        }
+        else
+        {
+            out[u++] = '%';
+            out[u++] = hex[((unsigned char)c >> 4) & 0xF];
+            out[u++] = hex[(unsigned char)c & 0xF];
+        }
+    }
+    out[u] = '\0';
+    *used = u;
+}
+
+/* The wire road: collect the form data set ONCE and serialize it with
+ * the escaper above — byte-for-byte what the route-standard POST body
+ * carries (see the pluto_form_fallback POST branch). Static scratch:
+ * single-threaded caller, same bss-scratch precedent as the controls
+ * walker. */
+void jsbridge_form_data_urlenc(JsBridge *b, void *formNode,
+                               void *submitterNode, char *out, size_t cap)
+{
+    static FdPair buf[JSBRIDGE_FD_PAIRS];
+    out[0] = '\0';
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    int cnt = jsbridge_form_data_collect(b, formNode, submitterNode, buf,
+                                         JSBRIDGE_FD_PAIRS);
+    if (cnt < 0)
+    {
+        cnt = 0;
+    }
+    size_t used = 0;
+    for (int i = 0; i < cnt; i++)
+    {
+        if (used && used + 1 < cap)
+        {
+            out[used++] = '&';
+        }
+        jsbridge_urlenc_cpy(buf[i].name, out, cap, &used);
+        if (used + 1 < cap)
+        {
+            out[used++] = '=';
+        }
+        jsbridge_urlenc_cpy(buf[i].value, out, cap, &used);
+    }
+    out[used] = '\0';
+}
+
+/* ── Forms-Phase 6: the enumerated IDL reflection + the text/plain road ── */
+
+/* ASCII case-insensitive keyword match (the getter road runs every
+ * reflected read; keep it tiny). */
+static int fdw_eq_ci(const char *v, const char *kw)
+{
+    if (!v)
+        return 0;
+    while (*v && *kw)
+    {
+        char lv = (*v >= 'A' && *v <= 'Z') ? (char)(*v + 32) : *v;
+        char lk = (*kw >= 'A' && *kw <= 'Z') ? (char)(*kw + 32) : *kw;
+        if (lv != lk)
+            return 0;
+        v++;
+        kw++;
+    }
+    return *v == *kw;
+}
+
+/* HTMLFormElement.method IDL — the reflected enumerated attribute,
+ * "limited to only known values" (spec): the getter returns the
+ * canonical keyword when the attribute names one, else the enumerated
+ * GET default — the missing-value default AND the invalid-value default
+ * share the GET keyword. The IDL setter is the browser's own shape: the
+ * engine layers write the lowercased string verbatim; the DEFAULT is
+ * applied here on every read (so an invalid set reads "get"). Returns
+ * one of "get"/"post"/"dialog" (static storage, no scratch). */
+const char *jsbridge_form_method_idl(const char *raw)
+{
+    if (raw && raw[0])
+    {
+        if (fdw_eq_ci(raw, "get"))
+            return "get";
+        if (fdw_eq_ci(raw, "post"))
+            return "post";
+        if (fdw_eq_ci(raw, "dialog"))
+            return "dialog";
+    }
+    return "get";
+}
+
+/* HTMLFormElement.enctype (and the .encoding alias) IDL — the same
+ * limited reflection for the three submission encodings. Missing or
+ * invalid maps to application/x-www-form-urlencoded (both defaults).
+ * SHAREd with the wire road: pluto_form_fallback resolves the
+ * submitter's effective enctype through this helper, so the reflected
+ * read and the actual serialization cannot disagree. */
+const char *jsbridge_form_enctype_idl(const char *raw)
+{
+    if (raw && raw[0])
+    {
+        if (fdw_eq_ci(raw, "application/x-www-form-urlencoded"))
+            return "application/x-www-form-urlencoded";
+        if (fdw_eq_ci(raw, "multipart/form-data"))
+            return "multipart/form-data";
+        if (fdw_eq_ci(raw, "text/plain"))
+            return "text/plain";
+    }
+    return "application/x-www-form-urlencoded";
+}
+
+/* One text/plain segment copy (a name or a value) with the browser's
+ * own newline normalization: CRLF stays CRLF; lone CR and lone LF each
+ * become CRLF (spec: entry-list construction). Appends at *used, always
+ * NUL-terminates, truncates at cap-4 like the standing serializers. */
+static void fdw_plain_cpy(const char *s, char *out, size_t cap, size_t *used)
+{
+    for (; *s && *used + 4 < cap; s++)
+    {
+        char c = *s;
+        if (c == '\r')
+        {
+            out[(*used)++] = '\r';
+            out[(*used)++] = '\n';
+            if (s[1] == '\n')
+            {
+                s++; /* the paired LF rides the emitted CRLF */
+            }
+        }
+        else if (c == '\n')
+        {
+            out[(*used)++] = '\r';
+            out[(*used)++] = '\n';
+        }
+        else
+        {
+            out[(*used)++] = c;
+        }
+    }
+}
+
+/* The text/plain wire: the entry list serialized RAW (name=value with
+ * NO escaping — the browser's own human-readable encoding), each pair
+ * terminated with CRLF (spec step: append name, '=', value, CRLF for
+ * every pair — the final pair keeps its CRLF). Same static scratch as
+ * the urlencoded sibling — single-threaded caller. */
+void jsbridge_form_data_plain(JsBridge *b, void *formNode,
+                              void *submitterNode, char *out, size_t cap)
+{
+    static FdPair buf[JSBRIDGE_FD_PAIRS];
+    out[0] = '\0';
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    int cnt = jsbridge_form_data_collect(b, formNode, submitterNode, buf,
+                                         JSBRIDGE_FD_PAIRS);
+    if (cnt < 0)
+    {
+        cnt = 0;
+    }
+    size_t used = 0;
+    for (int i = 0; i < cnt; i++)
+    {
+        fdw_plain_cpy(buf[i].name, out, cap, &used);
+        if (used + 1 < cap)
+        {
+            out[used++] = '=';
+        }
+        fdw_plain_cpy(buf[i].value, out, cap, &used);
+        if (used + 2 < cap)
+        {
+            out[used++] = '\r';
+            out[used++] = '\n';
+        }
+    }
+    out[used] = '\0';
+}
+
 /* ── Device link shims (router-owned; shared by both engines) ────────────── */
 #ifdef TARGET_PLAYDATE
 /* Engine panic paths land here only if an impl fails to contain an error;

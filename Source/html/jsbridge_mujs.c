@@ -88,6 +88,9 @@ static void bridge_take_error(JsBridge *b, js_State *J)
  * normal own property so scripts can attach custom data to elements. */
 static int dom_has(js_State *J, void *p, const char *name);
 static int dom_put(js_State *J, void *p, const char *name);
+/* Forms-Phase 3: the constraint-validation object pusher (used by the
+ * dom_has road below; defined with the element roads). */
+static void mj_push_validity(js_State *J, JsBridge *b, DomNode *n);
 
 /* ── SW5: classList + style userdata hooks (this = the userdata; the C
  * functions read the element out of the boxed DomNode* on stack slot 0 —
@@ -394,6 +397,146 @@ static DomNode *to_element(js_State *J, int idx)
     return (DomNode *)js_touserdata(J, idx, DOM_TAG);
 }
 
+/* ── Forms-Phase 1: field-life helpers (frozen-engine parity with the XS
+ * NR lanes — same stores, this adapter's own C idioms) ─────────────── */
+
+/* Connectedness rule: parent walk to the document root (a browser only
+ * focuses connected elements). */
+static int mj_connected(JsBridge *b, DomNode *n)
+{
+    DomNode *root = (b->dom) ? b->dom->root : NULL;
+    for (DomNode *p = n; p; p = p->parent)
+    {
+        if (p == root)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Node → LIVE DocBlock reverse lookup (DocBlock stamps srcNode on
+ * rendered controls; first match wins — one block per node). */
+static DocBlock *mj_block_of_node(JsBridge *b, DomNode *n)
+{
+    if (!n || !b->doc)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < b->doc->blockCount; i++)
+    {
+        DocBlock *blk = b->doc->blocks[i];
+        if (blk && blk->srcNode == (void *)n)
+        {
+            return blk;
+        }
+    }
+    return NULL;
+}
+
+/* Forms-Phase 2: select.selectedIndex — the browser's 0-based read of
+ * the LIVE pick (see the XS/duktape twins). Block road first; markup
+ * fallback = the authored `selected` option, else the first option
+ * child. INT_MIN-ish sentinel when the node is not a select. INT_MIN
+ * literal keeps the twins header-free (limits.h not pulled here). */
+static int mj_select_index(JsBridge *b, DomNode *n)
+{
+    const char *tag = (n && n->kind == DOM_ELEMENT) ? n->tag : NULL;
+    if (!tag || strcmp(tag, "select") != 0)
+    {
+        return -2147483648;
+    }
+    DocBlock *blk = mj_block_of_node(b, n);
+    if (blk && blk->options && blk->optionCount > 0)
+    {
+        if (blk->multiple)
+        {
+            for (int k = 0; k < blk->optionCount; k++)
+            {
+                DocOption *o = blk->options[k];
+                if (o && !o->group && o->selected)
+                {
+                    return k;
+                }
+            }
+            return -1;
+        }
+        int si = blk->selectedIndex;
+        return (si >= 1 && si <= blk->optionCount) ? si - 1 : -1;
+    }
+    int sel = -1, first = -1, k = 0;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        DomNode *c = n->children[i];
+        if (!c || c->kind != DOM_ELEMENT || !c->tag ||
+            strcmp(c->tag, "option") != 0)
+        {
+            continue;
+        }
+        if (first < 0)
+        {
+            first = k;
+        }
+        if (sel < 0 && dom_get_attr(c, "selected"))
+        {
+            sel = k;
+        }
+        k++;
+    }
+    return sel >= 0 ? sel : first;
+}
+
+/* nth direct <option> child (the fallback's option-node lookup). */
+static DomNode *mj_option_node_at(DomNode *sel, int idx)
+{
+    int k = 0;
+    for (int i = 0; i < sel->childCount; i++)
+    {
+        DomNode *c = sel->children[i];
+        if (c && c->kind == DOM_ELEMENT && c->tag &&
+            strcmp(c->tag, "option") == 0)
+        {
+            if (k == idx)
+            {
+                return c;
+            }
+            k++;
+        }
+    }
+    return NULL;
+}
+
+/* Forms-Phase 2: pre-walk `checked` attr mirror (the XS/duktape twins).
+ * Page scripts run before the walker builds blocks; a write in that
+ * window lands on the markup attribute so the walk carries the state,
+ * with radio exclusivity removing OTHER same-name radios' `checked`
+ * attrs. Depth-capped like the other tree scans. */
+static void mj_attr_uncheck_radios(DomNode *n, const char *name,
+                                   DomNode *skip, int depth)
+{
+    if (!n || depth > 16)
+    {
+        return;
+    }
+    if (n->kind == DOM_ELEMENT && n->tag && strcmp(n->tag, "input") == 0 &&
+        n != skip)
+    {
+        const char *tv = dom_get_attr(n, "type");
+        if (tv && strcmp(tv, "radio") == 0)
+        {
+            const char *nm = dom_get_attr(n, "name");
+            if (nm && name && strcmp(nm, name) == 0)
+            {
+                dom_remove_attr(n, "checked");
+            }
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        mj_attr_uncheck_radios(n->children[i], name, skip, depth + 1);
+    }
+}
+
 static int dom_has(js_State *J, void *p, const char *name)
 {
     DomNode *n = (DomNode *)p;
@@ -425,6 +568,51 @@ static int dom_has(js_State *J, void *p, const char *name)
         {
             const char *v = dom_get_attr(n, "id");
             js_pushstring(J, v ? v : "");
+            return 1;
+        }
+        if (!strcmp(name, "validity"))
+        {
+            /* Forms-Phase 3: the constraint-validation snapshot (fresh
+             * per access, like the classList/children roads). */
+            mj_push_validity(J, (JsBridge *)js_getcontext(J), n);
+            return 1;
+        }
+        if (!strcmp(name, "validationMessage"))
+        {
+            char msg[96];
+            msg[0] = '\0';
+            JsbValidity v;
+            memset(&v, 0, sizeof(v));
+            jsbridge_form_validity_eval((JsBridge *)js_getcontext(J), n, &v);
+            snprintf(msg, sizeof(msg), "%s", v.message);
+            js_pushstring(J, msg);
+            return 1;
+        }
+        if (!strcmp(name, "willValidate"))
+        {
+            js_pushboolean(
+                J, jsbridge_form_will_validate(
+                       (JsBridge *)js_getcontext(J), n));
+            return 1;
+        }
+        if (!strcmp(name, "elements"))
+        {
+            /* Forms-Phase 4: the form's controls collection (tag-gated;
+             * non-forms read undefined). Fresh array per access, like
+             * `children`/`options`. */
+            if (!n->tag || strcmp(n->tag, "form") != 0)
+            {
+                js_pushundefined(J);
+                return 1;
+            }
+            void *buf[64]; /* scratch — 64 controls is far past any page */
+            int cnt = jsbridge_form_controls_collect(n, buf, 64);
+            js_newarray(J);
+            for (int i = 0; i < cnt; i++)
+            {
+                push_element(J, (DomNode *)buf[i]);
+                js_setindex(J, -2, i);
+            }
             return 1;
         }
         if (!strcmp(name, "className"))
@@ -607,6 +795,202 @@ static int dom_has(js_State *J, void *p, const char *name)
                             NULL, NULL);
             return 1;
         }
+        /* Forms-Phase 1+2: field-life reads. `value` = the select fork
+         * (the picker's option-shaped value), else the attr store with
+         * the textarea DOM-text fallback (the serializer's own
+         * preference order); `checked` READ on the toggles via the live
+         * DocBlock; `selectedIndex`/`options` = the picker reporting
+         * road (reads only this phase); `disabled`/`readOnly` =
+         * own-attribute reflection. */
+        if (!strcmp(name, "value"))
+        {
+            JsBridge *b = (JsBridge *)js_getcontext(J);
+            const char *v = dom_get_attr(n, "value");
+            if (n->tag && strcmp(n->tag, "select") == 0)
+            {
+                /* Forms-Phase 2: the browser's select.value is the
+                 * selected option's shape (value attr, else the option
+                 * text) — never the element's own attribute. */
+                int idx = mj_select_index(b, n);
+                if (idx >= 0 && idx != -2147483648)
+                {
+                    DocBlock *blk = mj_block_of_node(b, n);
+                    if (blk && blk->options && idx < blk->optionCount &&
+                        blk->options[idx])
+                    {
+                        DocOption *o = blk->options[idx];
+                        js_pushstring(J, (o->value && o->value[0])
+                                             ? o->value
+                                             : (o->text ? o->text : ""));
+                        return 1;
+                    }
+                    DomNode *optn = mj_option_node_at(n, idx);
+                    if (optn)
+                    {
+                        const char *ov = dom_get_attr(optn, "value");
+                        if (ov && ov[0])
+                        {
+                            js_pushstring(J, ov);
+                            return 1;
+                        }
+                        char obuf[512];
+                        doc_concat_node_text(optn, obuf, sizeof(obuf));
+                        js_pushstring(J, obuf);
+                        return 1;
+                    }
+                }
+                js_pushstring(J, v ? v : "");
+                return 1;
+            }
+            if (!v && n->tag && strcmp(n->tag, "textarea") == 0)
+            {
+                char buf[512];
+                doc_concat_node_text(n, buf, sizeof(buf));
+                js_pushstring(J, buf);
+                return 1;
+            }
+            js_pushstring(J, v ? v : "");
+            return 1;
+        }
+        if (!strcmp(name, "checked"))
+        {
+            JsBridge *b = (JsBridge *)js_getcontext(J);
+            int checked = 0;
+            const char *tag = n->tag;
+            const char *tv = dom_get_attr(n, "type");
+            if (tag && strcmp(tag, "input") == 0 && tv &&
+                (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0))
+            {
+                DocBlock *blk = mj_block_of_node(b, n);
+                checked = blk ? blk->checked
+                              : (dom_get_attr(n, "checked") != NULL);
+            }
+            js_pushboolean(J, checked ? 1 : 0);
+            return 1;
+        }
+        if (!strcmp(name, "selectedIndex"))
+        {
+            /* Forms-Phase 2: the picker reporting road — 0-based read of
+             * the LIVE pick; non-select elements read undefined (the
+             * browser's shape has only the select carrying it). */
+            JsBridge *b = (JsBridge *)js_getcontext(J);
+            int idx = mj_select_index(b, n);
+            if (idx == -2147483648)
+            {
+                js_pushundefined(J);
+                return 1;
+            }
+            js_pushnumber(J, idx);
+            return 1;
+        }
+        if (!strcmp(name, "options"))
+        {
+            /* Forms-Phase 2: every <option> element under the select
+             * (groups' options included, group headers are not
+             * options). Fresh array per access, like `children`.
+             * Non-selects read undefined. */
+            if (!n->tag || strcmp(n->tag, "select") != 0)
+            {
+                js_pushundefined(J);
+                return 1;
+            }
+            js_newarray(J);
+            int k = 0;
+            DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+            int top = 0;
+            stack[top++] = n;
+            while (top > 0)
+            {
+                DomNode *cur = stack[--top];
+                for (int i = 0; i < cur->childCount; i++)
+                {
+                    DomNode *c = cur->children[i];
+                    if (c->kind != DOM_ELEMENT)
+                    {
+                        continue;
+                    }
+                    if (!strcmp(c->tag, "option"))
+                    {
+                        push_element(J, c);
+                        js_setindex(J, -2, k++);
+                    }
+                    if (top + 1 < DOM_SEARCH_MAX_DEPTH)
+                    {
+                        stack[top++] = c;
+                    }
+                }
+            }
+            return 1;
+        }
+        if (!strcmp(name, "disabled"))
+        {
+            const char *v = dom_get_attr(n, "disabled");
+            js_pushboolean(J, v ? 1 : 0);
+            return 1;
+        }
+        if (!strcmp(name, "readOnly"))
+        {
+            const char *v = dom_get_attr(n, "readonly");
+            js_pushboolean(J, v ? 1 : 0);
+            return 1;
+        }
+        /* Forms-Phase 7: the element's control-type reflect — the XS
+         * twin's exact shape (attr verbatim, no case folding; a missing
+         * attribute reads <input> "text" / <button> "submit"; other tags
+         * read undefined). Getter-only: no dom_put case, matching the
+         * XS accessor table's NULL setter. This one branch receipts
+         * both roads (plain reads AND `in` membership — the has hook
+         * double-serves, like the method/enctype mirrors). */
+        if (!strcmp(name, "type"))
+        {
+            if (n->kind != DOM_ELEMENT)
+            {
+                js_pushundefined(J);
+                return 1;
+            }
+            const char *tv = dom_get_attr(n, "type");
+            if (tv)
+            {
+                js_pushstring(J, tv);
+            }
+            else if (n->tag && strcmp(n->tag, "input") == 0)
+            {
+                js_pushstring(J, "text");
+            }
+            else if (n->tag && strcmp(n->tag, "button") == 0)
+            {
+                js_pushstring(J, "submit");
+            }
+            else
+            {
+                js_pushundefined(J);
+            }
+            return 1;
+        }
+        if (!strcmp(name, "method") || !strcmp(name, "enctype") ||
+            !strcmp(name, "encoding"))
+        {
+            /* Forms-Phase 6: the form's enumerated IDL mirrors (the
+             * aliasing encoding → enctype). Tag-gated: non-forms read
+             * undefined — and they keep the `in` membership in this
+             * engine's standing shape. muJS's has-hook DOUBLE-SERVES
+             * plain reads (the hook consult above), so this ONE branch
+             * receipts both roads here; the missing/invalid default
+             * applies on the read through the shared reflection
+             * helper. */
+            const char *key = !strcmp(name, "method") ? "method"
+                                                       : "enctype";
+            if (!n->tag || strcmp(n->tag, "form") != 0)
+            {
+                js_pushundefined(J);
+                return 1;
+            }
+            const char *v = dom_get_attr(n, key);
+            js_pushstring(J, strcmp(key, "method") == 0
+                                  ? jsbridge_form_method_idl(v)
+                                  : jsbridge_form_enctype_idl(v));
+            return 1;
+        }
     }
     else if (!strcmp(name, "nodeType"))
     {
@@ -670,6 +1054,129 @@ static int dom_put(js_State *J, void *p, const char *name)
         if (jsbridge_el_set_inner_html(b, n, s, slen) != 0)
         {
             js_error(J, "innerHTML assignment failed");
+        }
+        return 1;
+    }
+    /* Forms-Phase 1: field-life writes, browser-true stores — `value`
+     * rides the typed-text attr (serialization wins on it); disabled/
+     * readOnly write/remove their own attributes (the reflected
+     * property, not fieldset inheritance). Forms-Phase 2: `checked`
+     * flips the LIVE DocBlock with radio-group exclusivity (same
+     * doc-wide same-name group the tap lane and the XS/duktape twins
+     * use) — no attribute mirror, so the markup `checked` stays the
+     * walk-time default for a later form.reset. Writes fire no events
+     * (a browser's typed .checked assignment fires none). */
+    if (!strcmp(name, "checked"))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        const char *tag = n->tag;
+        const char *tv = dom_get_attr(n, "type");
+        if (!(tag && strcmp(tag, "input") == 0 && tv &&
+              (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0)))
+        {
+            return 1; /* non-toggle nodes: the property stays inert */
+        }
+        DocBlock *blk = mj_block_of_node(b, n);
+        if (!blk)
+        {
+            /* Pre-walk window: attr mirror (see the XS/duktape twins). */
+            const char *nm = dom_get_attr(n, "name");
+            if (js_toboolean(J, -1))
+            {
+                if (strcmp(tv, "radio") == 0 && nm)
+                {
+                    mj_attr_uncheck_radios(b->dom->root, nm, n, 0);
+                }
+                dom_set_attr(b->dom, n, "checked", "");
+            }
+            else
+            {
+                dom_remove_attr(n, "checked");
+            }
+            return 1;
+        }
+        if (js_toboolean(J, -1))
+        {
+            if (blk->radio)
+            {
+                for (int i = 0; i < b->doc->blockCount; i++)
+                {
+                    DocBlock *sib = b->doc->blocks[i];
+                    if (sib && sib != blk && sib->radio && sib->name &&
+                        blk->name && strcmp(sib->name, blk->name) == 0)
+                    {
+                        sib->checked = 0;
+                    }
+                }
+            }
+            blk->checked = 1;
+        }
+        else
+        {
+            blk->checked = 0;
+        }
+        return 1;
+    }
+    if (!strcmp(name, "value"))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        dom_set_attr(b->dom, n, "value", js_tostring(J, -1));
+        return 1;
+    }
+    if (!strcmp(name, "disabled"))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        if (js_toboolean(J, -1))
+        {
+            dom_set_attr(b->dom, n, "disabled", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "disabled");
+        }
+        return 1;
+    }
+    if (!strcmp(name, "readOnly"))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        if (js_toboolean(J, -1))
+        {
+            dom_set_attr(b->dom, n, "readonly", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "readonly");
+        }
+        return 1;
+    }
+    if (!strcmp(name, "method") || !strcmp(name, "enctype") ||
+        !strcmp(name, "encoding"))
+    {
+        /* Forms-Phase 6: the form's enumerated IDL setter roads — the
+         * browser's reflect shape writes the lowercase value verbatim;
+         * the default applies only on the read. Tag-gated: non-form
+         * receivers absorb the write. */
+        if (n->tag && strcmp(n->tag, "form") == 0)
+        {
+            if (!budget_take(b))
+            {
+                js_error(J, "script did too much");
+            }
+            dom_set_attr(b->dom, n,
+                         !strcmp(name, "method") ? "method" : "enctype",
+                         js_tostring(J, -1));
         }
         return 1;
     }
@@ -1004,10 +1511,21 @@ static void js_el_addEventListener(js_State *J)
     {
         js_typeerror(J, "listener must be a function");
     }
-    if (!type || strcmp(type, "click") != 0)
+    /* Forms-Phase 1: focus/blur join the accepted set as the kind-6
+     * NON-bubbling class (delivered by the el.focus()/el.blur() roads
+     * only); Phase 3 joins `invalid` (the constraint-validation event
+     * doesn't bubble either). click stays the kind-0 bubbling class. */
+    int kind = 0;
+    if (type && (strcmp(type, "focus") == 0 || strcmp(type, "blur") == 0 ||
+                 strcmp(type, "invalid") == 0))
+    {
+        kind = 6;
+    }
+    else if (!type || strcmp(type, "click") != 0)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so pages
-         * registering them don't error — only click is delivered. */
+         * registering them don't error — click (kind 0) and the focus/
+         * blur roads (kind 6, Forms-Phase 1) are the delivered classes. */
         js_pushundefined(J);
         return;
     }
@@ -1019,7 +1537,13 @@ static void js_el_addEventListener(js_State *J)
     js_copy(J, 2);
     L->ref = (void *)js_ref(J);
     L->target = n;
-    L->kind = 0; /* click only (see JsListener.kind) */
+    L->kind = kind; /* 0 = click class; 6 = focus/blur roads (see JsListener.kind) */
+    /* Forms-Phase 7: store the event type — the XS twins write the same
+     * string at registration (shared JsListener shape), and the kind-6
+     * dispatch (focus/blur/invalid) routes listeners by exact type
+     * match. The click dispatcher stays target-only (it never consults
+     * `type`), so the standing click road is unchanged. */
+    snprintf(L->type, sizeof(L->type), "%s", type);
     js_pushundefined(J);
 }
 
@@ -1087,6 +1611,589 @@ static void js_doc_addEventListener(js_State *J)
     js_pushundefined(J);
 }
 
+/* ── Forms-Phase 1: the el.focus() / el.blur() roads — state + a
+ * NON-bubbling event each (the keyboard lane stays native; the tap path
+ * is untouched). focus on the already-focused element is a no-op, as is
+ * focusing a disconnected element; blur when not focused is a no-op.
+ * The latch is a pointer-identity compare only — never dereferenced. */
+static int mujs_dispatch_focus(JsBridge *b, DomNode *node,
+                               const char *type); /* defined below */
+
+static void js_el_focus(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        js_pushundefined(J);
+        return;
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    if (!mj_connected(b, n) || b->focusNode == n)
+    {
+        js_pushundefined(J);
+        return;
+    }
+    b->focusNode = n;
+    (void)mujs_dispatch_focus(b, n, "focus");
+    js_pushundefined(J);
+}
+
+static void js_el_blur(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (!n)
+    {
+        js_pushundefined(J);
+        return;
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    if (b->focusNode != n)
+    {
+        js_pushundefined(J);
+        return;
+    }
+    b->focusNode = NULL;
+    (void)mujs_dispatch_focus(b, n, "blur");
+    js_pushundefined(J);
+}
+
+/* Forms-Phase 3: the constraint-validation surface (the XS/Duktape
+ * twins above; muJS reuses the shared C rules — the validity snapshot
+ * object and message/willValidate ride the dom_has property roads, the
+ * methods ride the element prototype). no OS report surface exists, so
+ * reportValidity's "report" is the invalid delivery. */
+static void mj_push_validity(js_State *J, JsBridge *b, DomNode *n)
+{
+    JsbValidity v;
+    memset(&v, 0, sizeof(v));
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        jsbridge_form_validity_eval(b, n, &v);
+    }
+    js_newobject(J);
+    js_pushboolean(J, v.flags & JSBV_VALUEMISSING ? 1 : 0);
+    js_setproperty(J, -2, "valueMissing");
+    js_pushboolean(J, v.flags & JSBV_TYPEMISMATCH ? 1 : 0);
+    js_setproperty(J, -2, "typeMismatch");
+    js_pushboolean(J, v.flags & JSBV_PATTERNMISMATCH ? 1 : 0);
+    js_setproperty(J, -2, "patternMismatch");
+    js_pushboolean(J, v.flags & JSBV_TOOLONG ? 1 : 0);
+    js_setproperty(J, -2, "tooLong");
+    js_pushboolean(J, v.flags & JSBV_TOOSHORT ? 1 : 0);
+    js_setproperty(J, -2, "tooShort");
+    js_pushboolean(J, v.flags & JSBV_RANGEUNDERFLOW ? 1 : 0);
+    js_setproperty(J, -2, "rangeUnderflow");
+    js_pushboolean(J, v.flags & JSBV_RANGEOVERFLOW ? 1 : 0);
+    js_setproperty(J, -2, "rangeOverflow");
+    js_pushboolean(J, 0);
+    js_setproperty(J, -2, "stepMismatch");
+    js_pushboolean(J, v.flags & JSBV_BADINPUT ? 1 : 0);
+    js_setproperty(J, -2, "badInput");
+    js_pushboolean(J, 0);
+    js_setproperty(J, -2, "customError");
+    js_pushboolean(J, v.flags ? 0 : 1);
+    js_setproperty(J, -2, "valid");
+}
+
+static void js_el_checkValidity(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    int ok = 1;
+    if (n)
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        if (n->kind == DOM_ELEMENT)
+        {
+            JsbValidity v;
+            memset(&v, 0, sizeof(v));
+            jsbridge_form_validity_eval(b, n, &v);
+            ok = (v.flags == 0);
+            if (!ok)
+            {
+                (void)mujs_dispatch_focus(b, n, "invalid");
+            }
+        }
+    }
+    js_pushboolean(J, ok);
+}
+
+static void js_el_reportValidity(js_State *J)
+{
+    js_el_checkValidity(J);
+}
+
+/* ── Forms-Phase 4: the HTMLFormElement API + HTMLElement.click() ───────── *
+ * Same contract as the XS/Duktape twins: prototype-level surface (tag-
+ * gated inside), chains ride the main.c host hooks, and the frozen
+ * dispatcher dissolves event delivery (NONE falls through to the wire —
+ * the standing boundary a page with no listeners matches). */
+static DomNode *mj_form_receiver(DomNode *n)
+{
+    return (n && n->kind == DOM_ELEMENT && n->tag &&
+            !strcmp(n->tag, "form"))
+               ? n
+               : NULL;
+}
+
+static DomNode *mj_form_ancestor(DomNode *n)
+{
+    for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
+    {
+        if (p->kind == DOM_ELEMENT && p->tag && !strcmp(p->tag, "form"))
+        {
+            return (DomNode *)p;
+        }
+    }
+    return NULL;
+}
+
+/* The el.click() activation classes: submit button/button-defaulted or
+ * reset controls — the click's default action runs the form roads. */
+static int mj_node_is_form_button(DomNode *n)
+{
+    if (!n || n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return 0;
+    }
+    if (!strcmp(n->tag, "button"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return (!t || !t[0] || !strcmp(t, "submit") || !strcmp(t, "reset"));
+    }
+    if (!strcmp(n->tag, "input"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return t && (!strcmp(t, "submit") || !strcmp(t, "reset") ||
+                     !strcmp(t, "image"));
+    }
+    return 0;
+}
+
+static void js_form_reset(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (n && mj_connected(b, n))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        if (mj_form_receiver(n))
+        {
+            (void)jsbridge_form_host_reset(b, n); /* no events, ever */
+        }
+    }
+    js_pushundefined(J);
+}
+
+static void js_form_submit(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (n && mj_connected(b, n) && mj_form_receiver(n))
+    {
+        if (!budget_take(b))
+        {
+            js_error(J, "script did too much");
+        }
+        /* form.submit(): no gate, no submit event — straight to the wire. */
+        (void)jsbridge_form_host_wire(b, n, NULL, 0, 0);
+    }
+    js_pushundefined(J);
+}
+
+static void js_form_requestSubmit(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (!n || !mj_connected(b, n) || !mj_form_receiver(n))
+    {
+        js_pushundefined(J);
+        return;
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    /* requestSubmit([submitter]): the argument must be a form
+     * descendant (the spec's NotFoundError, contained as a TypeError). */
+    DomNode *submitter = NULL;
+    if (js_isobject(J, 1) &&
+        !(js_isundefined(J, 1) || js_isnull(J, 1)))
+    {
+        submitter = to_element(J, 1);
+        if (!submitter || mj_form_ancestor(submitter) != n)
+        {
+            js_typeerror(J, "requestSubmit: submitter is not this form's "
+                            "descendant");
+        }
+    }
+    (void)jsbridge_form_host_wire(b, n, submitter, 1, 1);
+    js_pushundefined(J);
+}
+
+/* ── Forms-Phase 5: FormData (constructor class, XHR-lane shape) ────────
+ * The userdata tag boxes a stable address INTO THE BRIDGE's fixed fd
+ * store (see the jsbridge_internal.h note): pairs live page-long in
+ * bridge-owned memory, so the finalizer frees NOTHING — the browser's
+ * own lifetime model (a FormData dies with its page). The C pair ops
+ * (append/get/set/…) live on the shared core in jsbridge.c — ONE
+ * crawler, ONE rulebook for all three engines; this layer is only the
+ * muJS glue. Iterators get their own userdata + proto and read a
+ * bridge-owned FormDataIter slot (mode distinguishes
+ * entries/keys/values). jsb formdata semantics: strict names, checked
+ * toggles only, the submitter pair ONLY via the second ctor argument. */
+#define FD_TAG "pluto.fd"
+#define FDITER_TAG "pluto.fdi"
+
+static FormDataEntry *js_formdata_this(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    FormDataEntry *e = (FormDataEntry *)js_touserdata(J, 0, FD_TAG);
+    if (!e || !b || !e->used)
+    {
+        return NULL;
+    }
+    return e;
+}
+
+static void js_formdata_new(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *form = NULL, *sub = NULL;
+    FormDataEntry *e;
+    int err = 0;
+    if (js_gettop(J) >= 1 && js_isuserdata(J, 1, DOM_TAG))
+    {
+        form = to_element(J, 1);
+    }
+    if (form && js_gettop(J) >= 2 && js_isuserdata(J, 2, DOM_TAG))
+    {
+        sub = to_element(J, 2);
+    }
+    e = jsbridge_form_data_construct(b, form, sub, &err);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: %s",
+                     err == 1 ? "parameter is not of type "
+                                "HTMLFormElement"
+                     : err == 2 ? "submitter is not this form's descendant"
+                                : "too many FormData objects this page");
+    }
+    js_getregistry(J, "pluto.fd.proto");
+    js_newuserdata(J, FD_TAG, e, NULL);
+}
+
+static void js_formdata_append(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    FormDataEntry *e = js_formdata_this(J);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    if (js_gettop(J) < 3)
+    {
+        js_typeerror(J, "FormData.append: name and value required");
+    }
+    jsbridge_form_data_append(e, js_tostring(J, 1), js_tostring(J, 2));
+    js_pushundefined(J);
+}
+
+static void js_formdata_get(js_State *J)
+{
+    FormDataEntry *e = js_formdata_this(J);
+    const char *v;
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    if (js_gettop(J) < 2)
+    {
+        js_typeerror(J, "FormData.get: name required");
+    }
+    v = jsbridge_form_data_get(e, js_tostring(J, 1));
+    if (v)
+    {
+        js_pushstring(J, v);
+    }
+    else
+    {
+        js_pushnull(J);
+    }
+}
+
+static void js_formdata_getAll(js_State *J)
+{
+    FormDataEntry *e = js_formdata_this(J);
+    const char *nm;
+    int hits = 0;
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    nm = js_gettop(J) >= 2 ? js_tostring(J, 1) : "";
+    js_newarray(J);
+    for (int i = 0; i < e->npairs; i++)
+    {
+        if (strcmp(e->pairs[i].name, nm) == 0)
+        {
+            js_pushstring(J, e->pairs[i].value);
+            js_setindex(J, -2, hits++);
+        }
+    }
+}
+
+static void js_formdata_has(js_State *J)
+{
+    FormDataEntry *e = js_formdata_this(J);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    js_pushboolean(J, jsbridge_form_data_has(e,
+                     js_gettop(J) >= 2 ? js_tostring(J, 1) : ""));
+}
+
+static void js_formdata_set(js_State *J)
+{
+    FormDataEntry *e = js_formdata_this(J);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    if (js_gettop(J) < 3)
+    {
+        js_typeerror(J, "FormData.set: name and value required");
+    }
+    (void)jsbridge_form_data_set(e, js_tostring(J, 1), js_tostring(J, 2));
+    js_pushundefined(J);
+}
+
+static void js_formdata_delete(js_State *J)
+{
+    FormDataEntry *e = js_formdata_this(J);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    js_pushboolean(J, jsbridge_form_data_delete(e,
+                   js_gettop(J) >= 2 ? js_tostring(J, 1) : ""));
+}
+
+static void mujs_formdata_iter(js_State *J, int mode);
+
+static void js_formdata_entries(js_State *J)
+{
+    mujs_formdata_iter(J, 0);
+}
+
+static void js_formdata_keys(js_State *J)
+{
+    mujs_formdata_iter(J, 1);
+}
+
+static void js_formdata_values(js_State *J)
+{
+    mujs_formdata_iter(J, 2);
+}
+
+/* Shared iterator factory: entries/keys/values all walk the same
+ * bridge-owned FormDataIter (mode 0/1/2). */
+static void mujs_formdata_iter(js_State *J, int mode)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    FormDataEntry *e = js_formdata_this(J);
+    int full = 0;
+    FormDataIter *it;
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    it = jsbridge_form_data_iter(b, e, &full);
+    if (!it)
+    {
+        js_error(J, full ? "FormData: too many iterators this page"
+                         : "FormData: iterator unavailable");
+    }
+    it->mode = (unsigned char)mode;
+    js_getregistry(J, "pluto.fditer.proto");
+    js_newuserdata(J, FDITER_TAG, it, NULL);
+}
+
+static void js_fditer_next(js_State *J)
+{
+    FormDataIter *it = (FormDataIter *)js_touserdata(J, 0, FDITER_TAG);
+    int going = it && it->entry && it->idx < it->entry->npairs;
+    js_newobject(J);
+    if (going)
+    {
+        const FdPair *p = &it->entry->pairs[it->idx++];
+        if (it->mode == 1)
+        {
+            js_pushstring(J, p->name);
+        }
+        else if (it->mode == 2)
+        {
+            js_pushstring(J, p->value);
+        }
+        else
+        {
+            js_newarray(J);
+            js_pushstring(J, p->name);
+            js_setindex(J, -2, 0);
+            js_pushstring(J, p->value);
+            js_setindex(J, -2, 1);
+        }
+        js_setproperty(J, -2, "value");
+        js_pushboolean(J, 0);
+        js_setproperty(J, -2, "done");
+    }
+    else
+    {
+        js_pushundefined(J);
+        js_setproperty(J, -2, "value");
+        js_pushboolean(J, 1);
+        js_setproperty(J, -2, "done");
+    }
+}
+
+static void js_formdata_foreach(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    FormDataEntry *e = js_formdata_this(J);
+    if (!e)
+    {
+        js_typeerror(J, "FormData: receiver is not a FormData");
+    }
+    if (js_gettop(J) < 1 || !js_iscallable(J, 1))
+    {
+        js_typeerror(J, "FormData.forEach: callback required");
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    for (int i = 0; i < e->npairs; i++)
+    {
+        const FdPair *p = &e->pairs[i];
+        js_copy(J, 1); /* the callback */
+        if (js_gettop(J) >= 2 && !js_isundefined(J, 2))
+        {
+            js_copy(J, 2); /* thisArg */
+        }
+        else
+        {
+            js_pushnull(J); /* browser default this = undefined; the
+                               muJS call lane needs a receiver */
+        }
+        js_pushstring(J, p->value);
+        js_pushstring(J, p->name);
+        if (js_pcall(J, 2) != 0)
+        {
+            int fatal = !b->lastError[0];
+            bridge_take_error(b, J);
+            js_pop(J, 1);
+            if (fatal)
+            {
+                js_error(J, "FormData.forEach abort");
+            }
+            return; /* the exception stops forEach (browser shape) */
+        }
+        js_pop(J, 1);
+    }
+    js_pushundefined(J);
+}
+
+static void mujs_define_formdata(js_State *J)
+{
+    js_newobject(J); /* "pluto.fd.proto" */
+    {
+        js_newcfunction(J, js_formdata_append, "append", 2);
+        js_setproperty(J, -2, "append");
+        js_newcfunction(J, js_formdata_get, "get", 1);
+        js_setproperty(J, -2, "get");
+        js_newcfunction(J, js_formdata_getAll, "getAll", 1);
+        js_setproperty(J, -2, "getAll");
+        js_newcfunction(J, js_formdata_has, "has", 1);
+        js_setproperty(J, -2, "has");
+        js_newcfunction(J, js_formdata_set, "set", 2);
+        js_setproperty(J, -2, "set");
+        js_newcfunction(J, js_formdata_delete, "delete", 1);
+        js_setproperty(J, -2, "delete");
+        js_newcfunction(J, js_formdata_entries, "entries", 0);
+        js_setproperty(J, -2, "entries");
+        js_newcfunction(J, js_formdata_keys, "keys", 0);
+        js_setproperty(J, -2, "keys");
+        js_newcfunction(J, js_formdata_values, "values", 0);
+        js_setproperty(J, -2, "values");
+        js_newcfunction(J, js_formdata_foreach, "forEach", 2);
+        js_setproperty(J, -2, "forEach");
+    }
+    js_setregistry(J, "pluto.fd.proto");
+
+    js_newobject(J); /* "pluto.fditer.proto" */
+    {
+        js_newcfunction(J, js_fditer_next, "next", 0);
+        js_setproperty(J, -2, "next");
+    }
+    js_setregistry(J, "pluto.fditer.proto");
+
+    /* mujs_formdata_iter forward-declared above the method bodies. */
+    js_getregistry(J, "pluto.fd.proto");
+    js_newcconstructor(J, js_formdata_new, js_formdata_new, "FormData", 2);
+    js_setglobal(J, "FormData");
+}
+
+/* HTMLElement.click(): the dispatched click first (frozen NONE still
+ * activates, matching a user tap on a script-less page); a non-prevented
+ * click on a form-associated submit/reset button then runs the form's
+ * activation chain. */
+static void js_el_click(js_State *J)
+{
+    JsBridge *b = (JsBridge *)js_getcontext(J);
+    DomNode *n = to_element(J, 0);
+    if (!n || !mj_connected(b, n))
+    {
+        js_pushundefined(J);
+        return;
+    }
+    if (!budget_take(b))
+    {
+        js_error(J, "script did too much");
+    }
+    int rc = jsbridge_dispatch_element_event(b, n, "click");
+    if (rc == JSB_EVENT_SUPPRESSED)
+    {
+        b->domDirty = 1; /* the click handler owns the page */
+        js_pushundefined(J);
+        return;
+    }
+    DomNode *form = mj_form_ancestor(n);
+    if (form && mj_node_is_form_button(n))
+    {
+        (void)jsbridge_form_host_wire(b, form, n, 1, 1);
+    }
+    js_pushundefined(J);
+}
+
 static void js_location_assign(js_State *J)
 {
     /* Navigation from scripts is not supported this pass: logged only. */
@@ -1119,6 +2226,27 @@ static void define_element_proto(js_State *J)
         js_setproperty(J, -2, "closest");
         js_newcfunction(J, js_el_addEventListener, "addEventListener", 2);
         js_setproperty(J, -2, "addEventListener");
+        /* Forms-Phase 1: the focus/blur roads (state + non-bubbling
+         * event; keyboard lane untouched). */
+        js_newcfunction(J, js_el_focus, "focus", 0);
+        js_setproperty(J, -2, "focus");
+        js_newcfunction(J, js_el_blur, "blur", 0);
+        js_setproperty(J, -2, "blur");
+        /* Forms-Phase 3: the validity check/report methods. */
+        js_newcfunction(J, js_el_checkValidity, "checkValidity", 0);
+        js_setproperty(J, -2, "checkValidity");
+        js_newcfunction(J, js_el_reportValidity, "reportValidity", 0);
+        js_setproperty(J, -2, "reportValidity");
+        /* Forms-Phase 4: the form API + the click activation road
+         * (tag-gated/no-op inside; the chains ride the host hooks). */
+        js_newcfunction(J, js_form_reset, "reset", 0);
+        js_setproperty(J, -2, "reset");
+        js_newcfunction(J, js_form_submit, "submit", 0);
+        js_setproperty(J, -2, "submit");
+        js_newcfunction(J, js_form_requestSubmit, "requestSubmit", 1);
+        js_setproperty(J, -2, "requestSubmit");
+        js_newcfunction(J, js_el_click, "click", 0);
+        js_setproperty(J, -2, "click");
         js_newcfunction(J, js_el_get_by_tag, "getElementsByTagName", 1);
         js_setproperty(J, -2, "getElementsByTagName");
     }
@@ -1160,6 +2288,7 @@ static void define_document(js_State *J, JsBridge *b)
 
 /* Forward declarations: mujs_init binds these globals before their bodies. */
 static void mujs_define_xhr(js_State *J);
+static void mujs_define_formdata(js_State *J); /* Forms-Phase 5 */
 static void mujs_define_worker(js_State *J);
 static void js_setTimeout(js_State *J);
 static void js_setInterval(js_State *J);
@@ -1499,8 +2628,10 @@ static void mujs_run_script(JsBridge *b, const char *src, size_t len, int index)
         b->errs++;
         /* Compile failure (syntax or the per-script allocation budget):
          * record which slot failed — muJS's error object needs an extra
-         * unwrap, so the log line carries the position, not the message. */
-        logger_log("[js] script %d failed to compile", index);
+         * unwrap (js_trystring), so the receipt now carries the engine
+         * message instead of the bare slot number. */
+        logger_log("[js] script %d failed to compile: %.96s", index,
+                   js_trystring(J, -1, "error"));
         js_pop(J, 1); /* error object */
     }
     else
@@ -1543,6 +2674,7 @@ static int mujs_init(JsBridge *b, const char *baseUrl)
     define_globals(J, b, baseUrl);
     mujs_define_xhr(J);
     mujs_define_worker(J);
+    mujs_define_formdata(J); /* Forms-Phase 5 */
     js_setlimit(J, JSBRIDGE_RUNLIMIT, JSBRIDGE_MAXALLOC);
     return 0;
 }
@@ -1598,6 +2730,71 @@ static int mujs_dispatch_click(JsBridge *b, const void *anchorNode)
         }
     }
     return fired ? JSB_CLICK_NAVIGATE : JSB_CLICK_NONE;
+}
+
+/* Forms-Phase 1: the NON-bubbling focus/blur dispatcher — the frozen-
+ * engine twin of the click dispatcher above (one flat pass, no
+ * listener-class mixing). focus/blur never bubble in browsers, so
+ * delivery targets ONLY kind-6 listeners of the exact type on the node;
+ * the event object carries bubbles:false + cancelable:false (HTML
+ * truth: neither event is cancelable; preventDefault rides along for
+ * shape parity but has no effect). */
+static int mujs_dispatch_focus(JsBridge *b, DomNode *node,
+                               const char *type)
+{
+    js_State *J = (js_State *)b->implState;
+    if (!J || !node || !type)
+    {
+        return JSB_EVENT_NONE;
+    }
+    int fired = 0;
+    for (int i = 0; i < b->listenerCount; i++)
+    {
+        JsListener *L = &b->listeners[i];
+        if (L->target != node || L->kind != 6 || /* focus/blur class */
+            strcmp(L->type, type) != 0)          /* exact type route */
+        {
+            continue;
+        }
+        fired = 1;
+        b->preventDef = 0;
+        b->inClick = 1;
+        js_setlimit(J, JSBRIDGE_RUNLIMIT, JSBRIDGE_MAXALLOC);
+
+        /* muJS call convention: [fn, this, arg] then js_pcall(J, n). */
+        js_getregistry(J, (const char *)L->ref); /* fn */
+        js_pushnull(J);                          /* this */
+        js_newobject(J);
+        {
+            js_pushstring(J, type);
+            js_setproperty(J, -2, "type");
+            js_pushboolean(J, 0); /* bubbles:false — non-bubbling class */
+            js_setproperty(J, -2, "bubbles");
+            js_pushboolean(J, 0); /* cancelable:false — HTML truth */
+            js_setproperty(J, -2, "cancelable");
+            push_element(J, node);
+            js_setproperty(J, -2, "target");
+            push_element(J, node);
+            js_setproperty(J, -2, "currentTarget");
+            js_newcfunction(J, js_event_preventDefault, "preventDefault", 0);
+            js_setproperty(J, -2, "preventDefault");
+        }
+        if (js_pcall(J, 1) != 0)
+        {
+            b->errs++;
+            bridge_take_error(b, J);
+            js_pop(J, 1);
+        }
+        else
+        {
+            js_pop(J, 1);
+        }
+        b->inClick = 0;
+        b->doc->jsErrors = b->errs;
+        snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+                 b->lastError);
+    }
+    return fired ? JSB_EVENT_NAVIGATE : JSB_EVENT_NONE;
 }
 
 /* Timer vtable: release one pinned registry ref (slot already inert). */

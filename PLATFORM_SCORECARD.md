@@ -17,7 +17,7 @@ receipts (log rows, suites, deploys). Date-stamp every change at the bottom.
 | JS language (XS NR engine) | ~95% | NOT STARTED | Real react bundles run end-to-end (TAP2 ×3, `jsErrors=0`); jsext suite 8/0; fork survives its own stack-limit engineering |
 | Engine's browser API surface | 100% | COMPLETE | DOM read/write, events **(receipted end-to-end Phase 1: submit/input/change dispatch, bubbling to document listeners, preventDefault honored)**, fetch **(real + receipted Phase 2: promise shape, local+wire receipts, setRequestHeader Content-Type wire lane, currentScript asserted)**, the page's own address **(receipted Phase 3: live location getters, pushState/replaceState in-engine journal with popstate/hashchange back-stack delivery, document.title set/get, pushState never navigates — `apihist: pass=7 miss=0`)**, console **(receipted Phase 4: every level tagged into the log file — `[console.log/warn/error/info/debug]` rows with printf substitution (%s/%d/%o/%%·out-of-args-literal) + the console-shape renderer (nested objects/arrays, `[1, 2, 3, 4, …5]`, depth-2 bounded) + assert browser semantics (truthy silent / falsey error row, never throws) + the panel stays clean — `apicon: pass=8 miss=0 sent=17`, `P4COUNT 17` = 16 rows + the documented silent assert)**, ES modules **(receipted Phase 5: the loader-side module lane — both scanners flag `<script type="module">` and the router transforms import/export in C before ANY engine sees the source, so every engine gets the same lane with the vendored engines untouched: IIFE module scope, import-first graph on a per-document ledger (cycle/depth/cap receipts), namespace objects `globalThis.__p5mod[<resolved URL>]`, named/default/star import forms, `export const/let/var/function/class` materialized after the body runs; imports resolve module-RELATIVELY through url_resolve (the journal's resolver) and fetch on the page's own roads — the `about:` store and the `file:` Data-dir loader rule with the flat file-road join; probe receipts `apimod: kids=3 refuse=PASS` (modin inline runs, modabs named bindings, modstar `* as ns`, and the path-only import on the opaque about: base refusing exactly as browsers refuse it — `./p5x.js` throws its honest load error), and the `file://modpage.html` bar proves the relative chain `import './p5rel.js'` → nested `./p5rel-child.js` runs children before the importer (`modpage: pass=2 miss=0 kids=2`); documented boundaries: export default/{list}/* cut whole with receipts, dynamic import() untouched, data:/http(s) module fetches refused synchronously, template ${} contents not re-lexed)**, DOM conveniences **(receipted Phase 6: `template.content` with the browser shape — the parsed template element stays reachable while its children parse into the DETACHED `#template-content` fragment (nodeType 11, parent-NULL: inert to getElementById/render/census; `content` materializes empty for created templates), `el.closest()` through the shared SW5 selector machinery (document-order self-then-ancestors, null for unusable selectors), `el.dataset` = a fresh camelCase snapshot per access (setAttribute is the write road), the append family returning its touched node per MDN — probe receipts `apidom: pass=6 miss=0` and the P0 `template` row flipping into `apisum: pass=12 miss=2` on all gates; the phase also repaired the id road — one shared O(depth) `dom_find_by_id` replaces the adapters' push-all-children getElementById walks that aborted whole once a node held 65+ element children, silently hiding every later id on wide bodies)**, timers, localStorage/sessionStorage **(receipted Phase 7: the shared webstorage road — localStorage persists per origin across boots, sessionStorage per run; origin rule `http(s)://authority` / one `file://` bucket / per-URL `about:` / opaque `"null"` fail-store; 4KB quota throws `QuotaExceededError` and stores nothing; `storage: PASS` + `[webstorage] quota:` + `visits` counter receipts on all three engines)**, workers **(receipted Phase 8: the contained-stub lane — the constructor SHIPS so `new Worker(url)` never dies on a ReferenceError; a stub constructs silently with the shape-complete object (`postMessage`/`terminate` functions, `onerror`/`onmessage` null) and tells the page via the standard async `onerror` path at the next pump with `ev = {message}`; the worker script never compiles or runs — `worker: PASS` + `[p8w] worker onerror` + `[worker] onerror delivered #1 present=1` on all three engines, `apisum: pass=14 miss=0` on XS)**, wrapper identity + the className accessor **(receipted Phase 9: the browser identity model now on every engine — ONE wrapper object per DOM node for the page's whole life, cached per node in a bridge-scoped table with engine-held refs (mujs registry keys unref'd at close; duktape stash-hidden heapptr pins; XS NR keeps its own P1-lane state arrays) so strict `===` chains and page-written expandos survive getElementById/parentNode/appendChild/insertBefore returns — the P6 apidom identity rows `closest`/`appendret` flip MISS→PASS on mujs and duktape — and `el.className` ships on all three engines through one shared write road (the classList family's snapshot/dirty-receipt contract, store identical to `setAttribute('class')`), `apidom: pass=7 miss=0` on all gates after the 7th `classnames` row)**, async http(s) module graphs + dynamic `import()` **(receipted Phase 10 — the API surface CLOSES: transport in the router against the single-flight client (`http_is_loading()==0` head + ~20s/~40s watchdogs; `http_get`'s 0=refused/1=started contract corrected against receipts), the bridge-scoped `modFlight[6]` table (epoch-tagged, parents parked, drain = the standing `mod_finish_run`, completion cascades by key — receipts `net: enqueue remote … (depth 2)` → `parked … on 1 remote child(ren)` → `delivered … bytes status=200` → `drain` → `cascade`), dynamic `import()` via `__p5di(` rename spans at any brace depth + the ES5 page shim `globalThis.__p5dynimport` + the native `__p5modRequest(spec,base)` per engine (`k:/p:/x:` strings, dynq tickets settled at the module pump, never re-entrant), `export {local as exported}` list exports now materialize (aliases included) while `export {list} from` stays receipted-boundary, probe `apimod: kids=7 refuse=PASS` with moddyn/moddynid/modmiss/modnet rows (modnet = the pinned punycode CDN fetched over https and its 6 named exports asserted; conditional-PASS on failure), file gate `modpage: pass=3 miss=0 kids=3` on the full static file→file→https chain with `reuse` discipline; frozen engines feature-detect and write honest `MISS` rows (`apimod: kids=5 refuse=FAIL` on mujs/duk, `apisum pass=10 miss=4` unchanged) and the P10 body-error receipt lane exposed a standing silent mujs death — muJS lacked `globalThis`, fixed with the ES2020 identity alias, the P5 chain now alive; the file-loader tolerates a stray trailing slash on file referents, another diag-caught real bug)**. Missing: none — the API surface set is closed; the honest non-features (service workers, IndexedDB) are policy-documented rather than faked |
 | HTML + CSS | ~95% | COMPLETE (residuals = documented device policies) | Phases 1–10 closed: selector language, external stylesheet fetch, `var()`/`calc()` resolution, full `@media` evaluation (MQ4/5 + link attrs + the standalone `css_media_holds` API now feeding `<source media>`), the spec-anchored positioning lane (`position`/offsets/`z-index` consumed), the overflow lane (visually-hidden recipe suppression, `text-overflow: ellipsis` + `-webkit-line-clamp` real line cuts, region refs as honest no-ops), the flex/grid container lane (`display:flex/grid` containers, gap mounts on the halved-px scale with rem/em fraction precision `.75rem` = 12px exact, `align-items/align-self: center` on real containers, the whole distribution family consumed), P7's landed generated content (`::before`/`::after` printing inline with quotes/attr()/escapes resolved, `::marker` feeding the li bullet path, `:root`/`:target`/`:disabled`/`:enabled`/`:checked`/`:placeholder-shown`/`:empty` honest matchers, the consumed-inert `::`-family + `:focus-visible`/`:focus-within` joining documented policies), P8's interactive set (spec-srcset candidate selection with the panel-width policy live on real Wikipedia thumbs, `<picture>` source ordering by media=, working reset buttons with walk-time default capture + the browser click→reset activation order, multiple-select accumulation + real name-repeated serialization, the summary-less details default label), and P9's fidelity polish (the shared `fresh_len_px` unit reader across every walk-side length consumer — rem margins land, `"50%"` margins refuse, vmin/vmax/ch/ex/pt widen the Q namespace, `@media` consumes vmin/vmax; CSS translate() = REAL paint offsets mounted per-block at the ten block-open lanes with % keyed to the element's own box and the inline-replaces-whole-value cascade, rotate/scale/skew/matrix/transform-origin = consumed census vocabulary; gradient dark-hero polarity now rides background gradients on the sheet route — dark gradient heroes invert) — probe v9 `PASS (0 fails)` (105+ rows: doc-field mounts, content/state battery, srcset picks + msel/reset model asserts, tf battery + invert/pct-margin rows, 120vmin MQ row). Gaps: generated text stays text (no per-line/per-char styling — `::first-line`/`::first-letter`/`::selection` = consumed-inert policy names), real 2-D distribution + raster transforms (rotate/scale/skew/matrix) = documented policy non-features (a 2-D compositor is the only honest home — trajectory line keeps them there), translate skips form widgets & separators by policy, focus states remain the always-match family (device truth: no persistent focus), template.content & the JS DOM surface stay out of the bridge (JS-phase item), `select size>1` = a one-line field (no multi-row widget on the flat panel), multiple-select deselection = the reset button (no pick-list UI); and P10's declarative end-event lane (`@keyframes`/`@-webkit-keyframes` registries (ident-only names, >24 chars refuse = the animation stays inert, never silently mis-fires), the `animation-name` value resolver (first registry-known token, numeric/functional/keyword-skipping), the `walk_anim_engage` companion at every block-open lane with the infinite/zero-count/paused guards and a per-(node,name) exactly-once dedupe map, `animationend`/`transitionend` delivered post-render as kind-4 listeners from an addEventListener vocabulary that exists for real in both element and document paths, `transitionend` armed by the walk-visible gate attributes (class/id flips noted through the JsBridge mutation-notes ring at nine tree-mutation sites, gated on the winner being non-`none`)) |
-| Forms & interaction | ~85% | NOT STARTED | The R56g–R58 arc: tap → typing → validation → in-place submit → POST → sent card → "Send another" restore, TAP2 baseline exact ×3 + device use |
+| Forms & interaction | 100% (residuals = documented device policies) | COMPLETE | Phases 0-7 closed: values, toggles, native validation, Enter/reset/submit API, FormData parity, browser-true GET navigation, dialog-method hold, text/plain + reflected method/enctype/encoding, and **Phase 7's close lands full parity: the battery reads identically on all three engines (`formsum: pass=28 miss=0 policy=5` — the frozen `.type` reflect mirrors the XS shape exactly, and the dead frozen kind-6 listener lane reopened via stored JsListener types while the click road stays byte-standing)**; the 5 POLICY rows (no OS file picker, no date/range/color widgets, multi-row select stays a one-line field, tag-gated form prototype, multipart withheld) stand as documented device stances contested no further, not faked features |
 | Network | ~70% | NOT STARTED | Real HTTP client (POST/cookies/redirects/timeouts), snap cache, spill-to-disk bodies |
 | Media (canvas/video/audio) | <10% | NOT STARTED | Not built; sites stub out containedly, never crash |
 | Robustness under pressure | recently hardened | NOT STARTED | Wikipedia device crash chain fixed (R59 re-walk contract + `break_lines` guard); about:jsext monolith contained (R60 residency + chunked routing); failures are absence, not brittleness |
@@ -522,7 +522,600 @@ only with receipts, at phase close.
   the Missing list emptied and the row went COMPLETE (2026-10-20), with the non-features
   policy-documented rather than faked.
 
+## Active roadmap — Forms & interaction → close (the Forms program, SIM-ONLY)
+
+**STARTED 2026-10-20 — Phase 0 closed with receipts.** Approved 2026-10-20 (the R56g–R58 arc stays
+the standing baseline: tap → typing → validation → in-place submit → POST → sent card, TAP2 exact
+×3). Order of operations (usage-weighted), sizes, and the bar each phase must clear before its row
+goes `[x]`. The Status column opened at **IN PROGRESS** (score stays ~85% until phases land).
+**Simulator only for every phase** (device untouched). Every change is written generally — no
+site-specific behavior anywhere. Standing receipt set each phase: `about:formprobe` battery rows
+(rows flip from recorded state to assertions as phases land, the same growth pattern as
+`about:apiprobe`) + the standing gates byte-stable (jsext 8/0 + `about:apiprobe` sums) + the four
+real-page gates unchanged. The score moves only with receipts, at phase close.
+
+- [x] **Forms-Phase 0 Baseline + `about:formprobe` battery** *(S)* — **CLOSED 2026-10-20.** The
+  forms capability battery page registered on Home Test Cases (appended after `about:apiprobe`
+  so the existing harness assertions stay true) + in the README at creation. Fixtures ship ON the
+  page (text field `value="seed"`, textarea `hello`, checked + unchecked checkboxes, A/B radios,
+  three-option picker, submit + reset buttons) so every row measures the LIVE DOM, and the Events
+  battery self-drives whatever roads the engine exposes (all roads typeof-guarded; the submit
+  handler preventDefaults so the page never navigates) and receipts a `formev:` counter line once
+  at settle. Baseline run on engine 4: **`formsum: pass=5 miss=11 policy=3`**, `ran=2 errs=0`
+  (every write-side probe guarded — exceptions trapped in-page, never surfaced to the engine).
+  PASS rows: `title`, `fixtures` (all 10 ids resolve), `types` (the element `type` accessor reads
+  browser-true explicit/default shapes), `valread` (`f.value === 'seed'`), `valwrite`
+  (`.value = 'pluto'` round-trips through the value-attribute store). MISS rows (each carries its
+  own detail in the receipt): `textarea` (`v= w=wrote` — the value ROAD exists but reads the
+  `value` ATTRIBUTE, not the text content — browsers-true = text content; the typed round-trip
+  works, the initial content is invisible), `checkbox`/`radiogroup` (`c=undefined,undefined` — no
+  `checked` accessor), `radiowrite` (`MISS thr` — the checked WRITE attempt THROWS on XS host
+  objects; the try/catch contained it, page stayed `errs=0`), `selectvalue` (`v= i=undefined`),
+  `focusroad`, `btnclk`, `formstate` (`reset`/`elements` absent), `formsubmit`
+  (`submit`/`requestSubmit` absent), `formdata` (no `FormData` constructor — Phase 5 lane),
+  `validity` (no constraint-validation surface — Phase 3 lane). POLICY rows (standing
+  non-features, never relitigated): `policy-file` (no OS file picker), `policy-date`
+  (no date/range/color widgets), `policy-multiselect` (multi-row select stays the one-line field).
+  The Events battery settled at `formev: focus=0 blur=0 input=0 change=0 submit=0 docclick=0`
+  (the listeners registered on every lane with zero delivery — no focus()/blur()/click() roads
+  exist yet; Phase 1 flips this line). Page rendered 40 blocks, snapshot saved standing
+  (`[snap] saved url=about:formprobe blocks=40`, revisit phases skipped by the standing about:
+  branch). Standing gates re-verified on the Phase 0 build: **jsext 8/0**; **`about:apiprobe`
+  byte-stable** (`apisum 14/0`, `apicon 8/0 sent=17`, `P4COUNT 17`, the module lane trajectory
+  `kids=5 → 6 → 7 refuse=PASS` with the standing `errs=1 last=module './p5x.js' unavailable`
+  designed-refusal receipt — end state identical to the API-P10 final deck; receipt diffs =
+  pointers/visits/timing only, receipts in `/tmp/frm_p0_*.txt`).
+- [x] **Forms-Phase 1 Field life: focus, blur, and values** *(M)* — **CLOSED 2026-10-20.**
+  The missing corner of the events vocabulary landed on all three adapters (XS NR + duktape +
+  mujs, each through its own idiom): `focus`/`blur` registered as the **kind-6 NON-bubbling
+  class** (browser-true — focus/blur do not bubble; no ancestor walk, no stopPropagation
+  consultation) with a dedicated per-adapter no-climb dispatcher (event object `bubbles:false`
+  `cancelable:false`, target = the focused node); `el.focus()`/`el.blur()` are real roads over a
+  `b->focusNode` pointer-identity latch (`focus()` on already-focused = no event, on a
+  disconnected element = no-op; `blur()` when not focused = no-op; the latch is never
+  dereferenced, so a re-walk frees degrade to no-ops) — `checked` READ on the toggles reads the
+  LIVE `DocBlock.checked` (the node→block reverse lookup scan of `doc->blocks[]` by `srcNode`)
+  with the markup attribute only as the pre-walk fallback (getter-only this phase — writes +
+  radio exclusivity = Phase 2; the ES sloppy-mode `[[Set]]` path now silently drops the probe
+  write instead of the old missing-property throw, exactly a browser's getter-only accessor);
+  the `value` road is kind-aware for `<textarea>` (read attr-else-DOM-text, write the value
+  attr — the typed-text store the serializer wins on); `disabled`/`readOnly` reflect their own
+  attributes with the standard set/removeAttribute write-through (fieldset disabled does NOT
+  flip a child's `.disabled` — browser-true). Battery is UNCHANGED from Phase 0 — rows flipped
+  as roads landed: **`formsum: pass=9 miss=7 policy=3`** (+4: textarea, checkbox, radiogroup,
+  focusroad), `formev: focus=1 blur=1 input=0 change=0 submit=0 docclick=0`, `ran=2 errs=0`.
+  Standing gates held: jsext **8 passed, 0 failed**; apiprobe page-facing deck byte-identical
+  (`apisum 14/0`, `apicon 8/0 sent=17`, `P4COUNT 17`, `kids=7 refuse=PASS`, the designed
+  `./p5x.js` refusal); prod restore clean (0 autotest rows, 45KB, ~50fps). TAP2 arc untouched —
+  `main.c` has no Phase 1 edits (no tap-path files in the diff). Receipts: `/tmp/frm_p1_*.txt`
+  (boot-to-boot heap/mem live-counter drift is standing sim variance — provably present
+  P1-to-P1 on the identical binary: three boots gave 10.9/19.1/15.0MB ladder bases).
+- [x] **Forms-Phase 2 Toggles and pickers, finished** *(M)* — **CLOSED 2026-10-20.**
+  `checked` WRITE lands on all three adapters (XS roster + duktape lightprop + mujs `dom_put`)
+  with **browser-true radio-group exclusivity** — the doc-wide same-name group the tap lane
+  uses; setting a radio true unchecks every OTHER same-name radio first, false simply unchecks
+  (a browser's property-uncheck), writes fire NO events (a typed `.checked =` assignment fires
+  none). The phase surfaced the engine's **two-armed live-state model** (proven by the permanent
+  `[cbk]` log instruments): page scripts run BEFORE the walker builds blocks, so a pre-walk
+  write mirrors the `checked` ATTRIBUTE (the walk's checked/defaultChecked carrier — state
+  survives into the rendered page, exclusivity removes the other radios' attrs), while a live
+  write flips `DocBlock.checked` ONLY (no attr mirror — markup stays the walk-time default
+  which reset restores from later; the renderer reads the block live each frame and the submit
+  serializer is block-aware). The phase also repaired a standing walker gap in `document.c`:
+  checkbox/radio and select blocks never stamped `srcNode` (submit/textarea/button did), so
+  every node→block reverse lookup silently returned NULL for toggles and pickers — stamped
+  now. Picker reporting lands READ-ONLY: `selectedIndex` (browser 0-based read of the block's
+  1-based internal index; a multiple select reports the FIRST selected option in order, the
+  browser shape, not the device's cycle-arrival index; markup fallback = authored `selected`
+  else the first option), `value` (the selected option's value attribute else its option TEXT
+  — browser-default option semantics; the element's own attribute is never read), and
+  `options` (every `<option>` wrapper below the select — groups' options included, group
+  headers not; fresh arrays; non-selects read undefined everywhere). `change` **genuinely
+  delivered on user toggles** in main.c: checkbox/radio taps dispatch `input` then `change` on
+  the field's own srcNode when the state actually moved (a re-tap on an already-checked radio
+  moves nothing and fires nothing — browser-true), select taps when the cycle moved the index
+  or the multiple accumulate marked a fresh pick, mirroring the standing form_key_write
+  contract (change only counts when input's dispatch found no handler; SUPPRESSED → the
+  handler owns a re-walk). Battery UNCHANGED — rows flipped as roads landed: **`formsum:
+  pass=11 miss=5 policy=3`** (+2: radiowrite + selectvalue; checkbox/radiogroup stay PASS),
+  `formev: focus=1 blur=1 input=0 change=0 submit=0 docclick=0` (the JS self-drive still
+  cannot tap), `ran=2 errs=0`; two-boot page row + instrument-sequence diffs clean. Standing
+  gates held: jsext **8/0**; apiprobe page-facing deck byte-identical ×2 (`apisum 14/0`,
+  `apicon 8/0 sent=17`; the `visits` localStorage counter rolls ±1 between boots —
+  storage-state sim artifact, same standing variance family); acidtest census render-deck
+  byte-stable ×2 (65 rows); formclick-autotest PASS ×4 (radio click selected/exclusive, select
+  2→3, cursor, twins — with the new tap dispatches live, receipts unchanged, fixtures carry no
+  listeners); prod restore clean (0 autotest rows). Receipts: `/tmp/frm_p2_formprobe_b.txt`,
+  `/tmp/frm_p2_formprobe_c.txt`, `/tmp/frm_p2_jsext.txt`, `/tmp/frm_p2_apiprobe_a.txt`,
+  `/tmp/frm_p2_apiprobe_b.txt`, `/tmp/frm_p2_acidtest_a.txt`, `/tmp/frm_p2_acidtest_b.txt`,
+  `/tmp/frm_p2_tap.txt`, `/tmp/frm_p2_prod_boot.txt`. Sim killed + 0 processes verified after
+  every boot; device untouched; git user-locked.
+- [x] **Forms-Phase 3 The native validation engine** *(L)* — **CLOSED 2026-10-20.** The shared C
+  rule layer lives in jsbridge.c (a two-armed value store: the value ATTRIBUTE carries typed/JS
+  writes, taps live on the DocBlock; `willValidate` candidate rule; ordered ladder badInput →
+  valueMissing → typeMismatch → patternMismatch → tooLong → tooShort → range underflow/overflow;
+  the pattern matcher is an honest common-subset engine moved to css.c and exported as
+  `css_pattern_matches` so BOTH the JS layer and the CSS pseudo-class road run ONE rulebook —
+  groups/backrefs compile-fail = never-a-mismatch, the browser's invalid-pattern rule; valueMissing
+  carries the `required` gate — the real-page boot caught the first draft marking empty optional
+  controls invalid, fixed). Every submit attempt gates in main.c BEFORE the submit dispatch:
+  novalidate (form) / formNovalidate (button) skip the gate, `jsbridge_form_check` counts
+  offenders (cap 8) and the non-bubbling `invalid` (kind-6, target-only, `bubbles:false` in the
+  event object) fires on each (fire-and-forget on the NR engine; frozen engines dissolve the
+  delivery — dispatch_event stays NULL, checkValidity/reportValidity deliver via their own
+  type-generic focus roads), and a failing submit blocks at the source with the first offender's
+  browser-shaped message: `[form] submit blocked by validation (1): Fill in this field.` —
+  nothing on the wire. Boundary (documented): the gate rides the page's engine bridge, so a
+  script-less page keeps the standing byte-identical static behavior. Surfaces on all three
+  Forms engines (XS-NR live roster + the frozen Duktape/muJS twins): `validity` (fresh snapshot
+  object per access: the 8 real flags + stepMismatch/customError=false + `valid`),
+  `validationMessage`, `willValidate`, `checkValidity()`/`reportValidity()` (reportValidity's
+  "report" IS the invalid delivery — the device has no OS report UI; policy documented; dev tools
+  parity is out of scope), and `invalid` joins the kind-6 non-bubbling listener class everywhere.
+  Stylesheets reach :required/:optional/:valid/:invalid (css pcls ids 16–19 — honest match hands
+  joining the Phase-7 truth family; barred candidates are trivially :valid, browser-true; the
+  shared [css-skip] pcls census header updated). Receipts: formprobe battery photo
+  **pass=20 miss=4 policy=3** — `validity` flips MISS→PASS and the 8 new per-rule rows
+  (validshape/validreq/validpat/validlen/validrange/willval/validinvalid/validmsg) all PASS with
+  the standing 4 KOs + 3 POLICY rows unchanged; `about:formval` real page (script only observes;
+  invalid does not bubble so each control listens on itself) + PLUTO_FORMVAL_AUTOTEST driver:
+  `[formval-autotest] PASS: blocked at the native gate, URL unchanged, invalid painted 1` and
+  `[formval-autotest] PASS: valid submit navigated the GET wire` — the block message is the
+  honest first-offender line and the block leaves the address untouched (nothing sent). Every
+  sheet fallback boundaries stayed: jsext 8/0, apiprobe ×2 byte-stable (apidom pass=7 miss=0 +
+  [ev-test] PASS rows), acidtest census ×2 byte-stable (pcls does NOT move), prod restore
+  0 autotest rows. Receipts: `/tmp/form_p3_receipts.txt` (+ boot stdout under /tmp/boot_*.txt,
+  byte-pair logs /tmp/gate_apiprobe_boot{1,2}.log, /tmp/gate_acid_boot{1,2}.log). Sim killed +
+  0 processes verified after every boot; device untouched; git user-locked.
+- [x] **Forms-Phase 4 Enter key, reset, and the submit API** *(M)* — **CLOSED 2026-10-20.** The
+  keyboard OK commit (`g_formKbOkayPressed` capture → `form_kb_ok_commit`) delivers `input`+`change`
+  then rides the implicit-Enter chain (`pluto_form_enter_commit`, `<textarea>` excluded — Enter keeps
+  its own newline): the default button is the FIRST submit button in tree order (`form_default_button`)
+  and it walks `activate_form_block`'s whole road — driver receipt `[forment-autotest] PASS: Enter rode
+  the default button through the full chain (url=about:formprobe?user=EnterValid&age=&fvsend=Submit&user=
+  EnterValid&age=&q=Submit)` (the standing legacy double-append shape, byte-same as the tap lane).
+  `form.reset()` = browser-true walk-time defaults through the host hook (`jsbridge_form_host_reset`):
+  text restore REWRITES the node's `value` attr (`dom_set_attr`) AND syncs the focused item live
+  (`layout_set_input_value(it, defaultValue)` — the walk capture IS the block defaultValue) —
+  `PASS: form.reset() restored the walk-time default (typed 'Pluto' → '')` + battery `frmreok: PASS`;
+  pre-walk calls log `no walked controls (pre-walk call, DOM state already defaults)`; the reset-BUTTON
+  JS lane dispatches a cancelable `reset` event first (SUPPRESSED = the handler owns it → rewalk; else
+  the hook); radio exclusivity on reset stays a documented standing stance. The two submit flavors
+  diverge browser-true: `form.requestSubmit()` runs the NOVALIDATE-honoring native gate first
+  (`form_gate_general`: novalidate(form)/formNovalidate(submitter) skip; offenders fire `invalid`; the
+  block paints and the URL holds) — `PASS: requestSubmit blocked at the native gate (invalid painted,
+  URL held)` — while `form.submit()` skips ALL constraint validation, and the phase caught the profile
+  arc's own required check blocking the method road too (`[fbform] validation: required 'user' is
+  empty` — a road the tap lane never reaches because the Phase-3 gate blocks upstream first): the
+  fallback grew a 5th `skipValidation` param — the method road passes `!wantGate` (browser truth:
+  submit() bypasses even that arc), the tap lane passes 0 byte-identical standing —
+  `PASS: submit() sent the wire despite the invalid field (url=about:formprobe?user=&age=&fvsend=Submit
+  &user=&age=) — the flavors diverge`. requestSubmit(arg) must be the form's descendant else a
+  CONTAINED TypeError; `event.submitter` stays a documented boundary (skipped). Engine surface on all
+  three engines: `form.elements` getter + `reset`/`submit`/`requestSubmit`/`el.click()` methods on the
+  SHARED element prototype, TAG-GATED receivers (non-form hosts inert no-ops; muJS's gate rides the
+  dom_has fence; `elements` = `jsbridge_form_controls_collect`, bss queue[128], nested-form exclusion),
+  `click()` = dispatch then activation for submit/reset form buttons. The mid-parse lesson reproduced
+  and closed ONCE MORE: the first battery boot consumed the wire hook mid-parse with `g_pageJs==NULL`
+  (the page's own submit event never delivered → the wire self-navigated → the battery ran twice);
+  every host hook now THREADS the page's own `JsBridge *` (`jsbridge_internal.h` typedefs
+  reset(b,form)/wire(b,form,submitter,wantGate,wantSubmitEvent)) — after the threading: exactly ONE
+  battery run, `[form] submit dispatch: rc=2` (SUPPRESSED by the page's preventDefault through ITS
+  bridge), NO legacy route. Receipts: engine-4 battery photo **`formsum: pass=25 miss=1 policy=4`** —
+  EXACT predicted (`btnclk`/`formstate`/`formsubmit` flipped PASS, new `frmels`/`frmreok` PASS,
+  `formdata` stays MISS for Phase 5, policy=4); frozen twins DUKTAPE + muJS **`pass=23 miss=3
+  policy=4`** — ALL Phase-4 rows PASS on both (the 2 extra frozen MISSes `types`/`validinvalid` ride
+  paths the phase never touched = standing frozen gaps); each frozen battery page re-runs itself once
+  via the standing click-dissolution self-GET (assessed + documented, not fixed). Standing gates:
+  formval driver regression both receipts PASS byte-identical (tap lane `pluto_form_fallback(...,0)`);
+  **jsext 8/0 re-proven on XS-NR** — the 72,819-byte `jsext-huge.js` sets its marker via the SW2b
+  CHUNKED STREAM lane (`ext ran from disk (stream)`, run_script_stream = XS-NR-only by design, the
+  same column this scorecard's capability table rows the jsext suite under); on the frozen engine the
+  two whole-file rows are a DOCUMENTED STANDING ENVELOPE — muJS has no stream lane, the materialize
+  fallback whole-compiles prefix+72.8KB, and muJS's per-script CUMULATIVE allocation budget
+  (JSBRIDGE_MAXALLOC 1MB, subtract-only — `js_realloc` "TODO: track released memory", the fork's
+  crash armor) refuses with a CONTAINED compile throw, now receipted with its message
+  (`script 7 failed to compile: out of memory` — the js_trystring unwrap added to the failing lane;
+  6 passed, 2 failed on muJS, unchanged 8/0 class on XS): NOT a phase-4 regression (fixtures, SW5
+  prefix, budget constants, and the compile path are untouched by the phase). apiprobe census ×2:
+  46/47 normalized rows byte-identical + ONE accounted `[p7] store: visits` increment 41→42 (the
+  localStorage-across-boot gold-receipt class); acidtest census ×2: boot 2's census = BYTE-EXACT
+  PREFIX of boot 1 (diff `70a71,157` pure-additive) — the post-census excursion (`example.com/pick`
+  nav + back) was a STRAY HOST TAP at +76s on the unattended page (`[form] submit tap: click=0` — no
+  binary path; the same binary's boot 1 stayed pristine), the page's own census never diverged. Prod
+  restore: plain `make simulator`, **0 autotest rows in pluto.log**, 0 harness strings in pdex.dylib,
+  heartbeats 50+ fps 0 refusals. RECEIPTS-LEDGER CAVEAT: /tmp receipts + boot stdout for this phase
+  were wiped mid-phase by a system temp cleanup (2026-10-20 ~18:48) — the /tmp receipts-bank precedent
+  died with it; this row + the update-log entry ARE the phase's receipt surface (census/boot evidence
+  re-collected fresh in-machine 22:22–23:13). Sim killed + 0 processes verified after every boot;
+  device untouched; git user-locked.
+- [x] **Forms-Phase 5 FormData and serialization parity** *(M)* — **CLOSED 2026-10-20.** ONE
+  bridge-owned fixed store + ONE engine-agnostic collector feed BOTH `new FormData(form[,
+  submitter])` on all three Forms engines AND the route-standard POST body. **Store** (`JsBridge`):
+  `fd[8]` entries × 32 pairs (name[40]/value[240]) + `fdi[16]` iterator pool (entries/keys/values);
+  zero per-object mallocs, page-lifetime semantics, caps truncate honestly; engines carry only
+  stable pointers (muJS registry refs, Duktape hidden pointer props, XS host-data sites with their
+  `[xs] setHostData formdata|fditer` receipts). **Collector** (`jsbridge_form_data_collect` in
+  jsbridge.c): DFS tree-order pre-order (NOT Phase-4's BFS walker), nested `<form>` excluded only
+  at depth>0, fieldset `disabled` disables descendants, strict non-empty `name=` only,
+  `disabled`/`aria-disabled` excluded, checkbox/radio checked-only with the attr-less "on" default,
+  file/image skipped, submitter pair rides a real submit-button activation only (`form.submit()`
+  passes none), select/textarea/input plain lanes off the live value store.
+  **The XS finding (the phase's hard class):** `fxCheckArg` validates `xsArg(k)` against the
+  ACTUAL call's argument count (`C: xsArg(%ld): invalid index`, xsAPI.c:1305) — the declared
+  constructor length is only Function.length metadata — so every optional-slot read guards with
+  `xsToInteger(xsArgc)` first (the house `getComputedStyle` idiom); bare `new FormData()` is an
+  EMPTY instance on all three engines (browser truth: the form argument became optional), every fd
+  method carries browser-parity TypeErrors for missing-arg calls.
+  **The bar, met in one run on engine 4:** `formdata: PASS len=45` (page-side recount:
+  `encodeURIComponent` pairs + `&` join + `.split('%20').join('+')`, `n===5 && s.length===45`)
+  pairs byte-exact with the wire — `[fbform] route=standard action=about:formprobe method=POST` →
+  `POST about:formprobe body=45 (application/x-www-form-urlencoded)` → `POST body bytes=user=Pluto
+  &age=7&msg=hello+world&hdn=h1&ck=on` → `POST done status=200` — the wire fork calls
+  `jsbridge_form_data_urlenc(g_pageJs, form, submitterNode, …)`, THE SAME collector the ctor uses,
+  one data set, two roads. Forms engine 4 battery: `formsum: pass=26 miss=0 policy=4` (formdata
+  flips; all 26 rows PASS + the 4 policy rows).
+  **Frozen twins:** muJS + Duktape both `formdata: PASS len=45`, `pass=24 miss=2 policy=4` (the
+  standing envelope) — the SAME JS surface over the SAME bridge store, the POST road compiles
+  identically engine-agnostic — but the wire receipt cannot fire there: the standing frozen
+  listener-dissolve means the formev fixture's submit-preventDefault never lands, the legacy
+  self-GET re-queues `pendingNavUrl` every task step, and the page relives LOADING→parse per frame
+  (engine 0 boot runs 108k+ lines of storm cycles and ends `[nr-autotest] FAIL: first render never
+  completed (state=1)`); no post-parse bridge pump turn (timers OR xhr completions) ever arrives
+  inside a ~1-frame page lifetime. That storm family is documented since Phases 3-4; Phase 5 adds
+  no new frozen divergence, and the JS-side rows PASS every one of the storm cycles.
+  **The trigger that DID work everywhere:** the parity submit rides the page's own XHR (self GET
+  `about:formprobe`) — the standing post-parse completion lane on every engine (run_xhr_ref),
+  browser-true (a page fetches itself, then submits); the earlier setTimeout lane only ever
+  registered (5ms clamps to the router's 50ms floor, and frozen bridges carry no timer-arming pump
+  turn inside the storm). Battery row hardened: permanent step-indexed MISS diagnostics (24 steps)
+  + the empty-ctor assertion; the row classifier counts `PASS` prefixes (`PASS len=45` now scores,
+  matching the standing POLICY prefix rule). Divergences recorded: all three engines permit
+  non-`new` ctor calls (house XHR precedent); `encodeURIComponent` leaves `*!'( )` raw while our
+  wire escapes those bytes (the fixture uses none; the recorded pairing is byte-exact);
+  XS `forEach` passes 2 args (value, name) vs browser 3 and the thisArg-default nuance is skipped
+  by all engines; bare `fd.get()` etc. throw — XS with the new guards (pre-guard it aborted
+  `C: xsArg(0): invalid index`), frozen with their own engine-styled messages. Standing gates all
+  held: formval driver regression PASS both phases byte-identical; jsext **8/0** re-proven (the
+  boot receipt `engine forced: 4` re-pins the persisted engine); apiprobe census ×2 byte-stable
+  (`apisum: pass=14 miss=0` ×2, timestamp-stripped zero-diff); acidtest census ×2 byte-stable
+  (65-row render deck, EMPTY zero-diff — cleaner than Phase 3/4's prefix story). Prod restore:
+  plain `make simulator` + `make pdx` — **0 autotest rows in pluto.log**, 0 harness strings in
+  pdex.dylib, heartbeats 47-48 fps 0 refusals heap 46KB; `pdex.bin` md5
+  `9dd105636542bc8f42c00e052ab74cbb` unchanged (PDX clean prod; device untouched). Receipts:
+  `/tmp/boot_fd4j.txt` (engine-4 final capture), `/tmp/boot_fd1b.txt` + `/tmp/boot_fd0a.txt`
+  (frozen twins), `/tmp/boot_jsext.txt`, `/tmp/boot_formval.txt`, `/tmp/apilog{1,2}.txt`,
+  `/tmp/acidlog{1,2}.txt`, `/tmp/boot_prod.txt` — sim killed + 0 processes verified after every
+  boot; device untouched; git user-locked.
+- [x] **Forms-Phase 6 Submission completion** *(M)* — **CLOSED 2026-10-21.** GET-form
+  submissions navigate for real, `method="dialog"` holds without leaving the page, and the
+  exotic encodings are told honestly.
+  **The GET wire:** `pluto_form_fallback`'s GET branch swaps the legacy fallback collector for
+  the SAME one-rulebook form data set the POST body carries
+  (`jsbridge_form_data_urlenc(g_pageJs, form, submitterNode, …)`) — the typed pair(s) once, the
+  submitter's pair only on a real activation, enctype ignored (the browser's own rule). The
+  double-append shape is dead two ways: the legacy re-append no longer rides the query, and the
+  branch no longer hands the finished URL to `submit_form` (whose sameForm match never fires for
+  a query-bearing action) — the commit rides the standing deferred `pendingNavUrl` lane instead
+  (the mid-walk `navigate_to` would free the layout/doc underneath the tap lane, UB). An action
+  that already carries a query joins with `&`; an empty data set leaves the action bare.
+  **Design-accounted receipt changes:** the formval driver's GET verdict moves from the legacy
+  `about:formprobe?user=Pluto&age=&fvsend=Submit&user=Pluto&age=&q=Submit` to the browser-true
+  `about:formprobe?user=Pluto&age=` (the button has no name → no submitter pair; the old
+  `fvsend=`/`q=` shapes rode the legacy id-fallback walker's name defaults); the forment driver
+  rides `user=&age=` and `user=EnterValid&age=` the same way (driver assertions were
+  substring-based, so only the comment shapes changed).
+  **Dialog:** the effective method resolves through the shared `jsbridge_form_method_idl`
+  (submitter's `formmethod` first, then the form's `method` attribute) and DIALOG returns BEFORE
+  route selection — the spec's "intended to close the dialog box … and otherwise not submit"
+  makes the action and the site profile irrelevant (an actionless dialog form holds the same as
+  an action-bearing one). The gate and the cancelable submit event already ran upstream, so the
+  branch is the honest no-op: `[fbform] method=dialog — no ancestor dialog element: the page
+  holds (action=(none))` and the URL stands.
+  **THE FINDING (a vacuous receipt caught by its own log):** the first formval boot showed the
+  hold PASS but with NO hold log — the tap was eaten by the R56g sent-card guard, which keyed on
+  a GLOBAL `g_fbSummaryOn`: the battery page's fdp POST summary was still showing when the fpdlg
+  tap arrived, so the tap was consumed as "Send another". Two browser-true fixes: the guard is
+  now scoped to the summary's owning form (`g_fbSummaryForm` — another form's submit rides its
+  own route), and the TAP2 driver's same-form restore re-proves byte-identical
+  (`TAP2 RESULT cycle=0 restored=yes`). Second formval boot receipts the real chain:
+  `tap method=dialog submit` → `submit tap: click=1 tag=button` → the hold log →
+  `PASS: method=dialog held the page (url=about:formprobe?user=Pluto&age= unchanged)`.
+  **Encodings:** the POST branch resolves the submitter's effective enctype through
+  `jsbridge_form_enctype_idl`; text/plain rides the NEW `jsbridge_form_data_plain` (raw
+  `name=value` CRLF-joined pairs, trailing CRLF per spec, `Content-Type:
+  text/plain;charset=UTF-8`); multipart stays the documented policy boundary — the urlencoded
+  wire carries the POST and a loud log names the boundary; GET ignores enctype everywhere.
+  **IDL mirrors:** `form.method`, `form.enctype`, and the alias `form.encoding` get+set on all
+  three engines (XS `xs_form_get/set_*`, Duktape `duk_form_get/set_*` + accs entries, muJS
+  dom cases), tag-gated, reflecting the browser's limited-to-known-values shape: a missing or
+  invalid attribute reads GET / `application/x-www-form-urlencoded`, the setter writes the
+  string VERBATIM (no case folding), defaults apply only on the read.
+  **Engine finding #2 (muJS):** muJS's element has-hook double-serves plain property reads —
+  the membership stub I first added pushed `undefined` and returns, shadowing the real getter
+  so every form read was undefined (`formdlg MISS m=undefined`, envelope 24/4). Deleting the
+  stub (one branch receipts both roads, standing shape) flips the frozen envelope to the
+  predicted `pass=26 miss=2 policy=5`.
+  **Battery:** the new `fpdlg` fixture (method="dialog", hidden field + named submit button) +
+  graded rows `formdlg`/`formmeth` + policy row `policy-encoding` (four POLICY rows total).
+  Envelopes: engine 4 **`formsum: pass=28 miss=0 policy=5`**; frozen twins (muJS AND Duktape)
+  **`pass=26 miss=2 policy=5`** — formdlg + formmeth PASS on all three, the standing miss rows
+  (types/validinvalid) unchanged; `formdata: PASS len=45` and the POST road
+  (`POST body bytes=user=Pluto&age=7&msg=hello+world&hdn=h1&ck=on` → `POST done status=200`)
+  standing everywhere.
+  **Standing gates all held:** formval driver (gate block, typed value, browser-true GET,
+  dialog hold) with 48-54 fps 0 refusals; forment driver all 7 phases PASS with the new GET
+  shapes; formclick 4 PASS lines standing; TAP2 same-form restore standing (cycle-1 re-send
+  wait-capped under degraded wifi `wifi level 3 -> 1` — the loop is the standing R58 receipt
+  from Phase 5, untouched code on the same-form side); apiprobe `PASS: input+change+submit all
+  delivered … inPlace=sameDoc jsErrors=1 (before 1)` byte-standing; acidtest both modes
+  (cache off → `PASS: revisit fetched fresh (hits=0, blocks=128)`; cacheWebsite=1 → `PASS:
+  revisit served from snapshot (hits=1, blocks=128)` — block-count zero-diff; setting
+  restored to 0); jsext **8/0** re-proven; jsEngine persisted pin verified 4; Wikipedia live
+  GET gate — curl receipt: the Main-Page search form is `action="/w/index.php"` +
+  `name="search"` with the GET default (no method attribute); one sim boot to the GET-armed
+  `https://en.wikipedia.org/wiki/Special:Search?search=Playdate` fetched over TLS, took the
+  302 to the article, and rendered `blocks=132 links=85 title='Playdate - Wikipedia'`.
+  Prod restore: plain `make simulator` + `make device` + `make pdx` — **0 autotest rows in
+  pluto.log**, heartbeats 49 fps 0 refusals heap 46KB; `pdex.bin` md5 CHANGED as planned to
+  `3ed46b7243221d4b01e834d68236947f` (PDX clean prod; device untouched).
+- [x] **Forms-Phase 7 Honest non-features + close** *(S)* — **CLOSED 2026-10-21.** The
+  non-features stay as documented device stances — the 5 POLICY rows (`policy-file`,
+  `policy-date`, `policy-multiselect`, `policy-formproto`, `policy-encoding`) are contested no
+  further. The close also seals the last two standing frozen-engine MISS rows with
+  general-purpose fixes, receipts as program-envelopes: **(1) the element `.type` reflect**
+  lands on muJS + Duktape (the XS twin's exact shape — attr verbatim, no case folding; a
+  missing attr reads `<input>` "text" / `<button>` "submit"; other tags read undefined;
+  getter-only on every engine — React's hydrate matcher `'hidden' !== e.type` is what it
+  serves), via one `dom_has` case (muJS: the has hook double-serves reads AND `in`
+  membership) and one `duk_el_get_type` + accessor entry (Duktape); **(2) the frozen kind-6
+  listener lane reopens** — root cause stood since Phase 1/3: the shared JsListener `type`
+  slot was never stored at frozen `addEventListener` while BOTH frozen focus/blur/invalid
+  dispatchers route by exact `strcmp(L->type, type)` match, so on muJS/Duktape those
+  deliveries stood dead (the `types`+`validinvalid` MISS pair is exactly this + (1)); both
+  frozen registrations now store the type with one `snprintf` each — byte-mirroring the XS
+  registrations (`snprintf(L->type, sizeof L->type, "%s", type)` at jsbridge_xs_nr.c
+  3468/4609) — and structurally cannot touch anything standing: the frozen click dispatch
+  stays target-only (it never consults `type`), unsupported event types are still dropped at
+  registration before any store, and the shared drain scan is XS-only (frozen engines have no
+  script_queue_drained hook). **Receipts:** muJS AND Duktape both boot the battery at
+  `formsum: pass=28 miss=0 policy=5` with `types: PASS` + `validinvalid: PASS` (engine 4
+  guard boot byte-unchanged at 28/0/5) — the full 28-row battery + 5 policy rows now read
+  IDENTICALLY on all three Forms engines; formval driver standing (native gate block +
+  invalid painted 1, browser-true GET `url=about:formprobe?user=Pluto&age=`, POST
+  `user=Pluto&age=7&msg=hello+world&hdn=h1&ck=on` → `POST done status=200`, method=dialog
+  `no ancestor dialog element: the page holds`, `formdata: PASS len=45` + the policy wall on
+  the dialog nav); formclick 4 PASS; forment flavors (requestSubmit gate / submit() sail /
+  reset restore / Enter chain); apiprobe `RESULT inPlace=sameDoc jsErrors=1 (before 1)`
+  PASS; jsext **8/0**; TAP2 cycle-0 `restored=yes frames=1` + cycle-1 R58 wait-cap receipt
+  byte-standing; acidtest ×2 (`PASS: cache off, revisit fetched fresh (hits=0, blocks=128)`
+  / `PASS: revisit served from snapshot (hits=1, blocks=128)` — zero block-count diff,
+  setting restored to 0). Prod restore: plain `make simulator` (**0 autotest rows in
+  pluto.log**, heartbeats 48-49 fps 0 refusals heap 46KB) + `make device` + `make pdx`;
+  `pdex.bin` md5 CHANGED as planned to `a9c68c302a00991302efe3014f77b490` (PDX clean prod;
+  device untouched — sim-only phase). README's `about:formprobe` paragraph carries the final
+  sums. **Forms & interaction: COMPLETE.**
+
+**Goal:** ~85% → sealed high-90s with the non-features policy-documented rather than faked —
+the same shape the HTML+CSS program closed with. **Sealed at COMPLETE: every engine reads the
+full battery identically (`pass=28 miss=0 policy=5`), the non-features stand as the 5 POLICY
+rows.**
+
 ## Update log
+
+- **2026-10-21 (Forms-Phase 7 CLOSED — program seal)** — Forms & interaction flips
+  **COMPLETE**. The close lands two general-purpose frozen-engine fixes and ends with every
+  Forms engine reading the full battery identically: **(1) element `.type` reflect on
+  muJS/Duktape** (one `dom_has` case + one `duk_el_get_type` + accessor entry, mirroring
+  `xs_el_get_type` byte-for-byte: attr verbatim, missing attr → `<input>` "text" /
+  `<button>` "submit", other tags undefined, getter-only); **(2) the frozen kind-6 listener
+  lane reopens** — the standing dead `validinvalid` road rooted in the shared JsListener
+  `type` slot never being stored at frozen `addEventListener` while the focus/blur/invalid
+  dispatchers route by exact type match; both frozen registrations store it with one
+  `snprintf` each (byte-mirroring the XS road), and the standing click road is provably
+  unchanged (frozen click dispatch stays target-only, unsupported types drop before any
+  store, the shared drain scan is XS-only). Receipts: muJS + Duktape + XS-NR all boot the
+  battery at `formsum: pass=28 miss=0 policy=5` (`types: PASS`, `validinvalid: PASS` on the
+  frozen twins); the 5 POLICY rows stand as documented device stances contested no further;
+  formval/formclick/forment/apiprobe/jsext 8/0/TAP2 (cycle-0 restore + cycle-1 R58
+  wait-cap)/acidtest ×2 gates all held byte-standing; prod simulator **0 autotest rows**,
+  heartbeats 48-49 fps 0 refusals; `pdex.bin` md5 `a9c68c302a00991302efe3014f77b490` (PDX
+  clean prod; device untouched — sim-only phase). Full receipts in the Phase-7 row above.
+
+- **2026-10-21 (Forms-Phase 6 CLOSED)** — Submission completion lands. **GET forms navigate
+  browser-style:** the wire's GET branch builds the ONE-rulebook form data set
+  (`jsbridge_form_data_urlenc` — typed values ride, submitter pair only on real activations,
+  enctype ignored on GET) and commits through the deferred `pendingNavUrl` lane (an inline
+  `navigate_to` from the tap lane would free the layout/doc mid-walk — UB); the legacy
+  double-append (`fvsend=`/`q=` id-fallback pairs + `submit_form`'s second copy) is dead and the
+  driver receipts change by design (`about:formprobe?user=Pluto&age=`). **method="dialog" holds:**
+  the effective method resolves first (submitter `formmethod` → form `method` via the shared
+  IDL) and dialog returns before route selection — action/profile irrelevant per spec, the
+  gate + cancelable submit event already ran upstream; no ancestor `<dialog>` = the honest
+  no-op and the URL stands. FINDING: the first hold receipt was VACUOUS — the R56g sent-card
+  guard keyed on a global `g_fbSummaryOn` and ate the dialog tap as "Send another"; the guard
+  is now scoped to the summary's owning form (`g_fbSummaryForm`) with TAP2 re-proving the
+  same-form restore (`cycle=0 restored=yes`), and the second boot shows the real chain
+  (`[formval-autotest] tap method=dialog submit` → `[fbform] method=dialog — no ancestor dialog
+  element` → `PASS: method=dialog held the page (url unchanged)`). **Encodings told honestly:**
+  text/plain rides the new `jsbridge_form_data_plain` (raw CRLF `name=value` pairs, trailing
+  CRLF, `text/plain;charset=UTF-8`); multipart stays the policy boundary with a loud log;
+  GET ignores enctype (browser rule). **form.method/enctype/encoding IDL mirrors land on all
+  three engines** (limited-to-known-values reflect: missing/invalid reads GET/urlencoded,
+  setter writes verbatim, defaults on the read only; `encoding` aliases `enctype`).
+  ENGINE FINDING (muJS): the element has-hook double-serves plain reads — the added membership
+  stub shadowed the real getter and made every form read undefined (envelope 24/4); deleting
+  the stub restores the predicted frozen envelope. Battery: fpdlg fixture + formdlg/formmeth
+  graded rows + policy-encoding; engine 4 **pass=28 miss=0 policy=5**, frozen muJS AND Duktape
+  **pass=26 miss=2 policy=5** (both new rows PASS everywhere; formdata len=45 + the 45-byte
+  POST standing). Standing gates: forment/formclick/formval drivers, TAP2 same-form restore,
+  apiprobe (byte-standing), acidtest both modes (hits=0 fresh / hits=1 snapshot zero-diff),
+  jsext 8/0, engine pin 4; Wikipedia live gate receipts (curl: the real search form is
+  `action="/w/index.php"` `name="search"` GET-default; sim: `Special:Search?search=Playdate`
+  → 302 → `Playdate - Wikipedia`, blocks=132). Prod restore: plain simulator + device + pdx —
+  0 autotest rows, heartbeats 49 fps 0 refusals; `pdex.bin` md5
+  `3ed46b7243221d4b01e834d68236947f` (was `9dd105…`); device untouched.
+- **2026-10-20 (Forms-Phase 5 CLOSED)** — FormData and serialization parity land. ONE
+  bridge-owned fixed store (`fd[8]` × 32 pairs + `fdi[16]` iterators, zero per-object mallocs,
+  stable pointers only in the engines) + ONE engine-agnostic collector feed BOTH the
+  `new FormData(form[, submitter])` constructor on muJS/Duktape/XS-NR AND the route-standard POST
+  body (`jsbridge_form_data_urlenc` called from the wire fork) — collector truth browser-exact:
+  tree-order pre-order walk, nested-form exclusion at depth>0 only, fieldset disable descent,
+  empty-`name` exclusion, checked-only boxes with "on" default, file/image skipped, submitter pair
+  only on real activations, bare `new FormData()` = EMPTY instance. THE FINDING: XS validates
+  `xsArg(k)` against the ACTUAL argument count (`C: xsArg(%ld): invalid index` — the declared
+  length is Function.length metadata ONLY) — fixed with `xsArgc`-guards + browser-parity
+  TypeErrors on every fd method (phase one caught itself twice with `xsArg(1): invalid` before the
+  rule was found). THE BAR, one run on engine 4: `formdata: PASS len=45` pairs byte-exact with the
+  wire `route=standard` → `POST about:formprobe body=45` → `POST body bytes=user=Pluto&age=7&msg=
+  hello+world&hdn=h1&ck=on` → `POST done status=200`; `formsum: pass=26 miss=0 policy=4`.
+  Frozen twins: `formdata: PASS len=45` + standing `pass=24 miss=2 policy=4` on both — the wire
+  body-bytes receipt cannot fire there (standing frozen listener-dissolve → the formev self-GET
+  `pendingNavUrl` re-queue every task step → the STATE_LOADING storm documented since Phases 3-4;
+  no post-parse pump turn on a ~1-frame page — Phase 5 adds NO new frozen divergence). The parity
+  submit rides the page's own XHR (the standing post-parse completion lane, browser-true; the
+  setTimeout lane only ever registered — 5ms clamps to the 50ms floor). Battery row hardened with
+  permanent 24-step diagnostics + the empty-ctor assertion; the row classifier now counts `PASS`
+  prefixes. Gates: formval driver regression PASS byte-identical; jsext 8/0 (engine re-pinned 4);
+  apiprobe census ×2 zero-diff (`apisum: pass=14 miss=0` ×2); acidtest census ×2 zero-diff
+  (65-row deck); prod restore 0 autotest rows + 0 harness strings, heartbeats green; pdex.bin md5
+  9dd1056… unchanged (PDX clean prod, device untouched). Sim killed + 0 processes verified after
+  every boot; git user-locked.
+- **2026-10-20 (Forms-Phase 4 CLOSED)** — Enter, reset, and the submit API land. The keyboard OK
+  commits `input`+`change` then rides the implicit-Enter chain to the first submit button in tree
+  order (<textarea> keeps its newline); `form.reset()` restores walk-time defaults through the host
+  hook (attr rewrite + focused-item sync); the two submit flavors diverge browser-true —
+  `requestSubmit()` counts on the NOVALIDATE-honoring native gate (block paints, URL held) while
+  `submit()` skips ALL constraint validation including the fbform profile-arc required check (the
+  fallback's new `skipValidation` lane: method road `!wantGate`, tap lane 0 byte-identical) — and
+  `form.elements`/`reset`/`submit`/`requestSubmit`/`click()` join the shared element prototype of all
+  three engines tag-gated. The mid-parse hook lesson (page's own JsBridge threaded through every host
+  hook) re-proven: ONE battery run, preventDefault SUPPRESSED the wire, no legacy route. Photos:
+  engine 4 `formsum: pass=25 miss=1 policy=4`; frozen duk+mujs `pass=23 miss=3 policy=4` (ALL
+  Phase-4 rows PASS; `types`/`validinvalid` stay standing frozen gaps; the frozen battery's
+  click-dissolution self-GET re-run documented). Gates: formval driver regression byte-identical;
+  jsext 8/0 re-proven on XS-NR via the SW2b stream lane — the muJS whole-file pair is a contained
+  standing envelope (`out of memory` at the never-refunded 1MB per-script compile budget, receipted
+  with its message now); apiprobe census ×2 (one accounted visits increment); acidtest census ×2
+  (boot-2 = byte-exact prefix of boot-1; a +76s stray host tap drove the only excursion); prod
+  restore 0 autotest rows + 0 harness strings. Boundary receipts: `event.submitter` skipped,
+  requestSubmit arg must be a form descendant (contained TypeError), radio-uniqueness on reset
+  standing. NOTE: /tmp receipts for this phase were wiped by a system temp cleanup mid-phase — the
+  scorecard row is the receipt surface; keep future receipt banks out of /tmp. Sim killed + 0
+  processes verified after every boot; device untouched; git user-locked.
+- **2026-10-20** — **Forms-Phase 3 CLOSED: the native validation engine lands — the browser's own
+  constraint layer now owns submit attempts, per-control checks, and the validity vocabulary, on
+  every Forms engine.** One shared C rulebook in jsbridge.c evaluates `required`/`pattern`/`min`/
+  `max`/`minlength`/`maxlength`/type at each `checkValidity()`/`reportValidity()`/submit attempt;
+  a failing submit blocks BEFORE the dispatch (nothing on the wire) and fires the non-bubbling
+  `invalid` (kind-6, target-only) on each offender first — the real-page boot (about:formval)
+  proved both sides: empty required = blocked with "Fill in this field.", never navigated, and a
+  typed submit sails through the GET wire. The first draft's missing `required` gate inside
+  valueMissing was caught by the real-page boot (empty optional age field joined the invalid
+  list) and fixed — the battery's validreq row then caught the fixture missing its own required
+  attr, which the pre-fix engine had masked. `validity`/`validationMessage`/`willValidate`
+  surface on all three adapters (XS-NR roster + the frozen Duktape/muJS twins), the pattern
+  matcher moved to css.c as the shared `css_pattern_matches` (one rulebook for the JS layer and
+  the stylesheets), and :required/:optional/:valid/:invalid join the honest pseudo-class family
+  (css ids 16–19). Standing boundaries kept: frozen engines dissolve the invalid delivery from
+  the shared dispatcher (their own focus roads deliver for checkValidity/reportValidity);
+  reportValidity's "report" is the invalid event alone (no OS report UI on this device);
+  the gate rides the page's bridge, so script-less pages keep static behavior; jsext 8/0,
+  apiprobe ×2 + acidtest census ×2 byte-stable, prod restore 0 autotest rows. Photo:
+  formprobe battery pass=20 miss=4 policy=3 (8 new per-rule rows PASS; validity flips; the 4
+  legacy KOs + 3 POLICY rows unchanged).
+
+- **2026-10-20** — **Forms-Phase 2 CLOSED: toggles, pickers, and user-change events land — the
+  toggle/picker surface reaches page scripts and the tap path on every engine.** The three
+  adapters got the `checked` WRITE (XS roster setter + duktape lightprop + mujs `dom_put`
+  branch) with browser-true radio-group exclusivity: the doc-wide same-name group the tap lane
+  drives — setting a radio true first unchecks every other same-name radio; false unchecks;
+  writes fire no events (a browser's typed `.checked =` fires none). The phase learned the
+  engine's script timeline the hard way and logged it forever: **inline scripts run BEFORE the
+  walker builds blocks** (`js_doc_attach` executes at dom build; the permanent `[cbk]`
+  instruments showed `blk=0 blocks=0` behind every first-boot read/write), so a pre-walk
+  write mirrors the `checked` ATTRIBUTE (the walk's checked/defaultChecked carrier — the state
+  survives into the rendered page, with exclusivity removing the other radios' attrs) while a
+  live write flips `DocBlock.checked` only, keeping the markup attribute as the walk-time
+  default reset will restore from, the renderer's live per-frame block read, and the
+  block-aware submit serializer all truthful. Along the way it repaired a standing `document.c`
+  gap: checkbox/radio and select blocks never stamped `srcNode` (submit/textarea/button
+  branches did) — every node→block reverse lookup for toggles and pickers returned NULL until
+  the two stamps landed ("host toggle dispatch + JS checked road" / "host pick dispatch + JS
+  picker road"). Picker reporting is READ-ONLY this phase: `selectedIndex` = the browser's
+  0-based read of the block's 1-based internal index (a multiple select reports the FIRST
+  selected option in order — the browser shape — not the device's cycle-arrival index; markup
+  fallback = authored `selected` else the first option), `value` = the selected option's value
+  attribute else its option TEXT (a valueless option's value IS its text; the element's own
+  attribute is never read), `options` = every `<option>` wrapper below the select (groups'
+  options included, group headers not; fresh arrays per access; non-selects read undefined).
+  And `change` is now genuinely delivered on USER toggles in main.c: checkbox/radio taps
+  dispatch `input` then `change` on the field's own srcNode only when the state actually moved
+  (a re-tap on an already-checked radio moves nothing and fires nothing — the browser's no-op
+  re-click), select taps when the cycle moved the index or the multiple accumulate marked a
+  fresh pick, with the standing form_key_write dispatch contract (change only counts when
+  input's dispatch found no handler; SUPPRESSED = the handler owns a re-walk). Battery
+  UNCHANGED — rows flipped as roads landed: **`formsum: pass=9→11 miss=5 policy=3`** (radiowrite
+  + selectvalue PASS; checkbox/radiogroup/valread/valwrite hold), `formev: focus=1 blur=1
+  input=0 change=0 submit=0 docclick=0`, `ran=2 errs=0`; the write+restore sequence replays
+  byte-identically across boots (two-boot `cbk` + row diffs clean). Standing gates: jsext
+  **8/0**; apiprobe page-facing byte-identical ×2 (`apisum 14/0`, `apicon 8/0 sent=17`; the
+  `visits` localStorage counter rolls ±1 between boots — storage-state sim artifact, same
+  standing variance family as the mem ladder); acidtest census render-deck byte-stable ×2 (65
+  rows); formclick-autotest PASS ×4 with the new tap dispatches live (fixtures carry no
+  listeners — receipts unchanged); prod restore clean (0 autotest rows). Receipts:
+  `/tmp/frm_p2_*.txt`. Sim killed + 0 processes verified after every boot; device untouched;
+  git user-locked.
+
+- **2026-10-20** — **Forms-Phase 1 CLOSED: field life lands — focus, blur, and values reach the
+  page handlers on every engine.** The events vocabulary's missing corner arrived as a **kind-6
+  NON-bubbling focus/blur class** (browser-true: focus/blur do not bubble) delivered through a
+  dedicated no-climb dispatcher per adapter (`bubbles:false`/`cancelable:false` event object,
+  target = the focused node, per-listener metering/host brackets mirroring the B3 dispatcher;
+  the tap path and the B3 bubbling lane never consult kind 6). The roads: `el.focus()` on an
+  eligible, connected, not-already-focused element latches `b->focusNode` (additive trailing
+  struct field, pointer-identity compare only — never dereferenced) THEN delivers `focus`;
+  `el.blur()` clears the latch THEN delivers `blur`; both short-circuit to honest no-ops
+  otherwise (already-focused focus / not-focused blur / disconnected focus) exactly like the
+  HTML focus steps. The field surface grew the same way on all three adapters (XS NR roster +
+  duktape lightprop table + mujs `dom_has`/`dom_put` branches): `checked` READ on toggles via a
+  node→DocBlock reverse lookup (`doc->blocks[]` scan by `srcNode`) preferring the LIVE block
+  state with the markup attr only as pre-walk fallback (getter-only Phase 1 — the probe's write
+  now meets ES sloppy-mode `[[Set]]` semantics: silently dropped, `MISS rb=false,true` instead
+  of the old missing-property `thr`); the `value` road is `<textarea>`-kind-aware (read
+  attr-else-DOM-text — fb_field_value's own preference order — and write the value attr, the
+  store the serializer wins on); `disabled`/`readOnly` reflect their OWN attributes with the
+  set/removeAttribute write-through (`b->domDirty` + noted mutations on XS; frozen engines write
+  the plain attr per their frozen culture). Battery UNCHANGED from Phase 0 — rows flipped as
+  roads landed: `formsum: pass=5→9`, `formev: focus=1 blur=1` (self-drive receipts), `ran=2
+  errs=0`. Standing gates re-verified: jsext **8/0**; apiprobe page-facing deck byte-identical
+  (P1-vs-P1 and P0-vs-P1; the mem-ladder live counter drifts boot-to-boot EVEN P1-TO-P1 on the
+  identical binary — 10.9/19.1/15.0MB across three boots — standing sim variance, documented in
+  the receipts); prod restore clean (0 autotest rows, heap=45KB, ~50fps). No tap-path files
+  touched (TAP2 byte-stable by construction). Receipts: `/tmp/frm_p1_formprobe.txt`,
+  `/tmp/frm_p1_jsext.txt`, `/tmp/frm_p1_apiprobe.txt`, `/tmp/frm_p1_prod_boot.txt`. Sim killed +
+  0 processes verified after every boot; device untouched; git user-locked.
+
+- **2026-10-20** — **Forms-Phase 0 CLOSED: `about:formprobe` battery lands; the baseline
+  photograph is measured.** The Forms program opened (Status → IN PROGRESS, score stays ~85%.
+  The 8-phase roadmap section sits above). The battery page registered on Home Test Cases (after
+  `about:apiprobe`) + documented in the README. Fixtures ON the page (text/textarea/checkboxes/
+  radios/picker/submit/reset) — every row measures the live DOM; `in`-membership road guards keep
+  expando writes from faking a PASS; the Events battery self-drives the exposed roads and receipts
+  once at settle. Baseline on engine 4: **`formsum: pass=5 miss=11 policy=3`** (`ran=2 errs=0` —
+  exceptions trapped in-page never surfaced), `formev:` all-zero (no focus/blur/click roads —
+  Phase 1 flips it), POLICY×3 receipted standing. What the baseline proves exists today: the value
+  ATTRIBUTE road (valread/valwrite PASS on fields; the textarea road reads '' — browsers-true =
+  text content — recorded for Phase 1) and the element `type` classification. What it proves is
+  absent: `checked` (read AND write — the write attempt throws on XS host objects and stays
+  trapped), `selectedIndex`, `focus()`/`blur()`/`click()`, `reset`/`elements`/`submit`/
+  `requestSubmit`, `FormData`, the whole constraint-validation surface. Standing gates
+  re-verified on the Phase 0 build: jsext **8/0**; `about:apiprobe` byte-stable
+  (`apisum 14/0`, `apicon 8/0 sent=17`, `P4COUNT 17`, kids `5→6→7 refuse=PASS` end-state identical
+  to the API-P10 final deck; diffs = pointers/visits-counter/timing only). Receipts:
+  `/tmp/frm_p0_formprobe.txt` (battery deck), `/tmp/frm_p0_apiprobe.txt` (standing boot),
+  `/tmp/frm_p0_jsext.txt` (8/0). No device, sim-only; simulator killed + 0 processes verified
+  after every boot.
 
 - **2026-10-20** — **API-P10 CLOSED: the browser-API-surface program finishes end-to-end.** Async
   http(s) module graphs + dynamic `import()` landed (router-side single-flight transport,

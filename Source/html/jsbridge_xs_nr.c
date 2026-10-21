@@ -409,6 +409,8 @@ typedef struct
      * the OBJECT is pinned at construct; deliveries read the CURRENT
      * onerror property off it, browser at-fire semantics). */
     xsSlot workerProto; /* Worker prototype (rooted at init) */
+    xsSlot fdProto;     /* Forms-Phase 5: FormData prototype (rooted) */
+    xsSlot fdiProto;    /* FormData iterator prototype (rooted) */
     xsSlot wobj[JSBRIDGE_WORKER_MAX]; /* stub wrappers (delivery `this`) */
     unsigned char wobjSet[JSBRIDGE_WORKER_MAX];
     /* API-P3: per-entry history.state pins, parallel to the bridge's
@@ -758,6 +760,11 @@ static char *to_cstring(xsMachine *the, xsSlot slot)
 
 static xsSlot xs_push_element(JsBridge *b, DomNode *node);
 
+/* Forms-Phase 4 forward (defined with the dispatcher): the kind-0
+ * bubbling click dispatch used by el.click(). */
+static int xs_dispatch_element_event(JsBridge *b, const void *node,
+                                     const char *type);
+
 /* Host-data setter with call-site logging. The engine's
  * "C: xsSetHostData: not a host object" throw carries no context, so name
  * the site before it validates (host-only: the per-element path is too hot
@@ -797,6 +804,8 @@ static void xs_xmlhttprequest_new(xsMachine *the);
 static void xs_build_worker_proto(JsBridge *b);
 static void xs_worker_new(xsMachine *the);
 static void xs_worker_postMessage(xsMachine *the);
+static void xs_build_formdata_proto(JsBridge *b); /* Forms-Phase 5 */
+static void xs_formdata_new(xsMachine *the);
 static void xs_worker_terminate(xsMachine *the);
 
 /* API-P10: dynamic-import bridge native — status-string reply protocol
@@ -842,13 +851,141 @@ static void xs_el_get_id(xsMachine *the)
     xsResult = xsString(v ? v : "");
 }
 
+/* Forms-Phase 2: single-select live-state reader (the pickers' reporting
+ * road). Two helpers, both read-only:
+ *   - jsb_select_index: the browser's 0-based selectedIndex (-1 none),
+ *     from the LIVE DocBlock (the tap lane's own store — the renderer
+ *     draws it, the block-aware serializer submits it). A MULTIPLE
+ *     select reports the FIRST selected option in order (browser
+ *     shape), not the device's cycle-arrival index. No block
+ *     (unrendered control) → markup fallback: the authored `selected`
+ *     option, else the first option child (browser default).
+ *   - the VALUE road (in xs_el_get_value): the selected option's value
+ *     attribute, else its option text (browser-default option
+ *     semantics — a valueless <option> option's value IS its text).
+ * Phase 2 is READS ONLY: selectedIndex/option.selected writes stay in
+ * later phases per the stamped roadmap. */
+/* Forms-Phase 2 forwards: the select readers and the options collector
+ * (both defined later in the file, along the Phase-1 helper idiom). */
+static DocBlock *jsb_block_of_node(JsBridge *b, DomNode *n);
+static void xs_collect_tags_into(JsBridge *b, DomNode *start, char *tag);
+
+static int jsb_select_index(JsBridge *b, DomNode *n)
+{
+    const char *tag = (n && n->kind == DOM_ELEMENT) ? n->tag : NULL;
+    if (!tag || strcmp(tag, "select") != 0)
+    {
+        return INT_MIN; /* sentinel: not a select at all */
+    }
+    DocBlock *blk = jsb_block_of_node(b, n);
+    if (blk && blk->options && blk->optionCount > 0)
+    {
+        if (blk->multiple)
+        {
+            for (int k = 0; k < blk->optionCount; k++)
+            {
+                DocOption *o = blk->options[k];
+                if (o && !o->group && o->selected)
+                {
+                    return k;
+                }
+            }
+            return -1; /* nothing selected at all */
+        }
+        int si = blk->selectedIndex;
+        return (si >= 1 && si <= blk->optionCount) ? si - 1 : -1;
+    }
+    /* markup fallback over direct <option> children (the block road
+     * already covers optgroup-nested options via the walker) */
+    int sel = -1, first = -1, k = 0;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        DomNode *c = n->children[i];
+        if (!c || c->kind != DOM_ELEMENT || !c->tag ||
+            strcmp(c->tag, "option") != 0)
+        {
+            continue;
+        }
+        if (first < 0)
+        {
+            first = k;
+        }
+        if (sel < 0 && dom_get_attr(c, "selected"))
+        {
+            sel = k;
+        }
+        k++;
+    }
+    return sel >= 0 ? sel : first;
+}
+
+/* nth direct <option> child of a select node (the fallback road's twin
+ * of the walker's options[] order). NULL when the select has fewer. */
+static DomNode *jsb_option_node_at(DomNode *sel, int idx)
+{
+    int k = 0;
+    for (int i = 0; i < sel->childCount; i++)
+    {
+        DomNode *c = sel->children[i];
+        if (c && c->kind == DOM_ELEMENT && c->tag &&
+            strcmp(c->tag, "option") == 0)
+        {
+            if (k == idx)
+            {
+                return c;
+            }
+            k++;
+        }
+    }
+    return NULL;
+}
+
+/* Forms-Phase 2: select.selectedIndex — the browser's 0-based read of
+ * the LIVE pick (see jsb_select_index). Non-select elements read
+ * undefined (the browser's shape has only the select carrying it). */
+static void xs_el_get_selectedIndex(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    int idx = jsb_select_index(b, n);
+    if (idx == INT_MIN)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    xsResult = xsInteger(idx);
+}
+
+/* Forms-Phase 2: select.options — ALL option-element wrappers below the
+ * select (browsers: every <option>, including the ones optgroups
+ * hold — the group headers themselves are not options). Fresh array
+ * per access, like the classList family. Non-selects read undefined. */
+static void xs_el_get_options(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "select") != 0)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    xs_collect_tags_into(b, n, "option");
+}
+
 /* C4: form-control `value` property (react's controlled-input contract:
  * e.target.value on read, .value = "..." on write). Stored on the node's
  * `value` ATTRIBUTE — the same store dom_set_attr feeds and the block
  * walker mirrors — so re-renders that rebuild nodes keep carrying the
- * typed text across dispatches. */
+ * typed text across dispatches.
+ * Forms-Phase 1: kind-aware for <textarea> — the browser's value begins
+ * as the element's text content; once a value attribute exists it wins
+ * (the serializer rule: fb_field_value reads the attr first, the DOM
+ * text falls back). Read = attr-else-text; write = the attr (the live
+ * typed-text store, so a later submit serializes the set value). */
 static void xs_el_get_value(xsMachine *the)
 {
+    JsBridge *b = bridge_of(the);
     DomNode *n = this_node(the);
     const char *v = n ? dom_get_attr(n, "value") : NULL;
 #if defined(PLUTO_HYDRATE_TRACE)
@@ -856,6 +993,53 @@ static void xs_el_get_value(xsMachine *the)
                (n && n->kind == DOM_ELEMENT && n->tag) ? n->tag : "?",
                v ? v : "");
 #endif
+    if (n && n->tag && strcmp(n->tag, "select") == 0)
+    {
+        /* Forms-Phase 2: the picker reporting road — the browser's
+         * select.value is the selected option's shape (value attr, else
+         * the option text), never the element's own attribute. */
+        int idx = jsb_select_index(b, n);
+        if (idx < 0 || idx == INT_MIN)
+        {
+            xsResult = xsString(v ? v : "");
+            return;
+        }
+        DocBlock *blk = jsb_block_of_node(b, n);
+        if (blk && blk->options && idx < blk->optionCount && blk->options[idx])
+        {
+            DocOption *o = blk->options[idx];
+            xsResult = xsString((o->value && o->value[0]) ? o->value
+                                                          : (o->text
+                                                                 ? o->text
+                                                                 : ""));
+            return;
+        }
+        DomNode *optn = jsb_option_node_at(n, idx);
+        if (optn)
+        {
+            const char *ov = dom_get_attr(optn, "value");
+            if (ov && ov[0])
+            {
+                xsResult = xsString(ov);
+                return;
+            }
+            char obuf[512];
+            doc_concat_node_text(optn, obuf, sizeof(obuf));
+            xsResult = xsString(obuf);
+            return;
+        }
+        xsResult = xsString(v ? v : "");
+        return;
+    }
+    if (!v && n && n->tag && strcmp(n->tag, "textarea") == 0)
+    {
+        /* browser truth: a valueless textarea's value = its text content */
+        char buf[512];
+        doc_concat_node_text(n, buf, sizeof(buf));
+        (void)b;
+        xsResult = xsString(buf);
+        return;
+    }
     xsResult = xsString(v ? v : "");
 }
 
@@ -1110,24 +1294,659 @@ static void xs_el_get_ownerDocument(xsMachine *the)
  * reaches the document root; the shadow root (parent NULL, NOT the doc
  * root) and detached fragments report FALSE, matching real semantics
  * for the host element the announcer queries. */
+/* Forms-Phase 1 shared parent-walk: the isConnected rule factored out so
+ * the focus()/blur() roads share one connectedness rule (a browser only
+ * focuses connected elements). Defined later with the dispatch machinery;
+ * declared here so the roads above can call it. */
+static int xs_dispatch_focus_event(JsBridge *b, DomNode *node,
+                                   const char *type);
+
+static int node_connected_to_dom(JsBridge *b, DomNode *n)
+{
+    DomNode *root = (b->dom) ? b->dom->root : NULL;
+    for (DomNode *p = n; p; p = p->parent)
+    {
+        if (p == root)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void xs_el_get_isConnected(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
     DomNode *n = this_node(the);
-    DomNode *root = (b->dom) ? b->dom->root : NULL;
-    int conn = 0;
-    if (n)
+    xsResult = xsBoolean(n ? node_connected_to_dom(b, n) : 0);
+}
+
+/* Forms-Phase 1: node → LIVE DocBlock reverse lookup. DocBlock stamps
+ * srcNode on each rendered control, so scanning doc->blocks[] by pointer
+ * identity is the general road from a JS element wrapper to its render
+ * state (block->checked moves on tap; the markup `checked` attribute
+ * never does). First match wins — one block per node in the standing
+ * build; NULL when the node has no block (not a rendered control). */
+static DocBlock *jsb_block_of_node(JsBridge *b, DomNode *n)
+{
+    if (!n || !b->doc)
     {
-        for (DomNode *p = n; p; p = p->parent)
+        return NULL;
+    }
+    for (int i = 0; i < b->doc->blockCount; i++)
+    {
+        DocBlock *blk = b->doc->blocks[i];
+        if (blk && blk->srcNode == (void *)n)
         {
-            if (p == root)
+            return blk;
+        }
+    }
+    return NULL;
+}
+
+/* Forms-Phase 1: `checked` READ on the toggles (checkbox/radio).
+ * Browser truth: .checked reports the LIVE control state — a tapped
+ * checkbox flips without its markup attribute moving. The live state is
+ * DocBlock.checked (the same field main.c's formclick drives and the
+ * reset/defaultChecked machinery compares), so the read prefers the
+ * block and falls back to the markup attribute only when the node has
+ * no block yet (pre-walk window). Non-toggle nodes read false —
+ * browsers report false there too (only the property on controls
+ * differs from undefined; the battery's `in` checks use toggles).
+ * Getter-only in Phase 1: writes + radio-group exclusivity + change
+ * delivery land in Phase 2, so a stray set still hits XS's
+ * getter-only/no-op setter path exactly like Phase 0's baseline. */
+static void xs_el_get_checked(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    DomNode *n = this_node(the);
+    int checked = 0;
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        const char *tag = n->tag;
+        const char *tv = dom_get_attr(n, "type");
+        if (tag && strcmp(tag, "input") == 0 && tv &&
+            (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0))
+        {
+            DocBlock *blk = jsb_block_of_node(b, n);
+            checked = blk ? blk->checked
+                          : (dom_get_attr(n, "checked") != NULL);
+            logger_log("[cbk] get tag=%s tv=%s blk=%d checked=%d",
+                       tag, tv ? tv : "?", blk ? 1 : 0, checked);
+        }
+    }
+    xsResult = xsBoolean(checked ? 1 : 0);
+}
+
+/* Forms-Phase 2: `checked` WRITE on the toggles — browser semantics with
+ * radio-group exclusivity. The live state is DocBlock.checked (the same
+ * store the tap lane drives, the renderer draws live each frame, and the
+ * block-aware submit serializer reads), so the write flips the block —
+ * no attribute mirror (the markup `checked` attribute stays the WALK-TIME
+ * default; form.reset later restores from defaultChecked exactly like a
+ * browser reverts dirty checkedness). Group exclusivity mirrors the tap
+ * lane's scope: a doc-wide same-name radio group — setting a radio true
+ * first unchecks every OTHER same-name radio; setting false just
+ * unchecks (a browser allows unchecking via the property too). Checked
+ * WRITES fire no events (no dirty-checkedness change event without an
+ * activation — the same programmer-truth as a browser's .checked =).
+ * Visual + layout need no re-walk: the renderer reads the block live and
+ * the layout item ALIASES the block. */
+/* Forms-Phase 2: pre-walk `checked` attr mirror. Page scripts run BEFORE
+ * the element walker builds the blocks (js_doc_attach executes at dom
+ * build; blocks appear at walk end) — a write in that window must land
+ * on the MARKUP ATTRIBUTE so the walk carries it as the initial checked
+ * state. Radio exclusivity rides the same doc-wide same-name group:
+ * other same-name radios lose their `checked` attrs (the walker owns
+ * the post-walk truth). Depth-capped in step with the parser's own
+ * shape. */
+static void jsb_attr_uncheck_radios(DomNode *n, const char *name,
+                                    DomNode *skip, int depth)
+{
+    if (!n || depth > 16)
+    {
+        return;
+    }
+    if (n->kind == DOM_ELEMENT && n->tag && strcmp(n->tag, "input") == 0 &&
+        n != skip)
+    {
+        const char *tv = dom_get_attr(n, "type");
+        if (tv && strcmp(tv, "radio") == 0)
+        {
+            const char *nm = dom_get_attr(n, "name");
+            if (nm && name && strcmp(nm, name) == 0)
             {
-                conn = 1;
-                break;
+                dom_remove_attr(n, "checked");
             }
         }
     }
-    xsResult = xsBoolean(conn);
+    for (int i = 0; i < n->childCount; i++)
+    {
+        jsb_attr_uncheck_radios(n->children[i], name, skip, depth + 1);
+    }
+}
+
+static void xs_el_set_checked(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        logger_log("[cbk] set: no element node");
+        return;
+    }
+    const char *tag = n->tag;
+    const char *tv = dom_get_attr(n, "type");
+    if (!(tag && strcmp(tag, "input") == 0 && tv &&
+          (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0)))
+    {
+        logger_log("[cbk] set: not a toggle tag=%s", tag ? tag : "?");
+        return; /* non-toggle nodes: the property stays inert */
+    }
+    DocBlock *blk = jsb_block_of_node(b, n);
+    int want = xsToBoolean(xsArg(0));
+    if (!blk)
+    {
+        /* Pre-walk window (scripts run before the walker builds the
+         * blocks): the write lands on the markup attribute — the walk's
+         * checked/defaultChecked carrier — so the state survives into
+         * the rendered page. Radio exclusivity removes the OTHER
+         * same-name radios' `checked` attrs. */
+        const char *nm = dom_get_attr(n, "name");
+        if (want)
+        {
+            /* exclusivity only matters for radios (tv is the radio/checkbox
+             * discriminator already validated above) */
+            if (strcmp(tv, "radio") == 0 && nm)
+            {
+                jsb_attr_uncheck_radios(b->dom->root, nm, n, 0);
+            }
+            dom_set_attr(b->dom, n, "checked", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "checked");
+        }
+        logger_log("[cbk] pre-walk mirror tag=%s tv=%s want=%d",
+                   tag, tv ? tv : "?", want);
+        return; /* live block picks the state up at walk end */
+    }
+    if (want)
+    {
+        if (blk->radio)
+        {
+            /* group exclusivity — same rule as the tap lane: every OTHER
+             * same-name radio in the document unchecks first */
+            for (int i = 0; i < b->doc->blockCount; i++)
+            {
+                DocBlock *sib = b->doc->blocks[i];
+                if (sib && sib != blk && sib->radio && sib->name &&
+                    blk->name && strcmp(sib->name, blk->name) == 0)
+                {
+                    sib->checked = 0;
+                }
+            }
+        }
+        blk->checked = 1;
+    }
+    else
+    {
+        blk->checked = 0;
+    }
+    logger_log("[cbk] set tag=%s want=%d blk.node=%d -> checked=%d blocks=%d",
+               tag, want, (blk->srcNode == (void *)n) ? 1 : 0, blk->checked,
+               b->doc ? b->doc->blockCount : -1);
+}
+
+/* Forms-Phase 1: `disabled` reflection — browser-true to the REFLECTED
+ * property: .disabled reads the element's OWN disabled-attribute
+ * presence (a disabled <fieldset> does NOT flip a child's .disabled —
+ * that inheritance affects "actually disabled", a different concept).
+ * Write-through: set/remove the attribute via the same dom store every
+ * attribute road uses, budget-charged like the other setters, with the
+ * R58 dirty + mutation notes so styles (:disabled) and the layout
+ * mirror follow the change like any setAttribute. */
+static void xs_el_get_disabled(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "disabled") : NULL;
+    xsResult = xsBoolean(v ? 1 : 0);
+}
+
+static void xs_el_set_disabled(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        int on = xsToBoolean(xsArg(0));
+        int rc = on ? dom_set_attr(b->dom, n, "disabled", "")
+                    : dom_remove_attr(n, "disabled");
+        if (rc != 0)
+        {
+            xsTypeError("disabled assignment failed");
+        }
+        b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
+        jsbridge_note_dom_mutation(b, n);
+    }
+}
+
+/* `readOnly` reflection — the same shape as disabled against the
+ * `readonly` attribute (markup is lowercase; the JS property is the
+ * camelCase member per HTML IDL). */
+static void xs_el_get_readOnly(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "readonly") : NULL;
+    xsResult = xsBoolean(v ? 1 : 0);
+}
+
+static void xs_el_set_readOnly(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        int on = xsToBoolean(xsArg(0));
+        int rc = on ? dom_set_attr(b->dom, n, "readonly", "")
+                    : dom_remove_attr(n, "readonly");
+        if (rc != 0)
+        {
+            xsTypeError("readOnly assignment failed");
+        }
+        b->domDirty = 1; /* R58: change of record → frame-loop re-walk */
+        jsbridge_note_dom_mutation(b, n);
+    }
+}
+
+/* Forms-Phase 1: the el.focus() road. Browser truth (HTML focus steps):
+ * focusing the already-focused element is a no-op (no second focus
+ * event), a disconnected element cannot take focus, and the latch lands
+ * BEFORE the event dispatches so a handler reads consistent state.
+ * This is state + event only — the engine's keyboard lane stays native
+ * (programmatic focus does not open the keyboard; a browser only opens
+ * its soft keyboard per platform policy, and the device's tap path owns
+ * that here, untouched in this phase). The latch is a plain node
+ * POINTER compare everywhere — never dereferenced — so a re-walk that
+ * frees the node degrades to "already focused = no-op" at worst, not a
+ * crash. */
+static void xs_el_focus(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    if (!node_connected_to_dom(b, n) || b->focusNode == n)
+    {
+        return;
+    }
+    b->focusNode = n;
+    (void)xs_dispatch_focus_event(b, n, "focus");
+}
+
+/* el.blur(): clearing when not focused is a no-op (browser truth: blur
+ * fires only on an element that actually loses focus). */
+static void xs_el_blur(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || b->focusNode != n)
+    {
+        return;
+    }
+    b->focusNode = NULL;
+    (void)xs_dispatch_focus_event(b, n, "blur");
+}
+
+/* Forms-Phase 3: the constraint-validation surface on the element
+ * prototype. validity = a FRESH snapshot object per access (the same
+ * reader culture as classList); validationMessage = the shared C layer's
+ * first-failure message; willValidate = the candidate rule;
+ * checkValidity()/reportValidity() evaluate the rules and fire the
+ * non-bubbling `invalid` road on the offending element. reportValidity
+ * has no OS balloon/report UI on this device — "reporting" IS the
+ * invalid delivery (policy documented in the phase recap). Both public
+ * methods return the boolean verdict unchanged. */
+static void xs_push_validity(xsMachine *the, JsBridge *b, DomNode *n)
+{
+    JsbValidity v;
+    memset(&v, 0, sizeof(v));
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        jsbridge_form_validity_eval(b, n, &v);
+    }
+    xsResult = xsNewObject();
+    xsDefine(xsResult, xsID("valueMissing"),
+             xsBoolean(v.flags & JSBV_VALUEMISSING ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("typeMismatch"),
+             xsBoolean(v.flags & JSBV_TYPEMISMATCH ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("patternMismatch"),
+             xsBoolean(v.flags & JSBV_PATTERNMISMATCH ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("tooLong"),
+             xsBoolean(v.flags & JSBV_TOOLONG ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("tooShort"),
+             xsBoolean(v.flags & JSBV_TOOSHORT ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("rangeUnderflow"),
+             xsBoolean(v.flags & JSBV_RANGEUNDERFLOW ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("rangeOverflow"),
+             xsBoolean(v.flags & JSBV_RANGEOVERFLOW ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("stepMismatch"), xsFalse, xsDefault);
+    xsDefine(xsResult, xsID("badInput"),
+             xsBoolean(v.flags & JSBV_BADINPUT ? 1 : 0), xsDefault);
+    xsDefine(xsResult, xsID("customError"), xsFalse, xsDefault);
+    xsDefine(xsResult, xsID("valid"), xsBoolean(v.flags ? 0 : 1), xsDefault);
+}
+
+static void xs_el_get_validity(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    xs_push_validity(the, b, this_node(the));
+}
+
+static void xs_el_get_validationMessage(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    char msg[96];
+    msg[0] = '\0';
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        JsbValidity v;
+        memset(&v, 0, sizeof(v));
+        jsbridge_form_validity_eval(b, n, &v);
+        snprintf(msg, sizeof(msg), "%s", v.message);
+    }
+    xsResult = xsString(msg);
+}
+
+static void xs_el_get_willValidate(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    int will = (n && n->kind == DOM_ELEMENT)
+                   ? jsbridge_form_will_validate(b, n)
+                   : 0;
+    xsResult = xsBoolean(will);
+}
+
+static void xs_el_checkValidity(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    int ok = 1;
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        JsbValidity v;
+        memset(&v, 0, sizeof(v));
+        jsbridge_form_validity_eval(b, n, &v);
+        ok = (v.flags == 0);
+        if (!ok)
+        {
+            (void)xs_dispatch_focus_event(b, n, "invalid");
+        }
+    }
+    xsResult = xsBoolean(ok);
+}
+
+static void xs_el_reportValidity(xsMachine *the)
+{
+    /* Same evaluation + delivery as checkValidity: this device has no OS
+     * report surface for the browser's interactive-check dialog, so
+     * "reporting" is the invalid event alone. */
+    xs_el_checkValidity(the);
+}
+
+/* ── Forms-Phase 4: the HTMLFormElement API + HTMLElement.click() ───────── *
+ * The methods live on the shared element prototype (Phase 0's surface
+ * shape); the browser bounds them to form elements, so a non-form
+ * receiver stays inert — the standing no-op for unsupported receivers.
+ * The actual chains run through the main.c host hooks: reset restores
+ * walk-time defaults with no events; submit() bypasses the gate AND the
+ * submit event; requestSubmit(submitter?) runs the gate (formNovalidate
+ * honored) then the cancelable submit event then the wire with the
+ * submitter's formAction/formMethod overrides. Frozen engines dissolve
+ * the event delivery (standing boundary) and their NONE falls through
+ * to the wire, matching a page with no listeners. */
+static DomNode *xs_form_receiver(DomNode *n)
+{
+    return (n && n->kind == DOM_ELEMENT && n->tag &&
+            !strcmp(n->tag, "form"))
+               ? n
+               : NULL;
+}
+
+/* Nearest enclosing <form> over the parent chain (bridges own the DOM
+ * tree pointer; the wire/gate keys off node identity). */
+static DomNode *xs_form_ancestor(DomNode *n)
+{
+    for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
+    {
+        if (p->kind == DOM_ELEMENT && p->tag && !strcmp(p->tag, "form"))
+        {
+            return (DomNode *)p;
+        }
+    }
+    return NULL;
+}
+
+/* The activation classes for el.click(): a submit button (button
+ * defaulting to submit, or an input of submit/image type) or a reset
+ * control. A click on either runs the form's activation unless a
+ * handler prevented the click itself. */
+static int xs_node_is_form_button(DomNode *n)
+{
+    if (!n || n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return 0;
+    }
+    if (!strcmp(n->tag, "button"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return (!t || !t[0] || !strcmp(t, "submit") || !strcmp(t, "reset"));
+    }
+    if (!strcmp(n->tag, "input"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return t && (!strcmp(t, "submit") || !strcmp(t, "reset") ||
+                     !strcmp(t, "image"));
+    }
+    return 0;
+}
+
+static void xs_form_get_elements(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!xs_form_receiver(n))
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    void *buf[64]; /* scratch — 64 controls is far past any real page */
+    int cnt = jsbridge_form_controls_collect(n, buf, 64);
+    xsResult = xsNewArray(cnt);
+    for (int i = 0; i < cnt; i++)
+    {
+        xsSlot el = xs_push_element(b, (DomNode *)buf[i]);
+        xsSetAt(xsResult, xsInteger(i), el);
+    }
+}
+
+static void xs_form_reset(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!xs_form_receiver(n))
+    {
+        /* Non-form receiver: undefined (the call itself stays silent —
+         * the membership surface is the standing prototype shape). */
+        return;
+    }
+    (void)jsbridge_form_host_reset(b, n); /* no events; the walk-time
+                                          boolean returns to the wire */
+    xsResult = xsUndefined;
+}
+
+static void xs_form_submit(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!xs_form_receiver(n) || !node_connected_to_dom(b, n))
+    {
+        return;
+    }
+    /* form.submit(): no gate, no submit event — straight to the wire. */
+    (void)jsbridge_form_host_wire(b, n, NULL, 0, 0);
+    xsResult = xsUndefined;
+}
+
+static void xs_form_requestSubmit(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!xs_form_receiver(n) || !node_connected_to_dom(b, n))
+    {
+        return;
+    }
+    /* requestSubmit([submitter]): browser truth — the argument, when
+     * present, must be a form descendant (the spec throws
+     * NotFoundError otherwise; contained as a TypeError here). A submit
+     * button is the natural submitter; any descendant is accepted. */
+    DomNode *submitter = NULL;
+    if (xsTypeOf(xsArg(0)) != xsUndefinedType &&
+        xsTypeOf(xsArg(0)) != xsNullType)
+    {
+        submitter = arg_node(the, 0);
+        if (!submitter || xs_form_ancestor(submitter) != n)
+        {
+            xsTypeError("requestSubmit: submitter is not this form's "
+                        "descendant");
+        }
+    }
+    (void)jsbridge_form_host_wire(b, n, submitter, 1, 1);
+    xsResult = xsUndefined;
+}
+
+/* Forms-Phase 6: the form's enumerated IDL mirrors (get + set) on the
+ * shared element prototype, tag-gated like every Phase-4 road. Getting
+ * returns the canonical keyword through the shared reflection helper
+ * (missing/invalid → the GET / urlencoded defaults); setting writes the
+ * lowercase string verbatim — the browser's own reflect shape (the
+ * DEFAULT only applies on read). Non-form receivers read undefined and
+ * absorb the write; non-elements too. */
+static void xs_form_get_method(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xsUndefined;
+    if (!n || !xs_form_receiver(n))
+    {
+        return;
+    }
+    xsResult = xsString(jsbridge_form_method_idl(dom_get_attr(n, "method")));
+}
+
+static void xs_form_set_method(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || !xs_form_receiver(n))
+    {
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = dom_set_attr(b->dom, n, "method", v);
+    JFree(v);
+    if (rc != 0)
+    {
+        xsTypeError("method assignment failed");
+    }
+    jsbridge_note_dom_mutation(b, n);
+}
+
+static void xs_form_get_enctype(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    xsResult = xsUndefined;
+    if (!n || !xs_form_receiver(n))
+    {
+        return;
+    }
+    xsResult =
+        xsString(jsbridge_form_enctype_idl(dom_get_attr(n, "enctype")));
+}
+
+static void xs_form_set_enctype(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || !xs_form_receiver(n))
+    {
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = dom_set_attr(b->dom, n, "enctype", v);
+    JFree(v);
+    if (rc != 0)
+    {
+        xsTypeError("enctype assignment failed");
+    }
+    jsbridge_note_dom_mutation(b, n);
+}
+
+/* HTMLElement.click(): a real dispatched click (kind-0 bubbling). On a
+ * form-associated submit/reset button the browser's ACTIVATION follows
+ * the un-prevented click — the same chain a tap rides (the submit
+ * branch: gate honoring formNovalidate → cancelable submit → wire; the
+ * reset branch: cancelable reset → restore). Everything else is the
+ * pure dispatch (browsing-context links activate Phase 6). */
+static void xs_el_click(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT || !node_connected_to_dom(b, n))
+    {
+        return;
+    }
+    int rc = xs_dispatch_element_event(b, n, "click");
+    if (rc == JSB_EVENT_SUPPRESSED)
+    {
+        jsbridge_note_dom_mutation(b, n); /* the handler owns the page */
+        return;
+    }
+    /* Not prevented: run the activation when the target is a submit or
+     * reset button inside a form (browser truth: the click's default
+     * action). Everything else: the dispatch alone. */
+    DomNode *form = xs_form_ancestor(n);
+    if (form && xs_node_is_form_button(n))
+    {
+        (void)jsbridge_form_host_wire(b, form, n, 1, 1);
+    }
 }
 
 /* Element.attributes — a live snapshot Array of {name,value} objects.
@@ -2602,15 +3421,30 @@ static void xs_el_addEventListener(xsMachine *the)
     {
         kind = 5;
     }
+    /* Forms-Phase 1: the focus/blur class (kind 6) — NON-bubbling
+     * (browser-true: focus and blur do not bubble; focusin/focusout
+     * would). Phase 3 joins `invalid`: the constraint-validation event
+     * doesn't bubble either. Delivered ONLY by the el.focus()/el.blur()
+     * roads and the checkValidity()/reportValidity() surface through
+     * xs_dispatch_focus_event to the target's own listeners; the tap
+     * path and the B3 bubbling dispatcher never consult kind 6, so
+     * registering focus/blur/invalid cannot move the standing event
+     * counts. */
+    if (strcmp(type, "focus") == 0 || strcmp(type, "blur") == 0 ||
+        strcmp(type, "invalid") == 0)
+    {
+        kind = 6;
+    }
     if (!isDispatch && strcmp(type, "load") != 0 && strcmp(type, "error") != 0 &&
-        kind != 3 && kind != 4 && kind != 5)
+        kind != 3 && kind != 4 && kind != 5 && kind != 6)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so
          * pages registering them don't error — the delivered classes are
          * click/submit/input/change (kind 0; B3 bubbling dispatch),
          * load/error (kinds 1/2, replay-cached asset completion), the
-         * end-event class (kind 4; render-drain dispatch), and the
-         * journal events (kind 5; history drain dispatch). */
+         * end-event class (kind 4; render-drain dispatch), the
+         * journal events (kind 5; history drain dispatch), and the
+         * focus/blur class (kind 6; road dispatch — Forms-Phase 1). */
         JFree(type);
         return;
     }
@@ -4637,6 +5471,24 @@ static void xs_build_el_proto(JsBridge *b)
         {"hash", xs_el_get_hash, NULL},
         {"textContent", xs_el_get_textContent, xs_el_set_textContent},
         {"isConnected", xs_el_get_isConnected, NULL},
+        /* Forms-Phase 1+2: the field-life surface. checked gains the
+         * write side in Phase 2 (radio-group exclusivity rides the same
+         * doc-wide group the tap lane uses; writes flip the LIVE block
+         * — no attribute mirror, so form.reset keeps honoring the
+         * markup defaults later). selectedIndex/options are the picker
+         * reporting road (reads only this phase). disabled/readOnly
+         * reflect their own attributes (the REFLECTED property, not
+         * fieldset inheritance). */
+        {"checked", xs_el_get_checked, xs_el_set_checked},
+        {"selectedIndex", xs_el_get_selectedIndex, NULL},
+        {"options", xs_el_get_options, NULL},
+        {"disabled", xs_el_get_disabled, xs_el_set_disabled},
+        {"readOnly", xs_el_get_readOnly, xs_el_set_readOnly},
+        /* Forms-Phase 6: the form's enumerated IDL mirrors (the browser
+         * reflect shapes; tag-gated, aliasing encoding → enctype). */
+        {"method", xs_form_get_method, xs_form_set_method},
+        {"enctype", xs_form_get_enctype, xs_form_set_enctype},
+        {"encoding", xs_form_get_enctype, xs_form_set_enctype},
         {"innerHTML", xs_el_get_innerHTML, xs_el_set_innerHTML},
         {"parentNode", xs_el_get_parentNode, NULL},
         {"childElementCount", xs_el_get_childElementCount, NULL},
@@ -4662,6 +5514,13 @@ static void xs_build_el_proto(JsBridge *b)
         {"style", xs_el_get_style, NULL},
         {"sheet", xs_el_get_sheet, NULL},
         {"content", xs_el_get_content, NULL},
+        /* Forms-Phase 3: the constraint-validation getters. */
+        {"validity", xs_el_get_validity, NULL},
+        {"validationMessage", xs_el_get_validationMessage, NULL},
+        {"willValidate", xs_el_get_willValidate, NULL},
+        /* Forms-Phase 4: the form's controls collection (tag-gated
+         * inside; non-forms read undefined). */
+        {"elements", xs_form_get_elements, NULL},
     };
     static const struct
     {
@@ -4682,6 +5541,19 @@ static void xs_build_el_proto(JsBridge *b)
         {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"closest", xs_el_closest, 1},
         {"addEventListener", xs_el_addEventListener, 2},
+        /* Forms-Phase 1: the focus/blur roads (state + non-bubbling
+         * event; keyboard lane untouched). */
+        {"focus", xs_el_focus, 0},
+        {"blur", xs_el_blur, 0},
+        /* Forms-Phase 3: the validity check/report methods. */
+        {"checkValidity", xs_el_checkValidity, 0},
+        {"reportValidity", xs_el_reportValidity, 0},
+        /* Forms-Phase 4: the form API + the click activation road
+         * (tag-gated/no-op inside; the chains ride the host hooks). */
+        {"reset", xs_form_reset, 0},
+        {"submit", xs_form_submit, 0},
+        {"requestSubmit", xs_form_requestSubmit, 1},
+        {"click", xs_el_click, 0},
         {"getElementsByTagName", xs_el_getElementsByTagName, 1},
         {"getBoundingClientRect", xs_el_getBoundingClientRect, 0},
         {"attachShadow", xs_el_attachShadow, 1},
@@ -6574,6 +7446,7 @@ static int xs_init(JsBridge *b, const char *baseUrl)
         xs_build_globals(b);
         xs_build_xhr_proto(b);
         xs_build_worker_proto(b);
+        xs_build_formdata_proto(b); /* Forms-Phase 5 */
         /* XMLHttpRequest constructor global (xsGlobal pattern, line 1030).
          * SW5 sim finding: xsNewHostFunction does NOT set the constructor
          * flag, so `new XMLHttpRequest()` threw XS_TYPE_ERROR ("new: not a
@@ -6590,6 +7463,13 @@ static int xs_init(JsBridge *b, const char *baseUrl)
             xsDefine(xglob, xsID("Worker"),
                      xsNewHostConstructor(xs_worker_new, 1, st->workerProto),
                      xsDefault);
+            /* Forms-Phase 5: the FormData constructor (same shape);
+             * declared arity 2 so the optional-submitter slot exists
+             * (the C lane reads Arg(1)'s presence). */
+            xsDefine(xglob, xsID("FormData"),
+                     xsNewHostConstructor(xs_formdata_new, 2, st->fdProto),
+                     xsDefault);
+            logger_log("[xs] FormData defined");
             /* API-P10: the dynamic-import bridge (status-string protocol;
              * the __p5dynimport shim calls it — see jsbridge_internal.h). */
             xsDefine(xglob, xsID("__p5modRequest"),
@@ -10358,13 +11238,17 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
     xsMachine *m = st->machine;
     /* Phase 10: the delivery class follows the dispatched type — the
      * page-interactivity class (kind 0) for the react delegation set,
-     * the end-event class (kind 4) for animationend/transitionend. Each
-     * class is only delivered under its own type, so the tap path can
-     * never mis-fire an end-event listener and vice versa. */
+     * the end-event class (kind 4) for animationend/transitionend,
+     * Forms-Phase 3: the non-bubbling class (kind 6) for `invalid` —
+     * delivered target-only (browser-true: invalid does not bubble),
+     * so the climb below ends after the target node. */
     int evKind = (strcmp(type, "animationend") == 0 ||
                   strcmp(type, "transitionend") == 0)
                      ? 4
-                     : 0;
+                     : (strcmp(type, "invalid") == 0)
+                           ? 6
+                           : 0;
+    int noClimb = (evKind == 6);
 
     DomNode *t = (DomNode *)node;
     while (t)
@@ -10422,7 +11306,10 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
                                  xsDefault);
                         xsDefine(xsResult, xsID("cancelable"), xsTrue,
                                  xsDefault);
-                        xsDefine(xsResult, xsID("bubbles"), xsTrue, xsDefault);
+                        /* kind 6 classes (invalid) report bubbles:false,
+                         * browser-true for the non-bubbling event. */
+                        xsDefine(xsResult, xsID("bubbles"),
+                                 noClimb ? xsFalse : xsTrue, xsDefault);
                         xsDefine(xsResult, xsID("defaultPrevented"), xsFalse,
                                  xsDefault);
                         xsDefine(xsResult, xsID("preventDefault"),
@@ -10468,6 +11355,10 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
         {
             break; /* browser semantics: same-node listeners ran, climb ends */
         }
+        if (noClimb)
+        {
+            break; /* kind 6 classes (invalid) never bubble */
+        }
         t = t->parent; /* bubbling: target → ancestors */
     }
 
@@ -10480,6 +11371,114 @@ static int xs_dispatch_element_event(JsBridge *b, const void *node,
         return JSB_EVENT_NONE;
     }
     return b->preventDef ? JSB_EVENT_SUPPRESSED : JSB_EVENT_NAVIGATE;
+}
+
+/* Forms-Phase 1: the NON-bubbling focus/blur dispatcher — the no-climb
+ * sibling of the B3 dispatcher above. Browser truth: focus and blur do
+ * NOT bubble (focusin/focusout do), so delivery targets ONLY kind-6
+ * listeners of the exact type on the given node — no ancestor walk, no
+ * stopPropagation consultation, nothing else on the tree can see it.
+ * Event object matches the observable FocusEvent surface: type/target/
+ * currentTarget + bubbles:false/cancelable:false (neither event is
+ * cancelable per HTML; preventDefault is provided for shape parity but
+ * has no effect here). Per-listener metering/host brackets mirror the
+ * B3 dispatcher exactly; the tap path never routes through here. */
+static int xs_dispatch_focus_event(JsBridge *b, DomNode *node,
+                                   const char *type)
+{
+    XsState *st = (XsState *)b->implState;
+    if (!st || !st->machine || !node || !type)
+    {
+        return JSB_EVENT_NONE;
+    }
+    int fired = 0;
+    b->preventDef = 0;
+    b->stopProp = 0;
+    b->inClick = 1; /* same re-entrancy guard as the B3 dispatcher */
+    xsMachine *m = st->machine;
+    for (int i = 0; i < b->listenerCount; i++)
+    {
+        JsListener *L = &b->listeners[i];
+        if (L->target != node || L->kind != 6 || /* focus/blur class */
+            strcmp(L->type, type) != 0)          /* exact type route */
+        {
+            continue;
+        }
+        fired = 1;
+        xsBeginHostExit(m);
+        xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+        {
+            xsBeginHost(m);
+            {
+                xsVars(1);
+                xsTry
+                {
+                    /* fresh wrapper: the focused target (0) + event */
+                    xsVar(0) = xs_push_element(b, node);
+                    xsSlot ev = xsNewHostObject(NULL);
+                    xsResult = ev; /* GC anchor while defining */
+                    xsDefine(xsResult, xsID("type"), xsString(type),
+                             xsDefault);
+                    xsDefine(xsResult, xsID("target"), xsVar(0), xsDefault);
+                    xsDefine(xsResult, xsID("currentTarget"), xsVar(0),
+                             xsDefault);
+                    xsDefine(xsResult, xsID("cancelable"), xsFalse,
+                             xsDefault);
+                    xsDefine(xsResult, xsID("bubbles"), xsFalse, xsDefault);
+                    xsDefine(xsResult, xsID("defaultPrevented"), xsFalse,
+                             xsDefault);
+                    xsDefine(xsResult, xsID("preventDefault"),
+                             xsNewHostFunction(xs_event_preventDefault, 0),
+                             xsDefault);
+                    xsDefine(xsResult, xsID("stopPropagation"),
+                             xsNewHostFunction(xs_event_stopPropagation, 0),
+                             xsDefault);
+                    xsCall2_noResult(st->fns[i], xsID("call"), xsVar(0),
+                                     ev);
+                    xs_drain_jobs(the);
+                    xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
+                }
+                xsCatch
+                {
+                    b->errs++;
+                    bridge_take_error_text(b, "listener exception");
+                    logger_log("[js] %s handler failed", type);
+                }
+            }
+            xsEndHost(m);
+        }
+        xsEndMetering(m);
+        xsEndHostExit(m);
+
+        b->doc->jsErrors = b->errs;
+        snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+                 b->lastError);
+        if (m->exitStatus != xsNormalExit)
+        {
+            b->errs++;
+            bridge_take_error_text(b, "engine abort in event handler");
+            logger_log("[js] %s dispatch aborted engine — engine reset",
+                       type);
+            st->machine = NULL;
+            xsDeleteMachine(m);
+            xs_split_invalidate(b); /* R20 pacing + R22 stepwise are dead */
+            pluto_mem_resync_live(); /* counter re-base (see run_script) */
+            return fired ? JSB_EVENT_NAVIGATE : JSB_EVENT_NONE;
+        }
+    }
+
+    b->inClick = 0;
+    b->doc->jsErrors = b->errs;
+    snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+             b->lastError);
+    if (!fired)
+    {
+        return JSB_EVENT_NONE;
+    }
+    /* NOT suppressible: focus/blur carry cancelable:false, so delivery
+     * is always "handlers ran" — there is no native action to suppress
+     * at this layer (the keyboard lane is native and untouched). */
+    return JSB_EVENT_NAVIGATE;
 }
 
 /* Timer vtable: release one pinned callback (fnRef = tfn[] slot). */
@@ -11017,6 +12016,319 @@ static void xs_xmlhttprequest_new(xsMachine *the)
     xsSlot obj = xsNewHostInstance(st->xhrProto);
     xs_set_host_data_site(the, "xhrNew", obj, (void *)(intptr_t)0);
     xsResult = obj;
+}
+
+/* ── Forms-Phase 5: FormData (constructor class, host-instance shape) ───
+ * Proto-built like the XHR/Worker lane (rooted prototype slots); every
+ * instance is a host instance whose host data = the bridge-owned
+ * FormDataEntry (the page-long fixed store — see jsbridge_internal.h);
+ * iterators are their own host-instance lane with the FormDataIter as
+ * host data. The C pair ops all live on the shared core (jsbridge.c) —
+ * ONE rulebook feeding both the JS surface and the route-standard POST
+ * body. Typed throws use the family xsTypeError (contained). Strings
+ * cross the engine boundary via to_cstring (freed after each use). */
+static FormDataEntry *xs_formdata_entry(xsMachine *the)
+{
+    FormDataEntry *e = (FormDataEntry *)xsGetHostDataIf(xsThis);
+    return (e && e->used) ? e : NULL;
+}
+
+static void xs_formdata_append(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 2)
+    {
+        xsTypeError("FormData.append: name and value required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    char *v = to_cstring(the, xsArg(1));
+    jsbridge_form_data_append(e, n ? n : "", v ? v : "");
+    if (n)
+    {
+        JFree(n);
+    }
+    if (v)
+    {
+        JFree(v);
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_formdata_get(xsMachine *the)
+{
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 1)
+    {
+        xsTypeError("FormData.get: name required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    const char *v = jsbridge_form_data_get(e, n ? n : "");
+    if (n)
+    {
+        JFree(n);
+    }
+    xsResult = v ? xsString(v) : xsNull;
+}
+
+static void xs_formdata_getAll(xsMachine *the)
+{
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 1)
+    {
+        xsTypeError("FormData.getAll: name required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    int hits = 0;
+    xsResult = xsNewArray(0);
+    for (int i = 0; i < e->npairs; i++)
+    {
+        if (strcmp(e->pairs[i].name, n ? n : "") == 0)
+        {
+            xsSetAt(xsResult, xsInteger(hits++),
+                    xsString(e->pairs[i].value));
+        }
+    }
+    if (n)
+    {
+        JFree(n);
+    }
+}
+
+static void xs_formdata_has(xsMachine *the)
+{
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 1)
+    {
+        xsTypeError("FormData.has: name required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    int has = jsbridge_form_data_has(e, n ? n : "");
+    if (n)
+    {
+        JFree(n);
+    }
+    xsResult = has ? xsTrue : xsFalse;
+}
+
+static void xs_formdata_set(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 2)
+    {
+        xsTypeError("FormData.set: name and value required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    char *v = to_cstring(the, xsArg(1));
+    (void)jsbridge_form_data_set(e, n ? n : "", v ? v : "");
+    if (n)
+    {
+        JFree(n);
+    }
+    if (v)
+    {
+        JFree(v);
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_formdata_delete(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = xs_formdata_entry(the);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if ((int)xsToInteger(xsArgc) < 1)
+    {
+        xsTypeError("FormData.delete: name required");
+    }
+    char *n = to_cstring(the, xsArg(0));
+    int removed = jsbridge_form_data_delete(e, n ? n : "");
+    if (n)
+    {
+        JFree(n);
+    }
+    xsResult = removed ? xsTrue : xsFalse;
+}
+
+/* Shared iterator factory: entries/keys/values walk the same bridge
+ * FormDataIter (mode 0/1/2); the result object reads {value, done}. */
+static void xs_formdata_walk(xsMachine *the, int mode)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    FormDataEntry *e = xs_formdata_entry(the);
+    int full = 0;
+    FormDataIter *it;
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    it = jsbridge_form_data_iter(b, e, &full);
+    if (!it)
+    {
+        xsTypeError(full ? "FormData: too many iterators this page"
+                         : "FormData: iterator unavailable");
+    }
+    it->mode = (unsigned char)mode;
+    xsResult = xsNewHostInstance(st->fdiProto);
+    xs_set_host_data_site(the, "fditer", xsResult, it);
+}
+
+static void xs_formdata_entries(xsMachine *the)
+{
+    xs_formdata_walk(the, 0);
+}
+
+static void xs_formdata_keys(xsMachine *the)
+{
+    xs_formdata_walk(the, 1);
+}
+
+static void xs_formdata_values(xsMachine *the)
+{
+    xs_formdata_walk(the, 2);
+}
+
+static void xs_fditer_next(xsMachine *the)
+{
+    FormDataIter *it = (FormDataIter *)xsGetHostDataIf(xsThis);
+    xsResult = xsNewObject();
+    if (it && it->entry && it->idx < it->entry->npairs)
+    {
+        const FdPair *p = &it->entry->pairs[it->idx++];
+        if (it->mode == 1)
+        {
+            xsSet(xsResult, xsID("value"), xsString(p->name));
+        }
+        else if (it->mode == 2)
+        {
+            xsSet(xsResult, xsID("value"), xsString(p->value));
+        }
+        else
+        {
+            xsSlot arr = xsNewArray(2);
+            xsSetAt(arr, xsInteger(0), xsString(p->name));
+            xsSetAt(arr, xsInteger(1), xsString(p->value));
+            xsSet(xsResult, xsID("value"), arr);
+        }
+        xsSet(xsResult, xsID("done"), xsFalse);
+    }
+    else
+    {
+        xsSet(xsResult, xsID("value"), xsUndefined);
+        xsSet(xsResult, xsID("done"), xsTrue);
+    }
+}
+
+static void xs_formdata_foreach(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = xs_formdata_entry(the);
+    int argc = (int)xsToInteger(xsArgc);
+    if (!e)
+    {
+        xsTypeError("FormData: receiver is not a FormData");
+    }
+    if (argc < 1)
+    {
+        xsTypeError("FormData.forEach: callback required");
+    }
+    for (int i = 0; i < e->npairs; i++)
+    {
+        /* fn.call(thisArg, value, name) — callback slots re-read per
+         * round like every other house delivery loop (slot stability);
+         * a bare forEach(fn) passes undefined as the receiver (Arg(1)
+         * exists only when the page passed a thisArg — keyed off
+         * xsArgc, per the fxCheckArg actual-arg rule). Containment
+         * rides the page's own eval bracket, exactly like every
+         * callback delivery; a throw stops forEach. */
+        xsCall3_noResult(xsArg(0), xsID("call"),
+                         argc > 1 ? xsArg(1) : xsUndefined,
+                         xsString(e->pairs[i].value),
+                         xsString(e->pairs[i].name));
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_formdata_new(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    XsState *st = state_of(b);
+    /* fxCheckArg validates against the ACTUAL call's argument count (the
+     * declared constructor length is only Function.length metadata), so
+     * every optional-slot read is guarded by xsArgc first — the house
+     * getComputedStyle idiom. A bare `new FormData()` is an EMPTY
+     * instance (browser truth: the form argument became optional). */
+    int argc = (int)xsToInteger(xsArgc);
+    DomNode *form = argc > 0 ? arg_node(the, 0) : NULL;
+    DomNode *sub = (argc > 1 && xsTypeOf(xsArg(1)) != xsUndefinedType &&
+                    xsTypeOf(xsArg(1)) != xsNullType)
+                       ? arg_node(the, 1)
+                       : NULL;
+    FormDataEntry *e;
+    int err = 0;
+    e = jsbridge_form_data_construct(b, form, sub, &err);
+    if (!e)
+    {
+        xsTypeError(err == 1 ? "FormData: parameter is not of type "
+                               "HTMLFormElement"
+                    : err == 2 ? "FormData: submitter is not this form's "
+                                 "descendant"
+                               : "FormData: too many FormData objects "
+                                 "this page");
+    }
+    xsResult = xsNewHostInstance(st->fdProto);
+    xs_set_host_data_site(the, "formdata", xsResult, e);
+}
+
+static void xs_build_formdata_proto(JsBridge *b)
+{
+    xsMachine *the = machine_of(b);
+    XsState *st = state_of(b);
+    st->fdProto = xsNewHostObject(NULL);
+    xsRemember(st->fdProto); /* root BEFORE the build allocates */
+    def_fn(the, st->fdProto, "append", xs_formdata_append, 2);
+    def_fn(the, st->fdProto, "get", xs_formdata_get, 1);
+    def_fn(the, st->fdProto, "getAll", xs_formdata_getAll, 1);
+    def_fn(the, st->fdProto, "has", xs_formdata_has, 1);
+    def_fn(the, st->fdProto, "set", xs_formdata_set, 2);
+    def_fn(the, st->fdProto, "delete", xs_formdata_delete, 1);
+    def_fn(the, st->fdProto, "entries", xs_formdata_entries, 0);
+    def_fn(the, st->fdProto, "keys", xs_formdata_keys, 0);
+    def_fn(the, st->fdProto, "values", xs_formdata_values, 0);
+    def_fn(the, st->fdProto, "forEach", xs_formdata_foreach, 2);
+
+    st->fdiProto = xsNewHostObject(NULL);
+    xsRemember(st->fdiProto);
+    def_fn(the, st->fdiProto, "next", xs_fditer_next, 0);
 }
 
 /* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note) ──

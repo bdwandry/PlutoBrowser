@@ -5474,6 +5474,7 @@ static void handle_element(Walker *w, const DomNode *node)
                               * unreachable; the "" is kept. */
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host toggle dispatch + JS checked road */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -5686,6 +5687,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
                 b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
                 b->inert = (w->inert > 0) || attr_has(a, "disabled");
+                b->srcNode = node; /* host pick dispatch + JS picker road */
                 add_block(w, b);
             }
         }

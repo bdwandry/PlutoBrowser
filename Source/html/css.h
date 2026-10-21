@@ -414,6 +414,14 @@ int css_compound_matches_attrs(const CssSimple *c, const char *tagLower,
                                const char *classAttr, const char *idAttr,
                                const CssDom *dom, const void *node);
 
+/* ── Forms-Phase 3: the shared constraint-pattern matcher (the honest
+ * common subset lives here so BOTH the CSS :valid/:invalid road and the
+ * JS validity layer run ONE rulebook; see the css.c block for the exact
+ * grammar). Returns 1 when `value` matches `pattern` under the pattern
+ * attribute's implicit ^…$ anchoring; an unsupported pattern never
+ * mismatches (a browser's invalid-pattern rule). */
+int css_pattern_matches(const char *pattern, const char *value);
+
 /* ── Parse sheets into the engine (clears it first). */
 void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount);
 

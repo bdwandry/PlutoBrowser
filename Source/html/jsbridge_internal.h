@@ -205,6 +205,33 @@ typedef struct
     void *ref;     /* engine-held wrapper ref (opaque per engine) */
 } JsElwEntry;
 
+/* Forms-Phase 5: FormData storage types (see the `fd[]` note in the
+ * bridge struct). Fixed caps keep the store allocation-free for the
+ * page's lifetime; over-cap values truncate honestly (the standing
+ * fb-policy shape) and beyond the pair cap the append is refused. */
+#define JSBRIDGE_FD_MAX 8           /* FormData instances per page */
+#define JSBRIDGE_FD_PAIRS 32        /* pairs per instance */
+#define JSBRIDGE_FD_NAME 40         /* entry-name bytes (incl NUL) */
+#define JSBRIDGE_FD_VALUE 240       /* entry-value bytes (incl NUL) */
+#define JSBRIDGE_FD_ITER_MAX 16     /* iterator objects per page */
+typedef struct
+{
+    char name[JSBRIDGE_FD_NAME];
+    char value[JSBRIDGE_FD_VALUE];
+} FdPair;
+typedef struct
+{
+    unsigned char used;   /* slot claimed by a live FormData */
+    int npairs;
+    FdPair pairs[JSBRIDGE_FD_PAIRS];
+} FormDataEntry;
+typedef struct
+{
+    unsigned char used;   /* slot claimed by a live iterator */
+    FormDataEntry *entry; /* the walked instance (bridge-stable addr) */
+    int idx;              /* next pair index */
+    unsigned char mode;   /* 0 entries / 1 keys / 2 values */
+} FormDataIter;
 
 typedef enum
 {
@@ -248,8 +275,12 @@ typedef struct
      * is 17 bytes with its NUL and was silently snprintf-truncated to
      * "DOMContentD", which row 483's registration stored as a dead
      * alias the drain dispatch (kind 3 scan) could never find.
-     * Frozen engines never set it (stays "" → their dispatch_click keeps
-     * answering kind matches only). */
+     * Forms-Phase 7: the frozen engines' addEventListener writes it too
+     * (the kind-6 lanes were dead before: their dispatches strcmp'd an
+     * always-empty buffer). The frozen click dispatch stays
+     * target-only (it never consults `type`) and unsupported types are
+     * still dropped at registration, so the standing click roads and
+     * the shared drain scan are unchanged. */
     char type[24];
 } JsListener;
 
@@ -359,6 +390,17 @@ struct JsBridge
     int elwCount;
     int elwOverflow; /* >ELW_MAX nodes this page (logged once) */
 
+    /* Forms-Phase 5: FormData storage — ONE bridge-owned fixed store that
+     * all three JS engines share (fresh per page via the attach memset):
+     * each instance holds its own pair array; iterators reference the
+     * entry they walk. Engines carry only stable addresses into these
+     * arrays (mujs userdata, duktape hidden pointer prop, XS host data),
+     * so NOTHING is allocated or freed on the engines' side — page-close
+     * semantics come for free, exactly like a browser: a FormData lives
+     * and dies with its page. Cap overflow throws honestly (contained). */
+    FormDataEntry fd[JSBRIDGE_FD_MAX];
+    FormDataIter fdi[JSBRIDGE_FD_ITER_MAX];
+
     /* API-P10: async module lane (see the JsModFlight note above).
      * modFlight = the in-flight remote modules + parked parents; the
      * ledger's modState gains 3 = remote-flighting. dynQ = dynamic
@@ -466,6 +508,18 @@ struct JsBridge
     unsigned char modOk[JSBRIDGE_MAX_MODULES];
     int modCount;
     int modSeq;
+
+    /* Forms-Phase 1: the engine-held focus state. One focused element per
+     * page (browser-true): el.focus() on an eligible, connected, not
+     * already-focused element latches + delivers a NON-bubbling 'focus'
+     * event to the target's kind-6 listeners; el.blur() clears the latch
+     * + delivers 'blur'. Switching focus away via another el.focus()
+     * moves the latch (blur() remains callable separately, like a
+     * browser handling focusout separately). NULL = no focused element.
+     * The node is arena-live for the page (like every wrapper target)
+     * and the bridge is memset(0) fresh per page. Never dereferenced —
+     * pointer-identity compare only — see xs_dispatch_focus_event. */
+    void *focusNode;
 };
 
 /* Engine id (kept in sync with storage jsEngine / settings rows). */
@@ -731,5 +785,118 @@ void jsbridge_worker_pin(JsBridge *b, int id, void *objRef);
  * with out filled, 0 on refusal. Never throws. */
 int jsbridge_hist_resolve_url(JsBridge *b, const char *raw,
                               char *out, size_t outLen);
+
+/* ── Forms-Phase 3: the native constraint validation layer ──────────────── */
+/* The ValidityState flags (bitmask over the browser's rule set; see the
+ * jsbridge.c block for the panel's step/customError boundaries). */
+#define JSBV_BADINPUT        0x0001
+#define JSBV_VALUEMISSING    0x0002
+#define JSBV_TYPEMISMATCH    0x0004
+#define JSBV_PATTERNMISMATCH 0x0008
+#define JSBV_TOOLONG         0x0010
+#define JSBV_TOOSHORT        0x0020
+#define JSBV_RANGEUNDERFLOW  0x0040
+#define JSBV_RANGEOVERFLOW   0x0080
+#define JSBV_STEPMISMATCH    0x0100
+#define JSBV_CUSTOMERROR     0x0200
+
+typedef struct JsbValidity
+{
+    unsigned flags;   /* JSBV_* bitmask; 0 = the control validates       */
+    char message[96]; /* the FIRST failing rule's browser-shaped message */
+} JsbValidity;
+
+/* willValidate candidate rule: 1 when the control is submittable and not
+ * barred (hidden/button/submit/reset/image inputs and <button> barred;
+ * disabled barred; text-family readonly barred; multiple select barred).
+ * Option/optgroup/other elements always 0. */
+int jsbridge_form_will_validate(JsBridge *b, DomNode *n);
+
+/* The one rule evaluator: fills flags + the first-failure message.
+ * Barred controls evaluate trivially valid (0 / ""). Never throws. */
+void jsbridge_form_validity_eval(JsBridge *b, DomNode *n, JsbValidity *out);
+
+/* Form-level gate: count the invalid candidate controls under formNode;
+ * the first `cap` offenders fill the caller's array, validityOut receives
+ * the FIRST offender's message. Returns the count (0 = the form passes).
+ * Callers own the array memory (bss scratch, fixed cap). */
+int jsbridge_form_check(JsBridge *b, DomNode *formNode, DomNode **offenders,
+                        int cap, JsbValidity *validityOut);
+
+/* ── Forms-Phase 4: the HTMLFormElement API host hooks ──────────────────── *
+ * main.c owns the wire (pending navigation, the site-profile routes, the
+ * page re-walks, the blocked-by-validation audit trail); the bridges own
+ * the JS surface (form methods on every engine). The hooks are registered
+ * ONCE at boot; nodes are LIVE DomNode pointers.
+ *   hostFormReset — browser form.reset(): every walked control returns to
+ *     its walk-time default; fires NO events; returns 1 when any control
+ *     state changed (the caller decides whether the re-walk matters).
+ *   hostFormWire  — the submission chain: (form, submitter, wantGate,
+ *     wantSubmitEvent). The gate is the Phase-3 constraint layer (the
+ *     form's novalidate and the submitter's formNovalidate are honored);
+ *     the submit event is cancelable (SUPPRESSED = a handler owns the
+ *     submission); the wire routes exactly like a tap (standard action
+ *     GET/POST, site profile, legacy self-GET). Returns 1 when the wire
+ *     engaged, 0 when blocked or handled. */
+typedef int (*JsbFormHostReset)(JsBridge *b, void *formNode);
+typedef int (*JsbFormHostWire)(JsBridge *b, void *formNode,
+                               void *submitterNode, int wantGate,
+                               int wantSubmitEvent);
+void jsbridge_set_form_hosts(JsbFormHostReset resetFn, JsbFormHostWire wireFn);
+int jsbridge_form_host_reset(JsBridge *b, void *formNode);
+int jsbridge_form_host_wire(JsBridge *b, void *formNode, void *submitterNode,
+                            int wantGate, int wantSubmitEvent);
+
+/* Form-controls collector (Phase 4 `elements` backing): every descendant
+ * INPUT/TEXTAREA/SELECT/BUTTON of formNode in tree order, engine-written
+ * into out (cap-sized). Returns the collected count. */
+int jsbridge_form_controls_collect(DomNode *formNode, void **out, int cap);
+
+/* ── Forms-Phase 5: FormData + serialization parity ─────────────────────
+ * ONE browser-true rulebook (see jsbridge_form_data_collect) feeds BOTH
+ * `new FormData(form[, submitter])` on every Forms engine AND the
+ * route-standard POST body — the phase bar is the parity between the
+ * JS-side form-data bytes and the actual POST wire bytes. */
+int jsbridge_form_data_collect(JsBridge *b, void *formNode,
+                               void *submitterNode, FdPair *out, int cap);
+/* Claim a free instance slot; NULL on failure (errCode 0 ok / 1
+ * not-a-form / 2 submitter-not-descendant / 3 fixed store full). */
+FormDataEntry *jsbridge_form_data_construct(JsBridge *b, void *formNode,
+                                            void *submitterNode,
+                                            int *errCode);
+void jsbridge_form_data_append(FormDataEntry *e, const char *name,
+                               const char *value);
+const char *jsbridge_form_data_get(const FormDataEntry *e, const char *name);
+int jsbridge_form_data_has(const FormDataEntry *e, const char *name);
+int jsbridge_form_data_set(FormDataEntry *e, const char *name,
+                           const char *value);
+int jsbridge_form_data_delete(FormDataEntry *e, const char *name);
+int jsbridge_form_data_count(const FormDataEntry *e);
+const FdPair *jsbridge_form_data_at(const FormDataEntry *e, int i);
+FormDataIter *jsbridge_form_data_iter(JsBridge *b, FormDataEntry *e,
+                                      int *full);
+FormDataEntry *jsbridge_form_data_iter_entry(const FormDataIter *it);
+/* The wire serializer: the form data set URL-encoded byte-for-byte with
+ * the standing x-www-form-urlencoded escaper (space → '+', %XX hex). */
+void jsbridge_form_data_urlenc(JsBridge *b, void *formNode,
+                               void *submitterNode, char *out, size_t cap);
+/* Forms-Phase 6: the text/plain wire serializer (the browser's own
+ * human-readable encoding — RAW name=value pairs joined with CRLF, no
+ * escaping; the value CRLF normalization rides the entry construction). */
+void jsbridge_form_data_plain(JsBridge *b, void *formNode,
+                              void *submitterNode, char *out, size_t cap);
+/* Forms-Phase 6: the form's enumerated IDL reflection helpers (spec:
+ * "limited to only known values") — the getter road on every engine's
+ * method/enctype/encoding accessor AND the wire road's resolution of
+ * the effective method/enctype, so reads and serialization cannot
+ * disagree. method → "get"/"post"/"dialog" (GET default); enctype →
+ * "application/x-www-form-urlencoded"/"multipart/form-data"/
+ * "text/plain" (urlencoded default). Static storage, no scratch. */
+const char *jsbridge_form_method_idl(const char *raw);
+const char *jsbridge_form_enctype_idl(const char *raw);
+/* The shared escaper core (the standing main.c serializer now wraps
+ * this — same byte rules, one rulebook). */
+void jsbridge_urlenc_cpy(const char *raw, char *out, size_t cap,
+                         size_t *used);
 
 #endif /* PLUTO_JSBIDGE_INTERNAL_H */

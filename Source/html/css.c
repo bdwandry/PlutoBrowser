@@ -18,6 +18,7 @@
 #include "css.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -31,9 +32,10 @@
  *   sib    = '+' / '~' combinators (sheet + querySelector selector paths)
  *   attrOp = [a~=b] / ^= / $= / *= / |= attribute operators
  *   pcls   = refused pseudo-classes + unknown ::pseudo-elements
- *            (compound dropped; the Phase 7 truth family — :target/
+ *            (compound dropped; the truth family — :target/
  *            :root/:disabled/:enabled/:checked/:placeholder-shown/
- *            :empty — and the consumed ::-family leave this counter)
+ *            :empty, and Forms-Phase 3's :required/:optional/:valid/
+ *            :invalid — and the consumed ::-family leave this counter)
  *   medF   = unknown @media feature (query correctly evaluates false)
  *   var    = declaration value contains "var("  (census only — var() resolves since Phase 2)
  *   calc   = declaration value contains "calc(" (census only — calc() evaluates since Phase 2)
@@ -2171,6 +2173,26 @@ static int parse_compound(const char *s, const char *z, CssSimple *out)
                 out->pclass = 15;
                 p = t;
             }
+            else if (ilen == 8 && css_eq_ncase(p + 1, "required", 8))
+            {
+                out->pclass = 16;
+                p = t;
+            }
+            else if (ilen == 8 && css_eq_ncase(p + 1, "optional", 8))
+            {
+                out->pclass = 17;
+                p = t;
+            }
+            else if (ilen == 5 && css_eq_ncase(p + 1, "valid", 5))
+            {
+                out->pclass = 18;
+                p = t;
+            }
+            else if (ilen == 7 && css_eq_ncase(p + 1, "invalid", 7))
+            {
+                out->pclass = 19;
+                p = t;
+            }
             else if (ilen == 3 && css_eq_ncase(p + 1, "not", 3) &&
                      p + 4 < z && p[4] == '(')
             {
@@ -3366,6 +3388,571 @@ void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
 }
 
 /* ── 3. matching ──────────────────────────────────────────────────────────── */
+
+/* ── Pattern semantics (a browser compiles pattern into the page's own
+ * JS RegExp). This layer ships the honest common subset: literals, '.',
+ * [] classes (ranges + leading-^ negation + \d\w\s inside), the
+ * \d\D\w\W\s\S escapes, * + ? {n} {n,} {n,m} quantifiers, and top-level
+ * | alternation — anchored with the implicit ^…$ the spec mandates.
+ * Groups (…) and backreferences are OUT: such patterns fail to COMPILE
+ * and then never report a mismatch — a browser's invalid-pattern rule.
+ * Bounded compile + a ladder matcher keep any sheet input off a
+ * runaway path. */
+typedef struct CssPatAtom
+{
+    unsigned char kind; /* 0 literal, 1 '.', 2 class, 3 \sugar, 4 | split */
+    char c;             /* literal char, or sugar class letter (d/w/s)   */
+    unsigned char neg;  /* negated class/sugar                           */
+    char set[96];       /* class member bytes (ranges pre-expanded)      */
+    unsigned char min;  /* quantifier floor                              */
+    unsigned char max;  /* quantifier ceiling, 255 = unbounded           */
+} CssPatAtom;
+#define CSS_PAT_MAX 40
+
+static void cssp_set_put(char *set, size_t cap, char one)
+{
+    size_t l = strlen(set);
+    if (l + 1 < cap)
+    {
+        set[l] = one;
+        set[l + 1] = '\0';
+    }
+}
+
+static void cssp_set_append(char *set, size_t cap, const char *extra)
+{
+    size_t l = strlen(set);
+    for (const char *e = extra; *e && l + 1 < cap; e++)
+    {
+        set[l++] = *e;
+    }
+    set[l] = '\0';
+}
+
+/* Compile. Returns the atom count (≥0) or -1 on unsupported syntax. */
+static int cssp_pattern_compile(const char *pat, CssPatAtom *atoms)
+{
+    int n = 0;
+    const char *p = pat;
+    int inClass = 0;
+    while (*p)
+    {
+        if (n >= CSS_PAT_MAX)
+        {
+            return -1;
+        }
+        CssPatAtom *a = &atoms[n];
+        memset(a, 0, sizeof(*a));
+        a->max = 255;
+        if (p[0] == '\\')
+        {
+            p++;
+            if (!*p)
+            {
+                return -1;
+            }
+            char s = *p++;
+            if (s == 'd' || s == 'D' || s == 'w' || s == 'W' || s == 's' ||
+                s == 'S')
+            {
+                a->kind = 3;
+                a->neg = (s == 'D' || s == 'W' || s == 'S') ? 1 : 0;
+                a->c = (char)(s | 0x20);
+            }
+            else
+            {
+                a->kind = 0;
+                a->c = s;
+            }
+        }
+        else if (*p == '[')
+        {
+            p++;
+            a->kind = 2;
+            inClass = 1;
+            if (*p == '^')
+            {
+                a->neg = 1;
+                p++;
+            }
+            while (*p && *p != ']')
+            {
+                if (p[0] == '\\' && (p[1] == 'd' || p[1] == 'w' ||
+                                     p[1] == 's'))
+                {
+                    cssp_set_append(
+                        a->set, sizeof(a->set),
+                        p[1] == 'd'
+                            ? "0123456789"
+                            : (p[1] == 'w'
+                                   ? "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                     "0123456789_"
+                                   : " \t\n\r\f\v"));
+                    p += 2;
+                    continue;
+                }
+                if (p[0] == '\\' &&
+                    (p[1] == 'D' || p[1] == 'W' || p[1] == 'S'))
+                {
+                    return -1; /* complement escapes are outside the subset */
+                }
+                if (p[0] == '\\' && p[1])
+                {
+                    cssp_set_put(a->set, sizeof(a->set), p[1]);
+                    p += 2;
+                    continue;
+                }
+                if (p[1] == '-' && p[2] && p[2] != ']')
+                {
+                    char lo = p[0], hi = p[2];
+                    if (lo > hi)
+                    {
+                        return -1;
+                    }
+                    for (int ch = lo; ch <= hi; ch++)
+                    {
+                        cssp_set_put(a->set, sizeof(a->set), (char)ch);
+                    }
+                    p += 3;
+                    continue;
+                }
+                cssp_set_put(a->set, sizeof(a->set), *p);
+                p++;
+            }
+            if (*p != ']')
+            {
+                return -1;
+            }
+            p++;
+            inClass = 0;
+        }
+        else if (*p == '(' || *p == ')')
+        {
+            return -1; /* groups are outside the subset */
+        }
+        else if (*p == '|')
+        {
+            a->kind = 4;
+            p++;
+        }
+        else
+        {
+            a->kind = 0;
+            a->c = *p++;
+        }
+        if (!inClass)
+        {
+            if (*p == '*')
+            {
+                a->min = 0;
+                a->max = 255;
+                p++;
+            }
+            else if (*p == '+')
+            {
+                a->min = 1;
+                a->max = 255;
+                p++;
+            }
+            else if (*p == '?')
+            {
+                a->min = 0;
+                a->max = 1;
+                p++;
+            }
+            else if (*p == '{')
+            {
+                const char *q = strchr(p, '}');
+                size_t ll = q ? (size_t)(q - p - 1) : 0;
+                if (!q || ll == 0 || ll >= 8)
+                {
+                    return -1;
+                }
+                char mid[8];
+                memcpy(mid, p + 1, ll);
+                mid[ll] = '\0';
+                int lo = 0, hi = 0, comma = 0;
+                char *cpos = strchr(mid, ',');
+                if (cpos)
+                {
+                    comma = 1;
+                    *cpos = '\0';
+                }
+                for (const char *d = mid; *d; d++)
+                {
+                    if (*d < '0' || *d > '9')
+                    {
+                        return -1;
+                    }
+                }
+                lo = mid[0] ? atoi(mid) : 0;
+                if (comma)
+                {
+                    for (const char *d = cpos + 1; *d; d++)
+                    {
+                        if (*d < '0' || *d > '9')
+                        {
+                            return -1;
+                        }
+                    }
+                    hi = cpos[1] ? atoi(cpos + 1) : 0; /* 0 = open-ended */
+                }
+                else
+                {
+                    hi = lo;
+                }
+                if (lo > 200 || (hi && lo > hi))
+                {
+                    return -1;
+                }
+                a->min = (unsigned char)lo;
+                a->max =
+                    (unsigned char)((comma && !hi) ? 255 : (hi ? hi : lo));
+                p = q + 1;
+            }
+        }
+        atoms[n++] = *a;
+    }
+    /* the spec anchors the pattern implicitly at both ends; explicit
+     * leading '^' / trailing '$' are redundant but browsers treat them
+     * as anchors too — the matcher below never treats them as data, so
+     * strip a truly-anchored leading '^' / trailing '$' */
+    if (n > 0 && atoms[0].kind == 0 && atoms[0].c == '^')
+    {
+        memmove(&atoms[0], &atoms[1], sizeof(CssPatAtom) * (size_t)(n - 1));
+        memset(&atoms[n - 1], 0, sizeof(CssPatAtom));
+        atoms[n - 1].max = 255;
+        n--;
+    }
+    if (n > 0 && atoms[n - 1].kind == 0 && atoms[n - 1].c == '$')
+    {
+        memset(&atoms[n - 1], 0, sizeof(CssPatAtom));
+        atoms[n - 1].max = 255;
+        n--;
+    }
+    return n;
+}
+
+static int cssp_atom_one(CssPatAtom *a, char c)
+{
+    switch (a->kind)
+    {
+    case 0:
+        return c == a->c;
+    case 1:
+        return 1;
+    case 3:
+    {
+        int hit = 0;
+        switch (a->c)
+        {
+        case 'd':
+            hit = (c >= '0' && c <= '9');
+            break;
+        case 'w':
+            hit = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_');
+            break;
+        case 's':
+            hit = (c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                   c == '\f' || c == '\v');
+            break;
+        }
+        return a->neg ? !hit : hit;
+    }
+    case 2:
+    {
+        int hit = 0;
+        for (const char *s = a->set; *s; s++)
+        {
+            if (*s == c)
+            {
+                hit = 1;
+                break;
+            }
+        }
+        return a->neg ? !hit : hit;
+    }
+    }
+    return 0;
+}
+
+/* Atoms[lo..hi) must consume ALL of v (no | inside a branch — compile
+ * sorts those into separate branches first). */
+static int cssp_branch_at(CssPatAtom *atoms, int lo, int hi, const char *v,
+                          int depth)
+{
+    if (depth > 64)
+    {
+        return 0;
+    }
+    if (lo >= hi)
+    {
+        return *v == '\0';
+    }
+    CssPatAtom *a = &atoms[lo];
+    int avail = (int)strlen(v);
+    unsigned int amax = (a->max == 255) ? (unsigned)avail : a->max;
+    for (int k = a->min; k <= (int)amax; k++)
+    {
+        int ok = 1;
+        for (int j = 0; j < k; j++)
+        {
+            if (!v[j] || !cssp_atom_one(a, v[j]))
+            {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok)
+        {
+            break; /* longer prefixes can do no better */
+        }
+        if (cssp_branch_at(atoms, lo + 1, hi, v + k, depth + 1))
+        {
+            return 1;
+        }
+        if (k == 0)
+        {
+            break; /* zero-rep atoms don't ladder further here */
+        }
+    }
+    return 0;
+}
+
+/* One branch at [i..nextSplit) or the end; try each in order. */
+static int cssp_alt_at(CssPatAtom *atoms, int n, int i, const char *v,
+                       int depth)
+{
+    if (depth > 64)
+    {
+        return 0;
+    }
+    int j = i;
+    while (j < n && atoms[j].kind != 4)
+    {
+        j++;
+    }
+    if (cssp_branch_at(atoms, i, j, v, depth + 1))
+    {
+        return 1;
+    }
+    if (j < n)
+    {
+        return cssp_alt_at(atoms, n, j + 1, v, depth + 1);
+    }
+    return 0;
+}
+
+int css_pattern_matches(const char *pat, const char *val)
+{
+    if (!pat || !pat[0])
+    {
+        return 1;
+    }
+    CssPatAtom atoms[CSS_PAT_MAX];
+    int n = cssp_pattern_compile(pat, atoms);
+    if (n < 0)
+    {
+        return 1; /* unsupported pattern: never a mismatch */
+    }
+    if (cssp_alt_at(atoms, n, 0, val, 0))
+    {
+        return 1;
+    }
+    return 0; /* every compiled branch failed → mismatch */
+}
+
+/* The willValidate candidate rule (browser): submittable-and-not-barred
+ * controls. Hidden/button/submit/reset/image inputs and <button> are
+ * barred; disabled controls are barred; text-family readonly barred; a
+ * multiple select barred. (Fieldset-inherited disabled does NOT bar
+
+/* ── Forms-Phase 3: the stylesheet-side constraint state ────────────────
+ * :required/:optional and :valid/:invalid join the honest Phase-7
+ * family (real state from real attributes). The JS engine's FULL rule
+ * layer lives in jsbridge.c; THIS road reads what the CSS engine can
+ * see — element attributes through the CssDom hooks. Boundaries:
+ *   - textarea/select values read through `childless` (no text-concat
+ *     hook): a required textarea/select with no content children is
+ *     :invalid (spec valueMissing), their other rules don't apply here.
+ *   - readonly, disabled, hidden/button/submit/reset/image inputs are
+ *     barred candidates → trivially :valid, never :invalid (browser
+ *     truth), and :required/:optional only see candidate tags. */
+static int css_gr_candidate(const char *tagLower)
+{
+    size_t tl = tagLower ? strlen(tagLower) : 0;
+    if (tl == 5 && css_eq_ncase(tagLower, "input", 5))
+    {
+        return 1;
+    }
+    if (tl == 8 && css_eq_ncase(tagLower, "textarea", 8))
+    {
+        return 1;
+    }
+    if (tl == 6 && css_eq_ncase(tagLower, "select", 6))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+/* 1 = failing its constraints; 0 = passing (incl. barred candidates,
+ * trivially valid); -1 = unknowable (no hooks) → both pseudos skip. */
+static int css_gr_constraint_bad(const char *tagLower, const CssDom *dom,
+                                 const void *node)
+{
+    if (!dom || !dom->attr || !node || !tagLower)
+    {
+        return -1;
+    }
+    size_t tl = strlen(tagLower);
+    const char *req = dom->attr(node, "required", 8);
+    if (tl == 8 && css_eq_ncase(tagLower, "textarea", 8))
+    {
+        if (req && dom->childless && dom->childless(node) == 1)
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if (tl == 6 && css_eq_ncase(tagLower, "select", 6))
+    {
+        if (req && dom->childless && dom->childless(node) == 1)
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if (tl != 5 || !css_eq_ncase(tagLower, "input", 5))
+    {
+        return -1;
+    }
+    const char *tv = dom->attr(node, "type", 4);
+    const char *t = (tv && tv[0]) ? tv : "text";
+    if (!strcmp(t, "hidden") || !strcmp(t, "button") ||
+        !strcmp(t, "submit") || !strcmp(t, "reset") ||
+        !strcmp(t, "image"))
+    {
+        return 0; /* barred: trivially valid, browser-true */
+    }
+    if (dom->attr(node, "disabled", 8) || dom->attr(node, "readonly", 8))
+    {
+        return 0; /* barred: trivially valid */
+    }
+    const char *v = dom->attr(node, "value", 5);
+    size_t vl = v ? strlen(v) : 0;
+    if (!strcmp(t, "checkbox") || !strcmp(t, "radio"))
+    {
+        return (req && !dom->attr(node, "checked", 7)) ? 1 : 0;
+    }
+    if (req && vl == 0)
+    {
+        return 1;
+    }
+    if (vl == 0)
+    {
+        return 0;
+    }
+    if (!strcmp(t, "email"))
+    {
+        /* shape: non-empty local part, an @, a dotted host, no spaces */
+        const char *at = strchr(v, '@');
+        if (!(at && at != v && at[1] && strchr(at + 1, '.') &&
+              !strchr(v, ' ')))
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if (!strcmp(t, "url"))
+    {
+        /* shape: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":" */
+        if (!((v[0] >= 'a' && v[0] <= 'z') || (v[0] >= 'A' && v[0] <= 'Z')))
+        {
+            return 1;
+        }
+        size_t i = 1;
+        while (v[i] && v[i] != ':' &&
+               (((v[i] | 32) >= 'a' && (v[i] | 32) <= 'z') ||
+                (v[i] >= '0' && v[i] <= '9') || v[i] == '+' ||
+                v[i] == '-' || v[i] == '.'))
+        {
+            i++;
+        }
+        if (!(v[i] == ':' && i <= 32))
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if (!strcmp(t, "number"))
+    {
+        /* parse + the range bounds (badInput for unparseable, browser
+         * truth for trailing whitespace) */
+        double num;
+        char *end = NULL;
+        size_t i = vl;
+        while (i > 0 && css_isspace(v[i - 1]))
+        {
+            i--;
+        }
+        num = strtod(v, &end);
+        if (!end || (size_t)(end - v) != i)
+        {
+            return 1; /* badInput */
+        }
+        const char *mv = dom->attr(node, "min", 3);
+        if (mv && mv[0])
+        {
+            double mn = strtod(mv, &end);
+            if (end && !end[0] && num < mn)
+            {
+                return 1;
+            }
+        }
+        mv = dom->attr(node, "max", 3);
+        if (mv && mv[0])
+        {
+            double mx = strtod(mv, &end);
+            if (end && !end[0] && num > mx)
+            {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    /* pattern (the shared honest-subset matcher), then length bounds */
+    const char *pat = dom->attr(node, "pattern", 7);
+    if (pat && !css_pattern_matches(pat, v))
+    {
+        return 1;
+    }
+    {
+        const char *mv = dom->attr(node, "maxlength", 9);
+        if (mv && mv[0])
+        {
+            char *end = NULL;
+            long maxl = strtol(mv, &end, 10);
+            if (end && !end[0] && maxl >= 0 && (int)vl > (int)maxl)
+            {
+                return 1;
+            }
+        }
+        mv = dom->attr(node, "minlength", 9);
+        if (mv && mv[0])
+        {
+            char *end = NULL;
+            long minl = strtol(mv, &end, 10);
+            if (end && !end[0] && minl >= 0 && (int)vl < (int)minl)
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 int css_compound_matches(const CssSimple *c, const char *tagLower,
                           const char *classAttr, const char *idAttr,
                           const CssDom *dom, const void *node)
@@ -3661,6 +4248,48 @@ int css_compound_matches(const CssSimple *c, const char *tagLower,
             if (!dom || !dom->childless || dom->childless(node) != 1)
             {
                 return 0;
+            }
+        }
+        else if (c->pclass == 16)
+        {
+            /* :required — a candidate control (input/textarea/select)
+             * carrying the required attribute. Browsers keep :required
+             * on disabled controls (the attr shows), so only the tag
+             * family and the barred input types gate here. */
+            if (!dom || !dom->attr || !css_gr_candidate(tagLower) ||
+                !dom->attr(node, "required", 8))
+            {
+                return 0;
+            }
+        }
+        else if (c->pclass == 17)
+        {
+            /* :optional — a candidate control with no required attr. */
+            if (!dom || !dom->attr || !css_gr_candidate(tagLower) ||
+                dom->attr(node, "required", 8))
+            {
+                return 0;
+            }
+        }
+        else if (c->pclass == 18 || c->pclass == 19)
+        {
+            /* :valid/:invalid — the constraint state, honest from the
+             * attributes (see css_gr_constraint_bad). -1 (unknowable →
+             * no hooks) matches neither, graceful. */
+            int bad = css_gr_constraint_bad(tagLower, dom, node);
+            if (c->pclass == 18)
+            {
+                if (bad != 0)
+                {
+                    return 0;
+                }
+            }
+            else
+            {
+                if (bad != 1)
+                {
+                    return 0;
+                }
             }
         }
     }

@@ -1758,6 +1758,321 @@ static const char APIPROBE_HTML[] =
     "})();\n"
     "</script></body></html>\n";
 
+/* about:formprobe — Forms & interaction capability battery (the Forms
+ * program's Phase 0 baseline page). Every row feature-detects a browser-
+ * true form capability in the live engine — nothing is hard-coded to
+ * pass. Road guards use the `in`-membership test so only PROTOTYPE-level
+ * accessors (real engine roads) count — a plain expando write can never
+ * fake a PASS. Four POLICY rows state the device-truth non-features so
+ * nothing is silently relitigated. Forms-Phase 6 adds the dialog-method
+ * fixture (fpdlg — the spec's "otherwise not submit" hold, receipted by
+ * the formval driver's tap) and the method/enctype reflection rows.
+ * The fixture form doubles as the manual-interaction surface; the
+ * Events battery self-drives the roads the engine actually exposes
+ * (focus()/blur()/click() attempts guarded by typeof, the submit
+ * handler preventDefaults so the page never navigates) and receipts
+ * the counters once at settle. Rows fire by parse order (script comes
+ * after its fixtures). Plain ES5 throughout — the page runs unchanged
+ * wherever the vocabulary exists. */
+static const char FORMPROBE_HTML[] =
+    "<!DOCTYPE html><html><head><title>Form Probe</title><style>\n"
+    "body { background: white; color: black; }\n"
+    "h1 { font-size: 2em; }\n"
+    ".sum { font-weight: bold; }\n"
+    "</style></head><body>\n"
+    "<h1>Form Probe</h1>\n"
+    "<p>Forms &amp; interaction capability battery — Phase 0 baseline run.</p>\n"
+    "<p class=\"sum\" id=\"formsum\">formsum: pending</p>\n"
+    "<div id=\"out\"></div>\n"
+    "<h2>Field fixtures</h2>\n"
+    "<form id=\"fpf\">\n"
+    "<p>Text: <input id=\"fpt\" type=\"text\" name=\"text\" value=\"seed\"></p>\n"
+    "<p>Story: <textarea id=\"fpta\" name=\"story\" rows=\"2\">hello</textarea></p>\n"
+    "<p><input id=\"fpcb\" type=\"checkbox\" name=\"opt1\" checked> One (checked)</p>\n"
+    "<p><input id=\"fpcb2\" type=\"checkbox\" name=\"opt2\"> Two (unchecked)</p>\n"
+    "<p><input id=\"fpra\" type=\"radio\" name=\"grp\" value=\"a\" checked> Radio A</p>\n"
+    "<p><input id=\"fprb\" type=\"radio\" name=\"grp\" value=\"b\"> Radio B</p>\n"
+    "<p>Pick: <select id=\"fpsel\" name=\"pick\"><option>Alpha</option><option selected>Beta</option><option>Gamma</option></select></p>\n"
+    "<p><input id=\"fpsend\" type=\"submit\" value=\"Send probe\"> <input id=\"fprst\" type=\"reset\" value=\"Reset probe\"></p>\n"
+    "</form>\n"
+    "<h2>Validation fixtures</h2>\n"
+    "<p>Forms-Phase 3 battery fields — the per-rule rule rows read these.</p>\n"
+    "<form id=\"fpv\">\n"
+    "<p><input id=\"fprq\" type=\"text\" name=\"rv\" required placeholder=\"required\"></p>\n"
+    "<p><input id=\"fppat\" type=\"text\" name=\"pv\" pattern=\"[0-9]+\" value=\"abc\"></p>\n"
+    "<p><input id=\"fpplong\" type=\"text\" name=\"lv\" maxlength=\"4\" value=\"pluto\"></p>\n"
+    "<p><input id=\"fpshort\" type=\"text\" name=\"sv\" minlength=\"4\" value=\"ab\"></p>\n"
+    "<p><input id=\"fpnum\" type=\"number\" name=\"nv\" min=\"3\" max=\"9\" value=\"11\"></p>\n"
+    "<p><textarea id=\"fvta\" name=\"tv\" rows=\"2\">story</textarea></p>\n"
+    "<p><input id=\"fphide\" type=\"hidden\" name=\"hv\" value=\"h\"></p>\n"
+    "<p><input id=\"fpdis\" type=\"text\" name=\"dv\" disabled></p>\n"
+    "<p><input type=\"submit\" value=\"Validate me\"></p>\n"
+    "</form>\n"
+    "<h2>FormData fixtures</h2>\n"
+    "<p>Forms-Phase 5 parity form — the battery builds FormData from this\n"
+    "same form and submits it; the [fbform] POST line carries the wire\n"
+    "bytes (engage: fd.submit(), no gate, no submitter pair).</p>\n"
+    "<form id=\"fdp\" method=\"post\" action=\"about:formprobe\">\n"
+    "<p>U: <input id=\"fdpu\" name=\"user\" value=\"Pluto\"></p>\n"
+    "<p>A: <input id=\"fdpa\" name=\"age\" value=\"7\"></p>\n"
+    "<p>N: <input id=\"fdpuu\" type=\"text\" value=\"noname\"></p>\n"
+    "<p>M: <textarea id=\"fdpt\" name=\"msg\">hello world</textarea></p>\n"
+    "<p><input id=\"fdph\" type=\"hidden\" name=\"hdn\" value=\"h1\"></p>\n"
+    "<p><input id=\"fdpd\" type=\"text\" name=\"dv\" value=\"xd\" disabled></p>\n"
+    "<p>C: <input id=\"fdpc\" name=\"ck\" type=\"checkbox\" checked></p>\n"
+    "<p><button id=\"fdpb\" type=\"submit\">Send</button></p>\n"
+    "</form>\n"
+    "<h2>Dialog fixture</h2>\n"
+    "<p>Forms-Phase 6 — method=dialog: with no ancestor dialog element the\n"
+    "submission is the spec's honest no-op (\"otherwise not submit\"); the\n"
+    "driver taps this button through the real tap lane and receipts the\n"
+    "hold (the page stays on the GET URL the wire produced).</p>\n"
+    "<form id=\"fpdlg\" method=\"dialog\">\n"
+    "<p>F: <input id=\"fpdlgu\" name=\"dlguser\" value=\"held\"></p>\n"
+    "<p><button id=\"fpdlgb\" name=\"dlgbtn\" value=\"1\" type=\"submit\">Hold page</button></p>\n"
+    "</form>\n"
+    "<p class=\"sum\" id=\"formev\">formev: pending</p>\n"
+    "<div id=\"outev\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('out');\n"
+    "  var sumEl = document.getElementById('formsum');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    "  var npass = 0, nmiss = 0, npol = 0;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    var vs = String(verdict);\n"
+    "    if (vs.indexOf('PASS') === 0) { npass = npass + 1; }\n"
+    "    else if (vs.indexOf('POLICY') === 0) { npol = npol + 1; }\n"
+    "    else { nmiss = nmiss + 1; }\n"
+    "    console.log('[formprobe] ' + name + ': ' + vs);\n"
+    "  }\n"
+    "  function iscallable(v) { return typeof v === 'function'; }\n"
+    "  try { row('title', document.title === 'Form Probe' ? 'PASS' : 'MISS'); } catch (e) { row('title', 'MISS'); }\n"
+    "  var f = null, ta = null, cb = null, cb2 = null, ra = null, rb = null, sel = null, btn = null, rst = null, fm = null;\n"
+    "  try {\n"
+    "    f = document.getElementById('fpt');\n"
+    "    ta = document.getElementById('fpta');\n"
+    "    cb = document.getElementById('fpcb');\n"
+    "    cb2 = document.getElementById('fpcb2');\n"
+    "    ra = document.getElementById('fpra');\n"
+    "    rb = document.getElementById('fprb');\n"
+    "    sel = document.getElementById('fpsel');\n"
+    "    btn = document.getElementById('fpsend');\n"
+    "    rst = document.getElementById('fprst');\n"
+    "    fm = document.getElementById('fpf');\n"
+    "    row('fixtures', f && ta && cb && cb2 && ra && rb && sel && btn && rst && fm ? 'PASS' : 'MISS');\n"
+    "  } catch (e) { row('fixtures', 'MISS'); }\n"
+    "  var fprq = null, fppat = null, fpplong = null, fpshort = null, fpnum = null, fvta = null, fphide = null, fpdis = null, icount = 0;\n"
+    "  try {\n"
+    "    fprq = document.getElementById('fprq');\n"
+    "    fppat = document.getElementById('fppat');\n"
+    "    fpplong = document.getElementById('fpplong');\n"
+    "    fpshort = document.getElementById('fpshort');\n"
+    "    fpnum = document.getElementById('fpnum');\n"
+    "    fvta = document.getElementById('fvta');\n"
+    "    fphide = document.getElementById('fphide');\n"
+    "    fpdis = document.getElementById('fpdis');\n"
+    "    if (fppat && fppat.addEventListener) {\n"
+    "      fppat.addEventListener('invalid', function () { icount = icount + 1; });\n"
+    "    }\n"
+    "  } catch (e) {}\n"
+    "  try { row('types', f && f.type === 'text' && btn && btn.type === 'submit' ? 'PASS' : 'MISS t=' + String(f && f.type) + ',' + String(btn && btn.type)); } catch (e) { row('types', 'MISS'); }\n"
+    "  try { var v = f ? f.value : undefined; row('valread', f && v === 'seed' ? 'PASS' : 'MISS v=' + String(v)); } catch (e) { row('valread', 'MISS'); }\n"
+    "  try { var back = ''; if (f && ('value' in f)) { f.value = 'pluto'; back = f.value; f.value = 'seed'; } row('valwrite', back === 'pluto' ? 'PASS' : 'MISS back=' + back); } catch (e) { row('valwrite', 'MISS'); }\n"
+    "  try { var tv = ta ? ta.value : undefined, tw = ''; if (ta && ('value' in ta)) { ta.value = 'wrote'; tw = ta.value; try { ta.removeAttribute('value'); } catch (ee) {} } row('textarea', (tv === 'hello' && tw === 'wrote') ? 'PASS' : 'MISS v=' + String(tv) + ' w=' + String(tw)); } catch (e) { row('textarea', 'MISS'); }\n"
+    "  try { row('checkbox', cb && cb2 && ('checked' in cb) && ('checked' in cb2) && cb.checked === true && cb2.checked === false ? 'PASS' : 'MISS c=' + String(cb && cb.checked) + ',' + String(cb2 && cb2.checked)); } catch (e) { row('checkbox', 'MISS'); }\n"
+    "  try { row('radiogroup', ra && rb && ('checked' in ra) && ('checked' in rb) && ra.checked === true && rb.checked === false ? 'PASS' : 'MISS r=' + String(ra && ra.checked) + ',' + String(rb && rb.checked)); } catch (e) { row('radiogroup', 'MISS'); }\n"
+    "  var rpair = 'thr';\n"
+    "  try {\n"
+    "    if (rb && ('checked' in rb)) {\n"
+    "      rb.checked = true;\n"
+    "      rpair = 'rb=' + String(rb.checked) + ',' + String(ra && ra.checked);\n"
+    "      rb.checked = false;\n"
+    "      if (ra && ('checked' in ra)) { ra.checked = true; }\n"
+    "    }\n"
+    "  } catch (e) { rpair = 'thr'; }\n"
+    "  row('radiowrite', rpair === 'rb=true,false' ? 'PASS' : 'MISS ' + rpair);\n"
+    "  try { var sv = sel ? sel.value : undefined, si = sel ? sel.selectedIndex : undefined; row('selectvalue', (sel && ('value' in sel) && ('selectedIndex' in sel) && sv === 'Beta' && si === 1) ? 'PASS' : 'MISS v=' + String(sv) + ' i=' + String(si)); } catch (e) { row('selectvalue', 'MISS'); }\n"
+    "  try { row('focusroad', f && ('focus' in f) && ('blur' in f) && iscallable(f.focus) ? 'PASS' : 'MISS'); } catch (e) { row('focusroad', 'MISS'); }\n"
+    "  try { row('btnclk', btn && ('click' in btn) && iscallable(btn.click) ? 'PASS' : 'MISS'); } catch (e) { row('btnclk', 'MISS'); }\n"
+    "  try { row('formstate', fm && ('reset' in fm) && ('elements' in fm) ? 'PASS' : 'MISS'); } catch (e) { row('formstate', 'MISS'); }\n"
+    "  try { row('formsubmit', fm && ('submit' in fm) && ('requestSubmit' in fm) ? 'PASS' : 'MISS'); } catch (e) { row('formsubmit', 'MISS'); }\n"
+    "  try {\n"
+    "    var step = 0, ok = false, n = 0, s = '';\n"
+    "    step = 1; var dform = document.getElementById('fdp');\n"
+    "    step = 2; var hasC = typeof FormData === 'function';\n"
+    "    step = 3; var fd = hasC && dform ? new FormData(dform) : null;\n"
+    "    step = 4; var ok4 = !!fd && typeof fd.append === 'function' && typeof fd.get === 'function' && typeof fd.getAll === 'function' && typeof fd.has === 'function' && typeof fd.set === 'function' && typeof fd.delete === 'function' && typeof fd.entries === 'function';\n"
+    "    if (ok4) {\n"
+    "      step = 5; var it = fd.entries(), r = it.next();\n"
+    "      step = 6; ok = r && r.done === false && r.value && r.value.length === 2 && r.value[0] === 'user' && r.value[1] === 'Pluto';\n"
+    "      step = 7; ok = ok && fd.get('msg') === 'hello world';\n"
+    "      step = 8; ok = ok && fd.has('age') === true && fd.has('zz') === false;\n"
+    "      step = 9; ok = ok && !fd.has('dv') && !fd.has('fdpuu') && !fd.has('fdpb');\n"
+    "      step = 10; ok = ok && fd.get('ck') === 'on';\n"
+    "      step = 11; ok = ok && fd.getAll('user').length === 1;\n"
+    "      step = 12; var fde = new FormData(); ok = ok && fde.get('none') === null && fde.has('none') === false;\n"
+    "      step = 13; fd.append('user', 'u2');\n"
+    "      step = 14; ok = ok && fd.getAll('user').length === 2;\n"
+    "      step = 15; fd.set('user', 'only');\n"
+    "      step = 16; ok = ok && fd.get('user') === 'only' && fd.getAll('user').length === 1;\n"
+    "      step = 17; fd.delete('user');\n"
+    "      step = 18; ok = ok && fd.has('user') === false;\n"
+    "      step = 19; var fd2 = new FormData(dform);\n"
+    "      step = 20; s = '';\n"
+    "      step = 21; it = fd2.entries();\n"
+    "      step = 22; r = it.next();\n"
+    "      while (r && r.done === false) {\n"
+    "        s = s + (n ? '&' : '') + encodeURIComponent(r.value[0]) + '=' + encodeURIComponent(r.value[1]);\n"
+    "        n = n + 1;\n"
+    "        r = it.next();\n"
+    "      }\n"
+    "      step = 23; s = s.split('%20').join('+');\n"
+    "      step = 24; ok = ok && n === 5 && s.length === 45;\n"
+    "      row('formdata', ok ? 'PASS len=' + s.length : 'MISS n=' + n + ' len=' + s.length);\n"
+    "    } else {\n"
+    "      row('formdata', 'MISS ctor t=' + (typeof FormData));\n"
+    "    }\n"
+    "  } catch (e) { row('formdata', 'MISS ex=' + String(e).slice(0, 30)); }\n"
+    "  try { row('validity', f && f.validity && iscallable(f.checkValidity) && typeof f.validationMessage === 'string' && typeof f.willValidate === 'boolean' ? 'PASS' : 'MISS'); } catch (e) { row('validity', 'MISS'); }\n"
+    "  try { var vp = fvta ? fvta.validity : undefined; row('validshape', vp && typeof vp === 'object' && vp.valid === true && ('valueMissing' in vp) && ('patternMismatch' in vp) && ('stepMismatch' in vp) ? 'PASS' : 'MISS'); } catch (e) { row('validshape', 'MISS'); }\n"
+    "  try { var bad = fprq && fprq.checkValidity() === false; var vm = bad && fprq.validity && fprq.validity.valueMissing === true; var msg = vm && typeof fprq.validationMessage === 'string' && fprq.validationMessage.length > 0; if (fprq) { fprq.value = 'ok'; } var okv = fprq && fprq.checkValidity() === true && fprq.validity.valid === true; if (fprq) { fprq.value = ''; } row('validreq', bad && vm && msg && okv ? 'PASS' : 'MISS b=' + (bad ? 1 : 0) + ' v=' + (vm ? 1 : 0) + ' m=' + (msg ? 1 : 0) + ' o=' + (okv ? 1 : 0)); } catch (e) { row('validreq', 'MISS'); }\n"
+    "  try { var pm0 = fppat && fppat.checkValidity() === false && fppat.validity.patternMismatch === true; if (fppat) { fppat.value = '123'; } var pm1 = fppat && fppat.checkValidity() === true; if (fppat) { fppat.value = 'abc'; } row('validpat', pm0 && pm1 ? 'PASS' : 'MISS'); } catch (e) { row('validpat', 'MISS'); }\n"
+    "  try { var tl = fpplong && fpplong.checkValidity() === false && fpplong.validity.tooLong === true; var ts = fpshort && fpshort.checkValidity() === false && fpshort.validity.tooShort === true; row('validlen', tl && ts ? 'PASS' : 'MISS'); } catch (e) { row('validlen', 'MISS'); }\n"
+    "  try { var ov = fpnum && fpnum.checkValidity() === false && fpnum.validity.rangeOverflow === true; if (fpnum) { fpnum.value = '1'; } var uf = fpnum && fpnum.checkValidity() === false && fpnum.validity.rangeUnderflow === true; if (fpnum) { fpnum.value = '5'; } var inv = fpnum && fpnum.checkValidity() === true; if (fpnum) { fpnum.value = '11'; } row('validrange', ov && uf && inv ? 'PASS' : 'MISS'); } catch (e) { row('validrange', 'MISS'); }\n"
+    "  try { var w0 = f ? f.willValidate === true : false; var w1 = fphide ? fphide.willValidate === false : false; var w2 = fpdis ? fpdis.willValidate === false : false; row('willval', w0 && w1 && w2 ? 'PASS' : 'MISS'); } catch (e) { row('willval', 'MISS'); }\n"
+    "  try { icount = 0; var iv = fppat ? fppat.checkValidity() : undefined; row('validinvalid', iv === false && icount === 1 ? 'PASS' : 'MISS cnt=' + icount); } catch (e) { row('validinvalid', 'MISS'); }\n"
+    "  try { var ev0 = f && f.validationMessage === ''; row('validmsg', ev0 ? 'PASS' : 'MISS'); } catch (e) { row('validmsg', 'MISS'); }\n"
+    "  try { var els = fm ? fm.elements : null; row('frmels', els && els.length === 9 ? 'PASS' : 'MISS len=' + (els ? els.length : -1)); } catch (e) { row('frmels', 'MISS'); }\n"
+    "  try { row('frmreok', fm && iscallable(fm.reset) && fm.reset() === undefined ? 'PASS' : 'MISS'); } catch (e) { row('frmreok', 'MISS'); }\n"
+    "  var dlgf = document.getElementById('fpdlg');\n"
+    "  try { var dlm = dlgf ? dlgf.method : undefined; row('formdlg', typeof dlm === 'string' && dlm === 'dialog' ? 'PASS' : 'MISS m=' + String(dlm)); } catch (e) { row('formdlg', 'MISS'); }\n"
+    "  try {\n"
+    "    var gm = fm ? fm.method : undefined;\n"
+    "    var ge = fm ? fm.enctype : undefined;\n"
+    "    var ga = fm ? fm.encoding : undefined;\n"
+    "    var gdp = document.getElementById('fdp');\n"
+    "    var gp = gdp ? gdp.method : undefined;\n"
+    "    var sw = '', attr = '', inv = '', rst = '';\n"
+    "    if (fm && ('method' in fm)) {\n"
+    "      fm.method = 'post'; sw = fm.method; attr = fm.getAttribute('method');\n"
+    "      fm.method = 'frob'; inv = fm.method;\n"
+    "      fm.method = 'get'; rst = fm.method;\n"
+    "    }\n"
+    "    row('formmeth', (gm === 'get' && ge === 'application/x-www-form-urlencoded' && ga === ge && gp === 'post' && sw === 'post' && attr === 'post' && inv === 'get' && rst === 'get') ? 'PASS' : 'MISS m=' + String(gm) + ' e=' + String(ge) + ' a=' + String(ga) + ' p=' + String(gp) + ' s=' + sw + ' v=' + inv + ' r=' + rst);\n"
+    "  } catch (e) { row('formmeth', 'MISS'); }\n"
+    "  row('policy-file', 'POLICY no OS file picker on this device');\n"
+    "  row('policy-date', 'POLICY date/range/color widgets not on this panel');\n"
+    "  row('policy-multiselect', 'POLICY multi-row select stays one-line field');\n"
+    "  row('policy-formproto', 'POLICY form API roads ride the shared element prototype (tag-gated calls)');\n"
+    "  row('policy-encoding', 'POLICY multipart/form-data withheld (no file picker, no encoder); urlencoded is the wire; text/plain rides raw CRLF');\n"
+    "  sumEl.textContent = 'formsum: pass=' + npass + ' miss=' + nmiss + ' policy=' + npol;\n"
+    "  console.log('[formprobe] formsum: pass=' + npass + ' miss=' + nmiss + ' policy=' + npol);\n"
+    /* Forms-Phase 5: the parity submit rides the page's own XHR — the
+     * standing POST-PARSE delivery lane (run_xhr_ref exists on every
+     * engine; frozen bridges carry no run_timer_ref, so setTimeout only
+     * ever registers there). Scripts run mid-parse where doc->_dom is
+     * not yet promoted, so a same-bracket submit would fall through to
+     * the legacy self-GET; the XHR completion fires on a later pump
+     * pass, after the walk, and fdp.submit() takes the route-standard
+     * POST whose body MUST equal this run's fd recount (len=45). */
+    "  try {\n"
+    "    console.log('[formprobe] fdpost pre');\n"
+    "    var fx = new XMLHttpRequest();\n"
+    "    fx.open('GET', 'about:formprobe');\n"
+    "    fx.onload = function () {\n"
+    "      try {\n"
+    "        console.log('[formprobe] fdpost fire');\n"
+    "        var fdpf = document.getElementById('fdp');\n"
+    "        if (fdpf && iscallable(fdpf.submit)) { fdpf.submit(); } else { console.log('[formprobe] fdpost skip s=' + (fdpf ? 'form' : 'null') + ' c=' + (fdpf ? typeof fdpf.submit : '?')); }\n"
+    "      } catch (f2) { console.log('[formprobe] fdpost inner ' + String(f2).slice(0, 30)); }\n"
+    "    };\n"
+    "    fx.onerror = function () { console.log('[formprobe] fdpost err'); };\n"
+    "    fx.send();\n"
+    "    console.log('[formprobe] fdpost queued');\n"
+    "  } catch (e) { console.log('[formprobe] fdpost defer failed ' + String(e).slice(0, 30)); }\n"
+    "})();\n"
+    "</script>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var f = document.getElementById('fpt');\n"
+    "  var fm = document.getElementById('fpf');\n"
+    "  var btn = document.getElementById('fpsend');\n"
+    "  var out = document.getElementById('outev');\n"
+    "  var sumEl = document.getElementById('formev');\n"
+    "  if (!f || !fm || !btn || !out || !sumEl) { return; }\n"
+    "  var nf = 0, nb = 0, nin = 0, nchg = 0, nsub = 0, ndoc = 0;\n"
+    "  function paint(tag) {\n"
+    "    sumEl.textContent = 'formev: focus=' + nf + ' blur=' + nb + ' input=' + nin + ' change=' + nchg + ' submit=' + nsub + ' docclick=' + ndoc;\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = 'ev:' + tag;\n"
+    "    out.appendChild(d);\n"
+    "  }\n"
+    "  f.addEventListener('focus', function () { nf = nf + 1; paint('focus'); });\n"
+    "  f.addEventListener('blur', function () { nb = nb + 1; paint('blur'); });\n"
+    "  f.addEventListener('input', function () { nin = nin + 1; paint('input'); });\n"
+    "  f.addEventListener('change', function () { nchg = nchg + 1; paint('change'); });\n"
+    "  fm.addEventListener('submit', function (e) { nsub = nsub + 1; if (e && e.preventDefault) { e.preventDefault(); } paint('submit'); });\n"
+    "  document.addEventListener('click', function () { ndoc = ndoc + 1; paint('docclick'); });\n"
+    "  try { if (f && typeof f.focus === 'function') { f.focus(); } } catch (e) { paint('focusthr'); }\n"
+    "  try { if (f && typeof f.blur === 'function') { f.blur(); } } catch (e) { paint('blurthr'); }\n"
+    "  try { if (btn && typeof btn.click === 'function') { btn.click(); } } catch (e) { paint('clickthr'); }\n"
+    "  setTimeout(function () {\n"
+    "    console.log('[formprobe] formev: focus=' + nf + ' blur=' + nb + ' input=' + nin + ' change=' + nchg + ' submit=' + nsub + ' docclick=' + ndoc);\n"
+    "  }, 300);\n"
+    "})();\n"
+    "</script></body></html>\n";
+
+/* about:formval — Forms-Phase 3's real page with NATIVE-only validation:
+ * the submit button requires the engine's constraint layer — the page's
+ * one script only OBSERVES (an invalid listener paints a counter; it
+ * never prevents anything). A blocked submit keeps the URL; a passing
+ * one navigates the real GET wire to about:formprobe. The stylesheet
+ * exercises :required/:optional/:valid/:invalid — the [css-skip] pcls
+ * census receipt shows these consuming (zero pcls for this page now). */
+static const char FORMVAL_HTML[] =
+    "<!DOCTYPE html><html><head><title>Native Validation</title><style>\n"
+    "body { background: white; color: black; }\n"
+    "h1 { font-size: 2em; }\n"
+    ".sum { font-weight: bold; }\n"
+    "input:required { color: blue; }\n"
+    "input:optional { color: black; }\n"
+    "#fvu:invalid { color: red; }\n"
+    "input:valid { color: green; }\n"
+    "</style></head><body>\n"
+    "<h1>Native Validation</h1>\n"
+    "<p>Real page, native-only validation: the engine's constraint layer "
+    "owns the submit gate. The script below only observes.</p>\n"
+    "<p class=\"sum\" id=\"fvsum\">formval: pending</p>\n"
+    "<p id=\"fvinv\">invalidcount=0</p>\n"
+    "<form id=\"fv\" method=\"get\" action=\"about:formprobe\">\n"
+    "<p>User: <input id=\"fvu\" name=\"user\" required placeholder=\"required\"></p>\n"
+    "<p>Age (3..9): <input id=\"fva\" type=\"number\" name=\"age\" min=\"3\" "
+    "max=\"9\" placeholder=\"age\"></p>\n"
+    "<p><input id=\"fvsend\" type=\"submit\" value=\"Submit\"></p>\n"
+    "</form>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var inv = 0;\n"
+    "  var el = document.getElementById('fvinv');\n"
+    "  function tick() {\n"
+    "    inv = inv + 1;\n"
+    "    if (el) { el.textContent = 'invalidcount=' + inv; }\n"
+    "    console.log('[formval] invalid#' + inv);\n"
+    "  }\n"
+    "  var fvu = document.getElementById('fvu');\n"
+    "  var fva = document.getElementById('fva');\n"
+    "  // invalid does NOT bubble: each control listens on itself\n"
+    "  if (fvu && fvu.addEventListener) { fvu.addEventListener('invalid', function () { tick(); }); }\n"
+    "  if (fva && fva.addEventListener) { fva.addEventListener('invalid', function () { tick(); }); }\n"
+    "  var s = document.getElementById('fvsum');\n"
+    "  if (s) { s.textContent = 'formval: resting'; }\n"
+    "})();\n"
+    "</script></body></html>\n";
+
 static const InternalPage INTERNAL_PAGES[] = {
     { "about:home", "PlutoBrowser",
       "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
@@ -1768,6 +2083,8 @@ static const InternalPage INTERNAL_PAGES[] = {
     { "about:jsext", "Full JS Test Suite", JSEXTTEST_HTML },
     { "about:cssprobe", "CSS Probe", CSSPROBE_HTML },
     { "about:apiprobe", "API Probe", APIPROBE_HTML },
+    { "about:formprobe", "Form Probe", FORMPROBE_HTML },
+    { "about:formval", "Native Validation", FORMVAL_HTML },
     /* API-P5: fixture MODULES served from the same store road fetch()
      * and xhr use. Import-only — deliberately NOT in the PageDirectory:
      * the battery imports them by absolute key. */
@@ -1784,7 +2101,8 @@ static const InternalPage INTERNAL_PAGES[] = {
 
 /* Read-only directory view (http_client.h): name + title per internal page,
  * same order as INTERNAL_PAGES — the home page's Test Cases section lists
- * exactly these entries (all 6 programmed about: sites). */
+ * exactly these entries (all 9 programmed about: sites; the about:p5m0/
+ * about:p5m1 module fixtures stay import-only, deliberately NOT here). */
 static const HttpTestPage TEST_PAGES[] = {
     { "about:home", "PlutoBrowser Home" },
     { "about:blank", "Blank Page" },
@@ -1793,6 +2111,8 @@ static const HttpTestPage TEST_PAGES[] = {
     { "about:jsext", "Full JS Test Suite" },
     { "about:cssprobe", "CSS Probe" },
     { "about:apiprobe", "API Probe" },
+    { "about:formprobe", "Form Probe" },
+    { "about:formval", "Native Validation" },
 };
 
 size_t http_internal_page_body(const char *url, const char **bodyOut)
@@ -2515,10 +2835,18 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     /* ── Internal about: pages ────────────────────────────────────────────── */
     if (strncmp(g_url, "about:", 6) == 0)
     {
+        /* Forms-Phase 3: the GET wire may carry a query (?user=Pluto&...)
+         * on an about: action — browsers resolve the PAGE on the path
+         * part; the registry matches the bare name. */
+        const char *bareEnd = strchr(g_url + 6, '?');
+        size_t bareLen = bareEnd ? (size_t)(bareEnd - g_url)
+                                 : strlen(g_url);
         InternalPage *page = NULL;
         for (size_t i = 0; i < sizeof(INTERNAL_PAGES) / sizeof(INTERNAL_PAGES[0]); i++)
         {
-            if (strcmp(g_url, INTERNAL_PAGES[i].name) == 0)
+            size_t nl = strlen(INTERNAL_PAGES[i].name);
+            if (bareLen == nl &&
+                strncmp(g_url, INTERNAL_PAGES[i].name, nl) == 0)
             {
                 page = (InternalPage *)&INTERNAL_PAGES[i];
                 break;
