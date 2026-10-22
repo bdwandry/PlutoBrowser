@@ -26,7 +26,7 @@
 
 /* ── Phase-0 skip-class usage tally (HTML+CSS roadmap Phase 0.2) ────────────
  * Counts every stylesheet input the engine cannot honor today, by class, so
- * the gap backlog ranks by real-page usage (PLATFORM_SCORECARD.md). One
+ * the gap backlog ranks by real-page usage (MASTER_TODO.md, Platform Scorecard section). One
  * [css-skip] row per css_log_stats emit; reset after each emit (each row =
  * occurrences since the previous row). Classes:
  *   sib    = '+' / '~' combinators (sheet + querySelector selector paths)
