@@ -782,6 +782,21 @@ static int fxNRFrameInLiveChunks(txParser* parser, void* frame)
 
 static void fxParserRunStep(txParser* parser, txInteger kind)
 {
+#ifdef TARGET_PLAYDATE
+	/* xs_no_recursion R-kf: the meter callback is the only watchdog feeder on
+	   device, and its fxCheckMeter callers all live in the run/remap paths —
+	   the compile phase (parse pump, bind walks) never charges, so any
+	   script whose compile outlasts the RTOS watchdog (~15s) resets the
+	   board silently. Poll the bridge's 1Hz-throttled keepalive once every
+	   256 pump steps instead; it files nothing into meterIndex, so run
+	   budgets and meter-index receipts stay untouched. */
+	{
+		static unsigned long kfSteps;
+		extern void xs_engine_keepalive(void);
+		if ((++kfSteps & 0xFF) == 0)
+			xs_engine_keepalive();
+	}
+#endif
 	if ((kind < 0) || (kind >= K_KIND_COUNT) || (parser->curFrame == C_NULL) ||
 		!fxNRFrameInLiveChunks(parser, parser->curFrame)) {
 		gXSNRFaultKind = (long)kind;
@@ -894,6 +909,19 @@ void fxParserPump(txParser* parser)
 
 void fxParserCall(txParser* parser, txInteger kind, txInteger line)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: frame pushes route through their own cycles (prime push-only
+	   discipline, push storms) that never touch fxParserRunStep — the
+	   bootska cadence probe. Every 64th call feeds the 1Hz-throttled
+	   bridge keepalive so any push-cycle that wouldn't otherwise dispatch
+	   pump steps still keeps the device watchdog fed and visible in logs. */
+	{
+		static unsigned long kfCalls;
+		extern void xs_engine_keepalive(void);
+		if ((++kfCalls & 0x3F) == 0)
+			xs_engine_keepalive();
+	}
+#endif
 	txParserFrame* baseFrame = parser->curFrame;
 	fxParserFramePush(parser, kind, line);
 #ifdef XS_NR_PUMP_TRACE

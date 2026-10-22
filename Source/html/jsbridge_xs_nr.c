@@ -7643,13 +7643,17 @@ static int xs_run_tiny(JsBridge *b, xsMachine *m, int index,
             stream.buffer = (txString)src;
             stream.offset = 0;
             stream.size = len;
+            logger_log("[js] run_tiny %s: entering (len=%zu)", what, len);
             txScript *script =
                 fxParseScript(the, &stream, fxStringCGetter, mxProgramFlag);
+            logger_log("[js] run_tiny %s: parse %s", what,
+                       script ? "ok" : "NULL");
             if (script)
             {
                 xsVar(0) = xsUndefined;
                 fxRunScript(the, script, mxThis, C_NULL, C_NULL, C_NULL,
                             mxProgram.value.reference);
+                logger_log("[js] run_tiny %s: run done", what);
                 xs_drain_jobs(the);
                 xs_flush_microtasks(b); /* A2: microcheckpoint boundary */
             }
@@ -8450,14 +8454,37 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
      * 253KB bootstrap tail legitimately executes far more than the flat
      * 2M-op budget; admission already bounded the segment). */
     xs_run_limit = (txU8)XS_RUNLIMIT + (txU8)len * 256u;
+#ifdef TARGET_PLAYDATE
+    /* R-kf bisect stage 3: one row per bracket step. The fork entry's
+     * [nrp] probe is the first instruction of fxParseScript_nr and never
+     * prints, so the blocking call is one of these five — this pins it. */
+    extern unsigned logger_stack_depth(void);
+    logger_log("[js] par: pre-hostExit depth=%u", logger_stack_depth());
+#endif
     xsBeginHostExit(m);
+#ifdef TARGET_PLAYDATE
+    logger_log("[js] par: post-hostExit depth=%u", logger_stack_depth());
+#endif
     xsBeginMetering(m, xs_meter_callback, XS_METER_STEP);
+#ifdef TARGET_PLAYDATE
+    logger_log("[js] par: post-meter depth=%u", logger_stack_depth());
+#endif
     {
         xsBeginHost(m);
+#ifdef TARGET_PLAYDATE
+        logger_log("[js] par: post-host depth=%u", logger_stack_depth());
+#endif
         {
             xsVars(1);
+#ifdef TARGET_PLAYDATE
+            logger_log("[js] par: post-vars depth=%u", logger_stack_depth());
+#endif
             xsTry
             {
+#ifdef TARGET_PLAYDATE
+                logger_log("[js] par: in-try pre-parse depth=%u",
+                           logger_stack_depth());
+#endif
             txScript *script =
                 fxParseScript(the, streamCtx, getter, mxProgramFlag);
             if (script)

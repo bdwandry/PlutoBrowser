@@ -4835,7 +4835,18 @@ txScript* fxParserCode(txParser* parser)
 #ifdef mxMetering
 		meterIndex++;
 #endif
-	}	
+#ifdef TARGET_PLAYDATE
+		/* R-kf: the meter callback that feeds the watchdog never fires
+		   during codegen; poll the bridge keepalive every 256 emitted
+		   nodes (device only, same reasoning as fxParserRunStep). */
+		{
+			static unsigned long kfCodeSteps;
+			extern void xs_engine_keepalive(void);
+			if ((++kfCodeSteps & 0xFF) == 0)
+				xs_engine_keepalive();
+		}
+#endif
+	}
 #ifdef mxMetering
 	fxMeterSome(parser->console, meterIndex);
 #endif

@@ -136,6 +136,18 @@ bail:
 
 void fxGetNextCharacter(txParser* parser)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: character-level lexer loops are the only parse paths that can run
+	   before the first pump step dispatch; poll the bridge keepalive
+	   every 4096 characters so a wedged char-scan still feeds the
+	   watchdog and shows up as ka cadence in the log. */
+	{
+		static unsigned long kfChars;
+		extern void xs_engine_keepalive(void);
+		if ((++kfChars & 0xFFF) == 0)
+			xs_engine_keepalive();
+	}
+#endif
 	parser->character = parser->lookahead;
 	if (parser->character != (txU4)C_EOF) {
 	#if mxCESU8
@@ -832,6 +844,16 @@ txBoolean fxGetNextStringX(int c, txU4* value)
 
 void fxGetNextToken(txParser* parser)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: poll the bridge keepalive every 64 scanned tokens (see
+	   fxGetNextCharacter). */
+	{
+		static unsigned long kfTokens;
+		extern void xs_engine_keepalive(void);
+		if ((++kfTokens & 0x3F) == 0)
+			xs_engine_keepalive();
+	}
+#endif
 	if (parser->ahead == 0) {
 		fxGetNextTokenAux(parser);
 		parser->states[0] = parser->states[2];

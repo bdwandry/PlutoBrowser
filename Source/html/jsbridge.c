@@ -355,6 +355,14 @@ static int extract_scripts(const char *html, const char **starts, size_t *lens,
     const char *pos = html;
     const char *end = html + strlen(html);
     int count = 0;
+#ifdef TARGET_PLAYDATE
+    /* R-kf bisect: two watchdog snapshots froze with lr inside this
+     * function's strlen/type-check callees — log the stack depth at entry
+     * so the next snapshot can be reconciled. */
+    extern unsigned logger_stack_depth(void);
+    logger_log("[js] probe: extract enter depth=%u",
+               logger_stack_depth());
+#endif
 
     while (pos < end)
     {
@@ -1425,6 +1433,13 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     size_t tagLens[JSBRIDGE_MAX_SCRIPTS];
     int n = 0;
     int total = 0;
+#ifdef TARGET_PLAYDATE
+    /* R-kf bisect: stack-depth anchors across the mount lane — a device
+     * gameTask stack overflow is a known class of failure here (P19 rule
+     * origin), and two crash snapshots froze inside extract_scripts. */
+    extern unsigned logger_stack_depth(void);
+    logger_log("[js] probe: attach depth=%u", logger_stack_depth());
+#endif
     if (!(policy == DOC_SCRIPT_FULL && doc->extScripts))
     {
         /* OFF/RUN/RUN_KEEP: extract inline bodies up front. FULL defers this
@@ -1509,6 +1524,17 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
     }
     else
     {
+        /* R54 for ALL policies (R-kf fix, 2026-10-22 device receipts):
+         * never run inline script parses inside the attach frame. An NR
+         * fxParseScript driven synchronously from the attach context
+         * hard-wedges the device — zero ka rows, crashlog register dumps
+         * scattering across strlen/extract_scripts/firmware — while the
+         * same machine, bracket, and parse from the per-frame pump lane
+         * runs clean end to end (tests/logs/
+         * device_aboutjavascript_parked_FIX_20261022.log: [nrp] rows
+         * print, ka cadence holds, SW battery 54 passed, no crashlog).
+         * Park inline bodies and drain them one entry per frame, like
+         * the parked FULL path already does. */
         for (int i = 0; i < total; i++)
         {
             JsScriptSlot s;
@@ -1520,20 +1546,7 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
             s.tagLen = tagLens[i];
             s.isModule = jsbridge_script_type_is_module(
                 tags[i], tags[i] + tagLens[i]);
-            jsbridge_cur_script_stamp(b, &s, NULL);
-            if (s.isModule)
-            {
-                /* API-P5: the same lane the pump entries use — inline
-                 * modules resolve imports against the document URL on
-                 * every engine, not only on the parked FULL path. */
-                jsbridge_module_root(b, starts[i], lens[i], doc->baseUrl,
-                                     i + 1);
-            }
-            else
-            {
-                impl->run_script(b, starts[i], lens[i], i + 1);
-            }
-            jsbridge_cur_script_clear(b);
+            b->scriptQueue[b->scriptQueueCount++] = s;
         }
     }
 

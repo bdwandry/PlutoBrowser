@@ -92,6 +92,14 @@ void fxDisposeParserChunks(txParser* parser)
 
 void fxInitializeParser(txParser* parser, void* console, txSize bufferSize, txSize symbolModulo)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: parser init runs before any pump/lexer step; a single
+	   keepalive feed here timestamps every parse attempt in the log. */
+	{
+		extern void xs_engine_keepalive(void);
+		xs_engine_keepalive();
+	}
+#endif
 	c_memset(parser, 0, sizeof(txParser));
 	parser->first = C_NULL;
 	parser->console = console;
