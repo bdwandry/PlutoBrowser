@@ -402,7 +402,70 @@ static int name_char_ok(char c)
     return strchr("!#$%&'*+-.^_`|~", c) != NULL && c != '\0';
 }
 
-Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw)
+/* RFC 6265 §5.1 "IP-literal" test: a request host composed only of digits,
+ * dots, and/or colons is a numeric address (IPv4 dotted-quad or IPv6-ish),
+ * never a DNS name. Browsers treat such hosts exactly this way for cookie
+ * domain purposes (Chromium's "looks_like_ip" rule), so this holds for
+ * every site that serves over an IP-address origin, not just the lab. */
+static int host_is_ip(const char *h)
+{
+    if (!h || h[0] == '\0')
+    {
+        return 0;
+    }
+    int digits = 0;
+    for (const char *p = h; *p; p++)
+    {
+        if (*p >= '0' && *p <= '9')
+        {
+            digits++;
+        }
+        else if (*p != '.' && *p != ':')
+        {
+            return 0; /* a letter/symbol makes it a DNS name */
+        }
+    }
+    return digits > 0;
+}
+
+/* RFC 6265 §5.1.4 default-path: derive the cookie path from the REQUEST-URI
+ * path — not always "/" (the old behavior). Algorithm:
+ *   1. request path empty or not starting with '/' → "/";
+ *   2. no more than one '/' in it → "/";
+ *   3. otherwise everything from the start up to (not including) the
+ *      rightmost '/' — e.g. "/dir/page" → "/dir", "/a/b/c" → "/a/b",
+ *      "/a/" → "/a", "/" → "/".
+ * Matching (§5.1.4 path-match in path_matches) is already browser-faithful,
+ * so a mid-site cookie handed the right directory still replays on every
+ * sibling request, exactly like a real browser. */
+static void cookie_default_path(const char *reqPath, char *out, size_t cap)
+{
+    if (out && cap > 0)
+    {
+        out[0] = '\0';
+    }
+    if (!reqPath || reqPath[0] != '/')
+    {
+        snprintf(out, cap, "/");
+        return;
+    }
+    const char *last = strrchr(reqPath, '/');
+    if (!last || last == reqPath)
+    {
+        snprintf(out, cap, "/");
+        return;
+    }
+    size_t dlen = (size_t)(last - reqPath);
+    if (dlen >= cap)
+    {
+        dlen = cap - 1;
+    }
+    memcpy(out, reqPath, dlen);
+    out[dlen] = '\0';
+}
+
+Cookie *cookie_jar_parse_set_cookie_ex(const char *host, const char *reqPath,
+                                       const char *raw)
 {
     if (!host || !raw)
     {
@@ -517,7 +580,14 @@ Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw)
     c->value = dup_str(value);
     c->domain = dup_str(host);
     c->hostOnly = 1;
-    c->path = dup_str("/");
+    {
+        /* RFC 6265 §5.1.4: default path = the request-URI directory, not a
+         * hardcoded "/" — used both for the no-Path case and as the
+         * §5.2.4 fallback for a Path attribute that lacks a leading '/'. */
+        char defPath[256];
+        cookie_default_path(reqPath, defPath, sizeof(defPath));
+        c->path = dup_str(defPath);
+    }
     c->secure = 0;
     c->httpOnly = 0;
     c->samesite[0] = '\0';
@@ -624,23 +694,36 @@ Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw)
                 {
                     memmove(d, d + 1, strlen(d)); /* gsub("^%.", "") */
                 }
-                size_t dlen = strlen(d);
-                size_t hlen = strlen(host);
                 int accepted = 0;
-                if (strcmp(d, host) == 0 || (hlen > dlen && host[hlen - dlen - 1] == '.' &&
-                                             strcmp(host + hlen - dlen, d) == 0))
+                if (host_is_ip(host))
                 {
-                    if (strchr(d, '.') || strcmp(d, "localhost") == 0)
-                    {
-                        PLUTO_FREE(c->domain);
-                        c->domain = dup_str(d);
-                        c->hostOnly = 0;
-                        accepted = 1;
-                    }
-                }
-                if (!accepted)
-                {
+                    /* RFC 6265 §5.1.3 + §5.3 (6): a numeric request-host can
+                     * never domain-match, so ANY Domain attribute (even
+                     * Domain=<the exact same IP>) invalidates the whole
+                     * Set-Cookie — the browser refuses it, it is not stored,
+                     * and it is not reinterpreted as host-only. */
                     domainRejected = 1;
+                }
+                else
+                {
+                    size_t dlen = strlen(d);
+                    size_t hlen = strlen(host);
+                    if (strcmp(d, host) == 0 ||
+                        (hlen > dlen && host[hlen - dlen - 1] == '.' &&
+                             strcmp(host + hlen - dlen, d) == 0))
+                    {
+                        if (strchr(d, '.') || strcmp(d, "localhost") == 0)
+                        {
+                            PLUTO_FREE(c->domain);
+                            c->domain = dup_str(d);
+                            c->hostOnly = 0;
+                            accepted = 1;
+                        }
+                    }
+                    if (!accepted)
+                    {
+                        domainRejected = 1;
+                    }
                 }
             }
             else if (strcmp(aname, "path") == 0)
@@ -648,7 +731,12 @@ Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw)
                 const char *p = avalue;
                 if (p[0] != '/')
                 {
-                    p = "/";
+                    /* RFC 6265 §5.2.4: a Path attribute that is empty or
+                     * lacks a leading '/' falls back to the DEFAULT-path
+                     * (request-URI directory), not "/". */
+                    char defPath[256];
+                    cookie_default_path(reqPath, defPath, sizeof(defPath));
+                    p = defPath;
                 }
                 PLUTO_FREE(c->path);
                 c->path = dup_str(p);
@@ -751,9 +839,10 @@ static void list_remove(int index)
     g_count--;
 }
 
-void cookie_jar_store(const char *host, const char *raw)
+void cookie_jar_store_ex(const char *host, const char *reqPath,
+                         const char *raw)
 {
-    Cookie *parsed = cookie_jar_parse_set_cookie(host, raw);
+    Cookie *parsed = cookie_jar_parse_set_cookie_ex(host, reqPath, raw);
     if (!parsed)
     {
         return;
@@ -808,7 +897,23 @@ void cookie_jar_store(const char *host, const char *raw)
     save();
 }
 
+Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw)
+{
+    return cookie_jar_parse_set_cookie_ex(host, "", raw);
+}
+
+void cookie_jar_store(const char *host, const char *raw)
+{
+    cookie_jar_store_ex(host, "", raw);
+}
+
 void cookie_jar_process_set_cookies(const char *host, char **list, int count)
+{
+    cookie_jar_process_set_cookies_ex(host, "", list, count);
+}
+
+void cookie_jar_process_set_cookies_ex(const char *host, const char *reqPath,
+                                       char **list, int count)
 {
     if (!list || count <= 0)
     {
@@ -816,7 +921,7 @@ void cookie_jar_process_set_cookies(const char *host, char **list, int count)
     }
     for (int i = 0; i < count; i++)
     {
-        cookie_jar_store(host, list[i]);
+        cookie_jar_store_ex(host, reqPath, list[i]);
     }
 }
 

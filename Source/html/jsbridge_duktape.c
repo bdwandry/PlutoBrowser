@@ -39,6 +39,7 @@
 #include "../util/strbuf.h"
 #include "../core/pluto_mem.h"
 #include "../html/dom.h"
+#include "../html/webstorage.h"
 
 extern PlaydateAPI *pluto_pd(void);
 #define JMalloc(n) pluto_mem_realloc(NULL, (n))
@@ -47,11 +48,18 @@ extern PlaydateAPI *pluto_pd(void);
 /* Hidden props on element wrapper objects: */
 #define DUK_NODE_PROP "\xFF" "pluto.node" /* heapptr-free: raw DomNode* as pointer */
 static int duk_xhr_open(duk_context *ctx);
+static int duk_xhr_setheader(duk_context *ctx);
 static int duk_xhr_send(duk_context *ctx);
 static int duk_xhr_abort(duk_context *ctx);
 static void duk_push_xhr(duk_context *ctx, JsBridge *b);
 static void duktape_define_xhr(duk_context *ctx, JsBridge *b);
+static void duk_xhr_attach_accessors(duk_context *ctx, duk_idx_t obj);
+static void duktape_define_worker(duk_context *ctx, JsBridge *b);
+static void duktape_define_formdata(duk_context *ctx, JsBridge *b);
 static int duk_xhr_id(duk_context *ctx);
+static void duk_push_worker(duk_context *ctx, JsBridge *b, int id);
+static int duk_worker_postmessage(duk_context *ctx);
+static int duk_worker_terminate(duk_context *ctx);
 
 
 /* ── heap allocators: route engine memory through the SDK ────────────────── */
@@ -195,6 +203,796 @@ static duk_ret_t duk_el_get_innerHTML(duk_context *ctx)
 {
     return duk_el_get_textContent(ctx);
 }
+
+/* ── Forms-Phase 1: field life (checked / disabled / readOnly / value /
+ * focus() / blur() roads) — the same surface the XS (No Recursion)
+ * adapter grew. Frozen-engine culture: attr-store writes go straight to
+ * the dom store (no domDirty lane here); live toggle state is read
+ * through the node → DocBlock reverse lookup. */
+
+static int duktape_dispatch_focus(JsBridge *b, DomNode *node,
+                                  const char *type); /* forward: below */
+
+/* Connectedness rule: the parent walk to the document root (a browser
+ * only focuses connected elements). Local to this adapter; frozen
+ * engines had no isConnected lane to factor from. */
+static int dk_connected(JsBridge *b, DomNode *n)
+{
+    DomNode *root = (b->dom) ? b->dom->root : NULL;
+    for (DomNode *p = n; p; p = p->parent)
+    {
+        if (p == root)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Node → LIVE DocBlock reverse lookup (One block per node in the
+ * standing build; DocBlock stamps srcNode on rendered controls). */
+static DocBlock *dk_block_of_node(JsBridge *b, DomNode *n)
+{
+    if (!n || !b->doc)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < b->doc->blockCount; i++)
+    {
+        DocBlock *blk = b->doc->blocks[i];
+        if (blk && blk->srcNode == (void *)n)
+        {
+            return blk;
+        }
+    }
+    return NULL;
+}
+
+/* The `value` property — browser shape: the attr is the store (the
+ * form click/submit reporter and the typed-text store both live there);
+ * a valueless <textarea> falls back to its DOM text content. */
+/* Forms-Phase 2: select readers (defined after the checked roads — the
+ * value accessor's select fork outranks them only via these decls). */
+static int dk_select_index(JsBridge *b, DomNode *n);
+static DomNode *dk_option_node_at(DomNode *sel, int idx);
+
+static duk_ret_t duk_el_get_value(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    const char *v = n ? dom_get_attr(n, "value") : NULL;
+    if (n && n->kind == DOM_ELEMENT && n->tag &&
+        strcmp(n->tag, "select") == 0)
+    {
+        /* Forms-Phase 2: the picker reporting road — the browser's
+         * select.value is the selected option's shape (value attr, else
+         * the option text), never the element's own attribute. */
+        int idx = dk_select_index(b, n);
+        if (idx >= 0 && idx != -2147483648)
+        {
+            DocBlock *blk = dk_block_of_node(b, n);
+            if (blk && blk->options && idx < blk->optionCount &&
+                blk->options[idx])
+            {
+                DocOption *o = blk->options[idx];
+                duk_push_string(ctx, (o->value && o->value[0])
+                                         ? o->value
+                                         : (o->text ? o->text : ""));
+                return 1;
+            }
+            DomNode *optn = dk_option_node_at(n, idx);
+            if (optn)
+            {
+                const char *ov = dom_get_attr(optn, "value");
+                if (ov && ov[0])
+                {
+                    duk_push_string(ctx, ov);
+                    return 1;
+                }
+                char obuf[512];
+                doc_concat_node_text(optn, obuf, sizeof(obuf));
+                duk_push_string(ctx, obuf);
+                return 1;
+            }
+        }
+        duk_push_string(ctx, v ? v : "");
+        return 1;
+    }
+    if (!v && n && n->tag && strcmp(n->tag, "textarea") == 0)
+    {
+        char buf[512];
+        doc_concat_node_text(n, buf, sizeof(buf));
+        duk_push_string(ctx, buf);
+        return 1;
+    }
+    duk_push_string(ctx, v ? v : "");
+    return 1;
+}
+static duk_ret_t duk_el_set_value(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    BUDGET_OR_THROW(b);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        dom_set_attr(b->dom, n, "value", duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+/* `checked` READ on the toggles: DocBlock.checked is the live state
+ * (moves on tap; the markup attribute never does); the markup attribute
+ * is only the pre-walk fallback. Non-toggles read false, like a
+ * browser's non-form .checked. Getter-only in Phase 1 (writes + radio
+ * exclusivity = Phase 2). */
+static duk_ret_t duk_el_get_checked(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    int checked = 0;
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        const char *tag = n->tag;
+        const char *tv = dom_get_attr(n, "type");
+        if (tag && strcmp(tag, "input") == 0 && tv &&
+            (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0))
+        {
+            DocBlock *blk = dk_block_of_node(b, n);
+            checked = blk ? blk->checked
+                          : (dom_get_attr(n, "checked") != NULL);
+        }
+    }
+    duk_push_boolean(ctx, checked ? 1 : 0);
+    return 1;
+}
+
+/* Forms-Phase 2: `checked` WRITE — radio-group exclusivity, browser
+ * semantics. Same live-store model as the XS NR lane: the write flips
+ * DocBlock.checked (the store the tap lane, the live-drawn renderer and
+ * the block-aware submit serializer all share); the markup attribute
+ * stays the walk-time default (reset restores from it later). Setting a
+ * radio true first unchecks every OTHER same-name radio (the tap lane's
+ * doc-wide group); false simply unchecks. No events (a browser's typed
+ * .checked assignment fires none). */
+/* Forms-Phase 2: pre-walk `checked` attr mirror (the XS twin). Page
+ * scripts run before the walker builds blocks; a write in that window
+ * lands on the markup attribute so the walk carries the state, with
+ * radio exclusivity removing OTHER same-name radios' `checked` attrs.
+ * Depth-capped like the browser-true tree scans. */
+static void dk_attr_uncheck_radios(DomNode *n, const char *name,
+                                   DomNode *skip, int depth)
+{
+    if (!n || depth > 16)
+    {
+        return;
+    }
+    if (n->kind == DOM_ELEMENT && n->tag && strcmp(n->tag, "input") == 0 &&
+        n != skip)
+    {
+        const char *tv = dom_get_attr(n, "type");
+        if (tv && strcmp(tv, "radio") == 0)
+        {
+            const char *nm = dom_get_attr(n, "name");
+            if (nm && name && strcmp(nm, name) == 0)
+            {
+                dom_remove_attr(n, "checked");
+            }
+        }
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        dk_attr_uncheck_radios(n->children[i], name, skip, depth + 1);
+    }
+}
+
+static duk_ret_t duk_el_set_checked(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    BUDGET_OR_THROW(b);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return 0;
+    }
+    const char *tag = n->tag;
+    const char *tv = dom_get_attr(n, "type");
+    if (!(tag && strcmp(tag, "input") == 0 && tv &&
+          (strcmp(tv, "checkbox") == 0 || strcmp(tv, "radio") == 0)))
+    {
+        return 0;
+    }
+    DocBlock *blk = dk_block_of_node(b, n);
+    int want = duk_to_boolean(ctx, 0);
+    if (!blk)
+    {
+        /* Pre-walk window: attr mirror (see the XS twin). */
+        const char *nm = dom_get_attr(n, "name");
+        if (want)
+        {
+            if (strcmp(tv, "radio") == 0 && nm)
+            {
+                dk_attr_uncheck_radios(b->dom->root, nm, n, 0);
+            }
+            dom_set_attr(b->dom, n, "checked", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "checked");
+        }
+        return 0;
+    }
+    if (want)
+    {
+        if (blk->radio)
+        {
+            for (int i = 0; i < b->doc->blockCount; i++)
+            {
+                DocBlock *sib = b->doc->blocks[i];
+                if (sib && sib != blk && sib->radio && sib->name &&
+                    blk->name && strcmp(sib->name, blk->name) == 0)
+                {
+                    sib->checked = 0;
+                }
+            }
+        }
+        blk->checked = 1;
+    }
+    else
+    {
+        blk->checked = 0;
+    }
+    return 0;
+}
+
+/* Forms-Phase 2: select.selectedIndex — the browser's 0-based read of
+ * the LIVE pick. Block road first (tap-lane store); markup fallback =
+ * the authored `selected` option, else the first option child.
+ * INT_MIN-ish sentinel for "not a select": the caller outranks it. */
+static int dk_select_index(JsBridge *b, DomNode *n)
+{
+    const char *tag = (n && n->kind == DOM_ELEMENT) ? n->tag : NULL;
+    if (!tag || strcmp(tag, "select") != 0)
+    {
+        return -2147483648;
+    }
+    DocBlock *blk = dk_block_of_node(b, n);
+    if (blk && blk->options && blk->optionCount > 0)
+    {
+        if (blk->multiple)
+        {
+            for (int k = 0; k < blk->optionCount; k++)
+            {
+                DocOption *o = blk->options[k];
+                if (o && !o->group && o->selected)
+                {
+                    return k;
+                }
+            }
+            return -1;
+        }
+        int si = blk->selectedIndex;
+        return (si >= 1 && si <= blk->optionCount) ? si - 1 : -1;
+    }
+    int sel = -1, first = -1, k = 0;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        DomNode *c = n->children[i];
+        if (!c || c->kind != DOM_ELEMENT || !c->tag ||
+            strcmp(c->tag, "option") != 0)
+        {
+            continue;
+        }
+        if (first < 0)
+        {
+            first = k;
+        }
+        if (sel < 0 && dom_get_attr(c, "selected"))
+        {
+            sel = k;
+        }
+        k++;
+    }
+    return sel >= 0 ? sel : first;
+}
+
+/* nth direct <option> child (the fallback's option-node lookup). */
+static DomNode *dk_option_node_at(DomNode *sel, int idx)
+{
+    int k = 0;
+    for (int i = 0; i < sel->childCount; i++)
+    {
+        DomNode *c = sel->children[i];
+        if (c && c->kind == DOM_ELEMENT && c->tag &&
+            strcmp(c->tag, "option") == 0)
+        {
+            if (k == idx)
+            {
+                return c;
+            }
+            k++;
+        }
+    }
+    return NULL;
+}
+
+static duk_ret_t duk_el_get_selectedIndex(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    int idx = dk_select_index(b, n);
+    if (idx == -2147483648)
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    duk_push_int(ctx, idx);
+    return 1;
+}
+
+/* select.options — every <option> element under the select (groups'
+ * options included, group headers are not options). Fresh array. */
+static duk_ret_t duk_el_get_options(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "select") != 0)
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    duk_idx_t arr = duk_push_array(ctx);
+    int k = 0;
+    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    int top = 0;
+    stack[top++] = n;
+    while (top > 0)
+    {
+        DomNode *cur = stack[--top];
+        for (int i = 0; i < cur->childCount; i++)
+        {
+            DomNode *c = cur->children[i];
+            if (c->kind != DOM_ELEMENT)
+            {
+                continue;
+            }
+            if (!strcmp(c->tag, "option"))
+            {
+                duk_push_element(ctx, b, c);
+                duk_put_prop_index(ctx, arr, (duk_uarridx_t)k++);
+            }
+            if (top + 1 < DOM_SEARCH_MAX_DEPTH)
+            {
+                stack[top++] = c;
+            }
+        }
+    }
+    return 1;
+}
+
+/* `disabled` / `readOnly` reflection — the REFLECTED property: own
+ * attribute presence only (a disabled fieldset does NOT flip a child's
+ * .disabled); writes go through the same dom store setAttribute uses. */
+static duk_ret_t duk_el_get_disabled(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    const char *v = n ? dom_get_attr(n, "disabled") : NULL;
+    duk_push_boolean(ctx, v ? 1 : 0);
+    return 1;
+}
+static duk_ret_t duk_el_set_disabled(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    BUDGET_OR_THROW(b);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        if (duk_to_boolean(ctx, 0))
+        {
+            dom_set_attr(b->dom, n, "disabled", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "disabled");
+        }
+    }
+    return 0;
+}
+static duk_ret_t duk_el_get_readOnly(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    const char *v = n ? dom_get_attr(n, "readonly") : NULL;
+    duk_push_boolean(ctx, v ? 1 : 0);
+    return 1;
+}
+static duk_ret_t duk_el_set_readOnly(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    BUDGET_OR_THROW(b);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        if (duk_to_boolean(ctx, 0))
+        {
+            dom_set_attr(b->dom, n, "readonly", "");
+        }
+        else
+        {
+            dom_remove_attr(n, "readonly");
+        }
+    }
+    return 0;
+}
+
+/* Form type — the XS twin's exact shape (Forms-Phase 7): the attr
+ * verbatim, no case folding; a missing attr reads <input> "text",
+ * <button> "submit"; other tags read undefined. Getter-only on every
+ * engine (no IDL setter), like the accessor table's NULL setters. */
+static duk_ret_t duk_el_get_type(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    const char *v = dom_get_attr(n, "type");
+    if (v)
+    {
+        duk_push_string(ctx, v);
+    }
+    else if (n->tag && !strcmp(n->tag, "input"))
+    {
+        duk_push_string(ctx, "text");
+    }
+    else if (n->tag && !strcmp(n->tag, "button"))
+    {
+        duk_push_string(ctx, "submit");
+    }
+    else
+    {
+        duk_push_undefined(ctx);
+    }
+    return 1;
+}
+
+/* el.focus() / el.blur() roads — state + NON-bubbling event (the
+ * keyboard lane stays native; the tap path is untouched). focus on the
+ * already-focused element is a no-op, as is focusing a disconnected
+ * element; blur when not focused is a no-op. Pointer-identity latch
+ * only — never dereferenced. */
+static duk_ret_t duk_el_focus(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return 0;
+    }
+    if (!dk_connected(b, n) || b->focusNode == n)
+    {
+        return 0;
+    }
+    b->focusNode = n;
+    (void)duktape_dispatch_focus(b, n, "focus");
+    return 0;
+}
+static duk_ret_t duk_el_blur(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (!n || b->focusNode != n)
+    {
+        return 0;
+    }
+    b->focusNode = NULL;
+    (void)duktape_dispatch_focus(b, n, "blur");
+    return 0;
+}
+
+/* Forms-Phase 3: the constraint-validation surface — validity snapshot
+ * object per access, validationMessage, willValidate, and the
+ * checkValidity/reportValidity methods (invalid rides the non-bubbling
+ * kind-6 road; no OS report surface exists here, so reportValidity's
+ * "report" is the invalid delivery). */
+static void duk_push_validity(duk_context *ctx, JsBridge *b, DomNode *n)
+{
+    JsbValidity v;
+    memset(&v, 0, sizeof(v));
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        jsbridge_form_validity_eval(b, n, &v);
+    }
+    duk_push_object(ctx);
+    duk_push_boolean(ctx, v.flags & JSBV_VALUEMISSING ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "valueMissing");
+    duk_push_boolean(ctx, v.flags & JSBV_TYPEMISMATCH ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "typeMismatch");
+    duk_push_boolean(ctx, v.flags & JSBV_PATTERNMISMATCH ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "patternMismatch");
+    duk_push_boolean(ctx, v.flags & JSBV_TOOLONG ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "tooLong");
+    duk_push_boolean(ctx, v.flags & JSBV_TOOSHORT ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "tooShort");
+    duk_push_boolean(ctx, v.flags & JSBV_RANGEUNDERFLOW ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "rangeUnderflow");
+    duk_push_boolean(ctx, v.flags & JSBV_RANGEOVERFLOW ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "rangeOverflow");
+    duk_push_boolean(ctx, 0);
+    duk_put_prop_string(ctx, -2, "stepMismatch");
+    duk_push_boolean(ctx, v.flags & JSBV_BADINPUT ? 1 : 0);
+    duk_put_prop_string(ctx, -2, "badInput");
+    duk_push_boolean(ctx, 0);
+    duk_put_prop_string(ctx, -2, "customError");
+    duk_push_boolean(ctx, v.flags ? 0 : 1);
+    duk_put_prop_string(ctx, -2, "valid");
+}
+
+static duk_ret_t duk_el_get_validity(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    duk_push_validity(ctx, b, this_node(ctx));
+    return 1;
+}
+
+static duk_ret_t duk_el_get_validationMessage(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    char msg[96];
+    msg[0] = '\0';
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        JsbValidity v;
+        memset(&v, 0, sizeof(v));
+        jsbridge_form_validity_eval(b, n, &v);
+        snprintf(msg, sizeof(msg), "%s", v.message);
+    }
+    duk_push_string(ctx, msg);
+    return 1;
+}
+
+static duk_ret_t duk_el_get_willValidate(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    int will = (n && n->kind == DOM_ELEMENT)
+                   ? jsbridge_form_will_validate(b, n)
+                   : 0;
+    duk_push_boolean(ctx, will);
+    return 1;
+}
+
+static duk_ret_t duk_el_checkValidity(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    int ok = 1;
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        JsbValidity v;
+        memset(&v, 0, sizeof(v));
+        jsbridge_form_validity_eval(b, n, &v);
+        ok = (v.flags == 0);
+        if (!ok)
+        {
+            (void)duktape_dispatch_focus(b, n, "invalid");
+        }
+    }
+    duk_push_boolean(ctx, ok);
+    return 1;
+}
+
+static duk_ret_t duk_el_reportValidity(duk_context *ctx)
+{
+    /* Same evaluate+deliver shake (device truth: no OS report UI). */
+    return duk_el_checkValidity(ctx);
+}
+
+/* ── Forms-Phase 4: the HTMLFormElement API + HTMLElement.click() ───────── *
+ * Same contract as the XS twin: prototype-level surface (tag-gated
+ * inside), the chains ride the main.c host hooks, and the frozen
+ * dispatcher dissolves event delivery (NONE falls through to the wire —
+ * the standing boundary a page with no listeners matches). */
+static DomNode *dk_form_receiver(DomNode *n)
+{
+    return (n && n->kind == DOM_ELEMENT && n->tag &&
+            !strcmp(n->tag, "form"))
+               ? n
+               : NULL;
+}
+
+static DomNode *dk_form_ancestor(DomNode *n)
+{
+    for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
+    {
+        if (p->kind == DOM_ELEMENT && p->tag && !strcmp(p->tag, "form"))
+        {
+            return (DomNode *)p;
+        }
+    }
+    return NULL;
+}
+
+/* The el.click() activation classes: submit button/button-defaulted or
+ * reset controls (the click's default action runs the form roads). */
+static int dk_node_is_form_button(DomNode *n)
+{
+    if (!n || n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return 0;
+    }
+    if (!strcmp(n->tag, "button"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return (!t || !t[0] || !strcmp(t, "submit") || !strcmp(t, "reset"));
+    }
+    if (!strcmp(n->tag, "input"))
+    {
+        const char *t = dom_get_attr(n, "type");
+        return t && (!strcmp(t, "submit") || !strcmp(t, "reset") ||
+                     !strcmp(t, "image"));
+    }
+    return 0;
+}
+
+static duk_ret_t duk_form_get_elements(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (!dk_form_receiver(n))
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    void *buf[64]; /* scratch — 64 controls is far past any real page */
+    int cnt = jsbridge_form_controls_collect(n, buf, 64);
+    duk_idx_t arr = duk_push_array(ctx);
+    for (int i = 0; i < cnt; i++)
+    {
+        duk_push_element(ctx, b, (DomNode *)buf[i]);
+        duk_put_prop_index(ctx, arr, (duk_uarridx_t)i);
+    }
+    return 1;
+}
+
+static duk_ret_t duk_form_reset(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (dk_form_receiver(n) && dk_connected(b, n))
+    {
+        (void)jsbridge_form_host_reset(b, n); /* no events, ever */
+    }
+    return 0;
+}
+
+static duk_ret_t duk_form_submit(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (dk_form_receiver(n) && dk_connected(b, n))
+    {
+        /* form.submit(): no gate, no submit event — straight to the wire. */
+        (void)jsbridge_form_host_wire(b, n, NULL, 0, 0);
+    }
+    return 0;
+}
+
+static duk_ret_t duk_form_requestSubmit(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (!dk_form_receiver(n) || !dk_connected(b, n))
+    {
+        return 0;
+    }
+    /* requestSubmit([submitter]): the argument must be a form
+     * descendant (the spec's NotFoundError, contained as TypeError). */
+    DomNode *submitter = NULL;
+    if (!duk_is_undefined(ctx, 0) && !duk_is_null(ctx, 0))
+    {
+        submitter = arg_node(ctx, 0);
+        if (!submitter || dk_form_ancestor(submitter) != n)
+        {
+            duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                      "requestSubmit: submitter is not this form's "
+                      "descendant");
+        }
+    }
+    (void)jsbridge_form_host_wire(b, n, submitter, 1, 1);
+    return 0;
+}
+
+/* Forms-Phase 6: the form's enumerated IDL mirrors (get + set) — the
+ * shared reflection helper covers the browser's limited enum shape
+ * (missing/invalid → the GET / urlencoded default on READ; the setter
+ * writes the lowercase value verbatim, exactly like setAttribute — this
+ * engine's standing attribute-road note: no dirty-tag on attr writes).
+ * Tag-gated: non-form receivers read undefined / absorb the write. */
+static duk_ret_t duk_form_get_method(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    if (!n || !dk_form_receiver(n))
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    duk_push_string(ctx, jsbridge_form_method_idl(dom_get_attr(n, "method")));
+    return 1;
+}
+
+static duk_ret_t duk_form_set_method(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (n && dk_form_receiver(n))
+    {
+        dom_set_attr(b->dom, n, "method", duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+static duk_ret_t duk_form_get_enctype(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    if (!n || !dk_form_receiver(n))
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    duk_push_string(ctx,
+                    jsbridge_form_enctype_idl(dom_get_attr(n, "enctype")));
+    return 1;
+}
+
+static duk_ret_t duk_form_set_enctype(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (n && dk_form_receiver(n))
+    {
+        dom_set_attr(b->dom, n, "enctype", duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+/* HTMLElement.click(): the dispatched click first (kind-0 — frozen
+ * engines return NONE here and still activate, matching a user tap on
+ * a script-less page); a non-prevented click on a form-associated
+ * submit/reset button then runs the form's activation chain. */
+static duk_ret_t duk_el_click(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT || !dk_connected(b, n))
+    {
+        return 0;
+    }
+    int rc = jsbridge_dispatch_element_event(b, n, "click");
+    if (rc == JSB_EVENT_SUPPRESSED)
+    {
+        b->domDirty = 1; /* the click handler owns the page */
+        return 0;
+    }
+    DomNode *form = dk_form_ancestor(n);
+    if (form && dk_node_is_form_button(n))
+    {
+        (void)jsbridge_form_host_wire(b, form, n, 1, 1);
+    }
+    return 0;
+}
+
 static duk_ret_t duk_el_get_parentNode(duk_context *ctx)
 {
     JsBridge *b = bridge_of(ctx);
@@ -241,6 +1039,16 @@ static duk_ret_t duk_el_get_children(duk_context *ctx)
 static duk_ret_t duk_el_get_nodeType(duk_context *ctx)
 {
     DomNode *n = this_node(ctx);
+    /* API-P6: the template's detached content fragment reports 11 —
+     * made as an element for the machinery, but it IS the browser's
+     * DocumentFragment surface. Parent-NULL is part of the rule (same
+     * rule as the XS NR and muJS getters). */
+    if (n && n->kind == DOM_ELEMENT && !n->parent && n->tag &&
+        !strcmp(n->tag, "#template-content"))
+    {
+        duk_push_int(ctx, 11);
+        return 1;
+    }
     duk_push_int(ctx, (n && n->kind == DOM_ELEMENT) ? 1 : 3);
     return 1;
 }
@@ -254,6 +1062,32 @@ static duk_ret_t duk_el_set_id(duk_context *ctx)
     if (n && n->kind == DOM_ELEMENT)
     {
         dom_set_attr(b->dom, n, "id", duk_to_string(ctx, 0));
+    }
+    return 0;
+}
+
+/* API-P9: className accessor pair — the read is the class attribute
+ * (never NULL; mapped 1:1 onto 'class', browser shape), the write goes
+ * through the shared class road with the classList family shape (the
+ * router owns the single budget charge; identical store to
+ * setAttribute('class')). Closes the P6 parked gap on this engine. */
+static duk_ret_t duk_el_get_className(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    const char *v = n ? dom_get_attr(n, "class") : NULL;
+    duk_push_string(ctx, v ? v : "");
+    return 1;
+}
+static duk_ret_t duk_el_set_className(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        if (jsbridge_el_class_set(b, n, duk_to_string(ctx, 0)) != 0)
+        {
+            duk_error(ctx, DUK_ERR_ERROR, "className assignment failed");
+        }
     }
     return 0;
 }
@@ -337,7 +1171,9 @@ static duk_ret_t duk_el_appendChild(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "appendChild failed");
     }
-    return 0;
+    /* API-P6: browsers return the appended child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 static duk_ret_t duk_el_removeChild(duk_context *ctx)
 {
@@ -349,7 +1185,9 @@ static duk_ret_t duk_el_removeChild(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "removeChild failed");
     }
-    return 0;
+    /* API-P6: browsers return the removed child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 /* ── SW5: insertBefore / querySelector(All) (methods) ───────────────────── */
 static duk_ret_t duk_el_insertBefore(duk_context *ctx)
@@ -363,7 +1201,9 @@ static duk_ret_t duk_el_insertBefore(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "insertBefore failed");
     }
-    return 0;
+    /* API-P6: browsers return the inserted child. */
+    duk_push_element(ctx, b, c);
+    return 1;
 }
 
 /* querySelector emit: Duktape pushes wrappers into the array being built
@@ -408,6 +1248,88 @@ static duk_ret_t duk_el_querySelector(duk_context *ctx)
     duk_push_element(ctx, b,
                      (DomNode *)jsbridge_el_query_selector_first(
                          b, n, sel, scratch, sizeof(scratch)));
+    return 1;
+}
+
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors; same parse + matcher as querySelector (the two can never
+ * disagree). NULL result pushes null, per browsers. */
+static duk_ret_t duk_el_closest(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    const char *sel = duk_to_string(ctx, 0);
+    char scratch[JSBRIDGE_QS_SCRATCH];
+    BUDGET_OR_THROW(b);
+    duk_push_element(ctx, b,
+                     (DomNode *)jsbridge_el_closest(b, n, sel, scratch,
+                                                    sizeof(scratch)));
+    return 1;
+}
+
+/* ── API-P6: template.content (getter) — the element's detached content
+ * fragment; created templates materialize an EMPTY fragment on first
+ * access. Non-template elements read undefined, like browsers. */
+static duk_ret_t duk_el_get_content(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *n = this_node(ctx);
+    if (!n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "template") != 0)
+    {
+        duk_push_undefined(ctx);
+        return 1;
+    }
+    DomNode *frag = dom_template_content(b->dom, n);
+    if (!frag)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, "template content unavailable");
+    }
+    duk_push_element(ctx, b, frag);
+    logger_log("[tpl] content -> node %d (children=%d)", frag->nodeId,
+               frag->childCount);
+    return 1;
+}
+
+/* ── API-P6: dataset (getter) — a fresh plain object per access mapping
+ * data-* attributes to camelCase keys (read-through from the live
+ * attribute list, same semantics as the XS engine's getter; direct
+ * writes to the object do NOT write back — set attributes with
+ * setAttribute like the browser's own pattern). */
+static duk_ret_t duk_el_get_dataset(duk_context *ctx)
+{
+    DomNode *n = this_node(ctx);
+    duk_idx_t obj = duk_push_object(ctx);
+    if (!n)
+    {
+        return 1; /* empty object like the other engines' NULL path */
+    }
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        const char *k = n->attrs[i].key;
+        if (strncmp(k, "data-", 5) != 0)
+        {
+            continue;
+        }
+        char camel[64];
+        int ci = 0;
+        for (const char *p = k + 5; *p && ci + 1 < (int)sizeof(camel); p++)
+        {
+            if (*p == '-' && p[1])
+            {
+                p++;
+                camel[ci++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+            }
+            else
+            {
+                camel[ci++] = *p;
+            }
+        }
+        camel[ci] = '\0';
+        const char *v = dom_get_attr(n, k);
+        duk_push_string(ctx, v ? v : "");
+        duk_put_prop_string(ctx, obj, camel);
+    }
     return 1;
 }
 
@@ -734,10 +1656,21 @@ static duk_ret_t duk_el_addEventListener(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_TYPE_ERROR, "listener must be a function");
     }
-    if (!type || strcmp(type, "click") != 0)
+    /* Forms-Phase 1: focus/blur join the accepted set as the kind-6
+     * NON-bubbling class (delivered by the el.focus()/el.blur() roads
+     * only); Phase 3 joins `invalid` (the constraint-validation event
+     * doesn't bubble either). click stays the kind-0 bubbling class. */
+    int kind = 0;
+    if (type && (strcmp(type, "focus") == 0 || strcmp(type, "blur") == 0 ||
+                 strcmp(type, "invalid") == 0))
+    {
+        kind = 6;
+    }
+    else if (!type || strcmp(type, "click") != 0)
     {
         /* UNSUPPORTED event types are accepted and ignored (no-op) so pages
-         * registering them don't error — only click is delivered. */
+         * registering them don't error — click (kind 0) and the focus/
+         * blur roads (kind 6, Forms-Phase 1) are the delivered classes. */
         return 0;
     }
     if (b->listenerCount >= JSBRIDGE_LISTENERS_MAX)
@@ -761,6 +1694,13 @@ static duk_ret_t duk_el_addEventListener(duk_context *ctx)
     JsListener *L = &b->listeners[b->listenerCount++];
     L->ref = fnHeapptr;
     L->target = n;
+    L->kind = kind; /* 0 = click class; 6 = focus/blur roads (see JsListener.kind) */
+    /* Forms-Phase 7: store the event type — the XS twins write the same
+     * string at registration (shared JsListener shape), and the kind-6
+     * dispatch (focus/blur/invalid) routes listeners by exact type
+     * match. The click dispatcher stays target-only (it never consults
+     * `type`), so the standing click road is unchanged. */
+    snprintf(L->type, sizeof(L->type), "%s", type);
     return 0;
 }
 static duk_ret_t duk_el_getElementsByTagName(duk_context *ctx)
@@ -839,6 +1779,19 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         duk_push_null(ctx);
         return;
     }
+    /* API-P9: the per-node wrapper cache — browser identity model (ONE
+     * wrapper per node for the page's whole life, so strict `===` chains
+     * and page-written expandos survive accesses; same contract XS NR
+     * holds). Hit = push the stash-pinned heapptr; miss = build fresh
+     * and pin below. See the JsElwEntry note in jsbridge_internal.h. */
+    for (int i = b->elwCount - 1; i >= 0; i--)
+    {
+        if (b->elw[i].node == node && b->elw[i].ref)
+        {
+            duk_push_heapptr(ctx, b->elw[i].ref);
+            return;
+        }
+    }
     duk_idx_t obj = duk_push_object(ctx);
     duk_push_pointer(ctx, (void *)node);
     duk_put_prop_string(ctx, obj, DUK_NODE_PROP);
@@ -852,6 +1805,24 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
     } accs[] = {
         {"tagName", duk_el_get_tagName, NULL},
         {"id", duk_el_get_id, duk_el_set_id},
+        {"className", duk_el_get_className, duk_el_set_className},
+        /* Forms-Phase 1+2: the field-life surface (value incl. the
+         * textarea text road and the Phase-2 select fork; checked gains
+         * the write side in Phase 2 — radio-group exclusivity rides the
+         * same doc-wide group the tap lane uses, writes flip the LIVE
+         * block, no attribute mirror; disabled/readOnly reflect their
+         * own attributes). selectedIndex/options are the picker
+         * reporting road (reads only this phase). */
+        {"value", duk_el_get_value, duk_el_set_value},
+        {"checked", duk_el_get_checked, duk_el_set_checked},
+        {"selectedIndex", duk_el_get_selectedIndex, NULL},
+        {"options", duk_el_get_options, NULL},
+        {"disabled", duk_el_get_disabled, duk_el_set_disabled},
+        {"readOnly", duk_el_get_readOnly, duk_el_set_readOnly},
+        /* Forms-Phase 7: the control-type reflect (the XS twin's exact
+         * shape — attr verbatim / input "text" / button "submit"; other
+         * tags undefined). Getter-only everywhere. */
+        {"type", duk_el_get_type, NULL},
         {"textContent", duk_el_get_textContent, duk_el_set_textContent},
         {"innerHTML", duk_el_get_innerHTML, duk_el_set_innerHTML},
         {"parentNode", duk_el_get_parentNode, NULL},
@@ -862,6 +1833,20 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"nextElementSibling", duk_el_get_nextElementSibling, NULL},
         {"classList", duk_el_get_classList, NULL},
         {"style", duk_el_get_style, NULL},
+        {"content", duk_el_get_content, NULL},
+        {"dataset", duk_el_get_dataset, NULL},
+        /* Forms-Phase 3: the constraint-validation getters. */
+        {"validity", duk_el_get_validity, NULL},
+        {"validationMessage", duk_el_get_validationMessage, NULL},
+        {"willValidate", duk_el_get_willValidate, NULL},
+        /* Forms-Phase 4: the form's controls collection (tag-gated
+         * inside; non-forms read undefined). */
+        {"elements", duk_form_get_elements, NULL},
+        /* Forms-Phase 6: the form's enumerated IDL mirrors (the browser
+         * reflect shapes; tagging the aliasing encoding → enctype). */
+        {"method", duk_form_get_method, duk_form_set_method},
+        {"enctype", duk_form_get_enctype, duk_form_set_enctype},
+        {"encoding", duk_form_get_enctype, duk_form_set_enctype},
     };
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
@@ -898,7 +1883,21 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         {"insertBefore", duk_el_insertBefore, 2},
         {"querySelector", duk_el_querySelector, 1},
         {"querySelectorAll", duk_el_querySelectorAll, 1},
+        {"closest", duk_el_closest, 1},
         {"addEventListener", duk_el_addEventListener, 2},
+        /* Forms-Phase 1: the focus/blur roads (state + non-bubbling
+         * event; keyboard lane untouched). */
+        {"focus", duk_el_focus, 0},
+        {"blur", duk_el_blur, 0},
+        /* Forms-Phase 3: the validity check/report methods. */
+        {"checkValidity", duk_el_checkValidity, 0},
+        {"reportValidity", duk_el_reportValidity, 0},
+        /* Forms-Phase 4: the form API + the click activation road
+         * (tag-gated/no-op inside; the chains ride the host hooks). */
+        {"reset", duk_form_reset, 0},
+        {"submit", duk_form_submit, 0},
+        {"requestSubmit", duk_form_requestSubmit, 1},
+        {"click", duk_el_click, 0},
         {"getElementsByTagName", duk_el_getElementsByTagName, 1},
     };
     for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
@@ -906,7 +1905,30 @@ static void duk_push_element(duk_context *ctx, JsBridge *b, DomNode *node)
         duk_push_c_function(ctx, methods[i].fn, methods[i].nargs);
         duk_put_prop_string(ctx, obj, methods[i].name);
     }
-    (void)b;
+
+    /* API-P9: pin the fresh wrapper in the global stash (GC-safe, the
+     * listener-pin contract) and remember its stable heapptr — the ONLY
+     * strong live ref; the heap dies with the engine at page close. */
+    if (b->elwCount < JSBRIDGE_ELW_MAX)
+    {
+        char key[32];
+        snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.elw.%d"),
+                 b->elwCount);
+        duk_push_global_stash(ctx);
+        duk_dup(ctx, -2); /* the fresh wrapper under the stash */
+        duk_put_prop_string(ctx, -2, key);
+        duk_pop(ctx); /* stash */
+        b->elw[b->elwCount].node = node;
+        b->elw[b->elwCount].ref = duk_get_heapptr(ctx, -1);
+        b->elwCount++;
+    }
+    else if (!b->elwOverflow)
+    {
+        b->elwOverflow = 1;
+        logger_log("[elw] duk wrapper cache full (%d) — fresh wrappers "
+                   "from here on",
+                   JSBRIDGE_ELW_MAX);
+    }
 }
 
 /* ── console ─────────────────────────────────────────────────────────────── */
@@ -994,40 +2016,10 @@ static DomNode *first_element(DomNode *n, const char *tag)
 
 static DomNode *find_element_by_id(JsBridge *b, const char *id)
 {
-    if (!b->dom || !b->dom->root || !id)
-    {
-        return NULL;
-    }
-    DomNode *hit = NULL;
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
-    int top = 0;
-    stack[top++] = b->dom->root;
-    while (top > 0 && !hit)
-    {
-        DomNode *n = stack[--top];
-        if (n->kind == DOM_ELEMENT)
-        {
-            const char *v = dom_get_attr(n, "id");
-            if (v && strcmp(v, id) == 0)
-            {
-                hit = n;
-                break;
-            }
-        }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
-        {
-            break;
-        }
-        for (int i = 0; i < n->childCount; i++)
-        {
-            stack[top++] = n->children[i];
-        }
-    }
-    if (!hit && id[0] == '_' && id[1] == 'd')
-    {
-        hit = dom_node_by_id(b->dom, atoi(id + 2));
-    }
-    return hit;
+    /* API-P6: road moved to the shared O(depth) scan (dom_find_by_id) —
+     * the former push-all-children walk aborted whole once a body held
+     * 65+ element children, hiding every later id from getElementById. */
+    return dom_find_by_id(b->dom, id);
 }
 
 static duk_ret_t duk_document_getElementById(duk_context *ctx)
@@ -1167,6 +2159,65 @@ static void put_method(duk_context *ctx, duk_idx_t obj, const char *name,
     duk_put_prop_string(ctx, obj, name);
 }
 
+/* Forms-Phase 1: the NON-bubbling focus/blur dispatcher — the frozen-
+ * engine twin of the click dispatcher above (one flat pass, no
+ * listener-class mixing: kind 0 never fires here and vice versa).
+ * focus/blur never bubble in browsers, so delivery
+ * targets ONLY kind-6 listeners of the exact type on the node; the
+ * event object carries bubbles:false + cancelable:false (neither is
+ * cancelable per HTML; preventDefault rides along for shape parity but
+ * has no effect). Returns JSB_EVENT_NAVIGATE when anything fired. */
+static int duktape_dispatch_focus(JsBridge *b, DomNode *node,
+                                  const char *type)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !node || !type)
+    {
+        return JSB_EVENT_NONE;
+    }
+    int fired = 0;
+    for (int i = 0; i < b->listenerCount; i++)
+    {
+        JsListener *L = &b->listeners[i];
+        if (L->target != node || L->kind != 6 || /* focus/blur class */
+            strcmp(L->type, type) != 0)          /* exact type route */
+        {
+            continue;
+        }
+        fired = 1;
+        b->preventDef = 0;
+        b->inClick = 1;
+
+        duk_push_heapptr(ctx, L->ref);      /* pinned in the global stash */
+        duk_push_element(ctx, b, node);     /* this = the focused node */
+        duk_idx_t ev = duk_push_object(ctx);
+        duk_push_string(ctx, type);
+        duk_put_prop_string(ctx, ev, "type");
+        duk_push_boolean(ctx, 0); /* bubbles:false — non-bubbling class */
+        duk_put_prop_string(ctx, ev, "bubbles");
+        duk_push_boolean(ctx, 0); /* cancelable:false — HTML truth */
+        duk_put_prop_string(ctx, ev, "cancelable");
+        duk_push_element(ctx, b, node);
+        duk_put_prop_string(ctx, ev, "target");
+        duk_push_element(ctx, b, node);
+        duk_put_prop_string(ctx, ev, "currentTarget");
+        duk_push_c_function(ctx, duk_event_preventDefault, 0);
+        duk_put_prop_string(ctx, ev, "preventDefault");
+
+        if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
+        {
+            b->errs++;
+            bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+        }
+        duk_pop(ctx); /* result or error */
+        b->inClick = 0;
+        b->doc->jsErrors = b->errs;
+        snprintf(b->doc->jsLastError, sizeof(b->doc->jsLastError), "%s",
+                 b->lastError);
+    }
+    return fired ? JSB_EVENT_NAVIGATE : JSB_EVENT_NONE;
+}
+
 /* ── timers (setTimeout / setInterval): router table + engine refs ──────── */
 /* Registration entry: [0]=fn [1]=delay. Registers in the ROUTER table and
  * returns the public id. Throws on refusal (table full / not a function). */
@@ -1245,6 +2296,94 @@ static duk_ret_t duk_clearInterval(duk_context *ctx)
     return 1;
 }
 
+/* ── API-P7: localStorage / sessionStorage (see webstorage.h) ────────── */
+#define WS_DUK_KIND_KEY "\xff" "wsKind" /* hidden per-instance store kind */
+
+/* The store this call belongs to: local (kind 0) or session (kind 1). */
+static WsStore *duk_storage_of(duk_context *ctx)
+{
+    WsStore *s = ws_local();
+    duk_push_this(ctx);
+    if (duk_is_object(ctx, -1))
+    {
+        duk_get_prop_string(ctx, -1, WS_DUK_KIND_KEY);
+        if (duk_is_number(ctx, -1) && duk_get_int(ctx, -1) == 1)
+        {
+            s = ws_session();
+        }
+        duk_pop(ctx);
+    }
+    duk_pop(ctx);
+    return s;
+}
+
+static duk_ret_t duk_storage_getItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    const char *k = duk_to_string(ctx, 0);
+    char out[WS_VAL_MAX];
+    int hit = s && ws_get(s, k, out, sizeof(out));
+    if (!hit)
+    {
+        logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
+    }
+    if (hit)
+    {
+        duk_push_string(ctx, out);
+    }
+    else
+    {
+        duk_push_null(ctx);
+    }
+    return 1;
+}
+
+static duk_ret_t duk_storage_setItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    const char *k = duk_to_string(ctx, 0);
+    const char *v = duk_to_string(ctx, 1);
+    if (!ws_set(s, k, v))
+    {
+        /* The browser's QuotaExceededError road (4KB here, not 5MB). */
+        duk_error(ctx, DUK_ERR_ERROR,
+                  "QuotaExceededError: per-origin storage quota exceeded");
+    }
+    return 0;
+}
+
+static duk_ret_t duk_storage_removeItem(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    ws_remove(s, duk_to_string(ctx, 0));
+    return 0;
+}
+
+static duk_ret_t duk_storage_clear(duk_context *ctx)
+{
+    ws_clear(duk_storage_of(ctx));
+    return 0;
+}
+
+static duk_ret_t duk_storage_key(duk_context *ctx)
+{
+    WsStore *s = duk_storage_of(ctx);
+    char out[WS_KEY_MAX];
+    if (ws_key(s, (int)duk_to_int(ctx, 0), out, sizeof(out)))
+    {
+        duk_push_string(ctx, out);
+        return 1;
+    }
+    duk_push_null(ctx);
+    return 1;
+}
+
+static duk_ret_t duk_storage_getLength(duk_context *ctx)
+{
+    duk_push_int(ctx, ws_count(duk_storage_of(ctx)));
+    return 1;
+}
+
 static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
 {
     /* window: identity alias for the global object. */
@@ -1296,6 +2435,38 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
     put_method(ctx, loc, "replace", duk_location_assign, 1);
     duk_put_global_lstring(ctx, "location", 8);
 
+    /* API-P7: localStorage + sessionStorage — the browser's key/value
+     * stores driven by the shared webstorage.c road (same origin rule,
+     * caps and persistence file as the other engines). Two instances,
+     * methods on each; the kind (0=local / 1=session) rides the hidden
+     * "\xffwsKind" property read through duk_push_this. length is a
+     * live getter; getItem misses return null; setItem quota-fails
+     * with the browser's QuotaExceededError road. */
+    ws_bind(baseUrl ? baseUrl : "");
+    for (int sk = 0; sk < 2; sk++)
+    {
+        duk_idx_t so = duk_push_object(ctx);
+        put_method(ctx, so, "getItem", duk_storage_getItem, 1);
+        put_method(ctx, so, "setItem", duk_storage_setItem, 2);
+        put_method(ctx, so, "removeItem", duk_storage_removeItem, 1);
+        put_method(ctx, so, "clear", duk_storage_clear, 0);
+        put_method(ctx, so, "key", duk_storage_key, 1);
+        duk_push_string(ctx, "length");
+        duk_push_c_function(ctx, duk_storage_getLength, 0);
+        duk_def_prop(ctx, so, DUK_DEFPROP_HAVE_GETTER | DUK_DEFPROP_SET_ENUMERABLE);
+        duk_push_int(ctx, sk);
+        duk_put_prop_lstring(ctx, so, "\xff" "wsKind", 7);
+        if (sk)
+        {
+            duk_put_global_lstring(ctx, "sessionStorage", 14);
+        }
+        else
+        {
+            duk_put_global_lstring(ctx, "localStorage", 12);
+        }
+    }
+    logger_log("[webstorage] globals bound (duktape): origin=%s", ws_origin());
+
     /* window/global methods (explicit global push: the stack is empty
      * after the put_global calls above). */
     duk_push_global_object(ctx);
@@ -1313,6 +2484,176 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
 }
 
 /* ── vtable entry points ─────────────────────────────────────────────────── */
+
+/* Phase 6: the vendored duktape strips both the Promise builtins (they are
+ * throw-stubs behind DUK_USE_PROMISE_BUILTIN) and the executor job queue,
+ * and upstream never ships it here — so the fetch shim rides a small
+ * Promise polyfill injected as engine JS (the same pattern as the XS-NR
+ * fetch shim). Semantics kept honest: constructor executor, then/catch
+ * with value flattening (thenable adoption), pass-through settle, and
+ * resolve/reject. Callbacks on an ALREADY-settled promise run
+ * synchronously inside then() — the battery's then-chains never depend on
+ * microtask ordering (the real async comes from the xhr delivery pump,
+ * like every other engine). Promise.all/race stay unset: pages calling
+ * them on this engine get an honest TypeError, matching the vendored
+ * build's stripped promises rather than faking a partial polyfill. */
+static const char *g_dukPromiseSrc =
+    "/* pluto promise polyfill (engine-owned; duktape) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.Promise === 'function') { return; }\n"
+    "  function P(executor) {\n"
+    "    this._st = 'p'; this._x = undefined; this._q = [];\n"
+    "    var me = this; var done = 0;\n"
+    "    function rs(v) { if (!done) { done = 1; settle(me, 1, v); } }\n"
+    "    function rj(e) { if (!done) { done = 1; settle(me, 0, e); } }\n"
+    "    try { executor(rs, rj); }\n"
+    "    catch (er) { if (!done) { done = 1; rj(er); } }\n"
+    "  }\n"
+    "  function settle(p, ok, v) {\n"
+    "    p._st = ok ? 'f' : 'r'; p._x = v;\n"
+    "    var q = p._q; p._q = [];\n"
+    "    for (var i = 0; i < q.length; i++) { step(p, q[i]); }\n"
+    "  }\n"
+    "  function finish(p, ok, v) { settle(p, ok, v); }\n"
+    "  function step(p, q) {\n"
+    "    var cb = (p._st === 'f') ? q.onF : q.onR;\n"
+    "    if (typeof cb !== 'function') {\n"
+    "      finish(q.next, p._st === 'f', p._x);\n"
+    "      return;\n"
+    "    }\n"
+    "    try {\n"
+    "      var out = cb(p._x);\n"
+    "      if (out && (typeof out === 'object' || typeof out === 'function')) {\n"
+    "        var th = out.then;\n"
+    "        if (typeof th === 'function') {\n"
+    "          th.call(out,\n"
+    "            function (vv) { finish(q.next, true, vv); },\n"
+    "            function (ee) { finish(q.next, false, ee); });\n"
+    "          return;\n"
+    "        }\n"
+    "      }\n"
+    "      finish(q.next, true, out);\n"
+    "    } catch (er) { finish(q.next, false, er); }\n"
+    "  }\n"
+    "  P.prototype.then = function (onF, onR) {\n"
+    "    var next = new P(function () {});\n"
+    "    var q = { onF: onF, onR: onR, next: next };\n"
+    "    if (this._st === 'p') { this._q.push(q); }\n"
+    "    else { step(this, q); }\n"
+    "    return next;\n"
+    "  };\n"
+    "  P.prototype.catch = function (onR) { return this.then(undefined, onR); };\n"
+    "  P.resolve = function (v) {\n"
+    "    return new P(function (rs) { rs(v); });\n"
+    "  };\n"
+    "  P.reject = function (e) {\n"
+    "    return new P(function (rs, rj) { rj(e); });\n"
+    "  };\n"
+    "  g.Promise = P;\n"
+    "})(this);\n";
+
+/* Phase 6: the fetch shim on duktape — 1:1 with the receipted XS-NR shim
+ * (jsbridge_xs_nr.c g_fetchShimSrc). The xhr surface it needs exists
+ * engine-side: open/send/abort + setRequestHeader (added this phase) +
+ * per-instance status/readText accessors, and the onerror pin lands the
+ * taxonomy text as this.plutoError (see duktape_run_xhr_ref). */
+static const char *g_dukFetchShimSrc =
+    "/* pluto fetch shim (engine-owned) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.fetch === 'function') { return; }\n"
+    "  if (typeof g.AbortSignal !== 'function') {\n"
+    "    var AS = function AbortSignal() {};\n"
+    "    AS.timeout = function (ms) {\n"
+    "      var n = 0;\n"
+    "      if (typeof ms === 'number' && ms === ms && ms > 0 &&\n"
+    "          ms <= 1200000) {\n"
+    "        n = Math.floor(ms);\n"
+    "      }\n"
+    "      return { aborted: false, reason: undefined, onabort: null,\n"
+    "        throwIfAborted: function () { if (this.aborted) {\n"
+    "            throw this.reason;\n"
+    "        } },\n"
+    "        addEventListener: function () {},\n"
+    "        removeEventListener: function () {},\n"
+    "        dispatchEvent: function () { return false; },\n"
+    "        plutoTimeoutMs: n };\n"
+    "    };\n"
+    "    g.AbortSignal = AS;\n"
+    "  }\n"
+    "  g.fetch = function (url, opts) {\n"
+    "    opts = opts || {};\n"
+    "    var ms = 0;\n"
+    "    var sig = opts.signal;\n"
+    "    if (sig && typeof sig.plutoTimeoutMs === 'number') {\n"
+    "      ms = sig.plutoTimeoutMs;\n"
+    "    }\n"
+    "    return new g.Promise(function (resolve, reject) {\n"
+    "      var xhr = new XMLHttpRequest();\n"
+    "      var timer = 0;\n"
+    "      try {\n"
+    "        xhr.open((opts.method || 'GET') + '', url + '');\n"
+    "      } catch (e) { reject(e); return; }\n"
+    "      var hs = opts.headers;\n"
+    "      if (hs && typeof hs === 'object') {\n"
+    "        for (var hk in hs) {\n"
+    "          try { xhr.setRequestHeader(String(hk), String(hs[hk])); }\n"
+    "          catch (hfe) {}\n"
+    "        }\n"
+    "      }\n"
+    "      if (ms > 0) {\n"
+    "        timer = setTimeout(function () {\n"
+    "          timer = 0;\n"
+    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
+    "        }, ms);\n"
+    "      }\n"
+    "      xhr.onload = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        var st = this.status || 0;\n"
+    "        var tx = this.responseText || '';\n"
+    "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
+    "          url: String(url), redirected: false,\n"
+    "          text: function () { return g.Promise.resolve(tx); },\n"
+    "          json: function () {\n"
+    "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
+    "            catch (e) { return g.Promise.reject(e); }\n"
+    "          } });\n"
+    "      };\n"
+    "      xhr.onerror = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        var detail = '';\n"
+    "        try {\n"
+    "          if (this && this.plutoError) { detail = ': ' + this.plutoError; }\n"
+    "        } catch (pe) {}\n"
+    "        reject(new Error('Fetch failed' + detail));\n"
+    "      };\n"
+    "      var body = opts.body;\n"
+    "      if (body === undefined || body === null) { xhr.send(); }\n"
+    "      else { xhr.send(String(body)); }\n"
+    "    });\n"
+    "  };\n"
+    "})(this);\n";
+
+static duk_ret_t duk_eval_shim_thunk(duk_context *ctx, void *ud)
+{
+    duk_eval_string(ctx, (const char *)ud);
+    return 1;
+}
+
+static void duktape_eval_protected(duk_context *ctx, const char *tag,
+                                   const char *src)
+{
+    if (duk_safe_call(ctx, duk_eval_shim_thunk, (void *)src, 0, 1) !=
+        DUK_EXEC_SUCCESS)
+    {
+        logger_log("[js] duktape %s eval FAILED: %s", tag,
+                   duk_safe_to_string(ctx, -1));
+        duk_pop(ctx); /* error */
+        return;
+    }
+    duk_pop(ctx); /* eval result */
+    logger_log("[js] duktape %s injected", tag);
+}
+
 static int duktape_init(JsBridge *b, const char *baseUrl)
 {
     duk_context *ctx = duk_create_heap(duk_sdk_alloc, duk_sdk_realloc,
@@ -1329,6 +2670,13 @@ static int duktape_init(JsBridge *b, const char *baseUrl)
     duk_pop(ctx);
     define_globals(ctx, b, baseUrl);
     duktape_define_xhr(ctx, b);
+    duktape_define_worker(ctx, b);
+    duktape_define_formdata(ctx, b); /* Forms-Phase 5 */
+    /* Phase 6: promise polyfill + fetch shim ride post-defines (the page
+     * scripts then see fetch/Promise exactly like the XS-NR engine). */
+    duktape_eval_protected(ctx, "promise polyfill", g_dukPromiseSrc);
+    duktape_eval_protected(ctx, "fetch shim", g_dukFetchShimSrc);
+    logger_log("[js] duktape_init ctx=%p b=%p", (void *)ctx, (void *)b);
     return 0;
 }
 
@@ -1461,10 +2809,11 @@ static void duktape_clear_timer_ref(JsBridge *b, void *fnRef)
     }
     /* Find + delete the stash entry whose heapptr matches. */
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
+        const char *k = duk_get_lstring(ctx, -1, NULL);
         if (k && strstr(k, "\xFF" "pluto.tid."))
         {
             duk_get_prop(ctx, -2); /* stash[key] */
@@ -1481,6 +2830,35 @@ static void duktape_clear_timer_ref(JsBridge *b, void *fnRef)
     duk_pop_2(ctx); /* enum, stash */
 }
 
+/* Phase 4: name a thrown value honestly — Duktape's duk_safe_to_string
+ * walks a double coercion (throw → ToString → its own error) that can
+ * flatten genuine messages to "", so also pull .stack (Error objects
+ * carry it) and flatten it to one line. Reads the value at -1 and leaves
+ * the stack unchanged. */
+static void duk_log_throw(duk_context *ctx, const char *lane)
+{
+    duk_int_t t = duk_get_type(ctx, -1);
+    char flat[104];
+    flat[0] = '\0';
+    if (t == DUK_TYPE_OBJECT && duk_has_prop_string(ctx, -1, "stack"))
+    {
+        duk_get_prop_string(ctx, -1, "stack");
+        const char *st = duk_safe_to_string(ctx, -1);
+        snprintf(flat, sizeof(flat), "%s", st ? st : "");
+        duk_pop(ctx); /* stack string */
+    }
+    const char *msg = duk_safe_to_string(ctx, -1);
+    for (char *p = flat; *p; p++)
+    {
+        if (*p == '\n' || *p == '\r')
+        {
+            *p = '|';
+        }
+    }
+    logger_log("[js] duk %s threw type=%d msg=%.40s stack=%s", lane,
+               (int)t, msg ? msg : "", flat);
+}
+
 /* Invoke one pinned callback. Returns 0 ok, 1 contained error, -1 abort. */
 static int duktape_run_timer_ref(JsBridge *b, void *fnRef)
 {
@@ -1490,13 +2868,27 @@ static int duktape_run_timer_ref(JsBridge *b, void *fnRef)
         return 1;
     }
     duk_push_heapptr(ctx, fnRef);
-    duk_push_undefined(ctx); /* this */
+    /* duk_pcall(ctx, 0) has NO `this` slot: the TOP of the stack is the
+     * function. The old extra push_undefined became the call target —
+     * every fire rethrown "TypeError: undefined not callable" from
+     * duktape's internal call check, and the page's activity died on the
+     * first fire. */
     if (duk_pcall(ctx, 0) != DUK_EXEC_SUCCESS)
     {
-        int firstErr = !b->lastError[0];
+        /* Phase 4: same contract as run_xhr_ref above — a caught JS
+         * exception in a timer callback is a page error (errs++), never a
+         * fatal engine fault. The old firstErr contract's -1 aborted the
+         * timer pump for a thrown callback and then lost the retry
+         * ("firstErr" now false) — the receipted timer-fire abort shape. */
+        /* Read the true type BEFORE duk_safe_to_string — it coerces the
+         * value in place, so the old "type=string" lines described the
+         * stringified result, not the throw (agrees with the 39-byte
+         * "TypeError: ..." hex probe). */
+        duk_log_throw(ctx, "timer");
+        b->errs++;
         bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
-        duk_pop(ctx);
-        return firstErr ? -1 : 1;
+        duk_pop(ctx); /* error value */
+        return 0;
     }
     duk_pop(ctx);
     return 0;
@@ -1509,13 +2901,15 @@ static void duktape_close(JsBridge *b)
     {
         return;
     }
+    logger_log("[js] duktape_close ctx=%p b=%p", (void *)ctx, (void *)b);
     /* Safety net: sweep any timer stash pins the router did not release
      * (paranoia — js_doc_close clears the table before close). */
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
+        const char *k = duk_get_lstring(ctx, -1, NULL);
         if (k && strstr(k, "\xFF" "pluto.tid."))
         {
             duk_del_prop(ctx, -2);
@@ -1549,10 +2943,13 @@ static void duk_push_xhr(duk_context *ctx, JsBridge *b)
 
     duk_push_c_function(ctx, duk_xhr_open, 2);
     duk_put_prop_string(ctx, obj, "open");
-    duk_push_c_function(ctx, duk_xhr_send, 0);
+    duk_push_c_function(ctx, duk_xhr_setheader, 2);
+    duk_put_prop_string(ctx, obj, "setRequestHeader");
+    duk_push_c_function(ctx, duk_xhr_send, DUK_VARARGS);
     duk_put_prop_string(ctx, obj, "send");
     duk_push_c_function(ctx, duk_xhr_abort, 0);
     duk_put_prop_string(ctx, obj, "abort");
+    duk_xhr_attach_accessors(ctx, obj);
 }
 
 static int duk_xhr_open(duk_context *ctx)
@@ -1569,6 +2966,29 @@ static int duk_xhr_open(duk_context *ctx)
     }
     duk_push_pointer(ctx, (void *)(intptr_t)id);
     duk_put_prop_string(ctx, -2, DUK_XHR_ID_PROP);
+    return 0;
+}
+
+/* Phase 6: the fetch shim's setRequestHeader lane rides the SHARED
+ * bridge feature (API-P2 receipts: replace-lane content-type, forbidden
+ * set refusal with a logged reason, ", " fold for repeats, CRLF guard).
+ * Browser-faithful: only callable while the request is opened. */
+static int duk_xhr_setheader(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    int id = duk_xhr_id(ctx);
+    if (id <= 0)
+    {
+        return duk_error(ctx, DUK_ERR_ERROR, "xhr: header before open");
+    }
+    const char *name = duk_to_string(ctx, 0);
+    const char *value = duk_to_string(ctx, 1);
+    if (!jsbridge_xhr_set_header(b, id, name, value))
+    {
+        return duk_error(ctx, DUK_ERR_ERROR, "%s",
+                         b->lastError[0] ? b->lastError
+                                         : "xhr: header refused");
+    }
     return 0;
 }
 
@@ -1589,47 +3009,106 @@ static int duk_xhr_send(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "xhr: send before open");
     }
+
+    /* Phase 6: optional body (varargs — the fetch shim posts stringified
+     * bodies). Read BEFORE any push so stack indexes stay clean. */
+    const char *reqBody = NULL;
+    duk_size_t reqLen = 0;
+    duk_idx_t top = duk_get_top(ctx);
+    if (top >= 1)
+    {
+        duk_size_t blen = 0;
+        const char *bp = duk_get_lstring(ctx, 0, &blen);
+        if (bp)
+        {
+            reqBody = bp;
+            reqLen = (size_t)blen;
+        }
+    }
+
     /* Pin the completion handler (onload → onerror → onreadystatechange
      * precedence) in the global stash and remember its heapptr. */
     static const char *const names[] = {"onload", "onerror",
                                         "onreadystatechange"};
-    void *fnHeapptr = NULL;
-    char key[40];
-    snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.xfn.%d"),
+    char fkey[40];
+    char okey[40];
+    char ekey[40];
+    snprintf(fkey, sizeof(fkey), DUK_HIDDEN_SYMBOL("pluto.xfn.%d"),
              b->xhrIdSeq + 1); /* next id the router hands out on start */
+    snprintf(okey, sizeof(okey), DUK_HIDDEN_SYMBOL("pluto.xobj.%d"),
+             b->xhrIdSeq + 1);
+    snprintf(ekey, sizeof(ekey), DUK_HIDDEN_SYMBOL("pluto.xerr.%d"),
+             b->xhrIdSeq + 1);
+
+    void *fnHeapptr = NULL;
+    void *errHeapptr = NULL;
+    void *objHeapptr = NULL;
+
+    duk_push_this(ctx);
+    objHeapptr = duk_get_heapptr(ctx, -1);
+
+    /* Success ref: first callable in precedence order. Capture BEFORE the
+     * stash churn — the old capture ran after the pops, where index -2 was
+     * `this` (the wrapper), so fnHeapptr was the wrapper object and EVERY
+     * deferred delivery threw "TypeError: [object Object] not callable"
+     * from duktape's internal call check. */
     for (int i = 0; i < 3 && !fnHeapptr; i++)
     {
-        duk_push_this(ctx);
-        if (duk_get_prop_string(ctx, -1, names[i]) && duk_is_callable(ctx, -1))
+        duk_get_prop_string(ctx, -1, names[i]);
+        if (duk_is_callable(ctx, -1))
         {
+            fnHeapptr = duk_get_heapptr(ctx, -1);
             duk_push_global_stash(ctx);
             duk_dup(ctx, -2); /* the handler value */
-            duk_put_prop_string(ctx, -2, key);
+            duk_put_prop_string(ctx, -2, fkey);
             duk_pop(ctx); /* stash */
-            duk_dup(ctx, -2);
-            fnHeapptr = duk_get_heapptr(ctx, -1);
-            duk_pop(ctx); /* dup */
         }
-        duk_pop_2(ctx); /* prop value + this */
+        duk_pop(ctx); /* prop value */
     }
     if (!fnHeapptr)
     {
+        duk_pop(ctx); /* this */
         duk_error(ctx, DUK_ERR_ERROR,
                   "xhr: no onload/onerror/onreadystatechange handler");
     }
+
+    /* Phase 6: pin onerror SEPARATELY (browser-true transport-failure
+     * routing — the fetch shim rejects from it). Same pre-churn capture.
+     * A page reusing one fn for both events pins once (the pump routes
+     * both completion kinds to the same ref; exactly one dispatch per
+     * request). */
+    duk_get_prop_string(ctx, -1, "onerror");
+    if (duk_is_callable(ctx, -1))
+    {
+        void *hp = duk_get_heapptr(ctx, -1);
+        if (hp && hp != fnHeapptr)
+        {
+            errHeapptr = hp;
+            duk_push_global_stash(ctx);
+            duk_dup(ctx, -2); /* the onerror value */
+            duk_put_prop_string(ctx, -2, ekey);
+            duk_pop(ctx); /* stash */
+        }
+    }
+    duk_pop(ctx); /* onerror value */
+
     /* Pin the wrapper object as `this` for the completion. */
-    char okey[40];
-    snprintf(okey, sizeof(okey), DUK_HIDDEN_SYMBOL("pluto.xobj.%d"),
-             b->xhrIdSeq + 1);
-    duk_push_this(ctx);
-    void *objHeapptr = duk_get_heapptr(ctx, -1);
     duk_push_global_stash(ctx);
     duk_dup(ctx, -2);
     duk_put_prop_string(ctx, -2, okey);
     duk_pop(ctx); /* stash */
     duk_pop(ctx); /* this */
 
-    jsbridge_xhr_send(b, id, fnHeapptr, objHeapptr);
+    if (reqBody && reqLen > 0)
+    {
+        /* C4: the POST/PUT body twin carries the body + both refs. */
+        jsbridge_xhr_send_body(b, id, reqBody, reqLen, fnHeapptr,
+                               errHeapptr, objHeapptr);
+    }
+    else
+    {
+        jsbridge_xhr_send(b, id, fnHeapptr, errHeapptr, objHeapptr);
+    }
     return 0;
 }
 
@@ -1672,11 +3151,57 @@ static int duk_xhr_get_responseURL(duk_context *ctx)
     return 1;
 }
 
+/* Shared XHR getter table. Attached BOTH on the constructor's prototype
+ * and per-instance: duk_xmlhttprequest_new returns its own plain wrapper
+ * (instance), whose prototype is Object.prototype — a prototype-only
+ * attach never reaches the wrapper, and every probe then read
+ * "MISS st=undefined" on Duktape while muJS (per-instance accessors)
+ * passed the same row. */
+static const struct
+{
+    const char *name;
+    duk_c_function get;
+} duk_xhr_accs[] = {
+    {"readyState", duk_xhr_get_readyState},
+    {"status", duk_xhr_get_status},
+    {"responseText", duk_xhr_get_responseText},
+    {"response", duk_xhr_get_responseText},
+    {"responseURL", duk_xhr_get_responseURL},
+};
+
+static void duk_xhr_attach_accessors(duk_context *ctx, duk_idx_t obj)
+{
+    /* duk_def_prop expects the name + getter on top of the stack; `obj`
+     * is an index that still resolves with those two pushed. */
+    for (size_t i = 0; i < sizeof(duk_xhr_accs) / sizeof(duk_xhr_accs[0]);
+         i++)
+    {
+        duk_push_string(ctx, duk_xhr_accs[i].name);
+        duk_push_c_function(ctx, duk_xhr_accs[i].get, 0);
+        duk_def_prop(ctx, obj, DUK_DEFPROP_HAVE_GETTER |
+                                   DUK_DEFPROP_SET_ENUMERABLE);
+    }
+}
+
 /* Constructor global: new XMLHttpRequest() / XHR() both return a wrapper. */
 static duk_ret_t duk_xmlhttprequest_new(duk_context *ctx)
 {
     JsBridge *b = bridge_of(ctx);
     duk_push_xhr(ctx, b);
+    return 1;
+}
+
+/* API-P10: dynamic-import bridge native — delegates to the shared core
+ * (jsbridge_dyn_request in jsbridge.c); status-string reply protocol
+ * ("k:<key>" resolved / "p:<id>" ticket / "x:<msg>" refused). */
+static duk_ret_t duk_dyn_request(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *spec = duk_to_string(ctx, 0);
+    const char *base = duk_to_string(ctx, 1);
+    char out[JSBRIDGE_MOD_KEY_MAX + 24];
+    jsbridge_dyn_request(b, spec, base, out, sizeof(out));
+    duk_push_string(ctx, out);
     return 1;
 }
 
@@ -1687,58 +3212,574 @@ static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
     {
         duk_push_c_function(ctx, duk_xhr_open, 2);
         duk_put_prop_string(ctx, -2, "open");
-        duk_push_c_function(ctx, duk_xhr_send, 0);
+        duk_push_c_function(ctx, duk_xhr_setheader, 2);
+        duk_put_prop_string(ctx, -2, "setRequestHeader");
+        duk_push_c_function(ctx, duk_xhr_send, DUK_VARARGS);
         duk_put_prop_string(ctx, -2, "send");
         duk_push_c_function(ctx, duk_xhr_abort, 0);
         duk_put_prop_string(ctx, -2, "abort");
-        struct
-        {
-            const char *name;
-            duk_c_function get;
-        } accs[] = {
-            {"readyState", duk_xhr_get_readyState},
-            {"status", duk_xhr_get_status},
-            {"responseText", duk_xhr_get_responseText},
-            {"response", duk_xhr_get_responseText},
-            {"responseURL", duk_xhr_get_responseURL},
-        };
-        for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
-        {
-            duk_push_string(ctx, accs[i].name);
-            duk_push_c_function(ctx, accs[i].get, 0);
-            duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER |
-                                      DUK_DEFPROP_SET_ENUMERABLE);
-        }
+        duk_xhr_attach_accessors(ctx, -3); /* proto: see duk_xhr_accs */
     }
     duk_put_prop_string(ctx, -2, "prototype");
     duk_put_global_string(ctx, "XMLHttpRequest");
+
+    /* API-P10: the dynamic-import bridge — one native over the shared
+     * core; status-string reply protocol (see jsbridge_internal.h). */
+    duk_push_c_function(ctx, duk_dyn_request, 2);
+    duk_put_global_string(ctx, "__p5modRequest");
+}
+
+/* ── API-P8: Worker (the contained-stub lane; see the JsWorkerStub note
+ * in jsbridge_internal.h) ─────────────────────────────────────────────
+ * Same thin-glue contract as this bridge's XHR: wrapper = plain object,
+ * the stub's public id rides a hidden pointer prop (0 = the documented
+ * delivery-less cap shape); methods are per-instance; onerror/onmessage
+ * materialize as null so a fresh stub reads `null` for both. The OBJECT
+ * is pinned in the stash at construct (heapptr key pluto.wobj.<id>) and
+ * the delivery reads the CURRENT onerror off it — browser at-fire
+ * semantics. The worker SCRIPT never compiles or runs. */
+#define DUK_WORKER_ID_PROP "\xFF" "pluto.wkid"
+
+static void duk_push_worker(duk_context *ctx, JsBridge *b, int id)
+{
+    (void)b;
+    duk_idx_t obj = duk_push_object(ctx);
+    duk_push_pointer(ctx, (void *)(intptr_t)id);
+    duk_put_prop_string(ctx, obj, DUK_WORKER_ID_PROP);
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, obj, "onerror");
+    duk_push_null(ctx);
+    duk_put_prop_string(ctx, obj, "onmessage");
+    duk_push_c_function(ctx, duk_worker_postmessage, 1);
+    duk_put_prop_string(ctx, obj, "postMessage");
+    duk_push_c_function(ctx, duk_worker_terminate, 0);
+    duk_put_prop_string(ctx, obj, "terminate");
+}
+
+static int duk_worker_id(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, DUK_WORKER_ID_PROP);
+    int id = (int)(intptr_t)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    return id;
+}
+
+static int duk_worker_postmessage(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    jsbridge_worker_post(b, duk_worker_id(ctx));
+    return 0;
+}
+
+static int duk_worker_terminate(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    jsbridge_worker_terminate(b, duk_worker_id(ctx));
+    return 0;
+}
+
+/* Constructor global: new Worker(url) / Worker(url) → stub wrapper. */
+static duk_ret_t duk_worker_new(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    const char *url = duk_to_string(ctx, 0); /* recorded, never resolved */
+    int id = jsbridge_worker_open(b, url); /* 0 = delivery-less (cap) */
+    duk_push_worker(ctx, b, id);
+    if (id > 0)
+    {
+        /* Pin the wrapper object for the cross-frame delivery. */
+        char key[40];
+        snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.wobj.%d"), id);
+        void *hp = duk_get_heapptr(ctx, -1);
+        duk_push_global_stash(ctx);
+        duk_dup(ctx, -2);
+        duk_put_prop_string(ctx, -2, key);
+        duk_pop(ctx); /* stash */
+        jsbridge_worker_pin(b, id, hp);
+    }
+    return 1;
+}
+
+static void duktape_define_worker(duk_context *ctx, JsBridge *b)
+{
+    (void)b;
+    duk_push_c_function(ctx, duk_worker_new, 1);
+    duk_push_object(ctx); /* prototype for instances */
+    {
+        duk_push_null(ctx);
+        duk_put_prop_string(ctx, -2, "onerror");
+        duk_push_null(ctx);
+        duk_put_prop_string(ctx, -2, "onmessage");
+    }
+    duk_put_prop_string(ctx, -2, "prototype");
+    duk_put_global_string(ctx, "Worker");
+}
+
+/* ── Forms-Phase 5: FormData (factory ctor + hidden pointer props) ──────
+ * Same thin-glue contract as this bridge's XHR: instance = plain object
+ * carrying the BRIDGE-side FormDataEntry address as a hidden pointer
+ * prop (the pair lives page-long in bridge-owned memory — nothing to
+ * free, browser lifetime semantics); methods are per-instance like
+ * duk_push_xhr. Args: form at 0, submitter at 1 (duktape convention).
+ * Iterators are their own factory (duktape lane of the shared pool). */
+#define DUK_FD_PROP "\xFF" "pluto.fd"
+#define DUK_FDI_PROP "\xFF" "pluto.fdi"
+
+static int duk_formdata_append(duk_context *ctx);
+static int duk_formdata_get(duk_context *ctx);
+static int duk_formdata_getAll(duk_context *ctx);
+static int duk_formdata_has(duk_context *ctx);
+static int duk_formdata_set(duk_context *ctx);
+static int duk_formdata_delete(duk_context *ctx);
+static int duk_formdata_entries(duk_context *ctx);
+static int duk_formdata_keys(duk_context *ctx);
+static int duk_formdata_values(duk_context *ctx);
+static int duk_formdata_foreach(duk_context *ctx);
+static int duk_fditer_next(duk_context *ctx);
+
+static FormDataEntry *duk_formdata_this(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, DUK_FD_PROP);
+    FormDataEntry *e = (FormDataEntry *)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    if (!e || !b || !e->used)
+    {
+        return NULL;
+    }
+    return e;
+}
+
+static int duk_formdata_new(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    DomNode *form = NULL, *sub = NULL;
+    FormDataEntry *e;
+    int err = 0;
+    if (duk_get_top(ctx) >= 1 && !duk_is_null(ctx, 0) &&
+        !duk_is_undefined(ctx, 0))
+    {
+        form = arg_node(ctx, 0);
+    }
+    if (form && duk_get_top(ctx) >= 2 && !duk_is_null(ctx, 1) &&
+        !duk_is_undefined(ctx, 1))
+    {
+        sub = arg_node(ctx, 1);
+    }
+    e = jsbridge_form_data_construct(b, form, sub, &err);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  err == 1 ? "FormData: parameter is not of type "
+                             "HTMLFormElement"
+                  : err == 2 ? "FormData: submitter is not this form's "
+                               "descendant"
+                             : "FormData: too many FormData objects "
+                               "this page");
+    }
+    duk_push_object(ctx);
+    {
+        static const struct
+        {
+            const char *name;
+            duk_c_function fn;
+            int arity;
+        } methods[] = {
+            {"append", duk_formdata_append, 2},
+            {"get", duk_formdata_get, 1},
+            {"getAll", duk_formdata_getAll, 1},
+            {"has", duk_formdata_has, 1},
+            {"set", duk_formdata_set, 2},
+            {"delete", duk_formdata_delete, 1},
+            {"entries", duk_formdata_entries, 0},
+            {"keys", duk_formdata_keys, 0},
+            {"values", duk_formdata_values, 0},
+            {"forEach", duk_formdata_foreach, 2},
+        };
+        for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
+        {
+            duk_push_c_function(ctx, methods[i].fn, methods[i].arity);
+            duk_put_prop_string(ctx, -2, methods[i].name);
+        }
+    }
+    duk_push_pointer(ctx, (void *)e);
+    duk_put_prop_string(ctx, -2, DUK_FD_PROP);
+    return 1;
+}
+
+static int duk_formdata_append(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = duk_formdata_this(ctx);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    if (duk_get_top(ctx) < 2)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData.append: name and value required");
+    }
+    jsbridge_form_data_append(e, duk_to_string(ctx, 0),
+                              duk_to_string(ctx, 1));
+    return 0;
+}
+
+static int duk_formdata_get(duk_context *ctx)
+{
+    FormDataEntry *e = duk_formdata_this(ctx);
+    const char *v;
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    if (duk_get_top(ctx) < 1)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR, "FormData.get: name required");
+    }
+    v = jsbridge_form_data_get(e, duk_to_string(ctx, 0));
+    if (v)
+    {
+        duk_push_string(ctx, v);
+    }
+    else
+    {
+        duk_push_null(ctx);
+    }
+    return 1;
+}
+
+static int duk_formdata_getAll(duk_context *ctx)
+{
+    FormDataEntry *e = duk_formdata_this(ctx);
+    int hits = 0, arr;
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    const char *nm = duk_get_top(ctx) >= 1 ? duk_to_string(ctx, 0) : "";
+    arr = duk_push_array(ctx);
+    for (int i = 0; i < e->npairs; i++)
+    {
+        if (strcmp(e->pairs[i].name, nm) == 0)
+        {
+            duk_push_string(ctx, e->pairs[i].value);
+            duk_put_prop_index(ctx, arr, hits++);
+        }
+    }
+    return 1;
+}
+
+static int duk_formdata_has(duk_context *ctx)
+{
+    FormDataEntry *e = duk_formdata_this(ctx);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    duk_push_boolean(ctx, jsbridge_form_data_has(
+                              e, duk_get_top(ctx) >= 1
+                                     ? duk_to_string(ctx, 0)
+                                     : ""));
+    return 1;
+}
+
+static int duk_formdata_set(duk_context *ctx)
+{
+    FormDataEntry *e = duk_formdata_this(ctx);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    if (duk_get_top(ctx) < 2)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData.set: name and value required");
+    }
+    (void)jsbridge_form_data_set(e, duk_to_string(ctx, 0),
+                                 duk_to_string(ctx, 1));
+    return 0;
+}
+
+static int duk_formdata_delete(duk_context *ctx)
+{
+    FormDataEntry *e = duk_formdata_this(ctx);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    duk_push_boolean(ctx, jsbridge_form_data_delete(
+                              e, duk_get_top(ctx) >= 1
+                                     ? duk_to_string(ctx, 0)
+                                     : ""));
+    return 1;
+}
+
+static void duk_formdata_iter(duk_context *ctx, int mode)
+{
+    JsBridge *b = bridge_of(ctx);
+    FormDataEntry *e = duk_formdata_this(ctx);
+    int full = 0;
+    FormDataIter *it;
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    it = jsbridge_form_data_iter(b, e, &full);
+    if (!it)
+    {
+        duk_error(ctx, DUK_ERR_ERROR, full ? "FormData: too many "
+                                     "iterators this page"
+                                           : "FormData: iterator "
+                                             "unavailable");
+    }
+    it->mode = (unsigned char)mode;
+    duk_push_object(ctx);
+    duk_push_c_function(ctx, duk_fditer_next, 0);
+    duk_put_prop_string(ctx, -2, "next");
+    duk_push_pointer(ctx, (void *)it);
+    duk_put_prop_string(ctx, -2, DUK_FDI_PROP);
+}
+
+static int duk_formdata_entries(duk_context *ctx)
+{
+    duk_formdata_iter(ctx, 0);
+    return 1;
+}
+
+static int duk_formdata_keys(duk_context *ctx)
+{
+    duk_formdata_iter(ctx, 1);
+    return 1;
+}
+
+static int duk_formdata_values(duk_context *ctx)
+{
+    duk_formdata_iter(ctx, 2);
+    return 1;
+}
+
+static int duk_fditer_next(duk_context *ctx)
+{
+    duk_push_this(ctx);
+    duk_get_prop_string(ctx, -1, DUK_FDI_PROP);
+    FormDataIter *it = (FormDataIter *)duk_get_pointer(ctx, -1);
+    duk_pop_2(ctx);
+    duk_push_object(ctx);
+    if (it && it->entry && it->idx < it->entry->npairs)
+    {
+        const FdPair *p = &it->entry->pairs[it->idx++];
+        if (it->mode == 1)
+        {
+            duk_push_string(ctx, p->name);
+        }
+        else if (it->mode == 2)
+        {
+            duk_push_string(ctx, p->value);
+        }
+        else
+        {
+            int arr = duk_push_array(ctx);
+            duk_push_string(ctx, p->name);
+            duk_put_prop_index(ctx, arr, 0);
+            duk_push_string(ctx, p->value);
+            duk_put_prop_index(ctx, arr, 1);
+        }
+        duk_put_prop_string(ctx, -2, "value");
+        duk_push_boolean(ctx, 0);
+        duk_put_prop_string(ctx, -2, "done");
+    }
+    else
+    {
+        duk_push_undefined(ctx);
+        duk_put_prop_string(ctx, -2, "value");
+        duk_push_boolean(ctx, 1);
+        duk_put_prop_string(ctx, -2, "done");
+    }
+    return 1;
+}
+
+static int duk_formdata_foreach(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    BUDGET_OR_THROW(b);
+    FormDataEntry *e = duk_formdata_this(ctx);
+    if (!e)
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData: receiver is not a FormData");
+    }
+    if (duk_get_top(ctx) < 1 || !duk_is_callable(ctx, 0))
+    {
+        duk_error(ctx, DUK_ERR_TYPE_ERROR,
+                  "FormData.forEach: callback required");
+    }
+    for (int i = 0; i < e->npairs; i++)
+    {
+        const FdPair *p = &e->pairs[i];
+        /* duk_pcall_method idiom: [fn][this][arg0][arg1] — the callback
+         * gets (value, name), the browser's first two arguments. */
+        duk_push_null(ctx);
+        duk_copy(ctx, 0, -1); /* fn = the callback argument */
+        if (duk_get_top(ctx) >= 2 && !duk_is_undefined(ctx, 1))
+        {
+            duk_copy(ctx, 1, -1); /* this = thisArg */
+        }
+        else
+        {
+            duk_push_undefined(ctx);
+        }
+        duk_push_string(ctx, p->value);
+        duk_push_string(ctx, p->name);
+        if (duk_pcall_method(ctx, 2) != DUK_EXEC_SUCCESS)
+        {
+            b->errs++;
+            bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+            duk_pop(ctx); /* error object */
+            break;        /* the exception stops forEach (browser) */
+        }
+        duk_pop(ctx); /* result */
+    }
+    return 0;
+}
+
+/* Constructor global: new FormData(form[, submitter]); the shared core
+ * validates the form/submitter pair (TypeError family, contained). */
+static void duktape_define_formdata(duk_context *ctx, JsBridge *b)
+{
+    (void)b;
+    duk_push_c_function(ctx, duk_formdata_new, 1);
+    duk_push_object(ctx); /* prototype for instanceof parity */
+    duk_put_prop_string(ctx, -2, "prototype");
+    duk_put_global_string(ctx, "FormData");
+}
+
+/* Worker vtable: delete the stub's stash pin whose heapptr matches. */
+static void duktape_clear_worker_refs(JsBridge *b, void *objRef)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !objRef)
+    {
+        return;
+    }
+    duk_push_global_stash(ctx);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
+    while (duk_next(ctx, -1, 1))
+    {
+        const char *k = duk_get_lstring(ctx, -2, NULL);
+        void *hp = NULL;
+        char kb[40];
+        if (k && strstr(k, "\xFF" "pluto.wobj."))
+        {
+            hp = duk_get_heapptr(ctx, -1);
+            snprintf(kb, sizeof(kb), "%s", k); /* key dies with the slot */
+        }
+        duk_pop_2(ctx); /* key + value */
+        if (hp && hp == objRef)
+        {
+            duk_del_prop_string(ctx, -2, kb); /* -2 = the stash */
+            break;
+        }
+    }
+    duk_pop(ctx); /* enum */
+    duk_pop(ctx); /* stash */
+}
+
+/* Delivery: worker.onerror(ev) with `this` = the pinned wrapper and
+ * ev = {message}. The CURRENT onerror is consulted at fire time; a stub
+ * without a callable onerror delivers nothing. Same bracket + contained
+ * error contract as duktape_run_xhr_ref. */
+static int duktape_run_worker_ref(JsBridge *b, void *objRef,
+                                  const JsWorkerStub *w)
+{
+    duk_context *ctx = (duk_context *)b->implState;
+    if (!ctx || !objRef || !w)
+    {
+        return 1;
+    }
+    duk_push_heapptr(ctx, objRef);
+    duk_get_prop_string(ctx, -1, "onerror");
+    if (duk_is_callable(ctx, -1))
+    {
+        void *fnHp = duk_get_heapptr(ctx, -1);
+        duk_pop_2(ctx); /* fn value + wrapper */
+        if (fnHp)
+        {
+            duk_push_heapptr(ctx, fnHp);  /* method */
+            duk_push_heapptr(ctx, objRef); /* this */
+            duk_push_object(ctx);          /* ev */
+            duk_push_string(ctx, w->message);
+            duk_put_prop_string(ctx, -2, "message");
+            if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
+            {
+                int firstErr = !b->lastError[0];
+                bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
+                duk_pop(ctx);
+                return firstErr ? -1 : 1;
+            }
+            duk_pop(ctx); /* result */
+            logger_log("[worker] onerror delivered #%d present=1", w->id);
+        }
+        else
+        {
+            logger_log("[worker] onerror delivered #%d present=1 "
+                       "(non-heapptr callable — undelivered)", w->id);
+        }
+    }
+    else
+    {
+        duk_pop_2(ctx); /* handler value + wrapper */
+        logger_log("[worker] onerror delivered #%d present=0 (silent — "
+                   "unhandled worker error)", w->id);
+    }
+    return 0;
 }
 
 /* XHR vtable: delete the stash pins whose heapptrs match. */
-static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                                   void *objRef)
 {
+    /* Phase 6: the onerror pin is real now (see duk_xhr_send) — the
+     * matching key scan includes pluto.xerr. below. */
     duk_context *ctx = (duk_context *)b->implState;
     if (!ctx)
     {
         return;
     }
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
-        if (k && (strstr(k, "\xFF" "pluto.xfn.") || strstr(k, "\xFF" "pluto.xobj.")))
+        const char *k = duk_get_lstring(ctx, -1, NULL);
+        if (k && (strstr(k, "\xFF" "pluto.xfn.") || strstr(k, "\xFF" "pluto.xobj.") ||
+                  strstr(k, "\xFF" "pluto.xerr.")))
         {
-            duk_get_prop(ctx, -2); /* stash[key] */
+            /* Phase 6: read the VALUE through the STASH (stack:
+             * [stash(-3), enum(-2), key(-1)]) — the old read used -2, the
+             * enum itself, so the heapptr never matched any ref and the
+             * pins LEAKED until close (same class as the Phase 4 scan). */
+            duk_get_prop(ctx, -3); /* stash[key] */
             void *hp = duk_get_heapptr(ctx, -1);
             duk_pop(ctx);
-            if (hp == fnRef || hp == objRef)
+            if (hp == fnRef || hp == objRef || (errFnRef && hp == errFnRef))
             {
                 duk_del_prop(ctx, -2);
             }
         }
         duk_pop(ctx); /* key */
-        if (!fnRef && !objRef)
+        if (!fnRef && !objRef && !errFnRef)
         {
             break;
         }
@@ -1756,6 +3797,10 @@ static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     {
         return 1;
     }
+    /* Note: the send-time stash pin was verified end-to-end here — the
+     * delivery pushes the router's heapptr and runs the handler (Duktape
+     * localxhr PASS len=15545, receipted 2026-10-21). No per-delivery
+     * scan; the enum-based probe never surfaced the hidden keys. */
     duk_push_heapptr(ctx, fnRef);
     if (objRef)
     {
@@ -1765,13 +3810,44 @@ static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     {
         duk_push_undefined(ctx);
     }
+    /* Phase 5 parity: on the ERROR dispatch (the pump routes the onerror
+     * ref here on transport failures) attach the taxonomy text to the
+     * wrapper so the fetch shim builds the browser-faithful reject reason
+     * ('Fetch failed: <phrase> (err=N)') — the same surface the NR engine
+     * receipted in Phase 5. */
+    if (r && r->err[0] && r->errFnRef && fnRef == r->errFnRef)
+    {
+        /* Stack here: [fnRef(-3), wrapper(-2), errString(-1)] — the put
+         * target is the WRAPPER at -2. The first cut used -1, which aimed
+         * the put at the pushed STRING itself; duktape throws a
+         * strict-mode "cannot write property" there, and the throw exits
+         * through the unprotected C frame into duk_sdk_fatal, whose
+         * handler loops forever — the app froze whole (root-caused with a
+         * macOS `sample` of the frozen sim: duk_put_prop_string →
+         * duk_hobject_putprop → duk_err_handle_error_fmt → fatal). */
+        duk_push_string(ctx, r->err);
+        duk_put_prop_string(ctx, -2, "plutoError");
+    }
     duk_push_string(ctx, (r && r->body) ? r->body : "");
     if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
     {
-        int firstErr = !b->lastError[0];
+        /* Phase 4: a caught JS exception inside the pinned completion is a
+         * PAGE error, not a fatal engine fault — the call DID run, exactly
+         * like the click/focus dispatcher (which counts errs++ and keeps
+         * pumping; see duktape_dispatch_focus). The old firstErr contract
+         * returned -1: the delivery pump aborted, the first follow-up
+         * delivery then hit `firstErr == false` and returned "success"
+         * with the callback never having run at all — every Duktape boot
+         * logged "xhr completion aborted" and lost the completion
+         * forever. */
+        /* Log the throw WITHOUT the long hex prefix — the logger clamps
+         * long lines and the message was being cut to "". Read the true
+         * type BEFORE duk_safe_to_string coerces the value in place. */
+        duk_log_throw(ctx, "xhr");
+        b->errs++;
         bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
-        duk_pop(ctx);
-        return firstErr ? -1 : 1;
+        duk_pop(ctx); /* error value */
+        return 0;
     }
     duk_pop(ctx);
     return 0;
@@ -1785,4 +3861,6 @@ const JsEngineImpl js_engine_duktape = {
     NULL, /* pump (R20: time-sliced split is XS NR only) */
     NULL, /* eval_pending (R27: no background eval) */
     NULL, /* mount_parked (R28: never parks) */
-    "Duktape"};
+    "Duktape",
+    NULL, NULL, /* dispatch_event / script_queue_drained (frozen engine) */
+    duktape_run_worker_ref, duktape_clear_worker_refs /* API-P8 */};

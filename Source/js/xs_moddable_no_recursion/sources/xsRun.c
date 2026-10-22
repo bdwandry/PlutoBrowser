@@ -38,6 +38,12 @@
 #include "xsAll.h"
 #include "xsScript.h"
 
+#ifdef PLUTO_THROW_LOG
+/* A2 forensics (harness-only): new-callee naming at the VM's construct
+ * dispatch — see the XS_CODE_CALL dispatch below. */
+#include "logger.h"
+#endif
+
 //#define mxTrace 1
 //#define mxTraceCall 1
 
@@ -226,10 +232,17 @@ static txBoolean fxToNumericNumberBinary(txMachine* the, txSlot* a, txSlot* b, t
 	}
 #endif
 
+/* R55b value-stack forensics: the failing bounded-push probe — defined by
+ * the bridge (jsbridge_xs_nr.c), logger-only, no engine state touched. */
+extern void pluto_fork_stack_overflow_probe(long want, long depth);
+extern void logger_log(const char *fmt, ...);
+
 #if mxBoundsCheck
 #define mxAllocStack(_COUNT) \
-	if ((mxStack - _COUNT) < the->stackBottom) \
+	if ((mxStack - _COUNT) < the->stackBottom) { \
+		pluto_fork_stack_overflow_probe((long)(_COUNT), (long)(the->stackTop - mxStack)); \
 		goto STACK_OVERFLOW; \
+	} \
 	mxStack -= _COUNT
 #else
 #define mxAllocStack(_COUNT) \
@@ -781,6 +794,20 @@ void fxRunID(txMachine* the, txSlot* generator, txInteger count)
 		char probe = 0;
 		if (xs_engine_stack_probe)
 			xs_engine_stack_probe("run", &probe);
+#ifdef PLUTO_THROW_LOG
+		if (xs_engine_stack_probe && ((the->nrRunDepth & 511) == 0)) {
+			/* A2 probe: name the program of every 512th interpreter
+			 * re-entry. The boot trip showed >8000 re-entries at an
+			 * unchanged C depth inside ONE flush; per-entry program
+			 * names reveal which JS programs the loop really runs
+			 * (host weakness: no-op when the hook is absent). */
+			char name[80];
+			name[0] = '\0';
+			fxBufferFrameName(the, name, sizeof(name), the->frame, "");
+			logger_log("[rnmeta] depth=%ld prog=%s", the->nrRunDepth,
+				name[0] ? name : "?");
+		}
+#endif
 	}
 	/* xs_no_recursion (R28): depth tracking — a pause is honored only by
 	 * the OUTERMOST interpreter C frame (depth 1). A nested run (host
@@ -788,6 +815,22 @@ void fxRunID(txMachine* the, txSlot* generator, txInteger count)
 	 * C caller; the host resets the counter after every burst so aborts
 	 * that longjmp past the decrements cannot leak depth. */
 	the->nrRunDepth++;
+	/* xs_no_recursion (A2): a fresh meter window per interpreter entry.
+	 * The stock window re-arms cumulatively from meterIndex, so ONE C
+	 * driver that re-enters the interpreter thousands of times (a drain
+	 * pumping the boot's async fall-out) sweeps ~5.3M dispatched
+	 * bytecodes into ONE window and trips the runner's source-scaled
+	 * abort MID-BOOT. Per-entry windows make the window the browser's
+	 * task: each interpreter invocation is bounded on its own — a
+	 * genuinely runaway script or still aborts inside ITS invocation —
+	 * while the driver loop cannot hoard dispatch budget across
+	 * re-entries. Mount bursts (clock contract) and sticky pause/abort
+	 * requests are excluded exactly like the other re-arms. */
+	if (the->meterInterval && !the->nrPauseRequest && !the->nrPauseAbort)
+	{
+		the->meterIndex = 0;
+		the->meterCount = the->meterInterval;
+	}
 	if (the->nrResume) {
 		/* resume entry for a parked run — see nrResumeLoop below. At
 		 * entry the->stack/frame/scope/code are the parked registers; the
@@ -1083,9 +1126,39 @@ nrResumeLoop:
 			}
 #endif
 			if (byte) {
+#ifdef PLUTO_THROW_LOG
+				/* A2 forensics (harness-only): name the callee a boot tried
+				 * to construct — the slot carries the property ID it was
+				 * fetched by even when the value is undefined, which pins
+				 * the missing global by NAME instead of guesswork. */
+				if (the->keyArray && (slot->ID > 0) &&
+				    (slot->ID < the->keyCount) && the->keyArray[slot->ID])
+					logger_log("[throw] new-callee id=%s kind=%d",
+					           the->keyArray[slot->ID], slot->kind);
+				else
+					logger_log("[throw] new-callee (anonymous) kind=%d",
+					           slot->kind);
+#endif
 				mxRunDebug(XS_TYPE_ERROR, "new: not a constructor");
 			}
 			else {
+#ifdef PLUTO_THROW_LOG
+				/* A3 forensics (harness-only): name the callee a script tried
+				 * to CALL when the slot turned out non-callable — mirrors
+				 * the new-callee probe above: the slot often still carries
+				 * the property ID it was fetched by, which pins the missing
+				 * global / property by NAME instead of guesswork. For a
+				 * reference callee, `slot` was already rebound to the
+				 * internal property, so its ID names the non-callable
+				 * member itself. */
+				if (the->keyArray && (slot->ID > 0) &&
+				    (slot->ID < the->keyCount) && the->keyArray[slot->ID])
+					logger_log("[throw] call-callee id=%s kind=%d",
+					           the->keyArray[slot->ID], slot->kind);
+				else
+					logger_log("[throw] call-callee (no-id) kind=%d",
+					           slot->kind);
+#endif
 				mxRunDebug(XS_TYPE_ERROR, "call: not a function");
 			}
 			mxBreak;
@@ -4592,6 +4665,19 @@ nrResumeLoop:
 
 STACK_OVERFLOW:
 	mxSaveState;
+	/* R55b value-stack forensics: state at the interpreter's overflow
+	 * exit. depth/free in slots; peak = deepest ever reached this
+	 * machine, guarded to [stackBottom, stackTop] (Debug.c instruments
+	 * the same field). The failing push's want is logged separately by
+	 * pluto_fork_stack_overflow_probe at the mxAllocStack branch. */
+	{
+		/* peak is only tracked under mxInstrument; depth/free/total carry
+		 * the abort state (depth==total ⇒ capped by XS_STACK_COUNT). */
+		logger_log("[slotstack] interpreter overflow: depth=%ld free=%ld total=%ld",
+			(long)(the->stackTop - the->stack),
+			(long)(the->stack - the->stackBottom),
+			(long)(the->stackTop - the->stackBottom));
+	}
 	fxAbort(the, XS_JAVASCRIPT_STACK_OVERFLOW_EXIT);
 }
 

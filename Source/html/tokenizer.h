@@ -8,7 +8,10 @@
  *     Attribute values are entity-decoded; boolean attributes are stored as
  *     the internal BOOL marker; keys are lowercased; FIRST duplicate wins.
  *   - <title> yields no token; its collapsed text becomes pageTitleOut.
- *   - comments, <script>, <style> bodies are skipped without tokens.
+ *   - comments yield TOK_COMMENT tokens with RAW (non-decoded) data in
+ *     `content`: React's SSR hydration walks marker comments ("$",
+ *     "/$", "F!"...) in the tree, so they must survive into the DOM.
+ *   - <script>, <style> bodies are skipped without tokens.
  *   - unterminated tags / stray '<' drop the remainder (no synthetic tokens).
  *   - input larger than 256KB is cut at a tag boundary before tokenizing.
  *
@@ -31,7 +34,8 @@ extern const char PLUTO_TOK_ATTR_TRUE[1];
 typedef enum
 {
     TOK_TEXT = 0,
-    TOK_TAG
+    TOK_TAG,
+    TOK_COMMENT
 } TokenType;
 
 typedef struct

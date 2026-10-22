@@ -927,7 +927,8 @@ static int snap_skip_url(const char *url)
         return 1;
     }
     if (strcmp(url, "about:javascript") == 0 ||
-        strcmp(url, "about:jsext") == 0)
+        strcmp(url, "about:jsext") == 0 ||
+        strcmp(url, "about:cssprobe") == 0)
     {
         return 1;
     }

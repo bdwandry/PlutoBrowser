@@ -160,6 +160,12 @@ typedef struct
 int layout_test_break_lines_probe(const DocInline **inlines, int inlineCount,
                                   int maxW, LCDFont *font, int bold, int lineH,
                                   LayoutBreakProbe *out);
+/* Phase 5 probe: same, with an explicit max-line clamp budget to assert
+ * the REAL breaker's ellipsis/clamp cuts (doc objects keep full text;
+ * the cut lives between breaker and emitter). */
+int layout_test_probe_maxlines(const DocInline **inlines, int inlineCount,
+                               int maxW, LCDFont *font, int bold, int lineH,
+                               int maxlines, LayoutBreakProbe *out);
 /* 1 when the last layout_build() hit the reference's Layout Error path
  * (percent-width tables raise in the reference's table branch). */
 int layout_build_failed(void);

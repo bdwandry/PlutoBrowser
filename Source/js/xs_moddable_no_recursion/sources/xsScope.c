@@ -645,6 +645,17 @@ void fxScopeLookup(txScope* self, txAccessNode* access, txBoolean closureFlag)
 /* xs_no_recursion: host-only walk trace (opt-in; never compiled for device) */
 static void fxNodeWalkStep(txParser* parser)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: bind/hoist/code walks also run unfed between parse and codegen;
+	   poll the bridge keepalive every 256 walk steps (device only, same
+	   reasoning as fxParserRunStep). */
+	{
+		static unsigned long kfWalkSteps;
+		extern void xs_engine_keepalive(void);
+		if ((++kfWalkSteps & 0xFF) == 0)
+			xs_engine_keepalive();
+	}
+#endif
 	txNodeWalkFrame* frame = parser->nodeWalkStack;
 	if (frame->kind == W_DISPATCH_H) {
 		if (frame->stage == 0) {
@@ -1492,8 +1503,14 @@ void fxObjectNodeBind(void* it, void* param)
 	txBinder* binder = param;
 	txNode* item = self->items->first;
 	sxNodeCollectContext context;
+	unsigned long guard = 100000000UL; /* xs_no_recursion runaway bound, see fxNodeDispatchHoistIter */
 	fxBinderPushVariables(param, 1);
 	while (item) {
+		if (--guard == 0) {
+			fxReportParserError(binder->parser, 0,
+				"xs_no_recursion: object bind items runaway (item=%p)", item);
+			return;
+		}
 		txNode* value;
 		if (item->description->token == XS_TOKEN_SPREAD) {
 		}

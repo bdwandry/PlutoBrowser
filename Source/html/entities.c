@@ -625,6 +625,263 @@ static int translit_clean_pass(StrBuf *out, const char *text)
  * Public API
  */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Browser-exact decode (DOM data path).
+ *
+ * The legacy entities_decode() mirrors the Lua display transform: MATH_CP
+ * remaps codepoints ("·" → "*", "—" → " -- ") and the translit pass replaces
+ * every non-table codepoint with a space. That is fine for page titles and
+ * reader-mode text, but the site engine's DOM must keep SSR text
+ * byte-for-byte identical to what the server emitted — react-dom's hydrate
+ * matcher compares fiber text against nodeValue after only CR/NUL
+ * normalization (checkForUnmatchedText). Transliterated text ("© " → "  ",
+ * "·" → "*") throws "Hydration failed" on every page that renders
+ * typographic characters. This decoder implements the HTML parser instead:
+ * numeric codepoints → real UTF-8, named table (unknown → literal), and
+ * otherwise verbatim bytes with NO cleanup passes. */
+
+static int put_utf8_cp(StrBuf *sb, unsigned int cp)
+{
+    char b[4];
+    int n;
+    if (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+    {
+        cp = 0xFFFD; /* HTML tokenizer: null/surrogate/out-of-range → U+FFFD */
+    }
+    if (cp < 0x80)
+    {
+        b[0] = (char)cp;
+        n = 1;
+    }
+    else if (cp < 0x800)
+    {
+        b[0] = (char)(0xC0 | (cp >> 6));
+        b[1] = (char)(0x80 | (cp & 0x3F));
+        n = 2;
+    }
+    else if (cp < 0x10000)
+    {
+        b[0] = (char)(0xE0 | (cp >> 12));
+        b[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        b[2] = (char)(0x80 | (cp & 0x3F));
+        n = 3;
+    }
+    else
+    {
+        b[0] = (char)(0xF0 | (cp >> 18));
+        b[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        b[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        b[3] = (char)(0x80 | (cp & 0x3F));
+        n = 4;
+    }
+    return strbuf_append_n(sb, b, (size_t)n);
+}
+
+static int decode_numeric_browser_pass(StrBuf *out, const char *text,
+                                       int hexPass)
+{
+    const char *p = text;
+    while (*p)
+    {
+        const char *amp = strchr(p, '&');
+        if (!amp)
+        {
+            if (strbuf_append(out, p) != 0)
+            {
+                return -1;
+            }
+            break;
+        }
+        if (amp > p && strbuf_append_n(out, p, (size_t)(amp - p)) != 0)
+        {
+            return -1;
+        }
+        p = amp;
+        const char *q = p + 1;
+        if (*q != '#')
+        {
+            goto literal;
+        }
+        q++;
+        if (hexPass)
+        {
+            if (*q != 'x' && *q != 'X')
+            {
+                goto literal;
+            }
+            q++;
+            const char *h = q;
+            while (isxdigit((unsigned char)*q))
+            {
+                q++;
+            }
+            if (q == h || *q != ';' || (q - h) > 7)
+            {
+                goto literal;
+            }
+            char hexbuf[8];
+            memcpy(hexbuf, h, (size_t)(q - h));
+            hexbuf[q - h] = '\0';
+            if (put_utf8_cp(out, (unsigned int)strtol(hexbuf, NULL, 16)) != 0)
+            {
+                return -1;
+            }
+            p = q + 1;
+            continue;
+        }
+        else
+        {
+            if (!isdigit((unsigned char)*q))
+            {
+                goto literal;
+            }
+            const char *d = q;
+            while (isdigit((unsigned char)*q))
+            {
+                q++;
+            }
+            if (*q != ';' || (q - d) > 8)
+            {
+                goto literal;
+            }
+            char decbuf[10];
+            memcpy(decbuf, d, (size_t)(q - d));
+            decbuf[q - d] = '\0';
+            if (put_utf8_cp(out, (unsigned int)strtol(decbuf, NULL, 10)) != 0)
+            {
+                return -1;
+            }
+            p = q + 1;
+            continue;
+        }
+    literal:
+        /* Not a valid entity for this pass: emit '&' and continue after it. */
+        if (strbuf_append_char(out, '&') != 0)
+        {
+            return -1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int decode_named_browser_pass(StrBuf *out, const char *text)
+{
+    const char *p = text;
+    while (*p)
+    {
+        const char *amp = strchr(p, '&');
+        if (!amp)
+        {
+            if (strbuf_append(out, p) != 0)
+            {
+                return -1;
+            }
+            break;
+        }
+        if (amp > p && strbuf_append_n(out, p, (size_t)(amp - p)) != 0)
+        {
+            return -1;
+        }
+        p = amp;
+        const char *q = p + 1;
+        const char *n = q;
+        while (isalpha((unsigned char)*q))
+        {
+            q++;
+        }
+        if (q == n || *q != ';' || (q - n) > 24)
+        {
+            /* Not a named entity: emit '&' verbatim (browser keeps raw text). */
+            if (strbuf_append_char(out, '&') != 0)
+            {
+                return -1;
+            }
+            p++;
+            continue;
+        }
+        const char *repl = named_lookup(n, (size_t)(q - n));
+        if (repl)
+        {
+            if (strbuf_append(out, repl) != 0)
+            {
+                return -1;
+            }
+        }
+        else
+        {
+            /* Unknown name: reproduce the source bytes exactly. */
+            if (strbuf_append_n(out, p, (size_t)(q - p + 1)) != 0)
+            {
+                return -1;
+            }
+        }
+        p = q + 1;
+    }
+    return 0;
+}
+
+char *entities_decode_browser(const char *text)
+{
+    logger_stack_touch();
+    if (!text || !text[0])
+    {
+        char *empty = (char *)PLUTO_MALLOC(1);
+        if (empty)
+        {
+            empty[0] = '\0';
+        }
+        return empty;
+    }
+    if (!strchr(text, '&'))
+    {
+        /* No entities — including all non-ASCII bytes — stays verbatim. */
+        char *dup = (char *)PLUTO_MALLOC(strlen(text) + 1);
+        if (dup)
+        {
+            strcpy(dup, text);
+        }
+        return dup;
+    }
+    StrBuf s1;
+    if (strbuf_init(&s1) != 0)
+    {
+        return NULL;
+    }
+    if (decode_numeric_browser_pass(&s1, text, 0) != 0)
+    {
+        strbuf_free(&s1);
+        return NULL;
+    }
+    StrBuf s2;
+    if (strbuf_init(&s2) != 0)
+    {
+        strbuf_free(&s1);
+        return NULL;
+    }
+    if (decode_numeric_browser_pass(&s2, s1.data, 1) != 0)
+    {
+        strbuf_free(&s1);
+        strbuf_free(&s2);
+        return NULL;
+    }
+    strbuf_free(&s1);
+    StrBuf s3;
+    if (strbuf_init(&s3) != 0)
+    {
+        strbuf_free(&s2);
+        return NULL;
+    }
+    if (decode_named_browser_pass(&s3, s2.data) != 0)
+    {
+        strbuf_free(&s2);
+        strbuf_free(&s3);
+        return NULL;
+    }
+    strbuf_free(&s2);
+    return strbuf_detach(&s3);
+}
+
 char *entities_decode(const char *text)
 {
     logger_stack_touch();

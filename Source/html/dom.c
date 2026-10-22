@@ -27,6 +27,16 @@ void pluto_free(void *p);
 
 #define PLUTO_REALLOC(p, n) pluto_mem_realloc((p), (n))
 
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+/* Hydration-debug registry (harness builds only): nodes made through
+ * dom_create_element, walked by dom_created_dump to find DETACHED fragment
+ * tops after a react commit (parent==NULL subtrees = content react built
+ * but never attached). */
+#define DOM_CREATED_MAX 2048
+static DomNode *g_created[DOM_CREATED_MAX];
+static int g_createdCount;
+#endif
+
 /* ── String arena: chunk list (same design as tokenizer.c) ────────────────
  * Pointers handed out by arena_dup must stay valid for the result's lifetime
  * even as more strings are added — so chunks are allocated once and never
@@ -102,6 +112,44 @@ char *dom_arena_dup(DomResult *dom, const char *s, int len)
     return arena_dup((Arena *)dom->_arena, s, (size_t)len);
 }
 
+/* ── Phase 10: animation-completion dedupe map ────────────────────────────
+ * One (node, name) pair per COMPLETED declared run, document-lifetime.
+ * Returns 1 when the pair was already recorded (dedupe held), 0 when
+ * newly recorded. Names copy into the doc string arena (≤24 chars —
+ * longer names never reach here; the registry refuses them, so an
+ * over-long animation is inert and never engages). */
+int dom_anim_end_report(DomResult *dom, const void *node,
+                        const char *name, int nameLen)
+{
+    if (!dom || !node || !name || nameLen <= 0 || nameLen > 24)
+    {
+        return 0; /* malformed: report "not recorded" (caller skips) */
+    }
+    for (int i = 0; i < dom->animFiredCount; i++)
+    {
+        if (dom->animFired[i].node == node &&
+            dom->animFired[i].nameLen == nameLen &&
+            memcmp(dom->animFired[i].name, name, (size_t)nameLen) == 0)
+        {
+            return 1;
+        }
+    }
+    if (dom->animFiredCount >= DOM_ANIMFIRED_MAX)
+    {
+        return 0; /* cap reached: record nothing (documented residual) */
+    }
+    char *copy = dom_arena_dup(dom, name, nameLen);
+    if (!copy)
+    {
+        return 0; /* arena exhaustion: record nothing */
+    }
+    dom->animFired[dom->animFiredCount].node = (void *)node;
+    dom->animFired[dom->animFiredCount].name = copy;
+    dom->animFired[dom->animFiredCount].nameLen = nameLen;
+    dom->animFiredCount++;
+    return 0;
+}
+
 /* ── Tag rule tables (Lua parity) ───────────────────────────────────────── */
 static int is_void(const char *tag)
 {
@@ -126,13 +174,13 @@ static int is_skip_subtree(const char *tag)
     /* R17: <head> is no longer skipped — its metadata children (<link>,
      * <meta>, <base>) must exist in the DOM because pages address them by
      * id (favicon swaps, canonical-link updates) and getElementById must
-     * find them like any browser. The render walker already no-ops these
-     * tags, so nothing leaks into the visual page. <template> stays skipped
-     * (inert content per HTML spec — browsers keep it out of getElementById
-     * reach too). */
+     * find them like any browser. API-P6: <template> left this table —
+     * the builder keeps the element (browsers reach it by id and
+     * querySelector) and parses its children into the element's DETACHED
+     * content fragment (the browser's inert content; see the builder's
+     * template branch). */
     (void)tag;
-    return strcmp(tag, "template") == 0 ||
-           strcmp(tag, "selectedcontent") == 0;
+    return strcmp(tag, "selectedcontent") == 0;
 }
 
 /* Legacy void elements (WHATWG §13.1.2, non-conforming-but-void list):
@@ -617,12 +665,65 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
                 out->textNodes++;
             }
         }
+        else if (tok->type == TOK_COMMENT)
+        {
+            /* Comment nodes stay at the OPEN-ELEMENT insertion point
+             * (WHATWG keeps comments outside the element-depth stack).
+             * React's hydration markers ride on these nodes. */
+            if (count < MAX_NODES)
+            {
+                DomNode *n = node_new();
+                if (!n)
+                {
+                    goto fail;
+                }
+                n->kind = DOM_COMMENT;
+                n->text = arena_dup(arena, tok->content ? tok->content : "",
+                                    tok->content ? strlen(tok->content) : 0);
+                if (!n->text)
+                {
+                    PLUTO_FREE(n);
+                    goto fail;
+                }
+                n->parent = stack.items[stack.count - 1];
+                if (node_append_child(stack.items[stack.count - 1], n) != 0)
+                {
+                    goto fail;
+                }
+                count++;
+            }
+        }
         else
         {
             const char *tag = tok->name ? tok->name : "";
             if (tok->isClosing)
             {
-                if (!is_void(tag) && !is_legacy_void(tag) && !is_skip_subtree(tag))
+                if (strcmp(tag, "template") == 0)
+                {
+                    /* API-P6: pop back through the TOPMOST open content
+                     * fragment (the innermost open template). A stray
+                     * </template> with no open template stays ignored —
+                     * the old skip behavior's inertness for malformed
+                     * markup. Elements that never closed inside the
+                     * content stay owned by the fragment (their parent
+                     * pointers keep them attached through it). */
+                    int fragTop = -1;
+                    for (int d = stack.count - 1; d > 0; d--)
+                    {
+                        DomNode *dn = stack.items[d];
+                        if (dn->tag && strcmp(dn->tag, "#template-content") == 0)
+                        {
+                            fragTop = d;
+                            break;
+                        }
+                    }
+                    if (fragTop > 0)
+                    {
+                        stack.count = fragTop;
+                    }
+                }
+                else if (!is_void(tag) && !is_legacy_void(tag) &&
+                         !is_skip_subtree(tag))
                 {
                     pop_to_tag(&stack, tag);
                 }
@@ -641,6 +742,54 @@ int dom_build(const TokenizeResult *tokens, DomResult *out)
                 {
                     skipDepth = 1;
                     skipTag = tag;
+                }
+                else if (strcmp(tag, "template") == 0)
+                {
+                    /* API-P6: <template> keeps its ELEMENT (browsers
+                     * reach it by id/querySelector — the old behavior
+                     * dropped it whole) but its children parse into a
+                     * DETACHED content fragment: parent NULL keeps them
+                     * out of the render tree, the id lookup, the census
+                     * and every parent-connected walk — the browser's
+                     * inert content, byte-identical rendering. The
+                     * fragment rides the builder stack as the append
+                     * target; the matching close pops back through it,
+                     * and NESTED templates each push their own fragment
+                     * (an inner </template> pops only to the topmost
+                     * fragment). */
+                    DomNode *el = node_new();
+                    if (!el)
+                    {
+                        goto fail;
+                    }
+                    el->kind = DOM_ELEMENT;
+                    el->tag = arena_dup(arena, tag, strlen(tag));
+                    el->parent = stack.items[stack.count - 1];
+                    if (!el->tag || copy_attrs(el, tok, arena) != 0 ||
+                        node_append_child(stack.items[stack.count - 1], el) != 0)
+                    {
+                        goto fail;
+                    }
+                    count++;
+                    out->elemNodes++;
+                    DomNode *frag = node_new();
+                    if (!frag)
+                    {
+                        goto fail;
+                    }
+                    frag->kind = DOM_ELEMENT;
+                    frag->tag = arena_dup(arena, "#template-content", 17);
+                    if (!frag->tag)
+                    {
+                        goto fail;
+                    }
+                    frag->parent = NULL; /* detached: inert by construction */
+                    el->templateContent = frag;
+                    if (stack_push(&stack, frag) != 0)
+                    {
+                        goto fail;
+                    }
+                    count++;
                 }
                 else if (is_void(tag) || is_legacy_void(tag))
                 {
@@ -840,6 +989,51 @@ const void *dom_css_sibling(const void *node, int dir)
     return NULL;
 }
 
+/* Phase 1: nearest ELEMENT sibling WITH selector-relevant info filled
+ * (tag lowercased compare, class, id). Backs the '+' / '~' sibling
+ * combinators in css_chain_matches — same walk as dom_css_sibling,
+ * adding the qs_compound_of-style info extraction. */
+static int qs_compound_of(const DomNode *n, const char **tagLower,
+                          const char **classAttr, const char **idAttr);
+
+const void *dom_css_sibling_info(const void *node, int dir,
+                                 const char **tagLower,
+                                 const char **classAttr,
+                                 const char **idAttr)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n || !n->parent || (dir != -1 && dir != 1))
+    {
+        return NULL;
+    }
+    const DomNode *par = n->parent;
+    int idx = -1;
+    for (int i = 0; i < par->childCount; i++)
+    {
+        if (par->children[i] == n)
+        {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0)
+    {
+        return NULL; /* detached (should not happen) */
+    }
+    for (int i = idx + dir; i >= 0 && i < par->childCount; i += dir)
+    {
+        const DomNode *s = par->children[i];
+        if (s && s->kind == DOM_ELEMENT)
+        {
+            qs_compound_of(s, tagLower, classAttr, idAttr);
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static int dom_css_childless(const void *node); /* Phase 7 :empty truth */
+
 void dom_css_dom(CssDom *d,
                  const void *(*ancestor)(const void *node, int i,
                                          const char **tagLower,
@@ -853,6 +1047,31 @@ void dom_css_dom(CssDom *d,
     d->ancestor = ancestor;
     d->attr = dom_css_attr;
     d->sibling = dom_css_sibling;
+    d->siblingInfo = dom_css_sibling_info;
+    d->childless = dom_css_childless;
+}
+
+/* Phase 7: spec :empty truth (CSS Selectors 4 §9.1): the node generates
+ * NO content — no element children and no text; comment children are
+ * transparent ("<p><!-- --></p>" IS :empty). Data/doc-type children
+ * (innerHTML blobs, raw data nodes) stay content — conservative true
+ * only for the comment-only case. */
+static int dom_css_childless(const void *node)
+{
+    const DomNode *n = (const DomNode *)node;
+    if (!n)
+    {
+        return -1;
+    }
+    for (int i = 0; i < n->childCount; i++)
+    {
+        const DomNode *c = n->children[i];
+        if (c && c->kind != DOM_COMMENT)
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* ── Runtime DOM mutation API (JavaScript bridge) ────────────────────────── */
@@ -875,6 +1094,65 @@ int dom_node_id(const DomResult *dom, DomNode *node)
     return node->nodeId;
 }
 
+/* ── API-P6: document.getElementById road — ONE shared O(depth) scan used
+ * by every engine adapter (the push-all-children copies that predate this
+ * truncated their whole walk once a body held 65+ element children and the
+ * id path silently returned null for every later section; the probe page
+ * shipped exactly that shape). Document-order (children 0..N-1), elements
+ * only, depth capped at DOM_SEARCH_MAX_DEPTH — width never truncates.
+ * Falls back to the runtime _dN node-id road exactly like the adapters
+ * did. */
+DomNode *dom_find_by_id(DomResult *dom, const char *id)
+{
+    if (!dom || !dom->root || !id)
+    {
+        return NULL;
+    }
+    DomNode *hit = NULL;
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
+    int top = 0;
+    frames[0].node = dom->root;
+    frames[0].nextChild = 0;
+    while (top >= 0 && !hit)
+    {
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->kind == DOM_ELEMENT)
+        {
+            const char *v = dom_get_attr(n, "id");
+            if (v && strcmp(v, id) == 0)
+            {
+                hit = n;
+                break;
+            }
+        }
+        if (frames[top].nextChild >= n->childCount)
+        {
+            top--;
+            continue;
+        }
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
+        {
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        /* deeper than the cap: that subtree stays unreachable (same
+         * contract as before) — but the WIDTH no longer truncates wide
+         * bodies, which is what bit the probe page. */
+    }
+    if (!hit && id[0] == '_' && id[1] == 'd')
+    {
+        hit = dom_node_by_id(dom, atoi(id + 2));
+    }
+    return hit;
+}
+
 /* First stub (pagedKey != 0) in the tree, iterative. */
 static DomNode *find_first_stub(DomNode *root)
 {
@@ -882,23 +1160,37 @@ static DomNode *find_first_stub(DomNode *root)
     {
         return NULL;
     }
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
     int top = 0;
-    stack[top++] = root;
-    while (top > 0)
+    frames[0].node = root;
+    frames[0].nextChild = 0;
+    while (top >= 0)
     {
-        DomNode *n = stack[--top];
-        if (n->pagedKey)
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->pagedKey)
         {
             return n;
         }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
+        if (frames[top].nextChild >= n->childCount)
         {
-            return NULL;
+            top--;
+            continue;
         }
-        for (int i = 0; i < n->childCount; i++)
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
         {
-            stack[top++] = n->children[i];
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        else if (c->pagedKey)
+        {
+            return c; /* depth cap: this wide subtree's own stub still counts */
         }
     }
     return NULL;
@@ -908,27 +1200,41 @@ static DomNode *find_first_stub(DomNode *root)
  * any paged-out stubs (the common case stays zero-flash-cost). */
 static DomNode *find_id_ram_only(DomResult *dom, int id)
 {
-    DomNode *stack[DOM_SEARCH_MAX_DEPTH];
+    DomScanFrame frames[DOM_SEARCH_MAX_DEPTH];
     int top = 0;
-    stack[top++] = dom->root;
-    while (top > 0)
+    frames[0].node = dom->root;
+    frames[0].nextChild = 0;
+    while (top >= 0)
     {
-        DomNode *n = stack[--top];
-        if (n->pagedKey)
+        DomNode *n = frames[top].node;
+        if (frames[top].nextChild == 0 && n->pagedKey)
         {
             continue; /* stub: skip (its restored children keep their ids) */
         }
-        if (n->nodeId == id)
+        if (frames[top].nextChild == 0 && n->nodeId == id)
         {
             return n;
         }
-        if (top + n->childCount > DOM_SEARCH_MAX_DEPTH)
+        if (frames[top].nextChild >= n->childCount)
         {
-            return NULL; /* pathological breadth; give up rather than grow */
+            top--;
+            continue;
         }
-        for (int i = 0; i < n->childCount; i++)
+        DomNode *c = n->children[frames[top].nextChild];
+        frames[top].nextChild++;
+        if (!c)
         {
-            stack[top++] = n->children[i];
+            continue;
+        }
+        if (top < DOM_SEARCH_MAX_DEPTH - 1)
+        {
+            top++;
+            frames[top].node = c;
+            frames[top].nextChild = 0;
+        }
+        else if (c->nodeId == id)
+        {
+            return c; /* depth cap: still recognize the id's last frame */
         }
     }
     return NULL;
@@ -1016,6 +1322,15 @@ DomNode *dom_create_element(DomResult *dom, const char *tag)
         PLUTO_FREE(el);
         return NULL;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    /* Hydration-debug registry: nodes created via the DOM API (react's
+     * createElement path). Harness-only `dom_created_dump` walks it to
+     * find detached fragment tops after commits. */
+    if (g_createdCount < DOM_CREATED_MAX)
+    {
+        g_created[g_createdCount++] = el;
+    }
+#endif
     return el;
 }
 
@@ -1040,6 +1355,29 @@ DomNode *dom_create_text(DomResult *dom, const char *text)
     return n;
 }
 
+/* ── dom_build companion: zero-child comment node (hydration markers,
+ * document.createComment). Data is RAW (no entity decode). */
+DomNode *dom_create_comment(DomResult *dom, const char *data)
+{
+    if (!dom || !data)
+    {
+        return NULL;
+    }
+    DomNode *n = node_new();
+    if (!n)
+    {
+        return NULL;
+    }
+    n->kind = DOM_COMMENT;
+    n->text = arena_dup((Arena *)dom->_arena, data, strlen(data));
+    if (!n->text)
+    {
+        PLUTO_FREE(n);
+        return NULL;
+    }
+    return n;
+}
+
 int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
 {
     (void)dom;
@@ -1047,6 +1385,12 @@ int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] append parent=%s(%p) child=%s(%p) kind=%d",
+               (parent->tag) ? parent->tag : "?", (void *)parent,
+               (child->tag) ? child->tag : "?", (void *)child,
+               (int)child->kind);
+#endif
     if (node_append_child(parent, child) != 0)
     {
         return -1;
@@ -1055,12 +1399,55 @@ int dom_append_child(DomResult *dom, DomNode *parent, DomNode *child)
     return 0;
 }
 
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+static void dom_created_dump_dfs(DomNode *n, int depth, int *shown)
+{
+    if (!n || depth > 4 || *shown > 40)
+    {
+        return;
+    }
+    logger_log("[frg] %.*s %s kids=%d", depth * 2, "        ",
+               (n->tag) ? n->tag : (n->kind == DOM_TEXT ? "#text" : "?"),
+               n->childCount);
+    (*shown)++;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        dom_created_dump_dfs(n->children[i], depth + 1, shown);
+    }
+}
+
+/* Dump every root-less fragment (top node with parent==NULL and real
+ * content) among the created-element registry — the shape of the tree
+ * react COMMITTED but never attached. */
+void dom_created_dump(void)
+{
+    logger_log("[frg] dump begin created=%d", g_createdCount);
+    for (int i = 0; i < g_createdCount; i++)
+    {
+        DomNode *n = g_created[i];
+        if (n && n->parent == NULL && n->childCount > 0 &&
+            n->tag && strcmp(n->tag, "#root") != 0 &&
+            !n->shadowHost) /* shadow roots are detached by DESIGN */
+        {
+            int shown = 0;
+            dom_created_dump_dfs(n, 0, &shown);
+        }
+    }
+    logger_log("[frg] dump end");
+}
+#endif
+
 int dom_remove_child(DomNode *parent, DomNode *child)
 {
     if (!parent || !child)
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] remove parent=%s child=%s",
+               (parent->tag) ? parent->tag : "?",
+               (child->tag) ? child->tag : "?");
+#endif
     for (int i = 0; i < parent->childCount; i++)
     {
         if (parent->children[i] == child)
@@ -1164,6 +1551,246 @@ int dom_remove_attr(DomNode *el, const char *key)
     return -1;
 }
 
+/* ── innerHTML subtree serializer (browser-parity markup writer) ─────────
+ * Serializes an element's children as HTML markup. Next.js's root error
+ * boundary snapshots `document.documentElement.innerHTML` and re-renders
+ * `<html dangerouslySetInnerHTML={{__html: snapshot}}>` on a hydration
+ * fallback; with the old text-degraded getter the snapshot was plain body
+ * text and that assignment erased head+body (the hydration gap). This
+ * writes REAL markup: `<tag attr="v">…</tag>`, void elements bare,
+ * text escaped for & < >, attrs also for ", comments copied,
+ * script/style text raw.
+ * Returns 0 + heap string (caller frees via PLUTO_FREE); -1 bad arg,
+ * -2 alloc failure, -3 runaway depth. len (optional) gets the length. */
+int dom_serialize_children_html(const DomNode *el, char **out, size_t *len);
+
+typedef struct
+{
+    char *buf;
+    size_t len;
+    size_t cap;
+} HtmlBuf;
+
+static int hb_grow(HtmlBuf *hb, size_t need)
+{
+    if (hb->len + need + 1 <= hb->cap)
+    {
+        return 0;
+    }
+    size_t ncap = hb->cap ? hb->cap : 1024;
+    while (hb->len + need + 1 > ncap)
+    {
+        ncap *= 2; /* 1024 → 8MB ceiling (32 doublings) */
+    }
+    char *nb = (char *)PLUTO_REALLOC(hb->buf, ncap);
+    if (!nb)
+    {
+        return -1;
+    }
+    hb->buf = nb;
+    hb->cap = ncap;
+    return 0;
+}
+
+static int hb_put(HtmlBuf *hb, const char *s, size_t n)
+{
+    if (!s || n == 0)
+    {
+        return 0;
+    }
+    if (hb_grow(hb, n) != 0)
+    {
+        return -1;
+    }
+    memcpy(hb->buf + hb->len, s, n);
+    hb->len += n;
+    hb->buf[hb->len] = '\0';
+    return 0;
+}
+
+static int hb_puts(HtmlBuf *hb, const char *s)
+{
+    return hb_put(hb, s, s ? strlen(s) : 0);
+}
+
+/* Text-escape & < > ; attr-escape & < > " (needsQuotes path). */
+static int hb_put_text(HtmlBuf *hb, const char *s, int isAttr)
+{
+    for (size_t i = 0; s[i]; i++)
+    {
+        char c = s[i];
+        const char *rep =
+            (c == '&') ? "&amp;" : (c == '<') ? "&lt;" : (c == '>') ? "&gt;"
+                                     : (isAttr && c == '"') ? "&quot;"
+                                                            : NULL;
+        if (rep)
+        {
+            if (hb_puts(hb, rep) != 0)
+            {
+                return -1;
+            }
+        }
+        else
+        {
+            if (hb_put(hb, &c, 1) != 0)
+            {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int dom_serialize_node_html(const DomNode *n, HtmlBuf *hb, int depth,
+                                   int rawText)
+{
+    if (!n || !hb)
+    {
+        return -1;
+    }
+    if (depth > 24)
+    {
+        return -3; /* runaway markup guard (top-level contract preserved) */
+    }
+    if (n->kind == DOM_TEXT)
+    {
+        return hb_put_text(hb, n->text ? n->text : "", rawText);
+    }
+    if (n->kind == DOM_COMMENT)
+    {
+        if (hb_puts(hb, "<!--") != 0)
+        {
+            return -1;
+        }
+        if (hb_puts(hb, n->text ? n->text : "") != 0)
+        {
+            return -1;
+        }
+        return hb_puts(hb, "-->");
+    }
+    if (n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return -1;
+    }
+    /* NOTE: bool attribute marker stores presence as "" — emitted as
+     * `key=""` (browser-shaped; attr serializers never emit bare keys). */
+    static const char *const VOID_TAGS[] = {"area", "base", "br", "col",
+                                            "embed", "hr", "img", "input",
+                                            "link", "meta", "param", "source",
+                                            "track", "wbr"};
+    if (hb_puts(hb, "<") != 0 || hb_puts(hb, n->tag) != 0)
+    {
+        return -1;
+    }
+    for (int a = 0; a < n->attrCount; a++)
+    {
+        const char *v = dom_get_attr(n, n->attrs[a].key);
+        if (hb_puts(hb, " ") != 0 || hb_puts(hb, n->attrs[a].key) != 0)
+        {
+            return -1;
+        }
+        if (v && v[0])
+        {
+            if (hb_puts(hb, "=\"") != 0 || hb_put_text(hb, v, 1) != 0 ||
+                hb_puts(hb, "\"") != 0)
+            {
+                return -1;
+            }
+        }
+        else
+        {
+            /* value "" / marker: emit `attr=""` (browser round-trip). */
+            if (hb_puts(hb, "=\"") != 0 || hb_puts(hb, "\"") != 0)
+            {
+                return -1;
+            }
+        }
+    }
+    if (hb_puts(hb, ">") != 0)
+    {
+        return -1;
+    }
+    int isVoid = 0;
+    for (size_t v = 0; v < sizeof(VOID_TAGS) / sizeof(VOID_TAGS[0]); v++)
+    {
+        if (strcmp(n->tag, VOID_TAGS[v]) == 0)
+        {
+            isVoid = 1;
+            break;
+        }
+    }
+    if (isVoid)
+    {
+        return 0;
+    }
+    /* script/style content renders raw (textarea escapes like plain
+     * text nodes — browser serialization parity). */
+    int kidsRaw =
+        (!strcmp(n->tag, "script") || !strcmp(n->tag, "style")) ? 1 : 0;
+    for (int i = 0; i < n->childCount; i++)
+    {
+        if (dom_serialize_node_html(n->children[i], hb, depth + 1, kidsRaw) != 0)
+        {
+            return -1;
+        }
+    }
+    if (hb_puts(hb, "</") != 0 || hb_puts(hb, n->tag) != 0 ||
+        hb_puts(hb, ">") != 0)
+    {
+        return -1;
+    }
+    return 0;
+}
+
+int dom_serialize_children_html(const DomNode *el, char **out, size_t *len)
+{
+    if (!out || !el || el->kind != DOM_ELEMENT)
+    {
+        return -1;
+    }
+    *out = NULL;
+    if (len)
+    {
+        *len = 0;
+    }
+    HtmlBuf hb;
+    hb.buf = NULL;
+    hb.len = 0;
+    hb.cap = 0;
+    for (int i = 0; i < el->childCount; i++)
+    {
+        int rc = dom_serialize_node_html(el->children[i], &hb, 0, 0);
+        if (rc == -3)
+        {
+            PLUTO_FREE(hb.buf);
+            return -3;
+        }
+        if (rc != 0)
+        {
+            PLUTO_FREE(hb.buf);
+            return -2;
+        }
+    }
+    if (!hb.buf)
+    {
+        hb.buf = (char *)PLUTO_MALLOC(1);
+        if (hb.buf)
+        {
+            hb.buf[0] = '\0';
+        }
+    }
+    if (!hb.buf)
+    {
+        return -2;
+    }
+    *out = hb.buf;
+    if (len)
+    {
+        *len = hb.len;
+    }
+    return 0;
+}
+
 DomNode *dom_first_element_child(const DomNode *node)
 {
     if (!node)
@@ -1212,6 +1839,11 @@ int dom_insert_before(DomResult *dom, DomNode *parent, DomNode *child,
     {
         return -1;
     }
+#if defined(PLUTO_THROW_LOG) && defined(PLUTO_HYDRATE_TRACE)
+    logger_log("[dom] insertBefore parent=%s child=%s ref=%s",
+               (parent->tag) ? parent->tag : "?", (child->tag) ? child->tag : "?",
+               ref ? (ref->tag ? ref->tag : "?") : "(null)");
+#endif
     if (ref && ref->parent != parent)
     {
         return -1; /* ref must be a child of parent (DOM semantics) */
@@ -1620,6 +2252,75 @@ DomNode *dom_query_selector_first(const DomResult *dom, const DomNode *scope,
     return q.count > 0 ? q.found : NULL;
 }
 
+/* ── API-P6: <template>.content — the element's detached content
+ * fragment. Parsed templates carry theirs from the builder; created
+ * templates (createElement('template')) materialize an EMPTY fragment
+ * on first access — the browser's always-a-DocumentFragment content
+ * getter. The fragment is a DomNode (kind element, tag
+ * "#template-content", parent NULL) so every bridge reads it with the
+ * ordinary node machinery; nodeType on it reports 11 per the adapters'
+ * fragment rule. */
+DomNode *dom_template_content(DomResult *dom, DomNode *el)
+{
+    if (!dom || !el || el->kind != DOM_ELEMENT || !el->tag ||
+        strcmp(el->tag, "template") != 0)
+    {
+        return NULL; /* non-template elements have no content, like browsers */
+    }
+    if (el->templateContent)
+    {
+        return el->templateContent;
+    }
+    DomNode *frag = node_new();
+    if (!frag)
+    {
+        return NULL;
+    }
+    frag->kind = DOM_ELEMENT;
+    frag->tag = arena_dup((Arena *)dom->_arena, "#template-content", 17);
+    if (!frag->tag)
+    {
+        PLUTO_FREE(frag);
+        return NULL;
+    }
+    frag->parent = NULL;
+    el->templateContent = frag;
+    return frag;
+}
+
+/* ── API-P6: Element.closest — the element itself first, then element
+ * ancestors only, first match wins (NULL = no match, never an
+ * exception for an unusable selector). Same parse + compound matcher
+ * as the querySelector walk, so the two can never disagree. */
+DomNode *dom_closest(const DomResult *dom, DomNode *start, const char *sel,
+                     char *scratch, size_t scratchSize)
+{
+    (void)dom;
+    if (!start || !sel || !scratch || scratchSize == 0)
+    {
+        return NULL;
+    }
+    CssSimple parts[CSS_QS_MAX_COMPOUNDS];
+    unsigned char combs[CSS_QS_MAX_COMPOUNDS];
+    int np = css_parse_selector(sel, scratch, scratchSize, parts, combs);
+    if (np <= 0)
+    {
+        return NULL; /* unusable selector → null result */
+    }
+    for (DomNode *n = start; n; n = n->parent)
+    {
+        if (n->kind != DOM_ELEMENT)
+        {
+            continue; /* text/comment levels: match only element ancestors */
+        }
+        if (qs_matches(parts, combs, np, n))
+        {
+            return n;
+        }
+    }
+    return NULL;
+}
+
 /* Iterative free (explicit stack). The previous recursive version recursed
  * once per DOM depth; a deep page could overflow the game-task stack during
  * teardown on device (same class of failure as the P18 watchdog crash). */
@@ -1687,12 +2388,99 @@ static void free_node_recursive(DomNode *root)
     PLUTO_FREE(st);
 }
 
+/* ── API-P6: owned detached subtrees — template content fragments and
+ * the SW shadow roots are parent-NULL subtrees the main tree free pass
+ * never reaches (they'd leak per document; the shadow roots predate
+ * this fix). One iterative visit: for every element reached, free its
+ * owned detached root FIRST — walking INTO it for ITS owned fields
+ * (a template inside a shadow root, a fragment inside a fragment) —
+ * then wholesale-free the detached tree with the ordinary free. The
+ * visit itself stays iterative (the P18 stack rule: the free pass may
+ * run on the game task against a deep page). Detached-in-detached
+ * chains resolve in one pass because the visit descends through the
+ * detached root's own children before freeing it. */
+typedef struct
+{
+    DomNode *node;
+    int nextChild;
+} OwnFrame;
+
+static void free_owned_detached_visit(DomNode *root)
+{
+    if (!root)
+    {
+        return;
+    }
+    int cap = 64;
+    int top = 0;
+    OwnFrame *st = (OwnFrame *)PLUTO_MALLOC(sizeof(OwnFrame) * (size_t)cap);
+    if (!st)
+    {
+        return; /* nothing we can do; allocator is out */
+    }
+    st[top].node = root;
+    st[top].nextChild = 0;
+    while (top >= 0)
+    {
+        DomNode *n = st[top].node;
+        if (st[top].nextChild < n->childCount)
+        {
+            DomNode *c = n->children[st[top].nextChild];
+            st[top].nextChild++;
+            if (c)
+            {
+                if (top + 1 >= cap)
+                {
+                    cap *= 2;
+                    OwnFrame *grown =
+                        (OwnFrame *)PLUTO_MALLOC(sizeof(OwnFrame) * (size_t)cap);
+                    if (!grown)
+                    {
+                        PLUTO_FREE(st);
+                        return;
+                    }
+                    memcpy(grown, st, sizeof(OwnFrame) * (size_t)top);
+                    PLUTO_FREE(st);
+                    st = grown;
+                }
+                top++;
+                st[top].node = c;
+                st[top].nextChild = 0;
+            }
+        }
+        else
+        {
+            /* pop: hand any owned detached subtree to the iterative free
+             * (its own visit descended it first — see below). To keep one
+             * recursive-shaped helper out of the game-task stack, the
+             * descent runs through THIS same function before the free. */
+            if (n->shadowRoot)
+            {
+                DomNode *d = n->shadowRoot;
+                n->shadowRoot = NULL;
+                free_owned_detached_visit(d);
+                free_node_recursive(d);
+            }
+            if (n->templateContent)
+            {
+                DomNode *d = n->templateContent;
+                n->templateContent = NULL;
+                free_owned_detached_visit(d);
+                free_node_recursive(d);
+            }
+            top--;
+        }
+    }
+    PLUTO_FREE(st);
+}
+
 void dom_free_result(DomResult *res)
 {
     if (!res)
     {
         return;
     }
+    free_owned_detached_visit(res->root);
     free_node_recursive(res->root);
     Arena *arena = (Arena *)res->_arena;
     if (arena)

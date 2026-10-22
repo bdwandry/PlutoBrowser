@@ -119,6 +119,7 @@ SRC_DEVICE = \
 	Source/html/jsbridge_mujs.c \
 	Source/html/jsbridge_duktape.c \
 	Source/html/jsbridge_quickjs.c \
+	Source/html/webstorage.c \
 	Source/html/jsext.c \
 	Source/html/css.c \
 	Source/keyboard/keyboard.c \
@@ -340,7 +341,18 @@ override PDCFLAGS += -k -s
 # the link recipe expands it lazily — a later SRC mutation would leave the
 # prerequisite graph missing the appended stock objects (link fails with
 # "No such file" for objects make never planned to compile).
-ifeq ($(MAKECMDGOALS),device)
+# Goal-aware: the device parts ride for `make device` AND for plain `make`
+# (goal-less = the default = the shippable bundle; see the `all` override
+# after the common.mk include — the SDK's all either fails the device link
+# with undefined fxAbort or assembles no PDX at all).
+ifeq ($(MAKECMDGOALS),)
+PLUTO_DEVICE_BUILD := 1
+else ifneq (,$(filter device all,$(MAKECMDGOALS)))
+PLUTO_DEVICE_BUILD := 1
+else
+PLUTO_DEVICE_BUILD :=
+endif
+ifeq ($(PLUTO_DEVICE_BUILD),1)
 SRC := $(SRC) $(patsubst Source/js/xs_moddable_no_recursion/%,Source/js/xs_moddable/%,$(filter Source/js/xs_moddable_no_recursion/%,$(SRC))) Source/html/jsbridge_xs.c
 # dav1d single-thread pthread stubs (device-only: the sim links macOS
 # pthreads; a shared TU would collide at link). See dav1d_pthread_shim.c.
@@ -444,3 +456,47 @@ build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -M
 # code motion). dav1d sources only — the rest of the tree stays -O2.
 build/Source/render/decoders/dav1d/src/%.o: OPT = -O3
 
+
+# Plain `make` (and explicit `make all`) must end in the SHIPPABLE bundle —
+# device binary + simulator dylib in ONE PlutoBrowser.pdx. The goal-less
+# default pulled the SDK's `all`, which built both binaries under the
+# sim-only source list — the device link died there (undefined fxAbort)
+# before assembly could ever run. With the goal-aware SRC append above,
+# plain `make` compiles the same blessed source list `make device` uses for
+# BOTH binaries (both XS engines ride — exactly the configuration the
+# device receipted), then assembles once.
+.PHONY: all
+all: device_bin simulator_bin
+	@$(PDC) $(PDCFLAGS) Source $(PRODUCT)
+
+# `make device` ships a DEVICE-ONLY bundle: after device_bin stages the
+# fresh ARM binary, the recipe removes BOTH stale carriers before packing:
+# (1) a simulator dylib staged in Source/ by an earlier `make` /
+# `make simulator` — the device goal itself never stages one, so a leftover
+# from a dual-build WOULD otherwise be packed right back in, and (2) the
+# whole product directory — pdc MERGES into an existing PDX and never
+# deletes stale files from it, so a previously packed dylib would survive
+# inside the bundle (both lanes receipted 2026-10-21). Result: pdex.bin +
+# assets and NOTHING the Playdate Simulator can launch. Plain `make` /
+# `make all` still stage a fresh dylib and assemble the dual-target
+# bundle; `make simulator` keeps the sim-only lab build. Recipe override,
+# last wins — same pattern as the `all` override above (the "overriding
+# commands" warning is cosmetic).
+# R-25a: device optimization knob. The SDK's common.mk bakes OPT = -O2 …
+# for the whole tree; these target-scoped assignments override it for the
+# `device` and `all` goals and their prerequisites (same pattern as the
+# SDK's own `debug: OPT = -O0`). R25 default: -O3 for the device binary —
+# the full -O3 device battery receipted clean 2026-10-22 (real site +
+# 5-page internal battery, zero crashlog, stack-usage audit ≤ +48B/frame).
+# Roll back per build with `make device DEVICEOPT=-O2`. The simulator
+# build never reads OPT (clang builds $(SRC) directly), so sim binaries
+# are identical either way.
+DEVICEOPT ?= -O3
+device: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
+all: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
+
+.PHONY: device
+device: device_bin
+	rm -f Source/pdex.dylib
+	rm -rf $(PRODUCT)
+	$(PDC) $(PDCFLAGS) Source $(PRODUCT)

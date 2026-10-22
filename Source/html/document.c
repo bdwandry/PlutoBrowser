@@ -36,6 +36,7 @@
 #include "core/logger.h"
 #include "html/css.h"
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -375,9 +376,22 @@ int doc_is_inverted_style(const DocStyleEntry *attrs, int attrCount)
     {
         bg = style_get(&st, "background");
     }
-    if (bg)
+    if (!bg)
     {
-        if (strstr(bg, "black") || strstr(bg, "#000"))
+        return 0;
+    }
+    if (strstr(bg, "black") || strstr(bg, "#000"))
+    {
+        return 1;
+    }
+    /* Phase 9: a gradient background decides polarity by its stop
+     * AVERAGE (dark hero gradients previously escaped this check and
+     * the page whose author inverted it rendered browser-invisible
+     * black-on-dark). No lum answer = nothing to claim. */
+    if (strstr(bg, "gradient("))
+    {
+        int lum = css_gradient_luma(bg, strlen(bg));
+        if (lum >= 0 && lum < 130)
         {
             return 1;
         }
@@ -388,29 +402,199 @@ int doc_is_inverted_style(const DocStyleEntry *attrs, int attrCount)
 /* ── parseBoxSpacing ────────────────────────────────────────────────────────── */
 
 /* Lua num(): strip '%', then STRICT tonumber. "10px" fails → component 0. */
+/* forward: the shared Phase-9 unit reader (defined beside split_parts) */
+static int fresh_len_px(const char *v, size_t vlen, int allowNeg,
+                        int *pctMille);
+
 static int box_num(const char *v)
 {
     if (!v)
     {
         return 0;
     }
-    char tmp[64];
-    size_t o = 0;
-    for (size_t i = 0; v[i] && o + 1 < sizeof(tmp); i++)
+    /* Phase 9: the shared reader answers px/rem/em/vw/vh/vmin/vmax/ch/
+     * ex/pt (with sign + fraction precision). % REPAIRS to refused:
+     * the old "%" strip-then-strtod path turned "50%" into 25px — a
+     * relative value wrongly treated as pixels; margins/gaps keep
+     * their P4-era `% refuses at walk time` rule via the parse miss.
+     * The bare-number px fallback semantics survive (bare = px). */
+    int pctMille;
+    int px = fresh_len_px(v, strlen(v), 1, &pctMille);
+    if (px < 0)
     {
-        if (v[i] != '%')
+        return 0; /* not a length OR refused % → 0 like the legacy path */
+    }
+    return (int)floor(px / 2.0); /* math.floor(n / 2) — true floor */
+}
+
+/* Phase 9: the shared unit reader for the walk-side length consumers
+ * (margins, gaps, indents, transform offsets). Returns the UNHALVED
+ * px value for the token, INT_MIN when it is not a length. pctMille =
+ * per-mille for a "%" token (e.g. -50% → -500), INT_MIN = not a %.
+ * allowNeg lets translate/margin pass signs through (gaps forbid —
+ * negative gaps are invalid CSS, the gap lane keeps its own check).
+ * Units and their documented semantics on this display:
+ *   px/bare   ×1           rem/em  ×16 (CSS root convention)
+ *   vw ×400/100  vh ×240/100  vmin = CSS_VMINDIM/100  vmax = CSS_VMAXDIM/100
+ *   ch ×8  ex ×8 (the documented half-advance/x-height approximations —
+ *   the engine ships no font metrics; both underestimate real fonts
+ *   slightly, which the 1-bit halved-px scale already absorbs)
+ *   pt ×4/3            %  pct only (the caller decides per property —
+ *   margins/gaps keep the P4-era refusal, translate converts at draw)
+ * Fractions keep the P6 precision (r/p fixed point, p ≤ 1000). */
+static int fresh_len_px(const char *v, size_t vlen, int allowNeg,
+                        int *pctMille)
+{
+#define FL_NOT_LEN INT_MIN
+    /* (-1 collided with a legitimately negative -1px length; INT_MIN
+     * is unambiguous - consumers test < 0, parse_translate routes
+     * pxv != INT_MIN into the length lane so a -1px length parses) */
+#define FL_NOT_PCT INT_MIN
+    if (pctMille)
+    {
+        *pctMille = FL_NOT_PCT;
+    }
+    if (!v || vlen == 0)
+    {
+        return FL_NOT_LEN;
+    }
+    size_t i = 0;
+    while (i < vlen && (v[i] == ' ' || v[i] == '\t'))
+    {
+        i++;
+    }
+    int neg = 0;
+    if (i < vlen && (v[i] == '-' || v[i] == '+'))
+    {
+        neg = (v[i] == '-');
+        i++;
+    }
+    if (!allowNeg && neg)
+    {
+        return FL_NOT_LEN;
+    }
+    int n = 0;
+    int got = 0;
+    while (i < vlen && v[i] >= '0' && v[i] <= '9')
+    {
+        if (n < 100000)
         {
-            tmp[o++] = v[i];
+            n = n * 10 + (v[i] - '0');
         }
+        got = 1;
+        i++;
     }
-    tmp[o] = '\0';
-    char *end = NULL;
-    double d = strtod(tmp, &end);
-    if (end == tmp || *end != '\0')
+    int r = 0, p = 1; /* fraction = r/p (p ≤ 1000) */
+    if (i < vlen && v[i] == '.')
     {
-        return 0;
+        size_t fs = i;
+        i++;
+        while (i < vlen && v[i] >= '0' && v[i] <= '9')
+        {
+            if (p < 1000)
+            {
+                r = r * 10 + (v[i] - '0');
+                p *= 10;
+            }
+            i++;
+        }
+        if (!got && i == fs + 1)
+        {
+            return FL_NOT_LEN; /* "." with no digits at all */
+        }
+        got = 1;
     }
-    return (int)floor(d / 2.0); /* math.floor(n / 2) — true floor */
+    if (!got)
+    {
+        return FL_NOT_LEN;
+    }
+    /* Swallow unit-internal spaces (CSS allows "0 2 rem"? no — keep
+     * strict: a space between number and unit is invalid). */
+    while (i < vlen && (v[i] == ' ' || v[i] == '\t'))
+    {
+        i++;
+    }
+    size_t rem = vlen - i;
+    long long px;
+    if (rem == 0)
+    {
+        px = (long long)n * p + r; /* bare = px (existing fallback) */
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'p' && (v[i + 1] | 32) == 'x')
+    {
+        px = ((long long)n * p + r) / p; /* drop trailing fraction noise */
+        i += 2;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'e' && (v[i + 1] | 32) == 'm')
+    {
+        px = ((long long)n * p + r) * 16 / p;
+        i += 2;
+    }
+    else if (rem >= 3 && (v[i] | 32) == 'r' && (v[i + 1] | 32) == 'e' &&
+             (v[i + 2] | 32) == 'm')
+    {
+        px = ((long long)n * p + r) * 16 / p;
+        i += 3;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'v' && (v[i + 1] | 32) == 'w')
+    {
+        px = ((long long)n * p + r) * CSS_VIEWPORT_W / (100LL * p);
+        i += 2;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'v' && (v[i + 1] | 32) == 'h')
+    {
+        px = ((long long)n * p + r) * CSS_VIEWPORT_H / (100LL * p);
+        i += 2;
+    }
+    else if (rem >= 4 && (v[i] | 32) == 'v' && (v[i + 1] | 32) == 'm' &&
+             (v[i + 2] | 32) == 'i' && (v[i + 3] | 32) == 'n')
+    {
+        px = ((long long)n * p + r) * CSS_VMINDIM / (100LL * p);
+        i += 4;
+    }
+    else if (rem >= 4 && (v[i] | 32) == 'v' && (v[i + 1] | 32) == 'm' &&
+             (v[i + 2] | 32) == 'a' && (v[i + 3] | 32) == 'x')
+    {
+        px = ((long long)n * p + r) * CSS_VMAXDIM / (100LL * p);
+        i += 4;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'c' && (v[i + 1] | 32) == 'h')
+    {
+        px = ((long long)n * p + r) * 8 / p;
+        i += 2;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'e' && (v[i + 1] | 32) == 'x')
+    {
+        px = ((long long)n * p + r) * 8 / p;
+        i += 2;
+    }
+    else if (rem >= 2 && (v[i] | 32) == 'p' && (v[i + 1] | 32) == 't')
+    {
+        px = ((long long)n * p + r) * 4 / (3LL * p);
+        i += 3;
+    }
+    else if (v[i] == '%')
+    {
+        if (!pctMille)
+        {
+            return FL_NOT_LEN; /* this consumer refuses % per its lane */
+        }
+        *pctMille = (neg ? -1 : 1) * (int)(((long long)n * p + r) * 10 / p);
+        return FL_NOT_LEN; /* a % is not a px answer; pct rides pMille */
+    }
+    else
+    {
+        return FL_NOT_LEN; /* unknown suffix (deg/q…, "2x em" debris) */
+    }
+    /* Trailing junk (e.g. "2pxx" or a second token) voids the token
+     * for single-value consumers; multi-token callers pre-split. */
+    if (i != vlen)
+    {
+        return FL_NOT_LEN;
+    }
+    return neg ? -(int)px : (int)px;
+#undef FL_NOT_LEN
+#undef FL_NOT_PCT
 }
 
 /* Split value on spaces/commas (Lua "[^%s,]+"), max 4 parts. */
@@ -1147,6 +1331,7 @@ _Static_assert(CSS_F_PRE == DOC_INF_PRE, "css/doc flag ABI");
 _Static_assert(CSS_F_PRELINE == DOC_INF_PRELINE, "css/doc flag ABI");
 _Static_assert(CSS_F_NOWRAP == DOC_INF_NOWRAP, "css/doc flag ABI");
 _Static_assert(CSS_F_BREAKWORD == DOC_INF_BREAKWORD, "css/doc flag ABI");
+_Static_assert(CSS_F_ELLIP == DOC_INF_ELLIP, "css/doc flag ABI");
 
 /* Exit-frame actions (post-children work the Lua handler does inline). */
 enum
@@ -1195,6 +1380,10 @@ typedef struct ExitCtx
     char *formMethod;
     int inertSaved; /* inert attribute: state.inert at entry */
     unsigned cssFlags; /* CSS-inherited inline bits added at entry (restore) */
+    /* Phase 6 flex container scope: the outer scope's row-gap keeps
+     * flowing inside the container's items (exchange at the exit). */
+    int gapSaved;
+    unsigned char gapSet;
     char *pseudoText; /* ::after text (arena), NULL when none */
     int pseudoBlock; /* ::after renders as a sibling block (not inline) */
 } ExitCtx;
@@ -1265,10 +1454,27 @@ struct Walker
 
     DocBlock *currentBlock;
 
+    /* Phase 6: flex/grid container transport (css.h policy). fgGap =
+     * the live container's row-gap in halved px (0 = none). Mounts add
+     * the gap AFTER each child block (DocBlock.gapApplied feeds
+     * layout's advances), and at the container's CSS exit the tail
+     * block's slot swaps to the outer scope's gap or drops to zero —
+     * the exact BETWEEN-items semantics. */
+    int fgGap;
+
     /* heap StrBufs owned by this walker (figure captions); freed at teardown */
     StrBuf **heapBufs;
     int heapBufCount;
     int heapBufCap;
+
+    /* Phase 10: the DomResult the walk owns — the fresh parse walks a
+     * STACK result (the heap copy only materializes for script pages
+     * after the walk), re-walks walk the live heap copy. The animation
+     * lane's completion map must consult THIS instance; zero-init for
+     * every other walker consumer (the map is best-effort by design).
+     * The fresh parse's map lands in the promoted heap copy when a
+     * bridge attaches, so JS-mutation re-walks inherit the record. */
+    DomResult *walkDom;
 
     int error;
 };
@@ -2138,11 +2344,17 @@ static void walk_pseudo_emit(Walker *w, const char *text, int asBlock)
     {
         return;
     }
-    /* Pure-ASCII-punctuation generated content (hlist separators like
-     * " * ", parens) renders as stray star-only lines in vertical flow —
-     * desktop shows them inline between items, we have no inline home
-     * for sibling blocks. Drop them (real generated content always
-     * carries alphanumerics or non-ASCII text, which is kept). */
+    /* Pure-ASCII-punctuation generated content: stray STAR-ONLY
+     * SIBLING BLOCKS in vertical flow (Wikipedia hlist separators) are
+     * dropped — but the INLINE path is exactly where separators
+     * belong (desktop renders them inline between items), so a
+     * punctuation-only ::before/::after on an INLINE subject now
+     * emits (Phase 7 — the P0 '>>' arrow canary class was killed by
+     * this guard; real bullets/arrows live inline). Block-level
+     * subjects keep the stray-guard: an arrow-only line above the
+     * element is vertical-flow noise, while real generated content
+     * carries alphanumerics or non-ASCII and renders as its own
+     * sibling block. */
     {
         int hasContent = 0;
         for (const char *p = text; *p; p++)
@@ -2155,7 +2367,7 @@ static void walk_pseudo_emit(Walker *w, const char *text, int asBlock)
                 break;
             }
         }
-        if (!hasContent)
+        if (!hasContent && asBlock)
         {
             return;
         }
@@ -2342,11 +2554,200 @@ static int walk_inverted(AttrList a)
     {
         bg = style_get(&st, "background");
     }
-    if (bg && (strstr(bg, "black") || strstr(bg, "#000")))
+    if (!bg)
+    {
+        return 0;
+    }
+    if (strstr(bg, "black") || strstr(bg, "#000"))
     {
         return 1;
     }
+    /* Phase 9: gradient backgrounds add a stop-average dark test —
+     * same threshold as doc_is_inverted_style. */
+    if (strstr(bg, "gradient("))
+    {
+        int lum = css_gradient_luma(bg, strlen(bg));
+        if (lum >= 0 && lum < 130)
+        {
+            return 1;
+        }
+    }
     return 0;
+}
+
+/* ── Phase 9: transform translate lane ────────────────────────────────────── */
+
+/* Parse a `transform` value into translate-only paint offsets. The
+ * grammar composes function tokens left to right; this display consumes
+ * ONLY the translate family (translate(X[,Y]) / translateX / translateY
+ * — offsets are order-independent under rotation-free composition, so
+ * ordering side effects of ignored rotate/scale tokens are not modeled,
+ * which is exactly the 2-D-compositor policy line) and SKIPS everything
+ * else inside the value. Arguments use fresh_len_px: px/rem/em/vw/vh/
+ * vmin/vmax/ch/ex/pt become FULL px; "%" rides pctMille (per-mille,
+ * converted at paint against the element's own box). Returns 1 when it
+ * produced at least one usable component, 0 when nothing translate-ish
+ * parsed (the caller records the consumption in no doc field). */
+static int parse_translate(const char *val, size_t vlen, int *xFullPx,
+                           int *yFullPx, int *xPct, int *yPct)
+{
+    if (!val || vlen == 0)
+    {
+        return 0;
+    }
+    int x = 0, y = 0;
+    int xp = 0, yp = 0;
+    int got = 0;
+    size_t i = 0;
+    while (i < vlen)
+    {
+        /* Find the next function token name. */
+        size_t ns = i;
+        while (i < vlen && !((val[i] | 32) >= 'a' && (val[i] | 32) <= 'z'))
+        {
+            i++;
+        }
+        if (i >= vlen)
+        {
+            break;
+        }
+        ns = i;
+        while (i < vlen && ((val[i] | 32) >= 'a' && (val[i] | 32) <= 'z'))
+        {
+            i++;
+        }
+        size_t ne = i;
+        if (i >= vlen || val[i] != '(')
+        {
+            continue; /* not a fn; keep scanning */
+        }
+        i++;
+        /* Argument span = to the matching close (args may nest rgb()). */
+        int depth = 1;
+        size_t as = i;
+        while (i < vlen && depth > 0)
+        {
+            if (val[i] == '(')
+            {
+                depth++;
+            }
+            else if (val[i] == ')')
+            {
+                depth--;
+            }
+            i++;
+        }
+        if (depth != 0)
+        {
+            break; /* unbalanced fn: stop reading the value */
+        }
+        size_t ae = i - 1;
+        /* Which translate family? */
+        int axis = -1; /* 0 = both, 1 = x only, 2 = y only */
+        size_t nl = ne - ns;
+        if (nl == 9 && ci_prefix(val + ns, "translate", 9) == 0)
+        {
+            axis = 0;
+        }
+        else if (nl == 10 && ci_prefix(val + ns, "translatex", 10) == 0)
+        {
+            axis = 1;
+        }
+        else if (nl == 10 && ci_prefix(val + ns, "translatey", 10) == 0)
+        {
+            axis = 2;
+        }
+        else
+        {
+            continue; /* rotate/scale/skew/matrix/perspective…: skip */
+        }
+        /* Split the arg span on the top-level comma (two args max for
+         * translate(); extra args = invalid, dropped). */
+        size_t a2 = ae;
+        int pd = 0;
+        for (size_t q = as; q < ae; q++)
+        {
+            if (val[q] == '(')
+            {
+                pd++;
+            }
+            else if (val[q] == ')')
+            {
+                pd--;
+            }
+            else if (val[q] == ',' && pd == 0)
+            {
+                a2 = q;
+                break;
+            }
+        }
+        int pxv;
+        int pct;
+        pxv = fresh_len_px(val + as, (axis == 0 ? a2 : ae) - as, 1, &pct);
+        if (pxv != INT_MIN)
+        {
+            if (axis != 2)
+            {
+                x += pxv;
+                got = 1;
+            }
+            else
+            {
+                /* axis == 2: translateY — the sole argument is the y
+                 * offset (translateY(x) never touches x). */
+                y += pxv;
+                got = 1;
+            }
+        }
+        else if (pct != INT_MIN)
+        {
+            if (axis != 2)
+            {
+                xp += pct;
+                got = 1;
+            }
+            else
+            {
+                yp += pct;
+                got = 1;
+            }
+        }
+        if (axis == 0 && a2 < ae)
+        {
+            pxv = fresh_len_px(val + a2 + 1, ae - (a2 + 1), 1, &pct);
+            if (pxv != INT_MIN)
+            {
+                y += pxv;
+                got = 1;
+            }
+            else if (pct != INT_MIN)
+            {
+                yp += pct;
+                got = 1;
+            }
+        }
+    }
+    if (!got)
+    {
+        return 0;
+    }
+    if (xFullPx)
+    {
+        *xFullPx = x;
+    }
+    if (yFullPx)
+    {
+        *yFullPx = y;
+    }
+    if (xPct)
+    {
+        *xPct = xp;
+    }
+    if (yPct)
+    {
+        *yPct = yp;
+    }
+    return 1;
 }
 
 /* Forward declarations (walk_box_spacing precedes their definitions). */
@@ -2357,6 +2758,436 @@ static const void *css_dom_ancestor(const void *node, int i,
                                     const char **tagLower,
                                     const char **classAttr,
                                     const char **idAttr);
+
+/* Phase 5: the visually-hidden recipe's tiny-box leg — width AND height
+ * both resolvable px values ≤ 2 (a 1px Dorothy box, the recipe's other
+ * standard completion alongside clip shapes). -1/absent/%/em values
+ * never claim it. Runs only when position+overflow-hidden are already
+ * declared, so the query cost is bounded. */
+static int tiny_hidden_box(Walker *w, const DomNode *node, const char *tag,
+                           AttrList a)
+{
+    if (!w->doc || !w->doc->_css)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    for (int k = 0; k < 2; k++)
+    {
+        size_t vl = 0;
+        const char *v = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                          node, k ? "height" : "width", &vl);
+        int px = walk_box_px(v, vl);
+        if (px < 0 || px > 2)
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* ── Phase 6: flex/grid gap transport ─────────────────────────────────────── */
+
+/* First-touch length in a length-delimited CSS value → HALVED px
+ * (Lua-parity scale, same halving walk_box_px applies to margins).
+ * px|rem|em|pt|vw|bare-number: rem/em ride the browser's default 16px
+ * root (real sheets are rem-heavy — bryanwandrych.com's gaps are
+ * 1rem/.75rem), pt = 4/3px, vw = n/100 of CSS_VIEWPORT_W (400).
+ * % / other units → -1 (a row-gap percentage needs the resolved
+ * container height — not decidable at walk time; real sheets answering
+ * in % for gaps are vanishingly rare). Negatives refused; REM/EM
+ * fractions KEPT on a r/p fixed-point (.75rem and .5rem must round
+ * exactly). -1 when the value holds no supported first token. */
+/* ── Phase 6: flex/grid gap transport ─────────────────────────────────────── */
+
+static int gap_len_px(const char *v, size_t vlen)
+{
+    if (!v || vlen == 0)
+    {
+        return -1;
+    }
+    int whole = walk_box_px(v, vlen);
+    if (whole >= 0)
+    {
+        return whole; /* px / bare number (already halved) */
+    }
+    /* Phase 9: one shared unit reader serves the fresh-parser route
+     * (rem/em fraction precision on the r/p fixed point survived the
+     * factoring — .75rem = 12px exact still); the new units join:
+     * vh/vmin/vmax/ch/ex ride the same documented semantics as the
+     * @media evaluator. % still refuses here (a row-gap percentage
+     * needs the resolved container height — not decidable at walk
+     * time), negatives still refused (invalid CSS), first token only
+     * (a "gap: 8px 16px" pair's second value = the column axis,
+     * inline-inert on this device), 480→240 cap kept. */
+    int pctMille;
+    int px = fresh_len_px(v, vlen, 0, &pctMille);
+    if (px < 0)
+    {
+        return -1;
+    }
+    return px > 480 ? 240 : px / 2;
+}
+
+/* Phase 6: the live flex/grid container's row-gap, halved px.
+ * Longhand row-gap wins over the gap shorthand (real browsers expand
+ * the shorthand per-axis; matching per longhand covers the practical
+ * cascade). 0 = declared-absent/unresolvable → the container simply
+ * has no gap. Gap names are consumed vocabulary (css_known_prop). */
+static int flex_gap_px(Walker *w, const DomNode *node, const char *tag,
+                       AttrList a)
+{
+    if (!w->doc || !w->doc->_css)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t vl = 0;
+    static const char *const kNames[2] = {"row-gap", "gap"};
+    for (int k = 0; k < 2; k++)
+    {
+        const char *v = css_winning_value(eng, tag, classAttr, idAttr,
+                                          &dom, node, kNames[k], &vl);
+        if (v)
+        {
+            int px = gap_len_px(v, vl);
+            return px > 0 ? px : 0;
+        }
+    }
+    return 0;
+}
+
+/* Phase 9: the transform translate mount at every P6 block-open site.
+ * Source precedence = the CSS cascade: the element's inline style
+ * attribute outranks any author sheet rule, so the INLINE value wins
+ * and a sheet rule answers only when no inline declaration exists.
+ * translate/translateX/translateY parse (both px and % — the % keys
+ * against the element's own drawn box at paint); an unusable parse
+ * records nothing. rotate/scale/skew/matrix stay the 2-D policy item.
+ * The halved-px scale rides like every other walk length (full px / 2
+ * below). memset-0 fields carry the "no transform" default. */
+static void walk_tf_fill(Walker *w, DocBlock *b, const DomNode *node,
+                         const char *tag, AttrList a)
+{
+    if (!w || !b)
+    {
+        return;
+    }
+    int xFull = 0, yFull = 0, xPct = 0, yPct = 0;
+    int usable = 0;
+    static DocStyle st; /* static: 1.6KB struct off the game-task stack */
+    const char *styleStr = attr_val(a, "style");
+    doc_parse_style(styleStr, &st);
+    const char *iv = style_get(&st, "transform");
+    if (iv)
+    {
+        usable = parse_translate(iv, strlen(iv), &xFull, &yFull, &xPct,
+                                 &yPct);
+    }
+    if (!usable && w->doc && w->doc->_css && !iv)
+    {
+        const char *classAttr = NULL;
+        const char *idAttr = NULL;
+        walk_class_id(a, &classAttr, &idAttr);
+        CssDom dom;
+        dom_css_dom(&dom, css_dom_ancestor);
+        CssEngine *eng = (CssEngine *)w->doc->_css;
+        size_t wl = 0;
+        const char *sv = css_winning_value(eng, tag, classAttr, idAttr,
+                                           &dom, node, "transform", &wl);
+        if (sv)
+        {
+            usable = parse_translate(sv, wl, &xFull, &yFull, &xPct,
+                                     &yPct);
+        }
+    }
+    if (!usable)
+    {
+        return;
+    }
+    if (xFull)
+    {
+        b->tfXpx = xFull / 2; /* the halved-px scale, like walk_box_px */
+    }
+    if (yFull)
+    {
+        b->tfYpx = yFull / 2;
+    }
+    if (xPct)
+    {
+        b->tfXpct = xPct / 20; /* per-mille → percent */
+    }
+    if (yPct)
+    {
+        b->tfYpct = yPct / 20;
+    }
+}
+
+/* ── Phase 10: animation lane — walk-time end-event engage ────────────────
+ * Spec-shaped for this renderer: there is no animation timeline, so a
+ * DECLARED run (a resolved `animation`/`animation-name` whose name the
+ * @keyframes registry holds) COMPLETES at the walk that first resolves
+ * it, and the element renders — the windows a real browser completes a
+ * run in, minus the clock. Guards keep windows that never complete in a
+ * browser silent: infinite iteration count, zero iteration count,
+ * paused play-state (keyword in the shorthand or the longhands).
+ * Ordering: inline style (author style attribute wins the cascade)
+ * then the sheet winner, longhand name first then the shorthand. The
+ * registry-resolved name comes back as a span (sheet/inline text,
+ * doc-lifetime). Dedupe per (node, name) lives on the DOM (document
+ * lifetime) so re-walks never re-engage while the declaration stands.
+ * The completed node joins the document's end-event queue (drained
+ * once per render by the browser) and the block carries the name for
+ * the probe's C-side receipts. */
+static int anim_word_in(const char *v, size_t vlen, const char *word)
+{
+    size_t wl = strlen(word);
+    size_t i = 0;
+    while (i < vlen)
+    {
+        char ch = v[i];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ||
+            ch == ',' || ch == '(')
+        {
+            i++;
+            continue;
+        }
+        size_t s = i;
+        while (i < vlen &&
+               (ch = v[i]) != ' ' && ch != '\t' && ch != '\n' &&
+               ch != '\r' && ch != ',' && ch != '(')
+        {
+            i++;
+        }
+        size_t tlen = i - s;
+        if (tlen == wl && ci_prefix(v + s, word, wl) == 0)
+        {
+            return 1;
+        }
+        if (v[i] == '(')
+        {
+            /* skip functional notation wholesale */
+            while (i < vlen && v[i] != ')')
+            {
+                i++;
+            }
+            if (i < vlen)
+            {
+                i++;
+            }
+        }
+    }
+    return 0;
+}
+
+static int anim_count_is_zero(const char *v, size_t vlen)
+{
+    size_t i = 0;
+    while (i < vlen)
+    {
+        char ch = v[i];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == ',')
+        {
+            i++;
+            continue;
+        }
+        size_t s = i;
+        while (i < vlen &&
+               (ch = v[i]) != ' ' && ch != '\t' && ch != '\n' &&
+               ch != '\r' && ch != ',')
+        {
+            i++;
+        }
+        size_t tlen = i - s;
+        if (tlen == 0)
+        {
+            break;
+        }
+        if (!((v[s] >= '0' && v[s] <= '9') || v[s] == '.'))
+        {
+            continue; /* keyword token ("infinite") not numeric */
+        }
+        int saw = 0;
+        size_t j = 0;
+        while (j < tlen && v[s + j] >= '0' && v[s + j] <= '9')
+        {
+            if (v[s + j] != '0' || saw)
+            {
+                saw = 1;
+            }
+            j++;
+        }
+        if (j < tlen && v[s + j] == '.')
+        {
+            j++;
+        }
+        while (j < tlen && v[s + j] >= '0' && v[s + j] <= '9')
+        {
+            if (v[s + j] != '0')
+            {
+                saw = 1;
+            }
+            j++;
+        }
+        if (saw == 0 && j == tlen)
+        {
+            return 1; /* a pure-zero count: zero runs, never completes */
+        }
+        return 0; /* the FIRST numeric count decides */
+    }
+    return 0; /* no numeric token: the spec default is 1 */
+}
+
+static void walk_anim_engage(Walker *w, DocBlock *b, const DomNode *node,
+                             const char *tag, AttrList a)
+{
+    if (!w || !w->doc || !b || !node || !w->doc->_css)
+    {
+        return; /* no engine: no animation is declared anywhere */
+    }
+    DocParseResult *doc = w->doc;
+    DomResult *dom = w->walkDom;
+    if (!dom)
+    {
+        return; /* no DOM instance in scope: the lane stays inert */
+    }
+    static DocStyle st; /* static: big struct off the game-task stack */
+    doc_parse_style(attr_val(a, "style"), &st);
+
+    /* Inline style attribute wins the author cascade; sheet path next. */
+    const char *inName = style_get(&st, "animation-name");
+    const char *inSh = style_get(&st, "animation");
+    const char *inCnt = style_get(&st, "animation-iteration-count");
+    const char *inState = style_get(&st, "animation-play-state");
+
+    CssEngine *eng = (CssEngine *)doc->_css;
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom cdom;
+    dom_css_dom(&cdom, css_dom_ancestor);
+    size_t wlName = 0, wlSh = 0, wlCnt = 0, wlState = 0;
+    const char *wvName = css_winning_value(eng, tag, classAttr, idAttr,
+                                           &cdom, node, "animation-name",
+                                           &wlName);
+    const char *wvSh = css_winning_value(eng, tag, classAttr, idAttr,
+                                         &cdom, node, "animation", &wlSh);
+    const char *wvCnt = css_winning_value(eng, tag, classAttr, idAttr,
+                                          &cdom, node,
+                                          "animation-iteration-count",
+                                          &wlCnt);
+    const char *wvState = css_winning_value(eng, tag, classAttr, idAttr,
+                                            &cdom, node,
+                                            "animation-play-state",
+                                            &wlState);
+
+    const char *nm = NULL;
+    size_t nl = 0;
+    const char *usedSh = NULL; /* the shorthand span that produced the
+                                * name — it may carry state/count words */
+    size_t usedShLen = 0;
+    if (inName)
+    {
+        nm = css_anim_registered_name(eng, inName, strlen(inName), &nl);
+    }
+    if (!nm && inSh)
+    {
+        nm = css_anim_registered_name(eng, inSh, strlen(inSh), &nl);
+        if (nm)
+        {
+            usedSh = inSh;
+            usedShLen = strlen(inSh);
+        }
+    }
+    if (!nm && wvName)
+    {
+        nm = css_anim_registered_name(eng, wvName, wlName, &nl);
+    }
+    if (!nm && wvSh)
+    {
+        nm = css_anim_registered_name(eng, wvSh, wlSh, &nl);
+        if (nm)
+        {
+            usedSh = wvSh;
+            usedShLen = wlSh;
+        }
+    }
+    if (!nm)
+    {
+        return; /* inert animation (no registered name): no window */
+    }
+
+    /* Never-complete windows stay silent, browser-honest. */
+    if (usedSh &&
+        (anim_word_in(usedSh, usedShLen, "infinite") ||
+         anim_word_in(usedSh, usedShLen, "paused")))
+    {
+        return;
+    }
+    if (inCnt ? anim_count_is_zero(inCnt, strlen(inCnt))
+              : (wvCnt && anim_count_is_zero(wvCnt, wlCnt)))
+    {
+        return;
+    }
+    if (inCnt && anim_word_in(inCnt, strlen(inCnt), "infinite"))
+    {
+        return;
+    }
+    if (!inCnt && wvCnt && anim_word_in(wvCnt, wlCnt, "infinite"))
+    {
+        return;
+    }
+    if (inState ? anim_word_in(inState, strlen(inState), "paused")
+                : (wvState && anim_word_in(wvState, wlState, "paused")))
+    {
+        return;
+    }
+
+    /* Dedupe per (node, name) across re-walks (document lifetime). */
+    if (dom_anim_end_report(dom, node, nm, (int)nl) != 0)
+    {
+        return; /* this run already completed */
+    }
+
+    /* Enqueue the end event + mount the name for the C-side receipts. */
+    if (doc->pendEndCount < DOC_PEND_END_MAX)
+    {
+        doc->pendEnd[doc->pendEndCount].node = (void *)node;
+        doc->pendEndCount++;
+    }
+    char nb[25];
+    memcpy(nb, nm, nl);
+    nb[nl] = '\0';
+    b->animName = doc_arena_str(w, nb);
+}
+
+/* Phase 6: the container transfers for ONE child block open — the
+ * row-gap mount (halved px, first item skips: the gap rides BETWEEN
+ * items, never before the first; the last item's mount IS its own
+ * trailing slot, so no strip exists) and the align-items:center
+ * cross-centering carried through the CSS-exit (the element's own
+ * text-align/align attr wins). */
+static void walk_flex_block(Walker *w, DocBlock *b, const char **alignSlot)
+{
+    if (w->fgGap > 0)
+    {
+        b->gapApplied = w->fgGap; /* the gap after THIS item (halved px) */
+    }
+    if (*alignSlot == NULL && (w->flags & (CSS_F_AIC | CSS_F_ASC)))
+    {
+        *alignSlot = doc_arena_str(w, "center");
+    }
+}
 
 static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
                                       const char *tag, AttrList a)
@@ -2486,6 +3317,28 @@ static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
                 *dst[side] = px;
             }
         }
+        /* Phase 5: -webkit-line-clamp probes like the box hints (same
+         * node, same mask lane). Unitless positive int 1..9; the unit
+         * loop stops at the first non-digit so "3 " or "3px" both
+         * resolve the 3 (a px value on a line-count is author junk). */
+        size_t cl = 0;
+        const char *cv = css_winning_value(eng, tag, classAttr, idAttr,
+                                           &sdom, node,
+                                           "-webkit-line-clamp", &cl);
+        if (cv && cl)
+        {
+            int cn = 0;
+            size_t q = 0;
+            while (q < cl && q < 3 && cv[q] >= '0' && cv[q] <= '9')
+            {
+                cn = cn * 10 + (cv[q] - '0');
+                q++;
+            }
+            if (cn >= 1 && cn <= 9)
+            {
+                out.clamp = cn;
+            }
+        }
     }
     return out;
 }
@@ -2501,38 +3354,48 @@ static int walk_box_px(const char *v, size_t vlen)
     int px = css_px_value(v, vlen);
     if (px < 0)
     {
-        /* bare-number fallback ("10" = 10px) */
-        const char *p = v;
-        const char *z = v + vlen;
-        while (p < z && (*p == ' ' || *p == '\t'))
+        /* Phase 9: the shared unit reader takes over when the px-only
+         * lookup misses — this is the "rem margins" P6 residual
+         * landing: margin-left:-.5rem, text-indent:1.25rem and every
+         * other suffixed box length now mounts at its call site via
+         * the same parser the gap lane uses. */
+        int pctMille;
+        px = fresh_len_px(v, vlen, 1, &pctMille);
+        if (px < 0)
         {
-            p++;
+            /* bare-number fallback ("10" = 10px) */
+            const char *p = v;
+            const char *z = v + vlen;
+            while (p < z && (*p == ' ' || *p == '\t'))
+            {
+                p++;
+            }
+            int neg = 0;
+            if (p < z && (*p == '-' || *p == '+'))
+            {
+                neg = (*p == '-');
+                p++;
+            }
+            if (p >= z || *p < '0' || *p > '9')
+            {
+                return -1;
+            }
+            int n = 0;
+            while (p < z && *p >= '0' && *p <= '9')
+            {
+                n = n * 10 + (*p - '0');
+                p++;
+            }
+            while (p < z && (*p == ' ' || *p == '\t'))
+            {
+                p++;
+            }
+            if (p != z)
+            {
+                return -1;
+            }
+            px = neg ? -n : n;
         }
-        int neg = 0;
-        if (p < z && (*p == '-' || *p == '+'))
-        {
-            neg = (*p == '-');
-            p++;
-        }
-        if (p >= z || *p < '0' || *p > '9')
-        {
-            return -1;
-        }
-        int n = 0;
-        while (p < z && *p >= '0' && *p <= '9')
-        {
-            n = n * 10 + (*p - '0');
-            p++;
-        }
-        while (p < z && (*p == ' ' || *p == '\t'))
-        {
-            p++;
-        }
-        if (p != z)
-        {
-            return -1;
-        }
-        px = neg ? -n : n;
     }
     if (px < 0)
     {
@@ -2733,9 +3596,215 @@ static void handle_text_node(Walker *w, const DomNode *node)
     }
 }
 
-/* ── Image ─────────────────────────────────────────────────────────────────── */
+/* ── Image ────────────────────────────────────────────────────────────────── */
 
-static void handle_image(Walker *w, AttrList a)
+/* Phase 8: spec-faithful srcset candidate selection for the 1-bit page.
+ * Candidates are comma-separated "url [descriptor]" tokens (the HTML
+ * srcset attribute grammar). Selection policy on this display:
+ *   - width descriptors ("480w"): the candidate with the SMALLEST width
+ *     that still covers the panel (CSS_VIEWPORT_W) wins — the smallest
+ *     fitting asset is the leafy one for a 400px 1-bit screen; when
+ *     every candidate is narrower, the LARGEST wins (closest to full
+ *     fidelity instead of under-sizing early);
+ *   - density descriptors ("1x"/"2x"): exactly 1x preferred, else the
+ *     smallest density >= 1, else the largest;
+ *   - a list with no descriptors = all 1x: first wins (list order is
+ *     author intent);
+ *   - mixed descriptor families are layered: width candidates get
+ *     first pick, density second, bare last — the real spec layering
+ *     with the panel as the only viewport to fit.
+ * NULL when nothing usable parsed (the caller falls back to the plain
+ * src attribute — the spec fallback). sizes/loading/decoding stay
+ * consumed-inert vocabulary: the flat page computes its own layout
+ * size and fetches eagerly at walk time (there is no deferred-fetch
+ * pipeline to schedule, and srcset width hints do not change the
+ * drawn box — the walk-time width/height attrs already do). */
+static char *img_pick_srcset(Walker *w, const char *ss)
+{
+    if (!w || !ss || !ss[0])
+    {
+        return NULL;
+    }
+    /* One pass collects the best candidate per descriptor family. */
+    const char *bestW = NULL;    /* best width-descriptor URL token */
+    int bestWv = 0;              /* its px width */
+    const char *bestX = NULL;    /* best density URL token */
+    double bestXv = 0.0;         /* its density */
+    const char *bestBare = NULL; /* first descriptor-less URL token */
+    const char *p = ss;
+    while (*p)
+    {
+        /* Skip separators/whitespace between candidates. */
+        while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n' ||
+               *p == '\r')
+        {
+            p++;
+        }
+        if (!*p)
+        {
+            break;
+        }
+        /* URL token = the run up to whitespace (URLs carry no internal
+         * spaces; foo?q=a+b style query URLs are spaces-escaped there),
+         * ends at a comma anyway. */
+        const char *us = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
+               *p != ',')
+        {
+            p++;
+        }
+        size_t ulen = (size_t)(p - us);
+        const char *ds = p; /* descriptor span = up to the next comma */
+        while (*p && *p != ',')
+        {
+            p++;
+        }
+        size_t dlen = (size_t)(p - ds);
+        if (ulen == 0)
+        {
+            continue;
+        }
+        /* Parse the descriptor: "123w" width or "1.5x" density. */
+        size_t ti = 0;
+        while (ti < dlen && ds[ti] == ' ')
+        {
+            ti++;
+        }
+        size_t numStart = ti;
+        while (ti < dlen && ((ds[ti] >= '0' && ds[ti] <= '9') || ds[ti] == '.'))
+        {
+            ti++;
+        }
+        int widthW = 0;
+        double densX = 0.0;
+        if (ti < dlen && ds[ti] == 'w' && ti > numStart)
+        {
+            /* integer strict: 'w' candidates are integer pixel widths */
+            int allInt = 1;
+            for (size_t k = numStart; k < ti; k++)
+            {
+                if (ds[k] == '.')
+                {
+                    allInt = 0;
+                    break;
+                }
+            }
+            if (allInt)
+            {
+                char nb[16];
+                size_t nl = ti - numStart;
+                if (nl >= sizeof(nb))
+                {
+                    nl = sizeof(nb) - 1;
+                }
+                memcpy(nb, ds + numStart, nl);
+                nb[nl] = '\0';
+                widthW = atoi(nb);
+            }
+        }
+        else if (ti < dlen && ds[ti] == 'x' && ti > numStart)
+        {
+            char xb[16];
+            size_t xl = ti - numStart;
+            if (xl >= sizeof(xb))
+            {
+                xl = sizeof(xb) - 1;
+            }
+            memcpy(xb, ds + numStart, xl);
+            xb[xl] = '\0';
+            densX = strict_num(xb, 0.0);
+        }
+        if (widthW > 0)
+        {
+            if (!bestW)
+            {
+                bestW = us;
+                bestWv = widthW;
+            }
+            int covers = widthW >= CSS_VIEWPORT_W;
+            int bestCovers = bestWv >= CSS_VIEWPORT_W;
+            if ((covers && bestCovers && widthW < bestWv) ||
+                (covers && !bestCovers) ||
+                (!covers && !bestCovers && widthW > bestWv))
+            {
+                bestW = us;
+                bestWv = widthW;
+            }
+        }
+        else if (densX > 0.0)
+        {
+            if (!bestX)
+            {
+                bestX = us;
+                bestXv = densX;
+            }
+            else
+            {
+                /* Policy: 1x exact preferred, else the smallest >= 1,
+                 * else (all candidates are shrink-density) the one
+                 * closest to 1 from below = the largest sub-1 value. */
+                int take = 0;
+                if (densX == 1.0)
+                {
+                    take = 1;
+                }
+                else if (bestXv == 1.0)
+                {
+                    take = 0;
+                }
+                else if (bestXv < 1.0 && densX >= 1.0)
+                {
+                    take = 1;
+                }
+                else if (bestXv >= 1.0 && densX >= 1.0)
+                {
+                    take = (densX < bestXv);
+                }
+                else
+                {
+                    take = (densX > bestXv);
+                }
+                if (take)
+                {
+                    bestX = us;
+                    bestXv = densX;
+                }
+            }
+        }
+        else if (!bestBare)
+        {
+            bestBare = us;
+        }
+    }
+    const char *pick = bestW ? bestW : (bestX ? bestX : bestBare);
+    if (pick == NULL)
+    {
+        return NULL;
+    }
+    /* The token end = the next space/comma/End after the pick start. */
+    const char *pe = pick;
+    while (*pe && *pe != ' ' && *pe != '\t' && *pe != '\n' && *pe != '\r' &&
+           *pe != ',')
+    {
+        pe++;
+    }
+    size_t plen = (size_t)(pe - pick);
+    if (plen == 0)
+    {
+        return NULL;
+    }
+    char *out = (char *)doc_arena_alloc(&w->arena, plen + 1);
+    if (!out)
+    {
+        w->error = 1;
+        return NULL;
+    }
+    memcpy(out, pick, plen);
+    out[plen] = '\0';
+    return out;
+}
+
+static void handle_image(Walker *w, AttrList a, const DomNode *node, const char *tag)
 {
     const char *src = attr_val(a, "src");
     if (!src)
@@ -2746,18 +3815,26 @@ static void handle_image(Walker *w, AttrList a)
     {
         src = "";
     }
-    if (src[0] == '\0')
     {
-        const char *ss = attr_val(a, "srcset");
-        if (ss)
+        /* Phase 8: a usable srcset attribute REPLACES the plain src in
+         * selection (HTML: src stands as the fallback only when srcset
+         * is absent or unusable). The pick is spec-shaped: width
+         * candidates choose the smallest covering the panel, density
+         * candidates prefer 1x — see img_pick_srcset. */
+        const char *ssv = attr_val(a, "srcset");
+        if (ssv && ssv[0])
         {
-            size_t n = 0;
-            while (ss[n] && ss[n] != ' ' && ss[n] != '\t' && ss[n] != '\n' &&
-                   ss[n] != ',' && ss[n] != '\r')
+            char *picked = img_pick_srcset(w, ssv);
+            if (picked)
             {
-                n++;
+                if (src[0] != '\0' && strcmp(src, picked) != 0)
+                {
+                    logger_log("[img] srcset pick: %s (src was: %s)",
+                               picked, src);
+                }
+                src = picked;
             }
-            src = n ? doc_arena_strn(w, ss, n) : "";
+            /* no usable candidate → src stays (the spec fallback) */
         }
     }
     const char *alt = attr_val(a, "alt");
@@ -2802,6 +3879,9 @@ static void handle_image(Walker *w, AttrList a)
             img->width = wd;
             img->height = ht;
             img->align = walk_align(w, a); /* Lua: align = parseAlign(attrs) */
+            walk_flex_block(w, img, &img->align);
+            walk_tf_fill(w, img, node, tag, a);
+            walk_anim_engage(w, img, node, tag, a);
             img->usemap = doc_arena_str(w, usemap);
             img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
             img->inert = (w->inert > 0);
@@ -2905,6 +3985,7 @@ static void collect_options(Walker *w, const DomNode *node, DocBlock *into)
                     o->value = doc_arena_str(w, val);
                     o->selected = attr_has(ca, "selected");
                     o->disabled = attr_has(ca, "disabled");
+                    o->defaultSelected = o->selected; /* reset basis */
                     if (doc_ptrarr_push((void ***)&into->options,
                                         &into->optionCount, &into->optionCap, o))
                     {
@@ -3249,11 +4330,15 @@ static void handle_element(Walker *w, const DomNode *node)
         }
         b->level = level;
         b->align = walk_align(w, a);
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         b->spacingTop = sp.top;
         b->spacingBottom = sp.bottom;
         b->indent = sp.left;
         b->hasSpacing = 1;
         b->invert = walk_inverted(a);
+        b->clampLines = sp.clamp;
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
         push_children(w, node);
@@ -3280,11 +4365,15 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         b->align = walk_align(w, a);
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         b->spacingTop = sp.top;
         b->spacingBottom = sp.bottom;
         b->indent = sp.left;
         b->hasSpacing = 1;
         b->invert = walk_inverted(a);
+        b->clampLines = sp.clamp;
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
         push_children(w, node);
@@ -3304,11 +4393,15 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         b->align = walk_align(w, a);
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         b->spacingTop = sp.top;
         b->spacingBottom = sp.bottom;
         b->indent = sp.left + 12;
         b->hasSpacing = 1;
         b->invert = walk_inverted(a);
+        b->clampLines = sp.clamp;
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
         push_children(w, node);
@@ -3327,6 +4420,9 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         b->align = doc_arena_str(w, "center");
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         b->hasSpacing = 1; /* center/marquee: spacing keys present, all 0 */
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
@@ -3346,6 +4442,9 @@ static void handle_element(Walker *w, const DomNode *node)
             return;
         }
         b->align = doc_arena_str(w, "center");
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         b->hasSpacing = 1; /* spacing keys present, all 0 */
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
@@ -3867,7 +4966,12 @@ static void handle_element(Walker *w, const DomNode *node)
         b->hasNumber = 1;
         b->number = (int)number;
         b->markerType = ctx->markerType ? ctx->markerType : '1';
-        /* list-style-type directly on the li beats the list default. */
+        /* list-style-type directly on the li beats the list default;
+         * ::marker content (Phase 7) beats BOTH — the winning content
+         * among ::marker rules becomes the drawn bullet text, with the
+         * none/normal keyword keeping the DEFAULT bullet (spec: a
+         * none marker value suppresses the pseudo-element entirely)
+         * and an empty string removing it. */
         if (w->doc && w->doc->_css)
         {
             const char *classAttr = NULL;
@@ -3884,8 +4988,35 @@ static void handle_element(Walker *w, const DomNode *node)
             {
                 b->markerType = cssMt;
             }
+            size_t mvlen = 0;
+            const char *mv = css_pseudo_content(
+                (CssEngine *)w->doc->_css, tag, classAttr, idAttr, &ldom,
+                node, 4, &mvlen);
+            if (mv && mvlen > 0)
+            {
+                if ((mvlen == 4 && memcmp(mv, "none", 4) == 0) ||
+                    (mvlen == 6 && memcmp(mv, "normal", 6) == 0))
+                {
+                    /* content: none/normal = no generated ::marker;
+                     * the default bullet type keeps drawing. */
+                }
+                else
+                {
+                    char mbuf[48];
+                    int mlen = walk_pseudo_text(a, mv, mvlen, mbuf,
+                                                sizeof(mbuf) - 1);
+                    if (mlen >= 0)
+                    {
+                        mbuf[mlen] = '\0';
+                        b->markerText = doc_arena_str(w, mbuf);
+                    }
+                }
+            }
         }
         b->depth = ctx->depth;
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
         push_children(w, node);
@@ -3917,6 +5048,9 @@ static void handle_element(Walker *w, const DomNode *node)
             b->dd = 1;
         }
         b->depth = w->dlDepth;
+        walk_flex_block(w, b, &b->align);
+        walk_tf_fill(w, b, node, tag, a);
+        walk_anim_engage(w, b, node, tag, a);
         w->currentBlock = b;
         push_exit(w, WX_FLUSH);
         push_children(w, node);
@@ -3925,16 +5059,21 @@ static void handle_element(Walker *w, const DomNode *node)
     /* ── Images & figures ── */
     else if (strcmp(tag, "img") == 0)
     {
-        handle_image(w, a);
+        handle_image(w, a, node, tag);
     }
     else if (strcmp(tag, "picture") == 0)
     {
         /* WHATWG §4.8.16: <picture> renders whichever <img> child exists.
          * An <img>-less picture (art-direction markup with only <source>)
-         * synthesizes an image from the LAST matching <source> so the
-         * art-directed asset still downloads and renders. */
+         * synthesizes an image from the FIRST source whose media=
+         * holds (or that declares none) — was "last <source> wins",
+         * which inverted author ordering; the sourcing blocks reuse the
+         * srcset pick helper (Phase 8) so a media-hit candidate's
+         * srcset still obeys the same width/density policy. The type=
+         * attribute needs no gate: the decoder dispatches by magic
+         * bytes at download time. */
         int hasImg = 0;
-        const DomNode *lastSrc = NULL;
+        const DomNode *firstSrc = NULL;
         for (int i = 0; i < node->childCount; i++)
         {
             const DomNode *c = node->children[i];
@@ -3946,54 +5085,59 @@ static void handle_element(Walker *w, const DomNode *node)
             {
                 hasImg = 1;
             }
-            else if (strcmp(c->tag, "source") == 0)
+            else if (strcmp(c->tag, "source") == 0 && !firstSrc)
             {
-                lastSrc = c;
+                AttrList cattrs = attrs_of(c);
+                const char *q = attr_val(cattrs, "media");
+                if (!q || css_media_holds(q, NULL))
+                {
+                    firstSrc = c;
+                }
             }
         }
-        if (!hasImg && lastSrc)
+        if (!hasImg && firstSrc)
         {
-            AttrList sa = attrs_of(lastSrc);
+            AttrList sa = attrs_of(firstSrc);
             const char *ss = attr_val(sa, "src");
-            if (!ss)
+            char *picked = NULL;
+            if (!ss || ss[0] == '\0')
             {
                 ss = attr_val(sa, "srcset");
-            }
-            if (ss && ss[0])
-            {
-                /* First URL of srcset wins (largest-descriptor skip). */
-                char urlbuf[512];
-                size_t n = 0;
-                while (ss[n] && ss[n] != ' ' && ss[n] != '\t' && ss[n] != '\n' &&
-                       ss[n] != ',' && ss[n] != '\r' && n + 1 < sizeof(urlbuf))
+                if (ss && ss[0])
                 {
-                    urlbuf[n] = ss[n];
-                    n++;
+                    picked = img_pick_srcset(w, ss);
                 }
-                urlbuf[n] = '\0';
-                if (urlbuf[0])
+            }
+            else if (attr_val(sa, "srcset") && attr_val(sa, "srcset")[0])
+            {
+                /* A source carrying BOTH src and srcset: srcset wins
+                 * under the same policy (mirrors handle_image). */
+                const char *ssv = attr_val(sa, "srcset");
+                picked = img_pick_srcset(w, ssv);
+            }
+            const char *srcTok = picked ? picked : ss;
+            if (srcTok && srcTok[0])
+            {
+                flush_current_block(w);
+                DocBlock *img = new_block(w, DOC_BLOCK_IMAGE);
+                if (img)
                 {
-                    flush_current_block(w);
-                    DocBlock *img = new_block(w, DOC_BLOCK_IMAGE);
-                    if (img)
+                    img->src = resolve_href(w, srcTok);
+                    img->alt = doc_arena_str(w, "picture");
+                    img->width = strict_num(attr_val(a, "width"), 160);
+                    img->height = strict_num(attr_val(a, "height"), 80);
+                    if (img->width <= 0 || img->width > 360)
                     {
-                        img->src = resolve_href(w, urlbuf);
-                        img->alt = doc_arena_str(w, "picture");
-                        img->width = strict_num(attr_val(a, "width"), 160);
-                        img->height = strict_num(attr_val(a, "height"), 80);
-                        if (img->width <= 0 || img->width > 360)
-                        {
-                            img->width = 160;
-                        }
-                        if (img->height <= 0 || img->height > 180)
-                        {
-                            img->height = 80;
-                        }
-                        img->align = walk_align(w, a);
-                        img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
-                        img->inert = (w->inert > 0);
-                        add_block(w, img);
+                        img->width = 160;
                     }
+                    if (img->height <= 0 || img->height > 180)
+                    {
+                        img->height = 80;
+                    }
+                    img->align = walk_align(w, a);
+                    img->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
+                    img->inert = (w->inert > 0);
+                    add_block(w, img);
                 }
             }
         }
@@ -4300,6 +5444,7 @@ static void handle_element(Walker *w, const DomNode *node)
             {
                 b->name = doc_arena_str(w, inputName);
                 b->value = doc_arena_str(w, inputVal);
+                b->defaultValue = doc_arena_str(w, inputVal); /* reset basis */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4313,8 +5458,10 @@ static void handle_element(Walker *w, const DomNode *node)
             {
                 b->radio = (strcmp(tbuf, "radio") == 0);
                 b->checked = isChecked;
+                b->defaultChecked = isChecked; /* reset basis */
                 b->name = doc_arena_str(w, inputName);
                 b->value = doc_arena_str(w, inputVal);
+                b->defaultValue = doc_arena_str(w, inputVal);
                 const char *lb = attr_val(a, "label");
                 if (!lb)
                 {
@@ -4327,6 +5474,7 @@ static void handle_element(Walker *w, const DomNode *node)
                               * unreachable; the "" is kept. */
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host toggle dispatch + JS checked road */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4346,6 +5494,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 b->inputType = doc_arena_str(w, tbuf);
                 b->name = doc_arena_str(w, inputName);
                 b->value = doc_arena_str(w, inputVal);
+                b->defaultValue = doc_arena_str(w, inputVal); /* reset basis */
                 b->placeholder = doc_arena_str(w, ph);
                 b->fieldWidth = hasSize ? (int)size : -1;
                 P19_COMMON(b);
@@ -4370,6 +5519,9 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = (strcmp(tbuf, "button") == 0) ? "Button" : "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host click/submit dispatch target */
+                b->buttonType = doc_arena_str(w, tbuf); /* tap needs the type */
+                b->defaultValue = doc_arena_str(w, inputVal);
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4401,6 +5553,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
+                b->srcNode = node; /* host click/submit dispatch target */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -4417,6 +5570,7 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             return;
         }
+        b->srcNode = node; /* host input/change dispatch target */
         b->inputType = doc_arena_str(w, "textarea");
         b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
         b->placeholder = doc_arena_str(w, attr_or_d(a, "placeholder", ""));
@@ -4452,7 +5606,8 @@ static void handle_element(Walker *w, const DomNode *node)
     {
         char bbuf[16];
         lua_lower_buf(bbuf, attr_or_d(a, "type", "submit"), sizeof(bbuf));
-        if (strcmp(bbuf, "submit") == 0 || strcmp(bbuf, "button") == 0)
+        if (strcmp(bbuf, "submit") == 0 || strcmp(bbuf, "button") == 0 ||
+            strcmp(bbuf, "reset") == 0)
         {
             static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
             doc_concat_node_text(node, lbuf, sizeof(lbuf));
@@ -4471,12 +5626,22 @@ static void handle_element(Walker *w, const DomNode *node)
                 {
                     lb = label;
                 }
+                else if (strcmp(bbuf, "button") == 0)
+                {
+                    lb = "Button";
+                }
+                else if (strcmp(bbuf, "reset") == 0)
+                {
+                    lb = "Reset";
+                }
                 else
                 {
-                    lb = (strcmp(bbuf, "button") == 0) ? "Button" : "Submit";
+                    lb = "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
                 b->disabled = disabled;
+                b->srcNode = node; /* host click/submit dispatch target */
+                b->buttonType = doc_arena_str(w, bbuf); /* tap needs the type */
                 const char *fa = attr_val(a, "formaction");
                 b->formAction = fa ? resolve_href(w, fa) : doc_arena_str(w, w->formAction ? w->formAction : "");
                 const char *fm = attr_val(a, "formmethod");
@@ -4515,12 +5680,14 @@ static void handle_element(Walker *w, const DomNode *node)
             if (b->optionCount > 0)
             {
                 b->selectedIndex = selIndex;
+                b->defaultSelIndex = selIndex; /* reset basis */
                 b->multiple = attr_has(a, "multiple");
                 b->disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
                 b->required = attr_has(a, "required");
                 b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
                 b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
                 b->inert = (w->inert > 0) || attr_has(a, "disabled");
+                b->srcNode = node; /* host pick dispatch + JS picker road */
                 add_block(w, b);
             }
         }
@@ -4583,6 +5750,14 @@ static void handle_element(Walker *w, const DomNode *node)
             isOpen = w->opts->detailsOpen[idx - 1];
         }
         static char withPrefix[1100]; /* hoisted: device gameTask stack is tiny */
+        /* WHATWG: a details with no <summary> must still show SOMETHING
+         * clickable — the user-agent default label "Details" (Phase 8;
+         * previously a summary-less details rendered an empty toggle
+         * line, leaving the fold invisible and unopenable). */
+        if (!label || label[0] == '\0')
+        {
+            label = doc_arena_str(w, "Details");
+        }
         snprintf(withPrefix, sizeof(withPrefix), "%s%s",
                  (label && label[0]) ? "> " : "", (label && label[0]) ? label : "");
         DocBlock *bo = box_open_block(w, withPrefix);
@@ -5085,6 +6260,9 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->href = w->currentHref ? doc_arena_str(w, w->currentHref) : NULL;
                 b->align = walk_align(w, a);
+                walk_flex_block(w, b, &b->align);
+                walk_tf_fill(w, b, node, tag, a);
+                walk_anim_engage(w, b, node, tag, a);
                 b->inert = (w->inert > 0);
                 add_block(w, b);
             }
@@ -5425,6 +6603,7 @@ static void run_exit(Walker *w, ExitCtx *x)
         if (b)
         {
             b->value = doc_arena_str(w, w->textareaBuf.data ? w->textareaBuf.data : "");
+            b->defaultValue = doc_arena_str(w, b->value); /* reset basis */
             add_block(w, b);
         }
         w->inTextarea = 0;
@@ -5478,6 +6657,29 @@ static void run_exit(Walker *w, ExitCtx *x)
         {
             w->flags = x->flags;
         }
+        if (x->gapSet)
+        {
+            /* Phase 6 scope restore + the exact tail rule: the scope's
+             * slot list is the container's items, BETWEEN-shaped — the
+             * LAST item's mount was the post-CONTAINER slot, which CSS
+             * closes (no gap after the last item) — and when an OUTER
+             * flex/grid container wraps this box, that same slot is the
+             * OUTER container's between-gap. Swap accordingly, then let
+             * the outer scope resume (the outer gap governs further
+             * items in it). The container's own text block (an
+             * anonymous item) is the mountable tail when it is last. */
+            DocBlock *tail = (w->doc && w->doc->blockCount > 0)
+                                 ? w->doc->blocks[w->doc->blockCount - 1]
+                                 : NULL;
+            /* Guard: an empty container's own block never reaches the
+             * doc, so the doc's tail can belong to an outside element —
+             * only a block carrying THIS container's mount is ours. */
+            if (tail && tail->gapApplied != 0)
+            {
+                tail->gapApplied = x->gapSaved; /* 0 closes the slot */
+            }
+            w->fgGap = x->gapSaved;
+        }
         break;
     case WX_PSEUDO_END:
         /* CSS ::after: the element's CSS scope is still live (this frame
@@ -5529,6 +6731,10 @@ static void walk_node(Walker *w, const DomNode *node)
     {
         return;
     }
+    if (node->kind == DOM_COMMENT)
+    {
+        return; /* hydration markers are not renderable content */
+    }
     if (node->kind == DOM_TEXT)
     {
         handle_text_node(w, node);
@@ -5540,10 +6746,36 @@ static void walk_node(Walker *w, const DomNode *node)
      * (identical semantics to the hidden attribute). */
     unsigned cssBits = 0;
     int cssHidden = 0;
+    int cssOverlay = 0;
+    int cssA11y = 0;
     if (w->doc && w->doc->_css)
     {
         cssBits = walk_css_compute(w, node, node->tag, a);
         cssHidden = (cssBits & CSS_F_HIDDEN) != 0;
+        /* Phase 4 positioning policy: out-of-flow (fixed/absolute) WITH
+         * an overlay signal (a non-auto offset or a numeric z-index)
+         * would render ON TOP of the document in a compositor; the flat
+         * 1-bit flow has no overlay layer, so such page chrome drops
+         * (reader-mode precedent; one-line reversible in css.h's policy
+         * note). WITHOUT a signal the CSS static-position rule applies:
+         * the absolute box flows exactly where written. */
+        cssOverlay = (cssBits & CSS_F_OOF) &&
+                     (cssBits & (CSS_F_OFF | CSS_F_OZ));
+        /* Phase 5 overflow policy: the W3C "visually-hidden" recipe —
+         * out-of-flow (fixed/absolute) + overflow:hidden + a concealing
+         * clip shape OR a 1px-ish box — IS invisible on the real web
+         * (the recipe exists to hide text from sight while keeping it
+         * for screen readers), so the walker drops it, exactly like the
+         * reader-mode precedents above. The tiny-box probe runs only
+         * when position+overflow-hidden already declared; without a
+         * concealing signal (clip or tiny box) the element flows —
+         * normal-size absolute+hidden panels keep their content. */
+        if ((cssBits & (CSS_F_OOF | CSS_F_OVH)) ==
+            (CSS_F_OOF | CSS_F_OVH))
+        {
+            cssA11y = (cssBits & CSS_F_CLIPN) ||
+                      tiny_hidden_box(w, node, node->tag, a);
+        }
     }
     /* hidden/popover/display:none styles suppress the element AND subtree */
     if (!cssHidden && walk_display_none(a))
@@ -5585,7 +6817,7 @@ static void walk_node(Walker *w, const DomNode *node)
             return;
         }
     }
-    else if (cssHidden)
+    else if (cssHidden || cssOverlay || cssA11y)
     {
         return;
     }
@@ -5606,14 +6838,41 @@ static void walk_node(Walker *w, const DomNode *node)
      * exit is pushed BEFORE handle_element, so it runs after every exit the
      * handler pushes (LIFO) — matching CSS scoping (child styles die at the
      * child's boundary, the element's own CSS dies at the element's). */
-    if (cssBits & CSS_INHERIT_MASK)
+    unsigned carry = cssBits & (CSS_INHERIT_MASK | CSS_F_ELLIP | CSS_F_ASC);
+    /* Phase 6: align-items:center cross-centers ONLY a real flex/grid
+     * container's items (element-scoped align-self carries alone). */
+    if ((cssBits & (CSS_F_FLEXCT | CSS_F_AIC)) == (CSS_F_FLEXCT | CSS_F_AIC))
+    {
+        carry |= CSS_F_AIC;
+    }
+    if (carry || (cssBits & CSS_F_FLEXCT))
     {
         ExitCtx *cx = push_exit(w, WX_CSS_END);
         if (cx)
         {
             cx->flags = w->flags; /* pre-CSS snapshot */
-            cx->cssFlags = cssBits & CSS_INHERIT_MASK;
+            /* Phase 5: CSS_F_ELLIP rides WITH the inherited subset (it
+             * scopes to the declaring element's subtree: text-overflow
+             * is a non-inherited property; the exit restore strips it
+             * at the boundary exactly like the inherited bits). Phase 6:
+             * AIC/ASC scope exactly the same way (the restore at this
+             * boundary unwinds them). */
+            cx->cssFlags = carry;
             walk_css_apply(w, cssBits);
+            w->flags |= carry & (CSS_F_ELLIP | CSS_F_AIC | CSS_F_ASC);
+            if (cssBits & CSS_F_FLEXCT)
+            {
+                /* Phase 6 scope: the container's row-gap applies to its
+                 * OWN items (children + its own direct-text item); the
+                 * scope is taken over even when zero (a flex box with
+                 * no gap closes the outer gap between its items — the
+                 * expand-per-container semantics), and the outer scope
+                 * resumes at the WX_CSS_END restore. */
+                int gp = flex_gap_px(w, node, node->tag, a);
+                cx->gapSaved = w->fgGap;
+                cx->gapSet = 1;
+                w->fgGap = gp > 0 ? gp : 0;
+            }
         }
     }
     /* CSS ::before/::after generated content (roadmap #2). Runs here so
@@ -5643,7 +6902,7 @@ static void walk_node(Walker *w, const DomNode *node)
         }
         const char *av = css_pseudo_content((CssEngine *)w->doc->_css,
                                             ptag, classAttr, idAttr, &pdom,
-                                            node, 0, &vlen);
+                                            node, 2, &vlen);
         if (av && vlen > 0)
         {
             char abuf[256];
@@ -5711,11 +6970,15 @@ static void walk_node(Walker *w, const DomNode *node)
                 return;
             }
             db->align = walk_align(w, a);
+            walk_flex_block(w, db, &db->align);
+            walk_tf_fill(w, db, node, ptag, a);
+            walk_anim_engage(w, db, node, ptag, a);
             db->spacingTop = dsp.top;
             db->spacingBottom = dsp.bottom;
             db->indent = dsp.left;
             db->hasSpacing = 1;
             db->invert = walk_inverted(a);
+            db->clampLines = dsp.clamp;
             w->currentBlock = db;
             push_exit(w, WX_FLUSH);
             push_children(w, node);
@@ -5858,6 +7121,43 @@ static int walk_children(Walker *w, const DomNode *parent)
         }
     }
     return w->error ? -1 : 0;
+}
+
+/* Phase 7: :target's matcher input — the current page URL's fragment id
+ * (the '#' tail of baseUrl), filled before EVERY walk (parse + re-walk)
+ * so a stylesheet's :target rules match the destination the user is
+ * actually looking at. Empty when the URL carries no fragment (about:
+ * pages never do) — then nothing matches :target (spec). */
+static void walk_set_target(DocParseResult *out)
+{
+    if (!out || !out->_css)
+    {
+        return;
+    }
+    char frag[56];
+    frag[0] = '\0';
+    const char *b = out->baseUrl;
+    if (b)
+    {
+        const char *h = strchr(b, '#');
+        if (h && h[1])
+        {
+            size_t len = 0;
+            /* Copy incl. the '#', then strip it — bounded by the buffer. */
+            while (h[len] && len < sizeof(frag) - 1)
+            {
+                frag[len] = h[len];
+                len++;
+            }
+            frag[len] = '\0';
+        }
+    }
+    /* css_set_target takes the id WITHOUT the '#'; strip it here. */
+    if (frag[0] == '#')
+    {
+        memmove(frag, frag + 1, strlen(frag));
+    }
+    css_set_target((CssEngine *)out->_css, frag, strlen(frag));
 }
 
 /* Finalize: truncated marker + empty-page fallback (top-level only). */
@@ -6497,6 +7797,20 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     {
         CssSheet sheets[CSS_MAX_SHEETS];
         int sheetCount = css_scan_sheets(out->rawHtml, sheets, CSS_MAX_SHEETS);
+        /* Phase 1.5: external <link rel="stylesheet"> bodies the render
+         * task fetched ride ahead of the parse — inline style blocks keep
+         * the tight slots, the ext sheets fill the remainder. Sheet text
+         * must live as long as the engine: these buffers are doc-owned
+         * (freed in document_free AFTER the engine — same lifetime
+         * contract as rawHtml). */
+        for (int i = 0; out->cssExtBody && i < out->cssExtN &&
+                        sheetCount < CSS_MAX_SHEETS;
+             i++)
+        {
+            sheets[sheetCount].start = out->cssExtBody[i];
+            sheets[sheetCount].len = out->cssExtLen[i];
+            sheetCount++;
+        }
         if (sheetCount > 0)
         {
             CssEngine *eng = (CssEngine *)PLUTO_MALLOC(sizeof(CssEngine));
@@ -6577,6 +7891,10 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     w.doc = out;
     w.opts = opts;
     w.formAction = NULL;
+    /* Phase 10: the walk's DomResult instance — the promoted heap copy
+     * when a bridge attached (so the completion map lands where the
+     * re-walks consult it), the stack result otherwise. */
+    w.walkDom = out->_dom ? (DomResult *)out->_dom : &dom;
     w.formMethod = doc_arena_str_lower(&w, "get");
     /* Browser parity: a page whose engine attached (or that the tokenizer
      * treated as scripting) hides its <noscript> fallback content. DOC_SCRIPT_OFF
@@ -6589,6 +7907,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
 
     /* formMethod default: "get" (reference state.formMethod = "get"). */
     css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
+    walk_set_target(out); /* Phase 7: :target fragment per walk */
     if (!werr && walk_children(&w, dom.root) != 0)
     {
         werr = 1;
@@ -6661,6 +7980,12 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
  * preventDefault(): blocks/links are rebuilt from the current tree without
  * re-parsing HTML or re-running scripts (script state is preserved).
  * Returns 0 ok, -1 alloc failure (doc is left with no walk output). */
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+/* Test seam (sim autotest only): 1 forces document_rewalk down its
+ * mid-walk-failure branch deterministically, without budget games. Never
+ * set in play. */
+int g_rewalkTestForceWalkError = 0;
+#endif
 int document_rewalk(DocParseResult *doc)
 {
     if (!doc || !doc->_dom)
@@ -6681,11 +8006,15 @@ int document_rewalk(DocParseResult *doc)
     doc->parseError = 0;
     doc->blockCount = doc->blockCap = 0;
     doc->blocks = NULL;
+    /* Phase 10: the end-event queue reflects exactly the walk that is
+     * about to run (per-(node,name) dedupe persists on the DOM). */
+    doc->pendEndCount = 0;
 
     Walker w;
     memset(&w, 0, sizeof(w));
     w.doc = doc;
     w.opts = NULL;
+    w.walkDom = dom; /* Phase 10: the live heap DomResult */
     w.formAction = NULL;
     w.formMethod = doc_arena_str_lower(&w, "get");
     w.suppressNoscript = doc->suppressNoscript; /* keep the parse policy */
@@ -6693,6 +8022,7 @@ int document_rewalk(DocParseResult *doc)
                  strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
     int werr = sbFail;
     css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
+    walk_set_target(doc); /* Phase 7: :target fragment per walk */
     if (!werr && walk_children(&w, dom->root) != 0)
     {
         werr = 1;
@@ -6724,11 +8054,30 @@ int document_rewalk(DocParseResult *doc)
         PLUTO_FREE(w.frames);
     }
 
+#if defined(PLUTO_REWALK_OOM_AUTOTEST)
+    if (g_rewalkTestForceWalkError)
+    {
+        /* Test seam engagement point: the walk above may have built
+         * partial blocks — exactly the production mid-refusal shape. */
+        werr = 1;
+    }
+#endif
     if (werr)
     {
-        doc_arena_free_all(&w.arena);
+        /* R59 (Wikipedia device crash, 2026-10-18): this branch used to
+         * return 0 with doc->blocks still holding the PARTIAL walk output
+         * whose strings die with the arena freed right below — the
+         * renderer then went on to LAYOUT over that half-freed state and
+         * break_lines dereferenced reused arena memory as a block's inline
+         * array (pc=break_lines+0x4e, mmfar=0x0C00, heap in a denied
+         * strait at 13.4MB on device). Free the partial HEAP walk output
+         * via doc_free_walk_output (the arrays own no arena data), free
+         * the arena, and REPORT the failure so render_step routes to the
+         * error screen instead of layout. */
+        doc_free_walk_output(doc);
         doc->parseError = 1;
-        return 0;
+        doc_arena_free_all(&w.arena);
+        return -1;
     }
 
     DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
@@ -6741,6 +8090,62 @@ int document_rewalk(DocParseResult *doc)
     w.arena.head = NULL;
     doc->_arena = keep;
     return 0;
+}
+
+/* ── Phase 10: transition lane — transition-arm consult for a live node ───
+ * The browser calls this at drain time for each node a script mutated
+ * (the bridge notes mutations; text-only writes are excluded, so the
+ * lane never sees listener self-writes). A node whose winning style
+ * declares a transition (any `transition`/`transition-*` shorthand or
+ * `transition-property` longhand whose value is not `none`) is armed:
+ * the property change ENDED a transition when the re-walk made the new
+ * state visible, so the browser fires transitionend — the immediate
+ * completion of a flat renderer. 1 = armed. */
+int document_node_transition_hot(DocParseResult *doc, const void *node)
+{
+    if (!doc || !doc->_css || !node)
+    {
+        return 0;
+    }
+    const DomNode *n = (const DomNode *)node;
+    if (n->kind != DOM_ELEMENT || !n->tag)
+    {
+        return 0;
+    }
+    CssEngine *eng = (CssEngine *)doc->_css;
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    for (int i = 0; i < n->attrCount; i++)
+    {
+        const DomAttr *at = &n->attrs[i];
+        if (!at->key)
+        {
+            continue;
+        }
+        if (strcmp(at->key, "class") == 0)
+        {
+            classAttr = at->value;
+        }
+        else if (strcmp(at->key, "id") == 0)
+        {
+            idAttr = at->value;
+        }
+    }
+    CssDom cdom;
+    dom_css_dom(&cdom, css_dom_ancestor);
+    size_t vl = 0;
+    const char *v = css_winning_value(eng, n->tag, classAttr, idAttr, &cdom,
+                                      node, "transition", &vl);
+    if ((!v || (vl == 4 && strncasecmp(v, "none", 4) == 0)))
+    {
+        v = css_winning_value(eng, n->tag, classAttr, idAttr, &cdom, node,
+                              "transition-property", &vl);
+        if (!v || (vl == 4 && strncasecmp(v, "none", 4) == 0))
+        {
+            return 0; /* no transition declared on this element */
+        }
+    }
+    return 1;
 }
 
 void document_free(DocParseResult *doc)
@@ -6800,5 +8205,25 @@ void document_free(DocParseResult *doc)
         /* jsext_arena_free frees every block AND the arena struct itself. */
         jsext_arena_free((JsExtArena *)doc->_extArena);
         doc->_extArena = NULL;
+    }
+    if (doc->cssExtBody)
+    {
+        /* Phase 1.5 external stylesheet bodies — freed after _css above,
+         * whose parsed rules point INTO these buffers. */
+        for (int k = 0; k < doc->cssExtN; k++)
+        {
+            if (doc->cssExtBody[k])
+            {
+                PLUTO_FREE(doc->cssExtBody[k]);
+            }
+        }
+        PLUTO_FREE(doc->cssExtBody);
+        doc->cssExtBody = NULL;
+        if (doc->cssExtLen)
+        {
+            PLUTO_FREE(doc->cssExtLen);
+        }
+        doc->cssExtLen = NULL;
+        doc->cssExtN = 0;
     }
 }

@@ -116,7 +116,7 @@ static int bookmark_count(void)
 }
 
 /* Test Cases section: the built-in about: pages, straight from http_client's
- * directory (currently 5). count == 0 when the section is absent (host-test
+ * directory (currently 10). count == 0 when the section is absent (host-test
  * fakes without the accessor, or a future build that drops the directory). */
 static int test_count(void)
 {

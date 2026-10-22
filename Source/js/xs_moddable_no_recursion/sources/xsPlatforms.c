@@ -322,14 +322,36 @@ void fxLoadModule(txMachine* the, txSlot* module, txID moduleID)
 
 txScript* fxParseScript(txMachine* the, void* stream, txGetter getter, txUnsigned flags)
 {
+#ifdef TARGET_PLAYDATE
+	/* R-kf: device-only probe ladder — three logger rows bracket the
+	 * parse entry so a device-only freeze localizes to one line. Sim
+	 * output stays byte-identical (TARGET_PLAYDATE-gated). */
+	{
+		extern void logger_log(const char* format, ...);
+		logger_log("[nrp] fxParseScript enter flags=%x", (unsigned)flags);
+	}
+#endif
 	txParser _parser;
 	txParser* parser = &_parser;
 	txParserJump jump;
 	txScript* script = NULL;
 	fxInitializeParser(parser, the, the->parserBufferSize, the->parserTableModulo);
+#ifdef TARGET_PLAYDATE
+	{
+		extern void logger_log(const char* format, ...);
+		logger_log("[nrp] parser init done");
+	}
+#endif
 	parser->firstJump = &jump;
 	if (c_setjmp(jump.jmp_buf) == 0) {
 		fxParserTree(parser, stream, getter, flags, NULL);
+#ifdef TARGET_PLAYDATE
+		{
+			extern void logger_log(const char* format, ...);
+			logger_log("[nrp] tree done total=%luK err=%d",
+				(unsigned long)(parser->total >> 10), (int)parser->errorCount);
+		}
+#endif
 #ifdef mxDebug
 		parser->flags |= mxDebugFlag;
 		if (!the->debugEval) {

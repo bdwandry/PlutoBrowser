@@ -11,11 +11,18 @@
  * against newlib's pthread_once_t layout ({is_initialized,
  * init_executed}, see toolchain sys/_pthreadtypes.h).
  *
- * DEVICE ONLY (Makefile ifeq device block): the simulator links the real
- * macOS pthreads. Same precedent as Source/html/qjs_pthread_stubs.c.
+ * DEVICE ONLY on real body: the guard below keeps every body for the
+ * device build and compiles the whole TU to NOTHING under the simulator
+ * compiler — plain `make` feeds this TU to the simulator's multi-engine
+ * dylib too, where compiling newlib struct internals is a hard error and
+ * the stock symbols would be dead weight anyway (macOS dav1d uses real
+ * pthreads; the Makefile comment warned a shared TU must stay inert).
+ * Same precedent as Source/html/qjs_pthread_stubs.c.
  */
-#include <pthread.h>
 #include <stddef.h>
+
+#ifdef TARGET_PLAYDATE
+#include <pthread.h>
 
 int pluto_dav1d_pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 {
@@ -123,3 +130,5 @@ int pluto_dav1d_pthread_join(pthread_t t, void **res)
     (void)res;
     return 0;
 }
+
+#endif /* TARGET_PLAYDATE — device keeps every body; the simulator TU compiles empty */

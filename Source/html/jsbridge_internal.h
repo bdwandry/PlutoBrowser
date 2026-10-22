@@ -72,6 +72,13 @@
 #ifndef JSBRIDGE_XHR_URL_MAX
 #define JSBRIDGE_XHR_URL_MAX 512
 #endif
+/* NetP2: page-set request headers that ride the wire (per request).
+ * Caps mirror the client's HTTP_EXTRA_HEADERS_MAX lane (6 pairs) —
+ * keep them in sync. Value 240 covers Range/Authorization-sized
+ * fields on the device envelope. */
+#ifndef JSBRIDGE_XHR_EXTRA_MAX
+#define JSBRIDGE_XHR_EXTRA_MAX 6
+#endif
 
 typedef enum
 {
@@ -99,9 +106,148 @@ typedef struct
     char *body;          /* SDK-allocated response (owned; freed at sweep) */
     size_t bodyLen;
     void *fnRef;         /* engine-held completion handler */
+    /* Phase 4 (browser-true error routing): engine-held onerror ref,
+     * dispatched ONLY when the completion is a transport failure
+     * (status==0 && ok!=1). NULL on engines that do not pin a separate
+     * error handler — their dispatch falls back to fnRef (historical
+     * behavior; NR, the fetch-bearing engine, pins it). */
+    void *errFnRef;
     void *objRef;        /* engine-held wrapper object (this-binding) */
+    /* C4 (fetch/POST, NR engine): send METHOD captured at open and the
+     * REQUEST body (owned copy; freed with the request at sweep/abort/
+     * close). Zero-init keeps every existing GET-only caller identical:
+     * method[0]=='\0' means GET and reqBody==NULL means no body. */
+    char method[8];
+    char *reqBody;
+    size_t reqBodyLen;
+    /* API-P2: setRequestHeader-carried request headers. Content-Type
+     * rides the wire via the client's Content-Type lane (last write
+     * wins; zero-init = the historical application/json default —
+     * pre-existing callers stay byte-identical). NetP2: every OTHER
+     * header is real now — the bounded per-request list rides the wire
+     * byte-for-byte (jsbridge_xhr_set_header refuses the engine-owned/
+     * spec-forbidden names and validates CRLF; a repeated name joins
+     * with the browser's ", " fold; cap refusals are logged). */
+    char reqCt[64];
+    char xhdrName[JSBRIDGE_XHR_EXTRA_MAX][44];
+    char xhdrVal[JSBRIDGE_XHR_EXTRA_MAX][240];
+    int xhdrCount;
 } JsHttpRequest;
 
+/* API-P3: the in-engine address journal (history.pushState/replaceState
+ * + back/forward/go over the ENGINE'S OWN book). Entry URLs are absolute
+ * (resolved against the page base or the current entry — fragments,
+ * queries, and paths resolve browser-faithfully; a scheme/host mismatch
+ * is refused like a real cross-origin push). The doc base seeds entry 0
+ * lazily on first journal use; a REAL navigation per page replaces the
+ * whole bridge, so re-seeding per page is automatic. pushState NEVER
+ * touches the wire (no http_* call, no pendingNav, no app-bar change):
+ * the journal feeds location reads and popstate/hashchange delivery
+ * only. Bytes: 8 entries x 260 = ~2KB per page (fixed, freed with the
+ * bridge). */
+#define JSBRIDGE_HIST_MAX 8
+#define JSBRIDGE_HIST_URL_MAX 260
+
+/* ── API-P8: the Worker contained-stub lane ─────────────────────────────
+ * A real background thread is not available inside this browser's single
+ * cooperative pump (device truth: one CPU, one frame budget). The honest
+ * browser-shaped story is NOT to hide the constructor — a page doing
+ * `new Worker(url)` would die on a ReferenceError and never run — but to
+ * hand the page a WORKER OBJECT that behaves like a worker whose script
+ * always fails to start, and to tell it through the browser's own failure
+ * protocol: the object constructs without throwing, carries postMessage/
+ * terminate/onerror/onmessage, and its `error` event fires ONCE at the
+ * next frame (never synchronously — the setTimeout-less analog of a real
+ * failed script load) with {message}. The worker SCRIPT is never
+ * compiled, never fetched, never executed: onmessage never fires; the
+ * main thread never blocks; a page with a non-worker fallback takes it
+ * exactly as it would for any briefly-broken script URL. postMessage is
+ * absorbed silently (logged; data dropped) — the message never comes
+ * back. terminate() silences the pending delivery or is a no-op after
+ * it. Caps (documented): 8 stubs resident per page; constructions beyond
+ * the 8th carry NO delivery slot (the object still works; onerror never
+ * fires — logged once per page). The stub table rides the SAME stable-
+ * slot + bracket discipline as timers/XHR (engine-held objRef; deliveries
+ * inside the pump; sweep outside every bracket). */
+#ifndef JSBRIDGE_WORKER_MAX
+#define JSBRIDGE_WORKER_MAX 8        /* resident worker stubs per page */
+#endif
+#ifndef JSBRIDGE_WORKER_URL_MAX
+#define JSBRIDGE_WORKER_URL_MAX 96   /* as-constructed URL (never resolved) */
+#endif
+#ifndef JSBRIDGE_WORKER_MSG_MAX
+#define JSBRIDGE_WORKER_MSG_MAX 128  /* the delivered error .message text */
+#endif
+
+/* One registered worker stub. objRef is engine-held (same opaque contract
+ * as JsHttpRequest.objRef). The URL is as the page wrote it: the router
+ * never resolves it because nothing is ever fetched. `terminated` before
+ * delivery = the stub stays silent (browser: the load was stopped);
+ * after delivery = a no-op. STABLE slots (cleared stubs stay parked
+ * (release=1) until the pump sweep), like timers/XHR. */
+typedef struct
+{
+    int active;    /* constructed, waiting for (or past) its delivery */
+    int release;   /* inert slot with an engine ref still held */
+    int id;        /* stable public id (never reused within a page) */
+    int terminated;/* terminate() seen; pending delivery cancelled */
+    int posts;     /* postMessage count (receipt; absorb always happens) */
+    char url[JSBRIDGE_WORKER_URL_MAX];
+    char message[JSBRIDGE_WORKER_MSG_MAX]; /* delivered event .message */
+    void *objRef;  /* engine-held wrapper object */
+} JsWorkerStub;
+
+/* ── API-P9: the per-node element-wrapper cache ─────────────────────────
+ * Browser identity model: ONE wrapper object per DOM node for the page's
+ * whole life — getElementById twice, a parentNode climb, a querySelector
+ * hit and an appendChild return all hand back the SAME object, so strict
+ * `===` chains and any expando the page wrote survive across accesses.
+ * XS NR has held one JS-visible wrapper per node since P1 (state arrays
+ * + pinned slots). mujs and duktape now share these BRIDGE-SCOPED
+ * entries (fresh per page — the bridge is memset(0) at attach) with
+ * engine-held refs, forwarded by the engine push_element factories:
+ *   - mujs: a js_ref registry key (the xhr-pin contract; unref'd at
+ *     page close along with the listeners);
+ *   - duktape: a heapptr whose only strong ref lives in the global
+ *     stash under the hidden key pluto.elw.<i> (i = the entry index;
+ *     the heap dies with the engine at page close, as documented).
+ * Aliasing-safe within a page: dom_remove_child DETACHES nodes (never
+ * frees), so a node pointer stays unique for the page's life; the
+ * whole DOM frees with the doc, after the engine close. */
+#define JSBRIDGE_ELW_MAX 128        /* wrapper cache entries per page */
+typedef struct
+{
+    DomNode *node; /* the cached node (arena-live for the page) */
+    void *ref;     /* engine-held wrapper ref (opaque per engine) */
+} JsElwEntry;
+
+/* Forms-Phase 5: FormData storage types (see the `fd[]` note in the
+ * bridge struct). Fixed caps keep the store allocation-free for the
+ * page's lifetime; over-cap values truncate honestly (the standing
+ * fb-policy shape) and beyond the pair cap the append is refused. */
+#define JSBRIDGE_FD_MAX 8           /* FormData instances per page */
+#define JSBRIDGE_FD_PAIRS 32        /* pairs per instance */
+#define JSBRIDGE_FD_NAME 40         /* entry-name bytes (incl NUL) */
+#define JSBRIDGE_FD_VALUE 240       /* entry-value bytes (incl NUL) */
+#define JSBRIDGE_FD_ITER_MAX 16     /* iterator objects per page */
+typedef struct
+{
+    char name[JSBRIDGE_FD_NAME];
+    char value[JSBRIDGE_FD_VALUE];
+} FdPair;
+typedef struct
+{
+    unsigned char used;   /* slot claimed by a live FormData */
+    int npairs;
+    FdPair pairs[JSBRIDGE_FD_PAIRS];
+} FormDataEntry;
+typedef struct
+{
+    unsigned char used;   /* slot claimed by a live iterator */
+    FormDataEntry *entry; /* the walked instance (bridge-stable addr) */
+    int idx;              /* next pair index */
+    unsigned char mode;   /* 0 entries / 1 keys / 2 values */
+} FormDataIter;
 
 typedef enum
 {
@@ -129,12 +275,70 @@ typedef struct
 
 /* One click listener: target element + engine-held function reference.
  * `ref` is opaque (muJS registry ref / Duktape heapptr / QuickJS pinned
- * JSValue index) — only the engine that created it may deref or free it. */
+ * JSValue index) — only the engine that created it may deref or free it.
+ * `kind` (XS NR only; zero elsewhere) selects the event class the handler
+ * answers: 0 = click (dispatch_click), 1 = load, 2 = error. The engine
+ * zero-inits registrations elsewhere, so the shared click path is
+ * unchanged for the frozen engines. */
 typedef struct
 {
     void *ref;       /* engine-held handler reference */
     DomNode *target; /* element the listener was registered on */
+    int kind;        /* 0 = click, 1 = load, 2 = error (default 0) */
+    /* B3: exact event type ("click","input","change","submit","load",
+     * "error","DOMContentLoaded") — the bubbling dispatch routes
+     * listeners by type match. R54: widened 12→24 — "DOMContentLoaded"
+     * is 17 bytes with its NUL and was silently snprintf-truncated to
+     * "DOMContentD", which row 483's registration stored as a dead
+     * alias the drain dispatch (kind 3 scan) could never find.
+     * Forms-Phase 7: the frozen engines' addEventListener writes it too
+     * (the kind-6 lanes were dead before: their dispatches strcmp'd an
+     * always-empty buffer). The frozen click dispatch stays
+     * target-only (it never consults `type`) and unsupported types are
+     * still dropped at registration, so the standing click roads and
+     * the shared drain scan are unchanged. */
+    char type[24];
 } JsListener;
+
+/* API-P5: per-document ES-module graph state (loader-side lane; the
+ * transform runs in C before any engine sees the source). Keys = the
+ * RESOLVED import URLs (about: store keys, file: Data-dir paths); an
+ * inline module gets a synthetic "<docUrl>#p5mi<N>" key (inline modules
+ * are not addressable, so their namespace is theirs alone).
+ * API-P10: 12 — the standing probe battery grew four async-lane module
+ * scripts (moddyn/moddynid/modmiss/modnet) + their store children, so
+ * the old 8-slot graph cap refused honest edges (receipted run 1). */
+#define JSBRIDGE_MAX_MODULES 12
+#define JSBRIDGE_MOD_KEY_MAX 128
+#define JSBRIDGE_MOD_IMPORTS 6 /* P10: imports per module (single def) */
+
+/* API-P10: async http(s) module graphs. The flight table holds the lane's
+ * in-flight remote modules plus parents parked while their children load
+ * (ONE entry per pending role — see jsbridge.c). Sources are HEAP copies
+ * (the cap stays JSBRIDGE_MOD_SRC_MAX in jsbridge.c) so the table outside
+ * a loading graph costs only its headers. dynQ = dynamic-import()
+ * settlement tickets; both tables are fresh per page (bridge memset(0)). */
+#define JSBRIDGE_MOD_FLIGHT_MAX 6
+#define JSBRIDGE_DYNQ_MAX 4
+
+typedef struct JsModFlight
+{
+    int set;      /* slot in use */
+    int state;    /* 1 = fetching (no src yet), 2 = holding/pending
+                   * children, 3 = drained (slot free at pump sweep) */
+    char key[JSBRIDGE_MOD_KEY_MAX];
+    char importBase[JSBRIDGE_MOD_KEY_MAX];
+    char *src;    /* heap copy of this module's source (held) */
+    size_t srcLen;
+    int depth;
+    int index;
+    int pendCount;                                /* remote children left */
+    char childKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
+    unsigned char impLoaded[JSBRIDGE_MOD_IMPORTS];
+    unsigned epoch;   /* page epoch at enqueue; stale deliveries drop */
+    unsigned startMs; /* pump clock at fetch start (watchdog) */
+    unsigned char retried; /* watchdog requeue-once latch */
+} JsModFlight;
 
 struct JsBridge
 {
@@ -144,6 +348,23 @@ struct JsBridge
 
     DocParseResult *doc; /* borrowed; the browser owns it */
     DomResult *dom;      /* == doc->_dom; live tree (browser frees it) */
+
+    /* A2: `document.currentScript` context — the ROUTER stamps the running
+     * script's <script …> open-tag span (+ resolved src for data:/remote
+     * runs) before EVERY script run and clears it after; impls that model
+     * the browser API synthesize the element on demand (Turbopack/webpack
+     * loaders read currentScript.src to find their chunk URL). NULL/0
+     * between runs: dynamic import()/timers see null, like a browser. */
+    const char *curTagStart;
+    size_t curTagLen;
+    const char *curSrcUrl;
+
+    /* A2: newest stamped EXTERNAL chunk URL, kept clear-after-script
+     * (unlike curSrcUrl): bundler registry drains run while an inline
+     * bootstrap slot is stamped and loaders there read
+     * currentScript.src — a src-bearing fallback (see the NR engine's
+     * currentScript getter) resolves against this like a chunk run. */
+    const char *lastExtSrcUrl;
 
     /* document.write capture (shared, engine-agnostic) */
     StrBuf output;
@@ -170,6 +391,68 @@ struct JsBridge
     int xhrBudgetEpoch; /* monotonically bumped per page; resets the
                          * module-global per-page byte budget on attach */
 
+    /* API-P8: the Worker contained-stub table (see the JsWorkerStub note
+     * above). Router-owned like the XHR table; deliveries ride the same
+     * pump bracket discipline. */
+    JsWorkerStub wk[JSBRIDGE_WORKER_MAX];
+    int wkCount;
+    int wkIdSeq;
+    int wkOverflow; /* >WORKER_MAX stubs this page (logged once) */
+    int inWorker;   /* a worker callback is on the stack */
+
+    /* API-P9: the per-node wrapper cache (browser identity model; see
+     * the JsElwEntry note above). Engine-held refs; fresh per page. */
+    JsElwEntry elw[JSBRIDGE_ELW_MAX];
+    int elwCount;
+    int elwOverflow; /* >ELW_MAX nodes this page (logged once) */
+
+    /* Forms-Phase 5: FormData storage — ONE bridge-owned fixed store that
+     * all three JS engines share (fresh per page via the attach memset):
+     * each instance holds its own pair array; iterators reference the
+     * entry they walk. Engines carry only stable addresses into these
+     * arrays (mujs userdata, duktape hidden pointer prop, XS host data),
+     * so NOTHING is allocated or freed on the engines' side — page-close
+     * semantics come for free, exactly like a browser: a FormData lives
+     * and dies with its page. Cap overflow throws honestly (contained). */
+    FormDataEntry fd[JSBRIDGE_FD_MAX];
+    FormDataIter fdi[JSBRIDGE_FD_ITER_MAX];
+
+    /* API-P10: async module lane (see the JsModFlight note above).
+     * modFlight = the in-flight remote modules + parked parents; the
+     * ledger's modState gains 3 = remote-flighting. dynQ = dynamic
+     * import() settlement tickets (id = a counter handed to the shim's
+     * __p5modRequest; delivery = a tiny __p5dynq eval at the pump).
+     * modFetchQueued = the ONE module fetch serialized lane-side;
+     * dynShimDone = the per-page __p5dynimport shim latch. */
+    JsModFlight modFlight[JSBRIDGE_MOD_FLIGHT_MAX];
+    int modFlightCount; /* used slots (active + parked) */
+    int modFetchBusy;   /* a module fetch owns the client right now */
+    int modFetchStop;   /* receipted module-fetch error seen (drop the head) */
+    struct
+    {
+        int set;
+        int id;
+        char key[JSBRIDGE_MOD_KEY_MAX];
+        unsigned char state; /* 0 pending, 1 resolved, 2 rejected */
+    } dynQ[JSBRIDGE_DYNQ_MAX];
+    int dynQCount;
+    int dynIdSeq;    /* last __p5modRequest ticket id handed out */
+    int dynShimDone; /* the __p5dynimport shim ran once on this page */
+    int inModRun;    /* a module body is on the stack (nest guard) */
+
+    /* P10 scratch: mod_finish_run fills these right before returning 2
+     * (pending) — the resolved keys of REMOTE children still in flight.
+     * Duplicated keys dedupe into ONE flight wait (a double import is a
+     * single load). */
+    int modPendCount;
+    char modPendKeys[JSBRIDGE_MOD_IMPORTS][JSBRIDGE_MOD_KEY_MAX];
+
+    /* API-P3: the in-engine address journal (see the JSBRIDGE_HIST_* note
+     * above). histCount 0 = unseeded; entry 0 = the doc base seed. */
+    char histUrl[JSBRIDGE_HIST_MAX][JSBRIDGE_HIST_URL_MAX];
+    int histCount; /* entries in use (0..JSBRIDGE_HIST_MAX) */
+    int histIdx;   /* current entry index */
+
 
     int callBudget; /* DOM-mutation budget (per page) */
     int inClick;    /* dispatch re-entrancy guard */
@@ -177,6 +460,31 @@ struct JsBridge
 
     char lastError[128];
     int ran, errs;
+
+    /* B3: event.stopPropagation() latch during a bubbled dispatch (the
+     * walk stops climbing past the listener's node; frozen engines never
+     * set it — additive trailing field, zero-init like the rest). */
+    int stopProp;
+
+    /* innerHTML-assignment mutation latch (XS (No Recursion) only, so the
+     * frozen engines stay untouched): set when a wrapper-level
+     * innerHTML assignment REPLACED/cleared subtree children so the sim's
+     * frame loop re-runs page_rewalk_now() (layout must re-anchor to the
+     * fresh subtree — react's fallback restore swaps head/body wholesale,
+     * and stale layout blocks would dispatch to DETACHED nodes). Reply
+     * after each frame through jsbridge_take_dom_dirty(). */
+    int domDirty;
+
+    /* Phase 10: DOM-mutation note ring (transition lane). The bridge
+     * marks WHICH element changed (see jsbridge_note_dom_mutation in
+     * jsbridge.h); the browser drains at render completion and fires
+     * transitionend for each noted node still armed with a transition.
+     * Frozen engines never note (the ring stays empty for them). */
+    struct
+    {
+        void *node;
+    } mutNotes[JSB_MUT_NOTES_MAX];
+    int mutNoteCount;
 
     /* R15: scripts skipped by the admission gate, waiting for memory
      * (JSBRIDGE_DEFERRED_MAX above). */
@@ -187,6 +495,47 @@ struct JsBridge
         size_t len;
     } deferred[4];
     int deferredCount;
+
+    /* R54: per-frame script stage park (FULL mode). js_doc_attach scans
+     * the slot plan, parks it HERE in document order, and returns; the
+     * frame sweep then runs ONE entry per update() through
+     * jsbridge_script_queue_pump. The old sync attach loop executed every
+     * script's parse+compile+run bracket inside ONE update() frame — the
+     * device breached the 10s SDK watchdog mid-lexer (E1 2026-10-18
+     * 12:02:50, pc=fxNewParserSymbol_nr) after ~9.5s of ARM parse work;
+     * the host sim finishes the whole stage in <1s and never reproduced
+     * it. Entries are copies: every span points into the DOC-owned
+     * rawHtml / extScripts, valid for the bridge's lifetime. */
+    JsScriptSlot scriptQueue[JSBRIDGE_MAX_SCRIPTS];
+    int scriptQueueCount; /* entries parked (<= JSBRIDGE_MAX_SCRIPTS) */
+    int scriptQueueNext;  /* next to run; == scriptQueueCount when drained */
+
+    /* API-P5: the module graph ledger. modKeys hold every resolved module
+     * URL this document has loaded; modState 0/1/2 = unvisited/visiting/
+     * done (the cycle guard). Fresh per bridge (memset at construct) —
+     * parts of the ledger never outlive the document. modSeq numbers
+     * synthetic keys for inline modules. */
+    char modKeys[JSBRIDGE_MAX_MODULES][JSBRIDGE_MOD_KEY_MAX];
+    unsigned char modState[JSBRIDGE_MAX_MODULES];
+    /* API-P10: per-ledger success byte for the dynamic delivery path
+     * (modState 2 cannot distinguish a loaded module from a refused
+     * one — failed loads stay reusable per the standing P5 contract).
+     * 1 = the body ran; 0 = refused/failed (namespace missing). */
+    unsigned char modOk[JSBRIDGE_MAX_MODULES];
+    int modCount;
+    int modSeq;
+
+    /* Forms-Phase 1: the engine-held focus state. One focused element per
+     * page (browser-true): el.focus() on an eligible, connected, not
+     * already-focused element latches + delivers a NON-bubbling 'focus'
+     * event to the target's kind-6 listeners; el.blur() clears the latch
+     * + delivers 'blur'. Switching focus away via another el.focus()
+     * moves the latch (blur() remains callable separately, like a
+     * browser handling focusout separately). NULL = no focused element.
+     * The node is arena-live for the page (like every wrapper target)
+     * and the bridge is memset(0) fresh per page. Never dereferenced —
+     * pointer-identity compare only — see xs_dispatch_focus_event. */
+    void *focusNode;
 };
 
 /* Engine id (kept in sync with storage jsEngine / settings rows). */
@@ -198,6 +547,16 @@ typedef enum
     JS_ENGINE_XS = 3,
     JS_ENGINE_XS_NR = 4 /* XS (No Recursion): heap-bounded walkers fork */
 } JsEngine;
+
+/* API-P10: the dynamic-import bridge core (declared here so every
+ * engine adapter registers its own tiny native wrapper over it). The
+ * shim's __p5dynimport calls the native; the reply is a status STRING:
+ * "k:<key>" = resolved now (namespace on globalThis.__p5mod),
+ * "p:<id>" = a ticket the module pump settles via __p5dynq evals,
+ * "x:<msg>" = refused with the browser's message class. Never runs
+ * module work inside the engine call (the pump owns brackets). */
+void jsbridge_dyn_request(JsBridge *b, const char *spec, const char *base,
+                          char *out, size_t outn);
 
 /* Exported from jsbridge.h so main.c/settings can select the engine; the
  * enum here is the shared definition. */
@@ -240,8 +599,11 @@ typedef struct JsEngineImpl
     int (*run_xhr_ref)(JsBridge *b, void *fnRef, void *objRef,
                        const JsHttpRequest *r);
     /* Release one request's engine-held refs (slot already inert; called
-     * from the pump sweep and at close). Either pointer may be NULL. */
-    void (*clear_xhr_refs)(JsBridge *b, void *fnRef, void *objRef);
+     * from the pump sweep and at close). Any pointer may be NULL. NR
+     * errors ref the onerror pin (see JsHttpRequest.errFnRef); the other
+     * engines pass NULL there today. */
+    void (*clear_xhr_refs)(JsBridge *b, void *fnRef, void *errFnRef,
+                           void *objRef);
     /* Destroy the engine + engine-held references. */
     void (*close)(JsBridge *b);
     /* R20: per-frame engine pump (called from jsbridge_deferred_pump's
@@ -264,6 +626,34 @@ typedef struct JsEngineImpl
     int (*mount_parked)(JsBridge *b);
     /* One-word engine name for logs ("muJS", "Duktape"). */
     const char *name;
+
+    /* B2: element-event dispatch with browser bubble semantics
+     * ("click"/"input"/"change"/"submit"; see jsbridge.h's
+     * jsbridge_dispatch_element_event). Additive LAST slot: the frozen
+     * engines' positional vtable initializers keep their exact mapping,
+     * and trailing unlisted members zero-init to NULL — the router then
+     * short-circuits to NONE so the caller takes its native action. */
+    int (*dispatch_event)(JsBridge *b, const void *node, const char *type);
+    /* R54: called ONCE by the router when the per-frame script queue
+     * drains (the sync attach loop's effective end).NULL = engine has
+     * no drained-time work (frozen engines zero-init). Currently: the
+     * XS-NR fork dispatches DOMContentLoaded to document-level
+     * listeners — browser parse semantics (loading during the script
+     * stage via xs_document_readyState; next.js's app-router arms its
+     * RSC stream closer on DCL, and its setTimeout fallback was
+     * interleave-unsafe with the per-frame queue). */
+    void (*script_queue_drained)(JsBridge *b);
+    /* API-P8: invoke one worker stub's error delivery — the CURRENT
+     * onerror property on the pinned stub object is consulted at fire
+     * time (browser at-fire semantics) and called as onerror(ev) with
+     * `this` = the stub object and ev = {message: w->message}. A stub
+     * without a callable onerror delivers nothing (browsers: silent).
+     * `w` is stable during the call (stable-slot contract). Same return
+     * contract as run_timer_ref (0 ok / 1 contained / -1 engine abort). */
+    int (*run_worker_ref)(JsBridge *b, void *objRef, const JsWorkerStub *w);
+    /* Release one stub's engine-held object ref (slot inert; called from
+     * the pump sweep and at close). objRef may be NULL. */
+    void (*clear_worker_refs)(JsBridge *b, void *objRef);
 } JsEngineImpl;
 
 /* Router helpers shared with the impls (jsbridge.c). */
@@ -272,6 +662,17 @@ int budget_take(JsBridge *b);
 void bridge_take_error_text(JsBridge *b, const char *msg);
 /* Compile-safety gate (shared by ALL engines — one safety bar). */
 int jsbridge_script_compile_safe(const char *src, size_t len);
+/* Browser-faithful data-type filter (shared by both script scanners in
+ * jsbridge.c + jsext.c): returns 1 when this <script> element's `type=`
+ * names a non-executable MIME (JSON family / importmap …) and the element
+ * must be skipped, 0 when its body/src is executable JavaScript. */
+int jsbridge_script_type_is_data(const char *lt, const char *gt);
+
+/* API-P5 module marker (both scanners, same rule): returns 1 when this
+ * <script> element's `type=` reads "module" (any case). Static import/
+ * export syntax then routes through the loader-side module lane
+ * (jsbridge.c) instead of the engine's classic run. */
+int jsbridge_script_type_is_module(const char *lt, const char *gt);
 
 /* ── R15: OS-truth admission + deferred-retry for giant scripts ──────────
  * A compile's peak footprint (parse tree + emitted bytecode + machine
@@ -361,7 +762,19 @@ int jsbridge_timer_clear(JsBridge *b, int id);
  * idle, queues otherwise). abort: settle as JS_XHR_ABORTED (delivering
  * onerror through the pump). clear: deactivate (used before close). */
 int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url);
-void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef);
+void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *errFnRef,
+                       void *objRef);
+/* C4 (fetch/POST): twin of jsbridge_xhr_send that also carries the
+ * REQUEST body (deep-copied). Frozen engines never call it. */
+void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
+                            size_t bodyLen, void *fnRef, void *errFnRef,
+                            void *objRef);
+/* API-P2: the fetch shim's setRequestHeader lane. Content-Type overrides
+ * the wire default on POSTs (http_request_ct); other headers are
+ * recorded for receipts (documented wire boundary), an error text is
+ * set when the request is past OPENED. Returns 1 stored, 0 refused. */
+int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
+                            const char *value);
 void jsbridge_xhr_abort(JsBridge *b, int id);
 /* Live request lookup (engines read status/responseText off the wrapper). */
 const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id);
@@ -369,5 +782,142 @@ const JsHttpRequest *jsbridge_xhr_get(JsBridge *b, int id);
  * through the engine vtable. mutationsOut set when a handler mutated DOM.
  * Returns the number of completions delivered (0 when none). */
 int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut);
+
+/* ── API-P8: the Worker contained-stub router (see JsWorkerStub) ──
+ * open() registers a stub and returns its public id; 0 = a delivery-less
+ * stub past the documented cap (the object still works). get/terminate/
+ * post follow the XHR router shapes. The pump = the delivery lane. */
+int jsbridge_worker_open(JsBridge *b, const char *url);
+const JsWorkerStub *jsbridge_worker_get(JsBridge *b, int id);
+void jsbridge_worker_terminate(JsBridge *b, int id);
+void jsbridge_worker_post(JsBridge *b, int id);
+/* Engine-side pin: hand the router a stub's engine-held object ref (set
+ * once at construct — matching-id + NULL-ref guards). */
+void jsbridge_worker_pin(JsBridge *b, int id, void *objRef);
+
+/* ── API-P3: the address journal (history.pushState/replaceState) ──
+ * The journal lives in the bridge (histUrl[]), the delivery machinery in
+ * each engine. pushState NEVER routes through the wire — no http_* call,
+ * no pendingNav, no app address-bar change: entries feed location reads
+ * and the engine's popstate/hashchange back-stack delivery only. */
+/* Resolver for pushState/replaceState URL arguments: resolves `raw`
+ * against the journal's CURRENT entry (fragment/query/path forms per the
+ * URL standard; about: opaque join — see the jsbridge.c note). Returns 1
+ * with out filled, 0 on refusal. Never throws. */
+int jsbridge_hist_resolve_url(JsBridge *b, const char *raw,
+                              char *out, size_t outLen);
+
+/* ── Forms-Phase 3: the native constraint validation layer ──────────────── */
+/* The ValidityState flags (bitmask over the browser's rule set; see the
+ * jsbridge.c block for the panel's step/customError boundaries). */
+#define JSBV_BADINPUT        0x0001
+#define JSBV_VALUEMISSING    0x0002
+#define JSBV_TYPEMISMATCH    0x0004
+#define JSBV_PATTERNMISMATCH 0x0008
+#define JSBV_TOOLONG         0x0010
+#define JSBV_TOOSHORT        0x0020
+#define JSBV_RANGEUNDERFLOW  0x0040
+#define JSBV_RANGEOVERFLOW   0x0080
+#define JSBV_STEPMISMATCH    0x0100
+#define JSBV_CUSTOMERROR     0x0200
+
+typedef struct JsbValidity
+{
+    unsigned flags;   /* JSBV_* bitmask; 0 = the control validates       */
+    char message[96]; /* the FIRST failing rule's browser-shaped message */
+} JsbValidity;
+
+/* willValidate candidate rule: 1 when the control is submittable and not
+ * barred (hidden/button/submit/reset/image inputs and <button> barred;
+ * disabled barred; text-family readonly barred; multiple select barred).
+ * Option/optgroup/other elements always 0. */
+int jsbridge_form_will_validate(JsBridge *b, DomNode *n);
+
+/* The one rule evaluator: fills flags + the first-failure message.
+ * Barred controls evaluate trivially valid (0 / ""). Never throws. */
+void jsbridge_form_validity_eval(JsBridge *b, DomNode *n, JsbValidity *out);
+
+/* Form-level gate: count the invalid candidate controls under formNode;
+ * the first `cap` offenders fill the caller's array, validityOut receives
+ * the FIRST offender's message. Returns the count (0 = the form passes).
+ * Callers own the array memory (bss scratch, fixed cap). */
+int jsbridge_form_check(JsBridge *b, DomNode *formNode, DomNode **offenders,
+                        int cap, JsbValidity *validityOut);
+
+/* ── Forms-Phase 4: the HTMLFormElement API host hooks ──────────────────── *
+ * main.c owns the wire (pending navigation, the site-profile routes, the
+ * page re-walks, the blocked-by-validation audit trail); the bridges own
+ * the JS surface (form methods on every engine). The hooks are registered
+ * ONCE at boot; nodes are LIVE DomNode pointers.
+ *   hostFormReset — browser form.reset(): every walked control returns to
+ *     its walk-time default; fires NO events; returns 1 when any control
+ *     state changed (the caller decides whether the re-walk matters).
+ *   hostFormWire  — the submission chain: (form, submitter, wantGate,
+ *     wantSubmitEvent). The gate is the Phase-3 constraint layer (the
+ *     form's novalidate and the submitter's formNovalidate are honored);
+ *     the submit event is cancelable (SUPPRESSED = a handler owns the
+ *     submission); the wire routes exactly like a tap (standard action
+ *     GET/POST, site profile, legacy self-GET). Returns 1 when the wire
+ *     engaged, 0 when blocked or handled. */
+typedef int (*JsbFormHostReset)(JsBridge *b, void *formNode);
+typedef int (*JsbFormHostWire)(JsBridge *b, void *formNode,
+                               void *submitterNode, int wantGate,
+                               int wantSubmitEvent);
+void jsbridge_set_form_hosts(JsbFormHostReset resetFn, JsbFormHostWire wireFn);
+int jsbridge_form_host_reset(JsBridge *b, void *formNode);
+int jsbridge_form_host_wire(JsBridge *b, void *formNode, void *submitterNode,
+                            int wantGate, int wantSubmitEvent);
+
+/* Form-controls collector (Phase 4 `elements` backing): every descendant
+ * INPUT/TEXTAREA/SELECT/BUTTON of formNode in tree order, engine-written
+ * into out (cap-sized). Returns the collected count. */
+int jsbridge_form_controls_collect(DomNode *formNode, void **out, int cap);
+
+/* ── Forms-Phase 5: FormData + serialization parity ─────────────────────
+ * ONE browser-true rulebook (see jsbridge_form_data_collect) feeds BOTH
+ * `new FormData(form[, submitter])` on every Forms engine AND the
+ * route-standard POST body — the phase bar is the parity between the
+ * JS-side form-data bytes and the actual POST wire bytes. */
+int jsbridge_form_data_collect(JsBridge *b, void *formNode,
+                               void *submitterNode, FdPair *out, int cap);
+/* Claim a free instance slot; NULL on failure (errCode 0 ok / 1
+ * not-a-form / 2 submitter-not-descendant / 3 fixed store full). */
+FormDataEntry *jsbridge_form_data_construct(JsBridge *b, void *formNode,
+                                            void *submitterNode,
+                                            int *errCode);
+void jsbridge_form_data_append(FormDataEntry *e, const char *name,
+                               const char *value);
+const char *jsbridge_form_data_get(const FormDataEntry *e, const char *name);
+int jsbridge_form_data_has(const FormDataEntry *e, const char *name);
+int jsbridge_form_data_set(FormDataEntry *e, const char *name,
+                           const char *value);
+int jsbridge_form_data_delete(FormDataEntry *e, const char *name);
+int jsbridge_form_data_count(const FormDataEntry *e);
+const FdPair *jsbridge_form_data_at(const FormDataEntry *e, int i);
+FormDataIter *jsbridge_form_data_iter(JsBridge *b, FormDataEntry *e,
+                                      int *full);
+FormDataEntry *jsbridge_form_data_iter_entry(const FormDataIter *it);
+/* The wire serializer: the form data set URL-encoded byte-for-byte with
+ * the standing x-www-form-urlencoded escaper (space → '+', %XX hex). */
+void jsbridge_form_data_urlenc(JsBridge *b, void *formNode,
+                               void *submitterNode, char *out, size_t cap);
+/* Forms-Phase 6: the text/plain wire serializer (the browser's own
+ * human-readable encoding — RAW name=value pairs joined with CRLF, no
+ * escaping; the value CRLF normalization rides the entry construction). */
+void jsbridge_form_data_plain(JsBridge *b, void *formNode,
+                              void *submitterNode, char *out, size_t cap);
+/* Forms-Phase 6: the form's enumerated IDL reflection helpers (spec:
+ * "limited to only known values") — the getter road on every engine's
+ * method/enctype/encoding accessor AND the wire road's resolution of
+ * the effective method/enctype, so reads and serialization cannot
+ * disagree. method → "get"/"post"/"dialog" (GET default); enctype →
+ * "application/x-www-form-urlencoded"/"multipart/form-data"/
+ * "text/plain" (urlencoded default). Static storage, no scratch. */
+const char *jsbridge_form_method_idl(const char *raw);
+const char *jsbridge_form_enctype_idl(const char *raw);
+/* The shared escaper core (the standing main.c serializer now wraps
+ * this — same byte rules, one rulebook). */
+void jsbridge_urlenc_cpy(const char *raw, char *out, size_t cap,
+                         size_t *used);
 
 #endif /* PLUTO_JSBIDGE_INTERNAL_H */

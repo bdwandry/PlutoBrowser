@@ -2088,7 +2088,8 @@ static void xs_xhr_send(xsMachine *the)
     st->xobj[oslot] = xsThis;
     st->xobjSet[oslot] = 1;
     xsRemember(st->xobj[oslot]);
-    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
+    /* Phase 4: no separate onerror pin in this engine (standing). */
+    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1), NULL,
                       (void *)(intptr_t)(oslot + 1));
     xsResult = xsUndefined;
 }
@@ -2166,8 +2167,10 @@ static void xs_xmlhttprequest_new(xsMachine *the)
 }
 
 /* XHR vtable: release the pinned completion + wrapper (slot inert). */
-static void xs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void xs_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                              void *objRef)
 {
+    (void)errFnRef; /* stock XS pins no separate onerror ref (standing) */
     XsState *st = (XsState *)b->implState;
     if (!st || !st->machine)
     {

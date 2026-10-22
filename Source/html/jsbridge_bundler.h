@@ -92,6 +92,11 @@
 #define PLUTO_BUNDLER_MIN_SOURCE (32u * 1024u)
 #endif
 
+/* R55: plan kinds (PlutoBundlerPlan.kind). 0 is the historical shape so
+ * zero-init keeps emitting webpack plans. */
+#define PLUTO_BUNDLER_KIND_WEBPACK 0
+#define PLUTO_BUNDLER_KIND_TURBOPACK 1
+
 typedef enum
 {
     PLUTO_BUNDLER_NO_MAP = 0, /* not a bundler monolith — run unsplit */
@@ -141,6 +146,41 @@ typedef struct
      * or template — and each slice is wrapped in its own IIFE, preserving
      * execution order and top-level `var` scoping within the tail. */
     uint32_t tailStep;
+    /* R55: TURBOPACK push-bundle plans (Next.js 15 turbopack chunks).
+     * kind routes emit/segment-cap (0 = webpack module-map above, 1 =
+     * turbopack chunk push). A turbopack chunk is a repeatable
+     * `.push([src, id, factory, ...])` registration whose array the chunk
+     * runtime re-consumes in push order and registers id→factory by WALKING
+     * the array (recursing once per nested pairs array, then scanning
+     * flat). Delivering the SAME registrations as several pushes of
+     * `[src, window…]` is therefore order-preserving — with the invariants
+     * that (a) a window never ends on a dangling id run: cut positions
+     * land only AFTER a lexically-proven factory element, and the FINAL
+     * window must likewise end on a proven factory (the runtime throws on
+     * dangling ids); and (b) windows always emit FLAT: the runtime's walk
+     * registers pairs only from args of length>2 — a bare `[src,[pairs]]`
+     * arg takes the config path (it reads `.otherChunks` on it) and
+     * registers nothing; flat emission also preserves the original
+     * registration order because the original walk recurses into the
+     * nested array before scanning top level and our windows are recorded
+     * in exactly that order. For a wrapped chunk the emitted segments
+     * re-carry the `(()=>{"use strict"; … })()` wrapper (strict-mode
+     * directive preserved per segment). spans[0..nSpans-1] are the pair
+     * windows (one emitted push each); the src expression and the arg's
+     * verbatim tail travel as the turbo* fields below. */
+    int kind;                /* PLUTO_BUNDLER_KIND_* */
+    int turboWrap;           /* 1 = `(()=>{"use strict"; … })()` wrapper */
+    uint32_t turboNestedEnd; /* diagnostics only: the closing ']' byte of
+                              * the (single) nested pairs array the plan
+                              * sliced through; 0 = flat source. NOT used
+                              * by the emitter (R55b: windows always emit
+                              * flat — see above) */
+    uint32_t turboSrc0;      /* chunk src expression span (verbatim) */
+    uint32_t turboSrc1;
+    uint32_t turboPost0;     /* verbatim arg tail after the last pair
+                              * element (leading ',' included), emitted in
+                              * the LAST segment only; 0/0 = none */
+    uint32_t turboPost1;
 } PlutoBundlerPlan;
 
 /* Scan src[0..len) for a bundler monolith and fill plan (which must carry a

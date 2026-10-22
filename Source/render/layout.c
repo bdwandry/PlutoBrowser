@@ -536,6 +536,34 @@ static void flow_add_word(FlowLine *cur, const FlowWord *w)
     cur->width += w->advance;
 }
 
+/* Phase 5 ellipsis tail: append a "..." word to `ln` measured in the
+ * CUT inline's font; pop trailing whole words until the dots fit the
+ * line budget (never underflows the line's first word). Literal text —
+ * emit is the only consumer and "..." outlives the pass. */
+static void flow_ellipsize(FlowLine *ln, int maxW, LCDFont *font,
+                           const DocInline *inl)
+{
+    FlowWord ew;
+    int eadv = measure(font, "...");
+    if (eadv <= 0)
+    {
+        eadv = 0;
+    }
+    while (ln->count > 1 && maxW > 0 && ln->width + eadv > maxW)
+    {
+        FlowWord *last = &ln->words[ln->count - 1];
+        ln->width -= last->advance;
+        ln->count--;
+    }
+    memset(&ew, 0, sizeof(ew));
+    ew.text = "...";
+    ew.font = font;
+    ew.w = eadv;
+    ew.advance = eadv;
+    ew.inl = inl;
+    flow_add_word(ln, &ew);
+}
+
 static int is_space_char(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
@@ -549,6 +577,11 @@ typedef struct BreakOpts
     LCDFont *font; /* NULL → per-inline font */
     int lineH;     /* 0 → 16 */
     int bold;
+    /* Phase 5: -webkit-line-clamp budget (0 → unlimited). When a new
+     * word would open line N+1, the block stops consuming text
+     * instead: the last kept line gains a "..." tail (the web's
+     * card-snippet truncation). */
+    int maxLines;
 } BreakOpts;
 
 /* overflow-wrap:break-word piece emission (one FlowWord per piece, with
@@ -609,9 +642,21 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         o = *opts;
     }
     int lineH = o.lineH ? o.lineH : 16;
+    if (!inlines || inlineCount <= 0)
+    {
+        /* R59 defensive guard (Wikipedia device crash 2026-10-18): a block
+         * that lost its inline array (mid-walk refusal before the re-walk
+         * contract fix) must degrade to an empty flow, never fault the
+         * loop. The re-walk now refuses to publish such states, but any
+         * producer of inlineCount>0 with inlines==NULL degrades here. */
+        return lineH;
+    }
     FlowLine cur;
     memset(&cur, 0, sizeof(cur));
     int firstWord = 1;
+    /* Phase 5: set once when an ellipsis/clamp cut drops a line's tail;
+     * every later inline (any later span, br, or text run) is skipped. */
+    int truncated = 0;
 
     for (int ii = 0; ii < inlineCount; ii++)
     {
@@ -619,6 +664,10 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         if (!inl)
         {
             continue;
+        }
+        if (truncated)
+        {
+            break;
         }
         if (inl->type == DOC_INLINE_BR)
         {
@@ -654,6 +703,19 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         if (lh > lineH)
         {
             lineH = lh;
+        }
+        if (o.maxLines && cur.count == 0 && fl->count >= o.maxLines)
+        {
+            /* Phase 5 clamp: this word would open line N+1 — cut with
+             * a "..." tail appended to the final kept line instead.
+             * Only reachable when cur emptied out right on the
+             * boundary (a wrap-closed line just filled the budget). */
+            if (fl->count > 0 && fl->lines)
+            {
+                flow_ellipsize(&fl->lines[fl->count - 1], maxW, font, inl);
+            }
+            truncated = 1;
+            break;
         }
 
         const char *text = inl->text;
@@ -733,6 +795,20 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
             }
 
             int aw = ww + gap;
+            /* Phase 5 ellipsis (text-overflow:ellipsis + white-space:
+             * nowrap): once the accumulating nowrap line runs past the
+             * budget, cut instead of overflowing — room for "..." is
+             * made by popping trailing words; later inlines die at the
+             * loop-top truncated guard. */
+            if (!truncated && maxW > 0 && cur.count > 0 &&
+                (inl->flags & DOC_INF_ELLIP) &&
+                (inl->flags & DOC_INF_NOWRAP) &&
+                cur.width + aw > maxW)
+            {
+                flow_ellipsize(&cur, maxW, font, inl);
+                truncated = 1;
+                break;
+            }
             /* CSS white-space:nowrap rides the inline flags: suppress the
              * wrap (the line overflows instead). Explicit <br> still
              * breaks (handled above, unconditional). */
@@ -761,6 +837,23 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
                 firstWord = 1;
                 aw = ww;
                 gap = 0;
+                if (o.maxLines && fl->count >= o.maxLines)
+                {
+                    /* Phase 5 clamp: the push just CLOSED line N — the
+                     * current word would open N+1 and every later word
+                     * dies with it, so the block truncates NOW: the
+                     * "..." tail lands at the end of the last kept line
+                     * (popping its overflow words for room). The
+                     * loop-top guard covers the remaining case (a BR
+                     * pushed the budget-full line with no text after). */
+                    if (fl->count > 0 && fl->lines)
+                    {
+                        flow_ellipsize(&fl->lines[fl->count - 1], maxW, font,
+                                       inl);
+                    }
+                    truncated = 1;
+                    break;
+                }
             }
             FlowWord w;
             w.text = arena_word(word);
@@ -905,6 +998,48 @@ static void add_rect_aux(const char *href, const char *text, int x, int y,
     lm_add_link_rect_ex(href, text, &r, anchor, aux);
 }
 
+/* Phase 9: apply a DocBlock's translate mount to the item span
+ * [from, to). px halves apply directly (the layout scale); the % rows
+ * key against the branch's own measured box (boxW/boxH, both already
+ * on the layout scale), matching CSS's own-relative translate %.
+ * Zero offsets = no work — the default for every block without a
+ * transform. */
+static void tf_apply_items(int from, int to, const DocBlock *b, int boxW,
+                           int boxH)
+{
+    if (!b)
+    {
+        return;
+    }
+    int dx = b->tfXpx, dy = b->tfYpx;
+    if (b->tfXpct && boxW > 0)
+    {
+        dx += (boxW * b->tfXpct) / 100;
+    }
+    if (b->tfYpct && boxH > 0)
+    {
+        dy += (boxH * b->tfYpct) / 100;
+    }
+    if (!dx && !dy)
+    {
+        return;
+    }
+    for (int i = from; i < to && i < g_itemCount; i++)
+    {
+        g_items[i]->x += dx;
+        g_items[i]->y += dy;
+        /* The blockquote rail is part of the block's own box — the
+         * LRI_LINE-type frames (heading rule, hr) stay put by design
+         * (separators are not transform targets), but this rail moves
+         * with its quote text through the y1/y2 line fields. */
+        if (g_items[i]->type == LRI_QUOTE_BAR)
+        {
+            g_items[i]->y1 += dy;
+            g_items[i]->y2 += dy;
+        }
+    }
+}
+
 void layout_build(DocParseResult *doc)
 {
     logger_stack_touch();
@@ -944,6 +1079,7 @@ void layout_build(DocParseResult *doc)
         if (block->type == DOC_BLOCK_READER_HEADER)
         {
             int badgeH = 28;
+            int tfFrom = g_itemCount;
             LayoutItem *it = item_new(LRI_READER_BADGE);
             if (!it)
             {
@@ -955,6 +1091,7 @@ void layout_build(DocParseResult *doc)
             it->h = badgeH;
             it->host = block->host ? block->host : "WEB PAGE";
             it->readingTime = block->readingTime ? block->readingTime : "";
+            tf_apply_items(tfFrom, g_itemCount, block, maxWidth, badgeH);
             currentY += badgeH + 10;
         }
         /* 2. Headings (h1 - h6) */
@@ -969,6 +1106,7 @@ void layout_build(DocParseResult *doc)
             memset(&bo, 0, sizeof(bo));
             bo.font = font;
             bo.lineH = lineH;
+            bo.maxLines = block->clampLines;
             FlowLines fl;
             int lh = break_lines((const DocInline **)block->inlines,
                                  block->inlineCount, maxWidth - indent, &bo, &fl);
@@ -981,6 +1119,11 @@ void layout_build(DocParseResult *doc)
             {
                 g_items[i]->bold = 1;
             }
+            /* Phase 9: the element's translate mount (the h2 underline
+             * is created AFTER this point, so the separator stays —
+             * separators are not transform targets). */
+            tf_apply_items(itemsBefore, g_itemCount, block, maxWidth - indent,
+                           lh * linesEmitted);
             currentY += lh * linesEmitted; /* emitFlow returns endY */
             if (block->level <= 2)
             {
@@ -995,12 +1138,13 @@ void layout_build(DocParseResult *doc)
                 ln->y2 = currentY + 3;
                 currentY += 6;
             }
-            currentY += marginB + block->spacingBottom;
+            currentY += marginB + block->spacingBottom + block->gapApplied;
         }
         /* 3. MathML linearized formulas */
         else if (block->type == DOC_BLOCK_MATH)
         {
             int startY = currentY + block->spacingTop;
+            int tfMathFrom = g_itemCount;
             DocInline inl;
             memset(&inl, 0, sizeof(inl));
             inl.type = DOC_INLINE_TEXT;
@@ -1012,6 +1156,8 @@ void layout_build(DocParseResult *doc)
             FlowLines fl;
             int lineH = break_lines(inls, 1, maxWidth - 10, &bo, &fl);
             emit_flow(&fl, lineH, marginX + 5, maxWidth - 10, "center", startY, 0);
+            tf_apply_items(tfMathFrom, g_itemCount, block, maxWidth - 10,
+                           lineH * fl.count);
             currentY = startY + lineH * fl.count + 10;
             flow_free(&fl);
         }
@@ -1023,16 +1169,19 @@ void layout_build(DocParseResult *doc)
             int indent = block->indent;
             int blockStartX = (isQuote ? marginX + 14 : marginX) + indent;
             int blockMaxW = maxWidth - (isQuote ? 18 : 0) - indent;
+            int tfQFrom = g_itemCount;
             int startQuoteY = currentY + block->spacingTop;
             const char *align = layout_normalize_align(block->align);
             BreakOpts bo;
             memset(&bo, 0, sizeof(bo));
+            bo.maxLines = block->clampLines;
             FlowLines fl;
             int lineH = break_lines((const DocInline **)block->inlines,
                                     block->inlineCount, blockMaxW, &bo, &fl);
             emit_flow(&fl, lineH, blockStartX, blockMaxW, align, startQuoteY,
                       block->invert);
-            currentY = startQuoteY + lineH * fl.count + 10 + block->spacingBottom;
+            currentY = startQuoteY + lineH * fl.count + 10 + block->spacingBottom +
+                       block->gapApplied;
             flow_free(&fl);
             if (isQuote)
             {
@@ -1045,6 +1194,8 @@ void layout_build(DocParseResult *doc)
                 qb->y1 = startQuoteY;
                 qb->y2 = currentY - 4;
             }
+            tf_apply_items(tfQFrom, g_itemCount, block, blockMaxW,
+                           lineH * fl.count);
         }
         /* 4. Lists (ul / ol / dl) */
         else if (block->type == DOC_BLOCK_LIST_ITEM)
@@ -1074,7 +1225,30 @@ void layout_build(DocParseResult *doc)
             int listMaxW = maxWidth - (textIndent - marginX) - 4;
             int lineH = 18;
 
-            if (!isDt && !isDd && block->markerType != 'n')
+            /* Phase 7: the winning ::marker content text replaces the
+             * default bullet glyph ("" = the author removed the bullet
+             * — draw nothing, no item slot). The ordered/unordered
+             * default path below still applies when markerText is
+             * NULL (::marker never fired). */
+            if (!isDt && !isDd && block->markerText)
+            {
+                if (block->markerText[0])
+                {
+                    LayoutItem *it = item_new(LRI_TEXT);
+                    if (!it)
+                    {
+                        return;
+                    }
+                    it->text = arena_word(block->markerText);
+                    it->font = style_font(PLUTO_FONT_BODY_BOLD);
+                    it->x = bulletIndent;
+                    it->y = currentY;
+                    it->w = 14;
+                    it->h = lineH;
+                    it->bold = 1;
+                }
+            }
+            else if (!isDt && !isDd && block->markerType != 'n')
             {
                 char bulletStr[48];
                 if (block->isOrdered && block->markerType != 'd' &&
@@ -1115,11 +1289,15 @@ void layout_build(DocParseResult *doc)
             BreakOpts bo;
             memset(&bo, 0, sizeof(bo));
             bo.bold = isDt;
+            bo.maxLines = block->clampLines;
             FlowLines fl;
             int lh = break_lines((const DocInline **)block->inlines,
                                  block->inlineCount, listMaxW, &bo, &fl);
+            int tfLFrom = g_itemCount;
             emit_flow(&fl, lh, textIndent, listMaxW, align, currentY, 0);
-            currentY = currentY + lh * fl.count + 6;
+            tf_apply_items(tfLFrom, g_itemCount, block, listMaxW,
+                           lh * fl.count);
+            currentY = currentY + lh * fl.count + 6 + block->gapApplied;
             flow_free(&fl);
             } /* end non-empty list item */
         }
@@ -1188,6 +1366,7 @@ void layout_build(DocParseResult *doc)
             {
                 boxH = 30;
             }
+            int tfCFrom = g_itemCount;
             LayoutItem *it = item_new(LRI_CODE_BOX);
             if (!it)
             {
@@ -1199,7 +1378,8 @@ void layout_build(DocParseResult *doc)
             it->h = boxH;
             it->lines = lines;
             it->lineCount = lineCount;
-            currentY += boxH + 10;
+            tf_apply_items(tfCFrom, g_itemCount, block, maxWidth, boxH);
+            currentY += boxH + 10 + block->gapApplied;
             if (heapLines)
             {
                 for (int i = 0; i < lineCount; i++)
@@ -1252,6 +1432,7 @@ void layout_build(DocParseResult *doc)
                 imgX = marginX;
             }
 
+            int tfIFrom = g_itemCount;
             LayoutItem *it = item_new(LRI_IMAGE);
             if (!it)
             {
@@ -1265,6 +1446,7 @@ void layout_build(DocParseResult *doc)
             it->src = block->src;
             it->imgHref = block->href;
             it->img = (LCDBitmap *)block->img;
+            tf_apply_items(tfIFrom, g_itemCount, block, imgW, imgH);
 
             if (block->href && !block->inert)
             {
@@ -1351,7 +1533,7 @@ void layout_build(DocParseResult *doc)
                 }
             }
 
-            currentY += imgH + 12;
+            currentY += imgH + 12 + block->gapApplied;
         }
         /* 8. Tables */
         else if (block->type == DOC_BLOCK_TABLE && block->table)
@@ -1479,6 +1661,7 @@ void layout_build(DocParseResult *doc)
                 }
             }
 
+            int tfTFrom = g_itemCount;
             LayoutItem *it = item_new(LRI_TABLE_BOX);
             if (!it)
             {
@@ -1491,7 +1674,8 @@ void layout_build(DocParseResult *doc)
             it->table = tbl;
             it->caption = tbl->caption;
             it->border = tbl->border;
-            currentY += tableH + 10;
+            tf_apply_items(tfTFrom, g_itemCount, block, tblW, tableH);
+            currentY += tableH + 10 + block->gapApplied;
         }
         /* 8a. Hidden fields */
         else if (block->type == DOC_BLOCK_HIDDEN_FIELD)
@@ -1758,6 +1942,7 @@ void layout_build(DocParseResult *doc)
         else if (block->type == DOC_BLOCK_METER)
         {
             int boxH = 20;
+            int tfMFrom = g_itemCount;
             LayoutItem *it = item_new(LRI_METER);
             if (!it)
             {
@@ -1774,6 +1959,7 @@ void layout_build(DocParseResult *doc)
             it->mHigh = block->mhigh;
             it->mOptimum = block->moptimum;
             it->label = block->label ? block->label : "";
+            tf_apply_items(tfMFrom, g_itemCount, block, maxWidth, boxH);
             currentY += boxH + 10;
         }
         /* 15. Bordered Boxes */
@@ -3124,6 +3310,34 @@ int layout_test_break_lines_probe(const DocInline **inlines, int inlineCount,
     bo.font = font;
     bo.bold = bold;
     bo.lineH = lineH;
+    FlowLines fl;
+    int lh = break_lines(inlines, inlineCount, maxW, &bo, &fl);
+    memset(out, 0, sizeof(*out));
+    out->lineCount = fl.count > 16 ? 16 : fl.count;
+    for (int i = 0; i < out->lineCount; i++)
+    {
+        out->lineWordCount[i] = fl.lines[i].count;
+        out->lineWidth[i] = fl.lines[i].width;
+    }
+    flow_free(&fl);
+    return lh;
+}
+
+/* Phase 5 probe: identical to layout_test_break_lines_probe but with an
+ * explicit -webkit-line-clamp budget (0 = unlimited), so a sim checker
+ * can assert on the REAL breaker's emitted structure for an ellipsis/
+ * clamp cut (the doc objects keep full text by design — the cut only
+ * exists between the breaker and the emitter). */
+int layout_test_probe_maxlines(const DocInline **inlines, int inlineCount,
+                               int maxW, LCDFont *font, int bold, int lineH,
+                               int maxlines, LayoutBreakProbe *out)
+{
+    BreakOpts bo;
+    memset(&bo, 0, sizeof(bo));
+    bo.font = font;
+    bo.bold = bold;
+    bo.lineH = lineH;
+    bo.maxLines = maxlines;
     FlowLines fl;
     int lh = break_lines(inlines, inlineCount, maxW, &bo, &fl);
     memset(out, 0, sizeof(*out));
