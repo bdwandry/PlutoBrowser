@@ -482,6 +482,19 @@ all: device_bin simulator_bin
 # bundle; `make simulator` keeps the sim-only lab build. Recipe override,
 # last wins — same pattern as the `all` override above (the "overriding
 # commands" warning is cosmetic).
+# R-25a: device optimization knob. The SDK's common.mk bakes OPT = -O2 …
+# for the whole tree; these target-scoped assignments override it for the
+# `device` and `all` goals and their prerequisites (same pattern as the
+# SDK's own `debug: OPT = -O0`). R25 default: -O3 for the device binary —
+# the full -O3 device battery receipted clean 2026-10-22 (real site +
+# 5-page internal battery, zero crashlog, stack-usage audit ≤ +48B/frame).
+# Roll back per build with `make device DEVICEOPT=-O2`. The simulator
+# build never reads OPT (clang builds $(SRC) directly), so sim binaries
+# are identical either way.
+DEVICEOPT ?= -O3
+device: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
+all: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
+
 .PHONY: device
 device: device_bin
 	rm -f Source/pdex.dylib
