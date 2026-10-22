@@ -7,10 +7,14 @@
  * times()/clock(); the instrumentation values are only read on the
  * simulator (real libc there).
  *
- * DEVICE ONLY (Makefile ifeq device block): the simulator links the real
- * macOS libc. Same precedent as dav1d_pthread_shim.c. REMOVE with the
+ * DEVICE ONLY on real body: the guard below keeps `_times` for the device
+ * build and compiles the TU to NOTHING under the simulator compiler —
+ * plain `make` feeds this TU to the simulator dylib too, where a defined
+ * `_times` would shadow the real macOS libc symptom; the instrumentation
+ * values are read on the simulator through the REAL libc. REMOVE with the
  * CSS instrumentation if clock() use goes away.
  */
+#ifdef TARGET_PLAYDATE
 #include <sys/times.h>
 
 clock_t _times(struct tms *buf)
@@ -18,3 +22,5 @@ clock_t _times(struct tms *buf)
     (void)buf;
     return (clock_t)-1;
 }
+#endif /* TARGET_PLAYDATE */
+

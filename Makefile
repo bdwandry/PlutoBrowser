@@ -341,7 +341,18 @@ override PDCFLAGS += -k -s
 # the link recipe expands it lazily — a later SRC mutation would leave the
 # prerequisite graph missing the appended stock objects (link fails with
 # "No such file" for objects make never planned to compile).
-ifeq ($(MAKECMDGOALS),device)
+# Goal-aware: the device parts ride for `make device` AND for plain `make`
+# (goal-less = the default = the shippable bundle; see the `all` override
+# after the common.mk include — the SDK's all either fails the device link
+# with undefined fxAbort or assembles no PDX at all).
+ifeq ($(MAKECMDGOALS),)
+PLUTO_DEVICE_BUILD := 1
+else ifneq (,$(filter device all,$(MAKECMDGOALS)))
+PLUTO_DEVICE_BUILD := 1
+else
+PLUTO_DEVICE_BUILD :=
+endif
+ifeq ($(PLUTO_DEVICE_BUILD),1)
 SRC := $(SRC) $(patsubst Source/js/xs_moddable_no_recursion/%,Source/js/xs_moddable/%,$(filter Source/js/xs_moddable_no_recursion/%,$(SRC))) Source/html/jsbridge_xs.c
 # dav1d single-thread pthread stubs (device-only: the sim links macOS
 # pthreads; a shared TU would collide at link). See dav1d_pthread_shim.c.
@@ -445,3 +456,14 @@ build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -M
 # code motion). dav1d sources only — the rest of the tree stays -O2.
 build/Source/render/decoders/dav1d/src/%.o: OPT = -O3
 
+
+# Plain `make` (and explicit `make all`) must end in the SHIPPABLE bundle —
+# device binary + simulator dylib in ONE PlutoBrowser.pdx. The SDK's all
+# only builds the two binaries and NEVER assembles (the pdc step lives only
+# in the device/simulator recipes), so a goal-less make left no fresh PDX at
+# all. With the goal-aware SRC above, plain `make` compiles the same blessed
+# source list `make device` uses for BOTH binaries (both XS engines ride —
+# exactly the configuration the device receipted), then assembles once.
+.PHONY: all
+all: device_bin simulator_bin
+	@$(PDC) $(PDCFLAGS) Source $(PRODUCT)
