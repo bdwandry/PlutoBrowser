@@ -1614,7 +1614,7 @@ void js_doc_close(JsBridge *b)
             JsHttpRequest *r = &b->xhr[i];
             if (r->active || r->release)
             {
-                impl->clear_xhr_refs(b, r->fnRef, r->objRef);
+                impl->clear_xhr_refs(b, r->fnRef, r->errFnRef, r->objRef);
                 if (r->body)
                 {
                     JFree(r->body);
@@ -5286,9 +5286,41 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
     r->state = JS_XHR_DONE;
     if (status < 200 || status >= 300)
     {
+        /* Phase 4: browser-true non-2xx — fetch RESOLVES for any completed
+         * HTTP response with ok=false (404/500 pages stay readable), and
+         * XHR fires onload with the real status. The old early return
+         * dropped BOTH the status (JS saw st=0) and the body. The body is
+         * stored under the same size/budget caps as 2xx; `err` stays an
+         * honest failure text for consumers that read it, while status/
+         * body surface the truth. */
         r->ok = 0;
+        r->status = status;
         snprintf(r->err, sizeof(r->err), "HTTP %d", status);
-        logger_log("[js] xhr #%d FAIL status=%d", r->id, status);
+        if (body && bodyLen && bodyLen <= (size_t)JSBRIDGE_XHR_BODY_MAX &&
+            bodyLen <= (size_t)g_xhrPageBudget)
+        {
+            r->body = (char *)JMalloc(bodyLen + 1);
+            if (r->body)
+            {
+                memcpy(r->body, body, bodyLen);
+                r->body[bodyLen] = '\0';
+                r->bodyLen = bodyLen;
+                g_xhrPageBudget -= bodyLen;
+                logger_log("[js] xhr #%d HTTP %d (error body %zu bytes "
+                           "stored, ok=0)", r->id, status, bodyLen);
+            }
+            else
+            {
+                snprintf(r->err, sizeof(r->err), "out of memory");
+                logger_log("[js] xhr #%d HTTP %d body OOM", r->id, status);
+            }
+        }
+        else
+        {
+            logger_log("[js] xhr #%d HTTP %d (status stored, body %s)",
+                       r->id, status,
+                       (body && bodyLen) ? "dropped (cap/budget)" : "none");
+        }
         return;
     }
     if (!body || bodyLen == 0)
@@ -5302,6 +5334,7 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
     if (bodyLen > (size_t)JSBRIDGE_XHR_BODY_MAX)
     {
         r->ok = 0;
+        r->status = status; /* completed HTTP response — browser keeps status */
         snprintf(r->err, sizeof(r->err), "response too large");
         logger_log("[js] xhr #%d FAIL too big (%zu bytes)", r->id, bodyLen);
         return;
@@ -5309,6 +5342,7 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
     if (bodyLen > g_xhrPageBudget)
     {
         r->ok = 0;
+        r->status = status;
         snprintf(r->err, sizeof(r->err), "page budget exhausted");
         logger_log("[js] xhr #%d FAIL over page budget (%zu left)",
                    r->id, g_xhrPageBudget);
@@ -5318,6 +5352,7 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
     if (!r->body)
     {
         r->ok = 0;
+        r->status = status;
         snprintf(r->err, sizeof(r->err), "out of memory");
         logger_log("[js] xhr #%d FAIL OOM", r->id);
         return;
@@ -5546,10 +5581,15 @@ int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url)
  * body-less twin; body is deep-copied so the caller's string can be a
  * transient). */
 /* API-P2: the fetch shim's setRequestHeader lane. Content-Type overrides
- * the wire default on POSTs (the request builder's only extra-header
- * knob); every OTHER header is recorded + logged for receipts and left
- * off the wire (documented boundary — nothing is invented or ignored
- * silently). Only valid while the request is OPENED, like a browser. */
+ * the wire Content-Type (the request builder's replace lane; last write
+ * wins). NetP2: every OTHER header is REAL — stored per-request and
+ * carried byte-for-byte onto the wire by the client's extra-header lane.
+ * Browser-faithful guard: the spec/engine-owned forbidden set and any
+ * CRLF/control byte refuse with a logged reason (nothing invented,
+ * nothing silently dropped); a repeated name joins its values with the
+ * browser's ", " fold; the list is capped at JSBRIDGE_XHR_EXTRA_MAX
+ * pairs with an honest refusal past the cap. Only valid while the
+ * request is OPENED, like a browser. */
 int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
                             const char *value)
 {
@@ -5584,12 +5624,101 @@ int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
                            r->id, r->reqCt);
                 return 1;
             }
-            snprintf(r->xhdrName, sizeof(r->xhdrName), "%s", name);
-            snprintf(r->xhdrVal, sizeof(r->xhdrVal), "%.68s",
+            /* NetP2 wire-integrity guard (mirrors the client's): name
+             * must be a printable token, value printable ASCII, and the
+             * framing/authority/client-lane names are refused before
+             * they are ever stored — logging the honest reason. */
+            {
+                int bad = 0;
+                for (const char *p = name; *p && !bad; p++)
+                {
+                    if (*p < 0x21 || *p > 0x7e)
+                    {
+                        bad = 1;
+                    }
+                }
+                for (const char *p = value ? value : ""; *p && !bad; p++)
+                {
+                    if (*p < 0x20 || *p > 0x7e)
+                    {
+                        bad = 1;
+                    }
+                }
+                if (bad)
+                {
+                    logger_log("[js] xhr #%d header refused "
+                               "(CRLF/control byte): %.40s",
+                               r->id, name);
+                    return 0;
+                }
+                static const char *const FORBIDDEN[] = {
+                    "accept-charset", "accept-encoding",
+                    "access-control-request-headers",
+                    "access-control-request-method", "connection",
+                    "content-length", "cookie", "cookie2", "date", "dnt",
+                    "expect", "host", "if-modified-since",
+                    "if-none-match", "keep-alive", "origin", "referer",
+                    "te", "trailer", "transfer-encoding", "upgrade",
+                    "via"};
+                for (size_t fi = 0; fi < sizeof(FORBIDDEN) /
+                                             sizeof(FORBIDDEN[0]);
+                     fi++)
+                {
+                    if (strcmp(lname, FORBIDDEN[fi]) == 0)
+                    {
+                        logger_log("[js] xhr #%d header refused "
+                                   "(engine-owned/spec-forbidden): %s",
+                                   r->id, name);
+                        return 0;
+                    }
+                }
+                if (strncmp(lname, "proxy-", 6) == 0 ||
+                    strncmp(lname, "sec-", 4) == 0)
+                {
+                    logger_log("[js] xhr #%d header refused "
+                               "(spec-forbidden family): %s",
+                               r->id, name);
+                    return 0;
+                }
+            }
+            for (int xi = 0; xi < r->xhdrCount; xi++)
+            {
+                if (strcasecmp(r->xhdrName[xi], name) == 0)
+                {
+                    int vf = (int)strlen(r->xhdrVal[xi]);
+                    int al = (int)strlen(value ? value : "");
+                    if (vf + 2 + al < (int)sizeof(r->xhdrVal[xi]))
+                    {
+                        snprintf(r->xhdrVal[xi] + vf,
+                                 sizeof(r->xhdrVal[xi]) - vf, ", %s",
+                                 value ? value : "");
+                        logger_log("[js] xhr #%d header %s merged "
+                                   "(now %.60s)",
+                                   r->id, name, r->xhdrVal[xi]);
+                        return 1;
+                    }
+                    logger_log("[js] xhr #%d header %s merge overflow "
+                               "(honest refusal, %d exists)",
+                               r->id, name, vf);
+                    return 0;
+                }
+            }
+            if (r->xhdrCount >= JSBRIDGE_XHR_EXTRA_MAX)
+            {
+                logger_log("[js] xhr #%d header lane full (%d) — "
+                           "refused: %s (logged, never sent)",
+                           r->id, JSBRIDGE_XHR_EXTRA_MAX, name);
+                return 0;
+            }
+            snprintf(r->xhdrName[r->xhdrCount],
+                     sizeof(r->xhdrName[r->xhdrCount]), "%s", name);
+            snprintf(r->xhdrVal[r->xhdrCount],
+                     sizeof(r->xhdrVal[r->xhdrCount]), "%s",
                      value ? value : "");
-            logger_log("[js] xhr #%d header %s: %.60s (recorded: the "
-                       "wire builder carries Content-Type only)",
-                       r->id, r->xhdrName, r->xhdrVal);
+            logger_log("[js] xhr #%d header %s: %.60s (rides the "
+                       "wire — NetP2 lane)",
+                       r->id, name, value ? value : "");
+            r->xhdrCount++;
             return 1;
         }
     }
@@ -5598,7 +5727,8 @@ int jsbridge_xhr_set_header(JsBridge *b, int id, const char *name,
 }
 
 void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
-                            size_t bodyLen, void *fnRef, void *objRef)
+                            size_t bodyLen, void *fnRef, void *errFnRef,
+                            void *objRef)
 {
     if (!b || id <= 0)
     {
@@ -5627,7 +5757,7 @@ void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
             break;
         }
     }
-    jsbridge_xhr_send(b, id, fnRef, objRef);
+    jsbridge_xhr_send(b, id, fnRef, errFnRef, objRef);
 }
 
 /* Start the actual fetch for an OPENED request. Returns 1 armed. Local
@@ -5683,8 +5813,28 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
     logger_log("[js] xhr #%d send %s", r->id, r->url);
     /* C4: POST requests ride http_request with the stored request body;
      * every GET (and any never-bodied request) keeps the old http_get path
-     * byte-for-byte. */
+     * byte-for-byte. NetP2: when the page stored extra headers on this
+     * request, the list rides along (the pair list copies OUT of the
+     * record snapshot-first; the client owns a deep copy before the call
+     * returns). Static, not stack: the send road runs inside the JS pump
+     * (eval frames already sit deep on the game-task stack) and cannot
+     * re-enter — the client is single-flight and the copy completes
+     * synchronously before any callback can fire. */
     int started;
+    static HttpHeaderPair pairs[JSBRIDGE_XHR_EXTRA_MAX];
+    int npairs = 0;
+    for (int xi = 0; xi < r->xhdrCount; xi++)
+    {
+        if (npairs >= JSBRIDGE_XHR_EXTRA_MAX)
+        {
+            break;
+        }
+        snprintf(pairs[npairs].name, sizeof(pairs[npairs].name), "%s",
+                 r->xhdrName[xi]);
+        snprintf(pairs[npairs].value, sizeof(pairs[npairs].value), "%s",
+                 r->xhdrVal[xi]);
+        npairs++;
+    }
     if (r->method[0] && strcmp(r->method, "POST") == 0 && r->reqBody)
     {
         /* R56f: expose the POST payload's lead bytes so the native form
@@ -5703,9 +5853,31 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
         {
             logger_log("[js] xhr #%d POST ct='%s'", r->id, r->reqCt);
         }
-        started = http_request_ct(r->method, r->url,
-                                  r->reqCt[0] ? r->reqCt : NULL,
-                                  r->reqBody, r->reqBodyLen, &cbs);
+        if (npairs > 0)
+        {
+            logger_log("[js] xhr #%d POST extras=%d (NetP2 wire lane)",
+                       r->id, npairs);
+            started = http_request_h(r->method, r->url,
+                                     r->reqCt[0] ? r->reqCt : NULL,
+                                     pairs, npairs, r->reqBody,
+                                     r->reqBodyLen, &cbs);
+        }
+        else
+        {
+            started = http_request_ct(r->method, r->url,
+                                      r->reqCt[0] ? r->reqCt : NULL,
+                                      r->reqBody, r->reqBodyLen, &cbs);
+        }
+    }
+    else if (npairs > 0)
+    {
+        /* NetP2: GET (or the never-bodied road) carries the page's header
+         * list in the same cancel-first shape. Method semantics match
+         * the existing else-branch (GET on the wire) so pre-NetP2
+         * behavior holds whenever no extra header was set. */
+        logger_log("[js] xhr #%d send extras=%d (NetP2 wire lane)",
+                   r->id, npairs);
+        started = http_get_headers(r->url, pairs, npairs, &cbs);
     }
     else
     {
@@ -5730,7 +5902,8 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
     return 1;
 }
 
-void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef)
+void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *errFnRef,
+                       void *objRef)
 {
     if (!b || id <= 0)
     {
@@ -5747,9 +5920,12 @@ void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef)
                 return;
             }
             /* Take the refs up front — the completion needs them whether
-             * the request starts now or queues behind the in-flight one. */
+             * the request starts now or queues behind the in-flight one.
+             * errFnRef==0 means the engine pinned no separate onerror
+             * (the dispatch falls back to fnRef). */
             r->fnRef = fnRef;
             r->objRef = objRef;
+            r->errFnRef = errFnRef;
             if (b->xhrInFlight == 0)
             {
                 xhr_start_fetch(b, r);
@@ -5904,13 +6080,30 @@ int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
             continue;
         }
         /* Slots are stable; a handler may settle/abort OTHER requests but
-         * never reorders the table, so `r` stays valid across the call. */
+         * never reorders the table, so `r` stays valid across the call.
+         * Phase 4 browser-true error routing: a TRANSPORT failure
+         * (status==0 with ok!=1 — connect refused, timeout, OOM at open)
+         * dispatches the pinned onerror (fetch REJECTS on network
+         * failures; XHR fires onerror). Every COMPLETED HTTP response —
+         * 2xx, 404, 500 — keeps the success dispatch (onload), with the
+         * bridge having stored the real status and body. Engines without
+         * an error pin (everything but NR today) fall back to fnRef. */
+        void *useFn = r->fnRef;
+        if (r->status == 0 && r->ok != 1 && r->errFnRef)
+        {
+            useFn = r->errFnRef;
+        }
         b->inXhr = 1;
-        int rc = impl->run_xhr_ref(b, r->fnRef, r->objRef, r);
+        int rc = impl->run_xhr_ref(b, useFn, r->objRef, r);
         b->inXhr = 0;
         if (rc < 0)
         {
-            logger_log("[js] xhr completion aborted the engine — stop");
+            /* Phase 4: name the error — every engine receipted this line
+             * without ever seeing WHY (the impl stores the thrown text in
+             * lastError; browsers log uncaught completion errors the same
+             * way). */
+            logger_log("[js] xhr completion aborted the engine (%s) — stop",
+                       b->lastError[0] ? b->lastError : "no error text");
             break;
         }
         if (b->callBudget < budgetBefore)
@@ -5931,7 +6124,7 @@ int jsbridge_xhr_pump(JsBridge *b, int *mutationsOut)
             JsHttpRequest *r = &b->xhr[i];
             if (r->release && !r->active)
             {
-                impl->clear_xhr_refs(b, r->fnRef, r->objRef);
+                impl->clear_xhr_refs(b, r->fnRef, r->errFnRef, r->objRef);
                 if (r->body)
                 {
                     JFree(r->body);

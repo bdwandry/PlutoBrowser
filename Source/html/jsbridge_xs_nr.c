@@ -404,6 +404,14 @@ typedef struct
     xsSlot xobj[JSBRIDGE_XHR_MAX]; /* wrapper objects (this) */
     unsigned char xfnSet[JSBRIDGE_XHR_MAX];
     unsigned char xobjSet[JSBRIDGE_XHR_MAX];
+    /* Phase 4 (browser-true error routing): onerror pins. NR is the
+     * fetch-bearing engine — the built-in fetch shim installs onload AND
+     * onerror today, so a transport failure must dispatch the SHIM's
+     * onerror (the rejection branch), not resolve from onload. Slot
+     * encoding for these pins on the shared bridge ref: MAX+1..2MAX
+     * (so one void* ref routes either array inside run/clear). */
+    xsSlot efn[JSBRIDGE_XHR_MAX];
+    unsigned char efnSet[JSBRIDGE_XHR_MAX];
     xsSlot xhrProto; /* XMLHttpRequest prototype (rooted) */
     /* API-P8: the Worker contained-stub lane (mirror of the xhr pins —
      * the OBJECT is pinned at construct; deliveries read the CURRENT
@@ -9016,7 +9024,11 @@ static const char g_fetchShimSrc[] =
     "      };\n"
     "      xhr.onerror = function () {\n"
     "        if (timer) { clearTimeout(timer); timer = 0; }\n"
-    "        reject(new Error('Fetch failed'));\n"
+    "        var detail = '';\n"
+    "        try {\n"
+    "          if (this && this.plutoError) { detail = ': ' + this.plutoError; }\n"
+    "        } catch (pe) {}\n"
+    "        reject(new Error('Fetch failed' + detail));\n"
     "      };\n"
     "      var body = opts.body;\n"
     "      if (body === undefined || body === null) { xhr.send(); }\n"
@@ -11899,6 +11911,33 @@ static void xs_xhr_send(xsMachine *the)
     {
         xsTypeError("xhr: no onload/onerror/onreadystatechange handler");
     }
+    /* Phase 4: pin the page's onerror for the transport-failure dispatch
+     * (connect refused / timeout — anything the client reports as an
+     * error). BRIDGES route by completion kind; for engines without an
+     * error pin the dispatch falls back to fnRef. A page reusing the
+     * same fn for both events still routes correctly (exactly one of the
+     * two dispatch branches runs per request). */
+    int eslot = -1;
+    for (int i = 0; i < JSBRIDGE_XHR_MAX && eslot < 0; i++)
+    {
+        if (!st->efnSet[i])
+        {
+            eslot = i;
+        }
+    }
+    int pinnedErr = 0;
+    if (eslot >= 0)
+    {
+        xsSlot errFn = xsGet(xsThis, xsID("onerror"));
+        if (fxIsCallable(the, &errFn))
+        {
+            st->efn[eslot] = errFn;
+            st->efnSet[eslot] = 1;
+            xsRemember(st->efn[eslot]);
+            pinnedErr = 1;
+        }
+    }
+    int efnRef = pinnedErr ? (eslot + 1 + JSBRIDGE_XHR_MAX) : 0;
     st->xfn[fslot] = fn;
     st->xfnSet[fslot] = 1;
     xsRemember(st->xfn[fslot]);
@@ -11919,11 +11958,13 @@ static void xs_xhr_send(xsMachine *the)
     {
         jsbridge_xhr_send_body(b, id, reqBody, reqBodyLen,
                                (void *)(intptr_t)(fslot + 1),
+                               efnRef ? (void *)(intptr_t)efnRef : NULL,
                                (void *)(intptr_t)(oslot + 1));
     }
     else
     {
         jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
+                          efnRef ? (void *)(intptr_t)efnRef : NULL,
                           (void *)(intptr_t)(oslot + 1));
     }
     xsResult = xsUndefined;
@@ -12405,20 +12446,34 @@ static void xs_worker_new(xsMachine *the)
 }
 
 /* XHR vtable: release the pinned completion + wrapper (slot inert). */
-static void xs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void xs_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                              void *objRef)
 {
     XsState *st = (XsState *)b->implState;
     if (!st || !st->machine)
     {
         return;
     }
+    /* Phase 4 slot-tag decode (see xs_run_xhr_ref): 1..MAX = xfn,
+     * MAX+1..2MAX = efn. fnRef is always a success pin; errFnRef may
+     * carry the onerror pin (or 0/NULL). */
     int fslot = (int)(intptr_t)fnRef - 1;
+    int eslot = (int)(intptr_t)errFnRef - 1;
+    if (eslot >= JSBRIDGE_XHR_MAX)
+    {
+        eslot -= JSBRIDGE_XHR_MAX;
+    }
     int oslot = (int)(intptr_t)objRef - 1;
     xsBeginHostExit(st->machine);
     if (fslot >= 0 && fslot < JSBRIDGE_XHR_MAX && st->xfnSet[fslot])
     {
         xsForget(st->xfn[fslot]);
         st->xfnSet[fslot] = 0;
+    }
+    if (eslot >= 0 && eslot < JSBRIDGE_XHR_MAX && st->efnSet[eslot])
+    {
+        xsForget(st->efn[eslot]);
+        st->efnSet[eslot] = 0;
     }
     if (oslot >= 0 && oslot < JSBRIDGE_XHR_MAX && st->xobjSet[oslot])
     {
@@ -12448,12 +12503,29 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
         return 1;
     }
 #endif
-    int fslot = (int)(intptr_t)fnRef - 1;
+    /* Phase 4 slot-tag decode: 1..JSBRIDGE_XHR_MAX indexes st->xfn (the
+     * success dispatch); MAX+1..2MAX indexes st->efn (onerror). The pump
+     * chooses which ref to hand over by completion kind. */
+    int ref = (int)(intptr_t)fnRef;
+    int fslot = ref - 1;
     int oslot = (int)(intptr_t)objRef - 1;
-    if (fslot < 0 || fslot >= JSBRIDGE_XHR_MAX || !st->xfnSet[fslot])
+    if (fslot >= JSBRIDGE_XHR_MAX)
+    {
+        fslot -= JSBRIDGE_XHR_MAX; /* onerror pin */
+    }
+    if (ref <= 0 || fslot < 0 || fslot >= JSBRIDGE_XHR_MAX)
     {
         return 1;
     }
+    /* A cleared/timed-out pin is inert (no call), matching the historical
+     * !xfnSet[fslot] guard for a badly-timed release. */
+    if ((ref > JSBRIDGE_XHR_MAX && !st->efnSet[fslot]) ||
+        (ref <= JSBRIDGE_XHR_MAX && !st->xfnSet[fslot]))
+    {
+        return 1;
+    }
+    xsSlot handlerFn = (ref > JSBRIDGE_XHR_MAX) ? st->efn[fslot]
+                                                : st->xfn[fslot];
     xsMachine *m = st->machine;
     b->inClick = 1; /* reuse the dispatch re-entrancy guard */
     xsBeginHostExit(m);
@@ -12461,15 +12533,27 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     {
         xsBeginHost(m);
         {
-            xsVars(3);
+            xsVars(4);
             xsTry
             {
-                xsVar(0) = st->xfn[fslot];
+                xsVar(0) = handlerFn;
                 xsVar(1) = (oslot >= 0 && oslot < JSBRIDGE_XHR_MAX &&
                             st->xobjSet[oslot])
                                ? st->xobj[oslot]
                                : xsNull;
                 xsVar(2) = xsString((r && r->body) ? r->body : "");
+                /* Phase 5: the transport taxonomy rides the wrapper — the
+                 * fetch shim's onerror reads this.plutoError to build the
+                 * browser-faithful reject reason ('Fetch failed: <phrase>
+                 * (err=N)'). Error dispatch only; the success lane stays
+                 * plain (browsers attach nothing on onload). */
+                if (ref > JSBRIDGE_XHR_MAX && oslot >= 0 &&
+                    oslot < JSBRIDGE_XHR_MAX && st->xobjSet[oslot] &&
+                    r && r->err[0])
+                {
+                    xsSet(xsVar(1), xsID("plutoError"),
+                          xsString(r->err));
+                }
                 xsCall2_noResult(xsVar(0), xsID("call"), xsVar(1), xsVar(2));
             }
             xsCatch

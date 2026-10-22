@@ -18,7 +18,7 @@ receipts (log rows, suites, deploys). Date-stamp every change at the bottom.
 | Engine's browser API surface | 100% | COMPLETE | DOM read/write, events **(receipted end-to-end Phase 1: submit/input/change dispatch, bubbling to document listeners, preventDefault honored)**, fetch **(real + receipted Phase 2: promise shape, local+wire receipts, setRequestHeader Content-Type wire lane, currentScript asserted)**, the page's own address **(receipted Phase 3: live location getters, pushState/replaceState in-engine journal with popstate/hashchange back-stack delivery, document.title set/get, pushState never navigates — `apihist: pass=7 miss=0`)**, console **(receipted Phase 4: every level tagged into the log file — `[console.log/warn/error/info/debug]` rows with printf substitution (%s/%d/%o/%%·out-of-args-literal) + the console-shape renderer (nested objects/arrays, `[1, 2, 3, 4, …5]`, depth-2 bounded) + assert browser semantics (truthy silent / falsey error row, never throws) + the panel stays clean — `apicon: pass=8 miss=0 sent=17`, `P4COUNT 17` = 16 rows + the documented silent assert)**, ES modules **(receipted Phase 5: the loader-side module lane — both scanners flag `<script type="module">` and the router transforms import/export in C before ANY engine sees the source, so every engine gets the same lane with the vendored engines untouched: IIFE module scope, import-first graph on a per-document ledger (cycle/depth/cap receipts), namespace objects `globalThis.__p5mod[<resolved URL>]`, named/default/star import forms, `export const/let/var/function/class` materialized after the body runs; imports resolve module-RELATIVELY through url_resolve (the journal's resolver) and fetch on the page's own roads — the `about:` store and the `file:` Data-dir loader rule with the flat file-road join; probe receipts `apimod: kids=3 refuse=PASS` (modin inline runs, modabs named bindings, modstar `* as ns`, and the path-only import on the opaque about: base refusing exactly as browsers refuse it — `./p5x.js` throws its honest load error), and the `file://modpage.html` bar proves the relative chain `import './p5rel.js'` → nested `./p5rel-child.js` runs children before the importer (`modpage: pass=2 miss=0 kids=2`); documented boundaries: export default/{list}/* cut whole with receipts, dynamic import() untouched, data:/http(s) module fetches refused synchronously, template ${} contents not re-lexed)**, DOM conveniences **(receipted Phase 6: `template.content` with the browser shape — the parsed template element stays reachable while its children parse into the DETACHED `#template-content` fragment (nodeType 11, parent-NULL: inert to getElementById/render/census; `content` materializes empty for created templates), `el.closest()` through the shared SW5 selector machinery (document-order self-then-ancestors, null for unusable selectors), `el.dataset` = a fresh camelCase snapshot per access (setAttribute is the write road), the append family returning its touched node per MDN — probe receipts `apidom: pass=6 miss=0` and the P0 `template` row flipping into `apisum: pass=12 miss=2` on all gates; the phase also repaired the id road — one shared O(depth) `dom_find_by_id` replaces the adapters' push-all-children getElementById walks that aborted whole once a node held 65+ element children, silently hiding every later id on wide bodies)**, timers, localStorage/sessionStorage **(receipted Phase 7: the shared webstorage road — localStorage persists per origin across boots, sessionStorage per run; origin rule `http(s)://authority` / one `file://` bucket / per-URL `about:` / opaque `"null"` fail-store; 4KB quota throws `QuotaExceededError` and stores nothing; `storage: PASS` + `[webstorage] quota:` + `visits` counter receipts on all three engines)**, workers **(receipted Phase 8: the contained-stub lane — the constructor SHIPS so `new Worker(url)` never dies on a ReferenceError; a stub constructs silently with the shape-complete object (`postMessage`/`terminate` functions, `onerror`/`onmessage` null) and tells the page via the standard async `onerror` path at the next pump with `ev = {message}`; the worker script never compiles or runs — `worker: PASS` + `[p8w] worker onerror` + `[worker] onerror delivered #1 present=1` on all three engines, `apisum: pass=14 miss=0` on XS)**, wrapper identity + the className accessor **(receipted Phase 9: the browser identity model now on every engine — ONE wrapper object per DOM node for the page's whole life, cached per node in a bridge-scoped table with engine-held refs (mujs registry keys unref'd at close; duktape stash-hidden heapptr pins; XS NR keeps its own P1-lane state arrays) so strict `===` chains and page-written expandos survive getElementById/parentNode/appendChild/insertBefore returns — the P6 apidom identity rows `closest`/`appendret` flip MISS→PASS on mujs and duktape — and `el.className` ships on all three engines through one shared write road (the classList family's snapshot/dirty-receipt contract, store identical to `setAttribute('class')`), `apidom: pass=7 miss=0` on all gates after the 7th `classnames` row)**, async http(s) module graphs + dynamic `import()` **(receipted Phase 10 — the API surface CLOSES: transport in the router against the single-flight client (`http_is_loading()==0` head + ~20s/~40s watchdogs; `http_get`'s 0=refused/1=started contract corrected against receipts), the bridge-scoped `modFlight[6]` table (epoch-tagged, parents parked, drain = the standing `mod_finish_run`, completion cascades by key — receipts `net: enqueue remote … (depth 2)` → `parked … on 1 remote child(ren)` → `delivered … bytes status=200` → `drain` → `cascade`), dynamic `import()` via `__p5di(` rename spans at any brace depth + the ES5 page shim `globalThis.__p5dynimport` + the native `__p5modRequest(spec,base)` per engine (`k:/p:/x:` strings, dynq tickets settled at the module pump, never re-entrant), `export {local as exported}` list exports now materialize (aliases included) while `export {list} from` stays receipted-boundary, probe `apimod: kids=7 refuse=PASS` with moddyn/moddynid/modmiss/modnet rows (modnet = the pinned punycode CDN fetched over https and its 6 named exports asserted; conditional-PASS on failure), file gate `modpage: pass=3 miss=0 kids=3` on the full static file→file→https chain with `reuse` discipline; frozen engines feature-detect and write honest `MISS` rows (`apimod: kids=5 refuse=FAIL` on mujs/duk, `apisum pass=10 miss=4` unchanged) and the P10 body-error receipt lane exposed a standing silent mujs death — muJS lacked `globalThis`, fixed with the ES2020 identity alias, the P5 chain now alive; the file-loader tolerates a stray trailing slash on file referents, another diag-caught real bug)**. Missing: none — the API surface set is closed; the honest non-features (service workers, IndexedDB) are policy-documented rather than faked |
 | HTML + CSS | ~95% | COMPLETE (residuals = documented device policies) | Phases 1–10 closed: selector language, external stylesheet fetch, `var()`/`calc()` resolution, full `@media` evaluation (MQ4/5 + link attrs + the standalone `css_media_holds` API now feeding `<source media>`), the spec-anchored positioning lane (`position`/offsets/`z-index` consumed), the overflow lane (visually-hidden recipe suppression, `text-overflow: ellipsis` + `-webkit-line-clamp` real line cuts, region refs as honest no-ops), the flex/grid container lane (`display:flex/grid` containers, gap mounts on the halved-px scale with rem/em fraction precision `.75rem` = 12px exact, `align-items/align-self: center` on real containers, the whole distribution family consumed), P7's landed generated content (`::before`/`::after` printing inline with quotes/attr()/escapes resolved, `::marker` feeding the li bullet path, `:root`/`:target`/`:disabled`/`:enabled`/`:checked`/`:placeholder-shown`/`:empty` honest matchers, the consumed-inert `::`-family + `:focus-visible`/`:focus-within` joining documented policies), P8's interactive set (spec-srcset candidate selection with the panel-width policy live on real Wikipedia thumbs, `<picture>` source ordering by media=, working reset buttons with walk-time default capture + the browser click→reset activation order, multiple-select accumulation + real name-repeated serialization, the summary-less details default label), and P9's fidelity polish (the shared `fresh_len_px` unit reader across every walk-side length consumer — rem margins land, `"50%"` margins refuse, vmin/vmax/ch/ex/pt widen the Q namespace, `@media` consumes vmin/vmax; CSS translate() = REAL paint offsets mounted per-block at the ten block-open lanes with % keyed to the element's own box and the inline-replaces-whole-value cascade, rotate/scale/skew/matrix/transform-origin = consumed census vocabulary; gradient dark-hero polarity now rides background gradients on the sheet route — dark gradient heroes invert) — probe v9 `PASS (0 fails)` (105+ rows: doc-field mounts, content/state battery, srcset picks + msel/reset model asserts, tf battery + invert/pct-margin rows, 120vmin MQ row). Gaps: generated text stays text (no per-line/per-char styling — `::first-line`/`::first-letter`/`::selection` = consumed-inert policy names), real 2-D distribution + raster transforms (rotate/scale/skew/matrix) = documented policy non-features (a 2-D compositor is the only honest home — trajectory line keeps them there), translate skips form widgets & separators by policy, focus states remain the always-match family (device truth: no persistent focus), template.content & the JS DOM surface stay out of the bridge (JS-phase item), `select size>1` = a one-line field (no multi-row widget on the flat panel), multiple-select deselection = the reset button (no pick-list UI); and P10's declarative end-event lane (`@keyframes`/`@-webkit-keyframes` registries (ident-only names, >24 chars refuse = the animation stays inert, never silently mis-fires), the `animation-name` value resolver (first registry-known token, numeric/functional/keyword-skipping), the `walk_anim_engage` companion at every block-open lane with the infinite/zero-count/paused guards and a per-(node,name) exactly-once dedupe map, `animationend`/`transitionend` delivered post-render as kind-4 listeners from an addEventListener vocabulary that exists for real in both element and document paths, `transitionend` armed by the walk-visible gate attributes (class/id flips noted through the JsBridge mutation-notes ring at nine tree-mutation sites, gated on the winner being non-`none`)) |
 | Forms & interaction | 100% (residuals = documented device policies) | COMPLETE | Phases 0-7 closed: values, toggles, native validation, Enter/reset/submit API, FormData parity, browser-true GET navigation, dialog-method hold, text/plain + reflected method/enctype/encoding, and **Phase 7's close lands full parity: the battery reads identically on all three engines (`formsum: pass=28 miss=0 policy=5` — the frozen `.type` reflect mirrors the XS shape exactly, and the dead frozen kind-6 listener lane reopened via stored JsListener types while the click road stays byte-standing)**; the 5 POLICY rows (no OS file picker, no date/range/color widgets, multi-row select stays a one-line field, tag-gated form prototype, multipart withheld) stand as documented device stances contested no further, not faked features |
-| Network | ~70% | NOT STARTED | Real HTTP client (POST/cookies/redirects/timeouts), snap cache, spill-to-disk bodies |
+| Network | 100% (residuals = documented engine ceilings + POLICY rows) | COMPLETE (program sealed 2026-10-21) | Real HTTP client (POST/cookies/redirects/timeouts), snap cache, spill-to-disk bodies — **Phases 0–7 CLOSED 2026-10-21, program sealed** (`about:netprobe` battery 23 rows; **Phase 1** response cache tier: freshness/validators/304→200 swap, `reval304` PASS; **Phase 2** extra-header wire lane: page setRequestHeader headers byte-for-byte on the wire + Range/206 slices, `headerecho`+`rangeseg` PASS; **Phase 3** redirect verb matrix: 307/308 preserve method+body, `redirverb307` PASS; **Phase 4** status/error surfaces + body-decode hardening: `wirechunked`/`wire404`/`labtimeout` PASS — plus the Duktape local-XHR completion abort root-caused+fixed (call layout, handler capture, per-instance accessors — `localxhr: PASS len=15545`); **Phase 5** cookie-jar edge rules (IP-host Domain refusal, RFC §5.1.4 default-path) + connection-error taxonomy receipted (refused / DNS mapped by host shape from the runtime's `NET_CONNECTION_FAILED=-21`, surfaced through the fetch shim's reject); **Phase 6** residual sweep — Duktape FULL battery parity (sync-settle Promise polyfill + the 1:1 fetch shim as engine JS, `setRequestHeader` on the shared lane, varargs body send, real separate `onerror` pin with the plutoError attach — the mis-aimed put fatal root-caused via macOS `sample` and fixed, plus the clear-lane stash read fixed); **Phase 7** seal — full battery re-receipt from the final source on XS-NR AND Duktape (both `netsum: pass=21 miss=0 policy=2 skip=0` incl. the labtimeout bounded rejection + the cookie/taxonomy rows), muJS ceiling standing (`pass=1 miss=20` — no fetch on that engine, honest MISS rows) and the QJS stall standing (canvas `netsum: pending`, localfetch/fetchpostlocal honest MISS) re-documented as per-ENGINE rows, the engine-4 page sweep re-clean (8 pages, 0 failure lanes), prod restore strings-verified 0/0 + stable home heartbeats — the client itself has no known gaps; the standing rows are the 2 device-policy statements in the battery (HTTP/1.1-only wire, per-request TCP single-flight) plus the per-engine ceilings above, not client gaps |
 | Media (canvas/video/audio) | <10% | NOT STARTED | Not built; sites stub out containedly, never crash |
 | Robustness under pressure | recently hardened | NOT STARTED | Wikipedia device crash chain fixed (R59 re-walk contract + `break_lines` guard); about:jsext monolith contained (R60 residency + chunked routing); failures are absence, not brittleness |
 
@@ -901,8 +901,584 @@ the same shape the HTML+CSS program closed with. **Sealed at COMPLETE: every eng
 full battery identically (`pass=28 miss=0 policy=5`), the non-features stand as the 5 POLICY
 rows.**
 
+## Active roadmap — Network → close (the Network program, SIM-ONLY)
+
+Program opened 2026-10-21 on the standing survey (~70%): real HTTP client with TLS, HTTP/1.1,
+chunked + gzip decode, redirects-to-depth, cookie jar persisted via storage `[cookies]`,
+timeouts + bounded retry, JS POST through `http_request_ct`, snap cache, spill-to-disk bodies.
+Confirmed gaps are receipted as probe rows, not vibes. **Simulator-only program — no device
+builds and no device testing.** One sim process at a time (`kill -9`, 0-proc verify after
+every boot). The netlab server (`tests/netlab_server.py`, 127.0.0.1:8931) is TEST
+INFRASTRUCTURE ONLY — it reaches the app exclusively through the `PLUTO_NETLAB_ON` build
+define on simulator driver builds (the shipped app never references it; plain prod builds
+print the wire rows as honest SKIPs).
+
+- [x] **Phase 0 — probe baseline** *(M)* — **CLOSED 2026-10-21.** `about:netprobe` lands as
+  the 10th Test Cases card: an 18-row battery — 4 local rows (every build/engine), 12 wire
+  rows over the netlab origin (driver builds only), 2 POLICY rows (HTTP/1.1-only wire;
+  per-request TCP single-flight) — closing with `[netprobe] netsum: pass=N miss=M policy=K
+  skip=S`. Engine receipts from ONE final source: **XS-NR `pass=9 miss=7 policy=2 skip=0`**
+  (byte-identical across two builds — deterministic); **muJS `pass=1 miss=15 policy=2
+  skip=0`** (standing ceiling: no `fetch` on the engine — the 12 wire rows print honest
+  `MISS no fetch on this engine (ceiling)`; `localxhr` PASS len=15545); **Duktape: 16 rows
+  settle + `page: ran=1 errs=0`, then `[js] xhr completion aborted the engine — stop`** —
+  the local-XHR completion lane kills the whole delivery pump (timers included), so
+  `localxhr`/`netsum` stall (STANDING DEFECT — Phase 4 owner). The 7 standing-truth MISS
+  rows on XS-NR, each owning a future flip: `wirechunked` (raw chunked framing reaches the
+  JS road undecoded — `b=a`), `wire404` (`.ok=false` correct but status stays 0, error body
+  undelivered), `headerecho` (non-Content-Type headers recorded+logged but never ride the
+  wire — the standing boundary made measurable), `redirverb307` (307 must PRESERVE
+  method+body; the deferred redirect restart re-fires a plain GET — `method=GET body=none`),
+  `reval304` (no validators lane — second fetch is a full 200), `rangeseg` (Range dropped by
+  the same header boundary — full 200), `labtimeout` (RESOLVED-OK via the **zombie-retry
+  race**: the first-byte watchdog retry leaves the older attempt's socket alive and its
+  40s-late first byte completes the fetch, beating the 60s bound —
+  `[http] no response in 20 s (attempt N); retrying` receipts in the log). Transport-tier
+  spill receipted at scale: the `/big?bytes=4194304` driver boot →
+  `[http] spill: streaming body to disk` + `[http] spill delivery over residency cap
+  (ram=16240 disk=4178064)`; the page tier's budget then rejects the 4MB text page as an
+  error page (standing page budget — the driver's bounded retry restored the session page,
+  a standing retry-semantics receipt). Home card: the prod binary carries the page (strings
+  receipt `Net Probe` / full NETPROBE HTML); the `count=11` crank receipt prints on the next
+  manual crank (unattended boots never crank).
+- [x] **Phase 1 — HTTP response cache tier** *(M)* — **CLOSED 2026-10-21.** Freshness +
+  validators landed: the client now covers itself with an HTTP response cache so repeat
+  visits stop touching the network when the stored copy is provably usable. STORAGE: an
+  in-RAM LRU tier (`HttpCacheEntry`, 8 entries / 512KB cap) keyed on the normalized URL +
+  method, each entry holding the final wire response (status, headers, cached body) with
+  its validators (primary ETag; Last-Modified as the `If-Modified-Since` fallback). CONSULT
+  order: cache lookup happens BEFORE URL parse/marshalling in `start_request` (~line 3211)
+  and before the snapshot system is even considered — the cache tier answers below the
+  snapshot fast-path, above the wire. FRESHNESS: `max-age` of `Ns-Cache-Control`/`Cache-Control`
+  governs a direct fresh serve (`cache serve (fresh)`); a stale/no-store entry revalidates —
+  request building (~2683–2701) injects `If-None-Match: <etag>` / `If-Modified-Since: <date>`
+  so the server can answer 304. A wire 304 swaps the cached status/body back over the
+  response path (~4363–4395): the client keeps the wire line protocol, and the cached body
+  routes to the consumer with `g_bodyStart` landing at the header terminator — JS and the
+  DOM see an honest 200-style delivery of the cached bytes, receipts
+  `[http] cache revalidated (304 -> 200)`. POLICY: entries store only wire-final 200s, only
+  when neither the 304-fill nor a cache serve already satisfied the request
+  (`!g_servedFromCache`, store hook ~4828); `no-store` responses never store. NO behavior
+  change for `about:`/`file:` pages (they never reach the tier) and no site-specific keys —
+  general-purpose on every road. Receipts (engine 4 XS-NR, netlab :8931):
+  `netsum: pass=11 miss=6 policy=2 skip=0` (19 rows = 13 wire + 2 policy + 4 local;
+  `reval304: PASS (stale entry revalidated: wire 304, cached body served as 200)`,
+  `cachefresh: PASS (fresh local serve)`, the six MISS rows standing and Phase-2–4-owned —
+  wirechunked/wire404/headerecho/redirverb307/rangeseg/labtimeout unchanged); lab trail
+  `GET /fresh2 If-None-Match="FRESH-1"` → 304; cache store/serve/revalidate row family in
+  the sim log (`tests/logs/sim_p1_run2_reval304_PASS_20261021_134424.log`,
+  `netlab_p1_run2_20261021_134424.log`). SNAP-CACHE INTERPLAY (driver URL = lab `/fresh`,
+  `NR_SOAK=2`): boot nav stores the entry (`[http] cache store … etag="FRESH-3"
+  maxage=1 bytes=19`) + snapshot; the soak revisit fell through the (default-off)
+  snapshot layer to the HTTP cache and got a DIRECT fresh serve `[http] cache serve
+  (fresh) age=58ms` with the cached body verified as page content
+  (`NETLAB-FRESH-BODY-3`), and the netlab trail shows exactly ONE sim wire GET for the
+  whole boot — cached revisit costs zero wire traffic (`tests/logs/sim_snapcache_soak2_full.log`,
+  `netlab_snapcache_*.log`). The soak verdict line `[nr-autotest] FAIL: revisit missed the
+  snapshot (hits=0)` is the R47 harness's snapshot-hit expectation colliding with the
+  `cacheWebsite` default (Off purges the left page's snapshot at nav start — `main.c`
+  `cache_off()`), pre-existing seek behavior, NOT a Phase 1 regression; with snapshot loads
+  ON the snapshot fast-path still wins (Phase-0-era soak receipts standing). PHASE-END
+  REGRESSION (all 10 Test-Cases pages booted on Phase-1 source): api `apisum pass=14 miss=0`,
+  forms `formsum: pass=28 miss=0 policy=5`, css `PASS (0 fails)`, jsext `8 passed, 0 failed`
+  (+ PL10ANIMMOUNT1/PL10TRANS1 exactly-once), jstest `[sw-suite] 54 passed, 4 partial,
+  1 missing` (the one missing row = `getElementsByTagName (element) → false`, a
+  pre-existing XS-NR-fork delta vs the Sept-21 STOCK-XS receipt `55 passed, 3 partial,
+  0 missing` — the Sept log ran engine 3; Phase 1 never executes on `about:` pages, and the
+  JS-bridge owns the row), acidtest renders 128 blocks errs=0 (IMGDEC boundary row standing),
+  formval renders + errs=0 (battery resting), blank renders empty honest (snap skip-save
+  path), home prod-restore boot clean with zero autotest rows; cross-engine netprobe
+  standing receipts re-proven: muJS `netsum: pass=1 miss=16 policy=2 skip=0` (no fetch on
+  the engine — instant ceiling), Duktape rows settle then `[js] xhr completion aborted the
+  engine — stop` with `netsum: pending` (standing, Phase 4-owned). Logs banked under
+  `tests/logs/` (`sim_page_*`, `sim_netprobe_mujs_pass1_miss16_*`,
+  `sim_netprobe_duktape_aborted_*`, `sim_prod_home_clean_*`).
+- [x] **Phase 2 — the extra-header wire lane + Range/206** *(M)* — **CLOSED 2026-10-21.**
+  The page's own request headers are REAL on the wire now, and Range/206 delivers its
+  bytes: a general-purpose single lane, no site-specific anything. CLIENT
+  (`Source/core/http_client.c/.h`): a bounded per-request extra-header lane
+  (`HttpHeaderPair`, 6 pairs, name 44 / value 240 — caps mirrored in the bridge), deep-
+  copied at call time through one shared front door `http_call_ex` (build_request emits
+  the list byte-for-byte beside the engine's base headers). Browser-faithful header
+  semantics: the four base identity lines are REPLACE-lanes (a page-set user-agent /
+  accept / accept-language / content-type overwrites the engine default — one line on
+  the wire); a repeated name folds values with the browser's `", "` join; the
+  engine-owned/spec-forbidden set (cookie/host/content-length/connection/transfer-
+  encoding/validator lanes/proxy-*/sec-*/…) refuses with a logged reason — never
+  invented, never silently dropped; CRLF/control bytes refuse at BOTH the bridge and the
+  client (injection guard). The lane survives redirect hops (browser-true — the hop
+  lane captures + re-arms after its own reset; pre-NetP2 roads capture an empty lane
+  and stay byte-identical); 206 responses ride the ordinary 2xx delivery (success
+  status surfaces to JS; the store hook's `==200` gate keeps 206 out of the Phase 1
+  response cache; a Range-carrying request skips the cache consult entirely —
+  byte-accurate segments come from the wire, never a whole-body serve). BRIDGE
+  (`Source/html/jsbridge.c/.h`): `setRequestHeader` stores into a per-request list
+  (browser-faithful open() resets it), and xhr/fetch send routes the page's lanes to the
+  new client front doors (`http_get_headers` / `http_request_h`) — GET and POST both
+  carry the extras; the pre-NetP2 signatures
+  (`http_get`/`http_request_ct`) stay byte-identical for frozen callers. Owns
+  `headerecho` (now: GET **and** POST echo steps — `/hdr` receipted server-side
+  `X-Pluto-Receipt=r1` on the wire GET, then `POST /hdr bodyLen=3 X-Pluto-Receipt=p1`)
+  and `rangeseg` (Range header on the wire → 206 slice delivered: `Range=bytes=0-4`,
+  body `NETLA`, `status===206`): **`netsum: pass=13 miss=4 policy=2 skip=0`** on XS-NR
+  (pass 11→13; the four remaining MISS rows are Phase 3–4 owned: wirechunked,
+  wire404, redirverb307, labtimeout). Cross-engine (same build shapes): muJS standing
+  `pass=1 miss=16 policy=2 skip=0` (no fetch — instant ceiling), Duktape standing
+  rows-settle-then `[js] xhr completion aborted the engine — stop` (Phase 4 owner).
+  QuickJS — NEW standing finding, receipted honestly: the battery runs its local rows
+  (`localxhr PASS len=15545`) and completes its FIRST wire fetch (lab received `GET
+  /fresh`; the Phase 1 cache stored it), then the engine's promise pump never resumes
+  the chain — no second wire leg, `netsum` stays pending (frozen-engine follow-up
+  candidate; first QJS wire-battery observation ever — Phase 0 receipted XS-NR/muJS/
+  Duktape only; no NetP2 code touched the QJS lane and the 0-extras road is
+  byte-identical). PHASE-END REGRESSION (all 10 Test-Cases pages on Phase-2 source,
+  engine 4, ≤30s boots): api `apisum: pass=14 miss=0` (+ all sub-receipts), forms
+  `formsum: pass=28 miss=0 policy=5`, css `PASS (0 fails)`, jsext `8 passed, 0 failed` +
+  PL10 rows exactly-once, jstest standing `54 passed, 4 partial, 1 missing`
+  (element-gEBTN row, unchanged standing), acidtest 128 blocks errs=0, formval renders
+  errs=0 (resting), blank honest empty render, netprobe 13/4/2 + owned rows PASS,
+  home prod-restore boot clean with ZERO autotest rows (heartbeats 50fps). Logs banked
+  under `tests/logs/` (`sim_p2_*`, `netlab_p2_*`). One seam note receipted on the way:
+  the first prod-restore boot re-ran the stale driver binary (SIMDEFS flip requires the
+  touch+rm dance) — receipted honest, rebuilt, restore re-proven clean.
+- [x] **Phase 3 — redirect verb semantics** *(M)* — **CLOSED 2026-10-21.**
+  The browser-true verb matrix now holds through the deferred restart:
+  301/302/303 keep the standing POST→GET rewrite with the body dropped
+  (receipted standing rows), and **307/308 PRESERVE the method + body +
+  Content-Type**. General-purpose, in `Source/core/http_client.c`: the
+  redirect **decision block** captures the hop state BEFORE its own
+  `reset_state()` — the verb is captured only when the status is 307/308,
+  and the BODY is captured by **pointer-steal** (`g_reqBody` is nulled so
+  the decision's reset frees nothing; the owned copy re-arms as the live
+  body at the deferred lane — never aliased, never double-freed, no leak:
+  an unconsumed steal is freed by the front door `http_call_ex` when a
+  brand-new request supersedes the pending hop). The deferred restart
+  lane then re-arms method/body/Content-Type + the NetP2 base-line
+  overrides + the page's extra-header lane, all from the decision-block
+  capture — which also REPAIRS the Phase 2 hop ordering honestly flagged
+  in the source: the extras capture previously sat in the deferred lane,
+  AFTER the decision block's reset had already cleared the live lane
+  (inert for every receipt to date — no redirect row sets a page header;
+  the verb capture demanded the decision point, and the row-true fix
+  lands here as one capture story). Ownership list drops to Phase 4
+  (wirechunked / wire404 / labtimeout + the Duktape abort) after
+  **`redirverb307: PASS`**: the row's POST `/redirectpost?mode=307`
+  (body `a=1&b=2`, ct `application/x-www-form-urlencoded`) 307-hops to
+  `/verbecho` and the server receipted **`POST /verbecho bodyLen=7`** —
+  method AND body AND ct preserved through the restart — while the same
+  trail keeps the standing `GET /verbecho bodyLen=0` shape for the 302
+  rows. **`netsum: pass=14 miss=3 policy=2 skip=0`** on XS-NR (pass
+  13→14; remaining MISS = Phase 4 owned). Cross-engine standing
+  (phase-close boots): muJS ceiling `pass=1 miss=16 policy=2 skip=0`;
+  Duktape rows-settle-then `[js] xhr completion aborted the engine —
+  stop` (their Phase 4 owner); QuickJS **stall reproduced identically**
+  (local rows + first wire fetch, then the promise pump never resumes —
+  twice-reproduced standing finding). PHASE-END REGRESSION (all 10
+  Test-Cases pages on Phase-3 source, engine 4, ≤30s boots): api
+  `apisum: pass=14 miss=0`, forms `formsum: pass=28 miss=0 policy=5`,
+  css `PASS (0 fails)`, jsext `8 passed, 0 failed` + PL10 rows
+  exactly-once, jstest standing `54 passed, 4 partial, 1 missing`,
+  acidtest 128 blocks errs=0, formval renders errs=0, blank honest empty
+  render, netprobe 14/3/2 + `redirverb307` PASS, home prod-restore boot
+  clean with ZERO autotest rows in the fresh binary (strings-verified:
+  0 `nr-autotest` occurrences; touch+rm dance performed — 47KB heap
+  idling ~48fps). Logs banked under `tests/logs/` (`sim_p3_*`,
+  `netlab_p3_*`).
+- [x] **Phase 4 — status/error surfaces + body-decode hardening on the JS road** *(M)* —
+  **CLOSED 2026-10-21.** All three owned rows flip + the Duktape completion abort is
+  root-caused and fixed. **wirechunked: PASS (decoded)** — the http_client spill
+  materialize lane now de-chunks the reassembled `[ram|disk]` buffer when
+  `g_savedIsChunked` (the XHR road never binds `onSuccessSpill`, so spilled chunked
+  bodies previously took the raw-frames fallback `b=a`). **wire404: PASS** —
+  `jsbridge.c xhr_on_success`'s non-2xx lane now stores `r->status` + the capped error
+  body while keeping `r->ok=0` and the `HTTP %d` bridge error; the too-large /
+  over-budget / OOM lanes store `r->status` too, so a 404 surfaces as `status===404` with
+  `.ok===false`. **labtimeout: PASS (bounded rejection)** — the netlab `/slow` route now
+  sleeps 75s (> every watchdog); the honest chain is audible: 2×
+  `[http] no response in 20 s (attempt N); retrying` → `Connection timed out after 60
+  seconds.` → `xhr #20 FAIL network` → shim `onerror` → fetch REJECTS. **errFnRef error
+  routing sweep (browser-true):** `JsHttpRequest.errFnRef` (jsbridge_internal.h), the
+  vtable `clear_xhr_refs(b, fnRef, errFnRef, objRef)` signature, pump dispatch
+  transport-failure → `onerror` ref else `fnRef`, and NR pinning `onerror` separately
+  (`XsState.efn[]/efnSet[]`, tagged slot encoding 1..MAX=xfn / MAX+1..2MAX=efn) —
+  duktape/mujs/quickjs/stock-xs pass NULL (standing). **Zombie-retry race hardened:**
+  `tcp_open_cb` now also guards `conn != g_tcp` (mirrors `tcp_closed_cb`) — a recycled
+  attempt's late resolve during the 20s backoff window can no longer enter the live
+  path (the success variant marked `g_connOpen` for a dead attempt and the request sat
+  silent to the 60s zombie; the failure variant killed the live retry). **The Duktape
+  local-XHR completion abort — ROOT-CAUSED with byte-level instrumentation and
+  fixed in three distinct defects:** ① the **`duk_pcall` layout bug** — the timer lane
+  pushed `[fn, undefined-as-this]` but `duk_pcall(ctx, 0)` has NO `this` slot, so the
+  pushed `undefined` WAS the call target: every deferred timer fire threw
+  `TypeError: undefined not callable` from duktape's internal call check
+  (duk_js_call.c:1349) and the page's activity died on the first fire (the receipted
+  "aborted the engine" shape trailed the old firstErr contract fix); layout now
+  matches the duktape contract (`[fn]`). ② the **handler-capture off-by-one** in
+  `duk_xhr_send` — `fnHeapptr = duk_get_heapptr(-1)` ran AFTER the stash
+  push/put/pop churn where index `-2` was `this`: the captured "handler" was the
+  WRAPPER object, so every deferred completion threw `TypeError: [object Object] not
+  callable` (proof: fnHeapptr == objHeapptr byte-identical in the send dump; the stash
+  pins themselves landed fine). Capture now reads the handler before the churn. ③ the
+  **per-instance accessor gap** — `duktape_define_xhr` attached
+  `status/readyState/responseText/response/responseURL` ONLY on the constructor's
+  `.prototype`, but the Duktape constructor returns its own plain wrapper whose
+  prototype is `Object.prototype`, so `x.status` read `undefined` even with the
+  delivery fixed (`localxhr: MISS st=undefined`); the shared `duk_xhr_attach_accessors`
+  now attaches the getter table BOTH prototype- AND per-instance. Page-error contract
+  (Phase 4 standing part): caught JS exceptions in the deferred lanes are PAGE errors
+  (`errs++`, error text taken, return 0 — never a fatal `-1` abort); zero
+  `[js] … aborted the engine` lines in every boot since the contract fix. **Receipts:**
+  engine 4 (XS-NR): **`netsum: pass=17 miss=0 policy=2 skip=0`** — ALL 13 wire rows PASS
+  (flips: wirechunked, wire404, labtimeout; standing: fixtures/local*
+  fetch/postlocal/policy×2/cachefresh/wireget/wiregzip/headerecho/cookieecho/redir302/
+  redirget302/redirverb307/reval304/rangeseg);
+  Duktape: **`localxhr: PASS len=15545`** + `netsum: pass=1 miss=16 policy=2 skip=0`
+  (the muJS-parity ceiling — no `fetch` on the engine; the honest MISS rows print);
+  muJS ceiling re-proven `pass=1 miss=16 policy=2 skip=0` with `localxhr` PASS;
+  zero throw/abort lines in all Duktape boots post-fix. QJS pump stall: twice-
+  reproduced STANDING (documented, not a Phase 4 item). PHASE-END REGRESSION (all 10
+  Test-Cases pages on Phase-4 source, engine 4, ≤30s boots): api `apisum: pass=14
+  miss=0` (479 PASS rows), forms `formsum: pass=28 miss=0 policy=5`, css `PASS (0
+  fails)`, jsext `8 passed, 0 failed` + PL10 rows exactly-once, jstest standing `54
+  passed, 4 partial, 1 missing`, acidtest 128 blocks errs=0, formval renders errs=0
+  (resting), blank honest empty render, netprobe 17/0/2 + owned flips, home
+  prod-restore boot clean with ZERO autotest rows in the fresh binary
+  (strings-verified: 0 `nr-autotest` occurrences; touch+rm dance performed; binary
+  strings `nr-autotest` count = 0). Logs banked under `tests/logs/`
+  (`sim_p4_netprobe_xs_pass17_regress_20261021_1741.log`,
+  `sim_p4_netprobe_duktape_localxhr_pass_20261021_1737.log`,
+  `sim_p4_netprobe_duktape_pass1_16_2_trimmed_20261021_1739.log`,
+  `sim_p4_netprobe_mujs_ceiling1_16_2_*`, `sim_p4_page_*`, `build_p4_*`).
+- [x] **Phase 5 — cookie jar edge rules + connection error taxonomy** *(S)* —
+  **CLOSED 2026-10-21.** **Cookie jar upgraded to RFC 6265-faithful on two
+  receipted gaps (cookie_jar.c/.h):** ① **IP-host + Domain refusal** — a
+  numeric request-host can never domain-match (§5.1.3), so ANY Domain
+  attribute (even `Domain=<the exact IP>`) now invalidates the whole
+  Set-Cookie per §5.3 (6) — the old equal-string branch had accepted
+  `Domain=127.0.0.1` on a `127.0.0.1` origin as a domain cookie; the
+  browser-faithful `host_is_ip()` test (digits/dots/colons only) holds for
+  EVERY IP-served site, not just the lab. ② **RFC §5.1.4 default-path** —
+  the cookie path now derives from the REQUEST-URI directory (not always
+  `/`): `/dir/page` → `/dir`, `/a/b/c` → `/a/b`, `/a/` → `/a`, and the
+  §5.2.4 Path-attribute fallback (no leading `/`) uses it too; threaded
+  through `g_parsed->path` via the new
+  `cookie_jar_process_set_cookies_ex()` front door (legacy signatures
+  delegate); the standing `cookieecho` row PASSED unchanged. Multi-label
+  PSL residual (`Domain=co.uk`) documented standing in cookie_jar.h — no
+  Public Suffix List ships on device. **Battery: 19 → 23 rows** with four
+  Phase-5 wire rows: `cookieexp` (Max-Age=1 expired → pruned at replay,
+  jar otherwise healthy), `cookiedmn` (`Domain=127.0.0.1` refused
+  entirely), `netdns` (bogus host → reject), `netrefuse` (closed port →
+  reject); netlab gained `/setcookieexp` + `/setcookiedmn`. **Connection
+  error taxonomy (receipted empirically):** boot19 logged the raw codes —
+  the sim reports BOTH shapes (nosuchhost.invalid AND 127.0.0.1:8939) as
+  `NET_CONNECTION_FAILED=-21` via tcp_open_cb, and the vendored
+  pd_api_network.h enum is STALE vs the runtime (the SDK's own reference
+  enumerates NET_CONNECT_TIMEOUT=-18, NET_CONNECTION_CLOSED=-19 —
+  header claims -18! — NET_PERMISSION_DENIED=-20,
+  NET_CONNECTION_FAILED=-21; mirrored as PLUTO_NET_* aliases in
+  http_client.c without touching the SDK header). Browsers distinguish by
+  resolving first and no lookup API exists, so the client classes the
+  -21 by HOST SHAPE exactly as browsers do: numeric host → `connection
+  refused (server did not accept)`; name host → `host not found (could
+  not resolve or connect)` — the honest hedge (the SDK cannot separate
+  NXDOMAIN from resolved-then-refused); `net_err_text()` maps the full
+  enum, the async-open / sync-open / newConnection-NULL lanes each have
+  distinct logs, and the phrase rides g_error → bridge → JS. **The fetch
+  shim now surfaces the taxonomy at reject time** ('Fetch failed: <phrase>
+  (err=N)'): the NR error dispatch pins `r->err` onto the xhr wrapper as
+  `plutoError` and the shim's onerror folds it into the reject reason —
+  the standing generic-only reject is gone. **Receipts (boot20, engine 4
+  XS-NR): `netsum: pass=21 miss=0 policy=2 skip=0`** — all four new rows
+  PASS with the taxonomy visible in the reject text
+  (`netdns: PASS (DNS taxonomy: ... host not found (could not reso…)`,
+  `netrefuse: PASS (refused taxonomy: ... connection refused …)`);
+  every standing row unchanged; `cookieecho: PASS (jar round-trip)` under
+  the default-path change. Ceilings: muJS + Duktape
+  `pass=1 miss=20 policy=2 skip=0` with `localxhr: PASS len=15545` and
+  zero throws (Duktape completion fixes hold); QJS standing stall
+  re-documented on Phase-5 source (`netsum: pending`, localxhr PASS).
+  PHASE-END REGRESSION (10/10 Test-Cases pages on Phase-5 source, engine
+  4, ≤30s): api `apisum: pass=14 miss=0`, forms `formsum: pass=28 miss=0
+  policy=5`, css `PASS (0 fails)`, jsext `8 passed, 0 failed`, jstest
+  standing `54 passed, 4 partial, 1 missing`, acidtest 128 blocks errs=0,
+  formval clean, blank clean, netprobe boot20 above, home prod-restore
+  boot clean with 0 autotest/netlab strings in the binary
+  (strings-verified) + stable heartbeats. Logs banked
+  (`sim_p5_netprobe_xs_pass21_receipt_20261021_1808.log`,
+  `sim_p5_netprobe_mujs_ceiling_20261021_1812.log`,
+  `sim_p5_netprobe_duktape_ceiling_20261021_1815.log`,
+  `sim_p5_netprobe_qjs_stall_standing_20261021_1818.log`, `sim_p5_page_*`,
+  `build_p5_*`).
+- [x] **Phase 6 — residual sweep** *(S)* — **CLOSED 2026-10-21.** Every flip row
+  PASS on XS-NR **+ Duktape** — the sweep brought the second receipted engine to
+  FULL battery parity, not just flip rows: the vendored duktape strips both the
+  Promise builtins (throw-stubs behind `DUK_USE_PROMISE_BUILTIN`) and the
+  executor job queue, so the fetch shim rides a small engine-owned Promise
+  polyfill + the 1:1 XS shim source, both injected as JS-in-C via
+  `duk_safe_call`-protected eval right after the defines in `duktape_init`
+  (polled first: `globalThis` does not exist in this build — both sources use
+  the `(function (g) { … })(this)` shape; polyfill = constructor executor +
+  then/catch with value flattening (thenable adoption) + pass-through settle +
+  resolve/reject, callbacks synchronous inside then() on settled promises
+  (battery-true: the real async comes from the xhr delivery pump), and
+  `Promise.all/race` left honestly UNSET (TypeError) rather than faked).
+  Engine surface completed with it: `setRequestHeader` on both xhr roads
+  (per-instance + prototype) riding the shared `jsbridge_xhr_set_header`
+  lane, varargs `send` reading the body and posting through the C4
+  `jsbridge_xhr_send_body` twin, and the browser-true dual handler pin —
+  `onerror` captured separately at send (`pluto.xerr.<id>` stash key, skipped
+  when a page reuses one fn for both events), passed as `errFnRef`, and the
+  pump routes transport failures (status==0, ok!=1) to it while every
+  completed HTTP response (404/500 included) keeps the success dispatch; the
+  run-ref attaches the taxonomy text as `this.plutoError` on the error
+  dispatch so the shim's reject reads ('Fetch failed: Connection failed:
+  connection refused (…)'). Two real bug fixes landed with the sweep:
+  (1) the plutoError attach aimed its `duk_put_prop_string` at the pushed
+  STRING (index -1) instead of the wrapper (-2) — the unprotected strict-mode
+  throw exited C through `duk_sdk_fatal`, whose handler loops forever and
+  froze the whole app mid-battery; root-caused at byte level with a macOS
+  `sample` of the frozen sim (`js_timers_update → jsbridge_xhr_pump →
+  duktape_run_xhr_ref → duk_put_prop_string → duk_hobject_putprop →
+  duk_err_handle_error_fmt → duk_fatal_raw`, message
+  "cannot write property 'plutoError' of 'Connection timed out after 60
+  se…'") — fixed to -2; (2) the clear-lane (`duktape_clear_xhr_refs`) read
+  pin VALUES through the enum at -2 instead of the stash at -3, so identity
+  never matched and every pin leaked until close — fixed (reads at -3, adds
+  the `pluto.xerr.` prefix + the errFnRef break condition). Receipts:
+  Duktape engine-1 netprobe boot26/27 =
+  `netsum: pass=21 miss=0 policy=2 skip=0` with every row PASS incl.
+  `labtimeout: PASS (bounded rejection)` + the four Phase-5 taxonomy/cookie
+  rows + `localxhr: PASS len=15545`; XS-NR engine-4 re-receipted UNCHANGED
+  (pass=21 miss=0 policy=2 skip=0 — duktape-only source, no XS behavior
+  drift); muJS ceiling standing (`pass=1 miss=20 policy=2 skip=0`, `MISS no
+  fetch on this engine (ceiling)` honest rows); QJS standing stall (netsum
+  pending, localfetch MISS — re-documented on Phase-6 source); engine-4 page
+  sweep re-clean (apiprobe/formprobe/cssprobe/jsext/javascript/acidtest/
+  formval/blank — 0 fail lanes, healthy heartbeats everywhere, `[jsext-t]`/
+  `[sw-t]` PASS rows again); prod restore home boot clean, strings-verified
+  0 `nr-autotest` / 0 `netlab` in the binary. Logs banked
+  (`sim_p6_netprobe_duktape_pass21_receipt_20261021_1842.log` incl. the
+  frozen fatal receipt `sim_p6_duktape_fatal_plutoerror_20261021_1829.log`,
+  `sim_p6_netprobe_xs_pass21_receipt_20261021_1847.log`,
+  `sim_p6_netprobe_mujs_ceiling_20261021_1844.log`,
+  `sim_p6_netprobe_qjs_stall_standing_20261021_1845.log`, `sim_p6_page_*`,
+  `sim_p6_prod_restore_home_20261021_1903.log`, `build_p6_*`).
+- [x] **Phase 7 — program seal** *(S)* — **CLOSED 2026-10-21. THE NETWORK PROGRAM
+  IS SEALED.** Full battery re-receipt from the final source: XS-NR
+  (`netsum: pass=21 miss=0 policy=2 skip=0`, boot1) AND Duktape
+  (`netsum: pass=21 miss=0 policy=2 skip=0`, boot2 — both settle ~100s through
+  the labtimeout watchdog chain, every row PASS incl. `labtimeout: PASS
+  (bounded rejection)` + the Phase-5 cookie/taxonomy rows + `localxhr PASS
+  len=15545`); muJS ceiling standing re-documented (`pass=1 miss=20 policy=2
+  skip=0` — one boot flaked at frame 1 and was re-booted clean; the standing
+  no-fetch ceiling is the honest per-ENGINE row set forever); QJS stall
+  standing re-documented (canvas `netsum: pending`, `localfetch`/`
+  fetchpostlocal` honest MISS, fixtures/localxhr PASS); the engine-4 page
+  sweep re-clean on final source (apiprobe/formprobe/cssprobe/jsext/
+  javascript/acidtest/formval/blank — all 8 under 30s, 0 failure lanes,
+  healthy heartbeats, `[jsext-t]`/`[sw-t]`/`[formprobe]` PASS lore intact;
+  two sim-spawn flakes (0-byte logs) re-booted and receipted); prod restore
+  strings-verified 0 `nr-autotest` / 0 `netlab` + stable home heartbeats.
+  Standing as POLICYROWS/standing engine rows, not client gaps: the 2 battery
+  POLICY rows (HTTP/1.1-only wire, per-request TCP through the single-flight
+  client) + the muJS no-fetch ceiling + the QJS netsum stall (both frozen
+  engines; documented standing). Logs banked
+  (`sim_p7_netprobe_xs_seal_20261021_1913.log`,
+  `sim_p7_netprobe_duktape_seal_20261021_1917.log`,
+  `sim_p7_netprobe_mujs_ceiling_seal_20261021_1918.log`,
+  `sim_p7_netprobe_qjs_stall_seal_20261021_1919.log`, `sim_p7_page_*`,
+  `sim_p7_prod_restore_home_20261021_1929.log`, `build_p7_*`).
+
 ## Update log
 
+- **2026-10-21 (Network-Phase 7 CLOSED — PROGRAM SEALED)** — **the seal**: the
+  Network program closes with the full battery re-receipted from the final
+  source on BOTH receipted engines — XS-NR and Duktape each close
+  `netsum: pass=21 miss=0 policy=2 skip=0` (all 21 grader rows PASS incl. the
+  labtimeout bounded rejection, the cookie expiry/domain refusals, and the
+  DNS/refused taxonomy through the fetch shim's reject); the muJS no-fetch
+  ceiling (`pass=1 miss=20 policy=2 skip=0`) and the QJS netsum stall
+  (canvas `netsum: pending`, localfetch/fetchpostlocal honest MISS) stand as
+  per-ENGINE rows, documented forever; the engine-4 nine-page sweep
+  re-cleaned (0 failure lanes across apiprobe/formprobe/cssprobe/jsext/
+  javascript/acidtest/formval/blank) and the prod restore ships
+  strings-verified 0 autotest/netlab with stable home heartbeats. Standing
+  rows are 2 device-policy statements in the battery (HTTP/1.1-only wire,
+  per-request TCP single-flight) plus the per-engine ceilings — the client
+  itself carries no known gaps. **Network raised ~94% → 100% (COMPLETE).**
+
+- **2026-10-21 (Network-Phase 6 CLOSED)** — **residual sweep → Duktape full
+  battery parity**: the second receipted engine now runs the whole 23-row
+  netprobe battery, not just flip rows. Build-up: the vendored duktape has NO
+  functioning Promise (builtins are throw-stubs, job queue stripped) so a
+  small sync-settle Promise polyfill ships as JS-in-C evaluated protected
+  (`duk_safe_call`) right after the defines, followed by the 1:1 XS fetch
+  shim — both through the `(function (g) { … })(this)` shape because
+  `globalThis` is absent in this build; `Promise.all/race` stay honestly
+  unset. Engine surface: `setRequestHeader` rides the shared API-P2 set-header
+  lane (both registration roads), varargs `send` carries stringified POST
+  bodies through the C4 send-body twin, and `onerror` is pinned for real
+  (separate `pluto.xerr.<id>` stash key at send, same-handler reuse skips the
+  pin) with the pump's existing kind-routing handing it transport failures
+  and the run-ref attaching the taxonomy text as `this.plutoError`. Bugs
+  fixed + receipted: the plutoError put aimed at the pushed STRING (-1) →
+  unprotected strict-mode throw → `duk_sdk_fatal` loop → whole-app freeze
+  (root-caused via macOS `sample` of the frozen sim, receipt banked) — the
+  put targets the wrapper (-2) now; and the clear-lane read its stash values
+  through the ENUM (-2) instead of the STASH (-3) so pins never matched and
+  leaked — fixed, with the `pluto.xerr.` prefix + the third-ref break
+  condition added. Receipts: engine-1 Duktape `netsum: pass=21 miss=0
+  policy=2 skip=0` (every row PASS, incl. `labtimeout: PASS (bounded
+  rejection)` and the Phase-5 cookie/taxonomy rows); engine-4 XS-NR
+  re-receipted unchanged (pass=21 miss=0 policy=2 skip=0); muJS ceiling
+  standing (`pass=1 miss=20 policy=2 skip=0`); QJS stall standing (netsum
+  pending); engine-4 nine-page sweep clean + prod-restore strings 0/0.
+  Network raised ~92% → ~94%.
+
+- **2026-10-21 (Network-Phase 5 CLOSED)** — **cookie-jar edge rules + connection
+  error taxonomy**: the jar is now RFC 6265-faithful on the two receipted gaps —
+  IP-host + any Domain attribute refuses the whole Set-Cookie (§5.1.3/§5.3; the
+  equal-string branch previously stored `Domain=127.0.0.1` on a `127.0.0.1`
+  origin), and the default path derives from the REQUEST-URI directory (§5.1.4;
+  `/dir/page` → `/dir`, `/a/` → `/a`, §5.2.4 fallback included) threaded through
+  the new `cookie_jar_process_set_cookies_ex()` front door; `cookieecho` PASSes
+  unchanged. Battery grew 19→23 rows (`cookieexp` Max-Age expiry pruned at
+  replay, `cookiedmn` Domain-on-IP refused, `netdns` bogus host, `netrefuse`
+  closed port). **Taxonomy receipted empirically:** the sim reports refused and
+  DNS shapes ALIKE as `NET_CONNECTION_FAILED=-21` (raw-code boot19), the vendored
+  SDK header's enum is stale vs the runtime (real codes -18..-21 per the SDK
+  reference; mirrored as PLUTO_NET_* aliases), so the client classes -21 by
+  HOST SHAPE browser-faithfully — numeric host → `connection refused (server
+  did not accept)`, name host → `host not found (could not resolve or
+  connect)` — and the full enum maps in `net_err_text()` with distinct
+  async-open / sync-open-fail logs. The fetch shim now rejects with the
+  taxonomy ('Fetch failed: <phrase> (err=N)') via the `plutoError` pin on the
+  xhr wrapper. Boot20: `netsum: pass=21 miss=0 policy=2 skip=0` on XS-NR (all
+  four new rows PASS with the phrases visible in the reject text);
+  muJS/Duktape ceilings `pass=1 miss=20 policy=2` + `localxhr: PASS len=15545`
+  (zero throws); QJS standing stall re-documented. Phase-end regression 10/10
+  Test-Cases pages green + prod restore strings-verified. Phase 6 next:
+  residual sweep.
+- **2026-10-21 (Network-Phase 4 CLOSED)** — **status/error surfaces + body-decode
+  hardening** on the JS road: `wirechunked: PASS (decoded)` (the spill materialize lane
+  de-chunks the reassembled buffer when `g_savedIsChunked`), `wire404: PASS`
+  (`xhr_on_success`'s non-2xx lane stores `r->status` + the capped body — `ok=0`, err
+  `HTTP %d`; the too-large/OOM lanes store status too), `labtimeout: PASS (bounded
+  rejection)` (netlab `/slow` sleeps 75s; the audible chain: 2× 20s-watchdog retries →
+  60s `Connection timed out` → `onerror` → fetch rejects). Browser-true **errFnRef**
+  error routing swept through the bridge/vtable/NR engine (`onerror` dispatched on
+  transport failure; duktape/mujs/qjs/stock-xs pass NULL standing); the **zombie-retry
+  race** hardened (`tcp_open_cb` guards `conn != g_tcp`). **The Duktape completion
+  abort root-caused at byte level and fixed** — three defects: the timer lane's
+  `duk_pcall` layout (a pushed `undefined-as-this` was the CALL TARGET → every fire
+  threw `TypeError: undefined not callable`), the handler capture off-by-one in
+  `duk_xhr_send` (read AFTER the stash churn → the WRAPPER object was captured →
+  `TypeError: [object Object] not callable`; send dump proved fnRef==objRef), and the
+  per-instance XHR accessor gap (`status/responseText/…` lived only on an unused
+  prototype → `MISS st=undefined`). Net: engine 4 battery
+  `netsum: pass=17 miss=0 policy=2 skip=0` (all 13 wire rows PASS);
+  Duktape/muJS `localxhr: PASS len=15545` with the `pass=1 miss=16 policy=2` ceiling;
+  zero aborts. Phase-end regression all 10 Test-Cases pages green + prod restore
+  strings-verified (`nr-autotest` = 0). Phase 5 next: cookie-jar edge rules +
+  connection-error taxonomy.
+- **2026-10-21 (Network-Phase 3 CLOSED)** — the **redirect verb matrix** lands
+  general-purpose: 301/302/303 keep the browser-true POST→GET rewrite (standing
+  receipted), and **307/308 now PRESERVE method + body + Content-Type through the
+  deferred restart** — capture at the redirect DECISION block before its own
+  reset, body carried by pointer-steal (null-before-reset, re-arm-after, front
+  door frees an unconsumed steal: no double-free, no leak), alongside the
+  decision-point move of the NetP2 extra-header hop capture (a repair of the
+  inert deferred-lane ordering — honest note in the source; no receipt ever rode
+  it). `redirverb307` flips PASS: `POST /verbecho bodyLen=7` on the lab trail
+  (the 302 rows keep `GET /verbecho bodyLen=0`) — **`netsum: pass=14 miss=3
+  policy=2 skip=0`** (pass 13→14; remaining MISS = Phase 4 owned: wirechunked,
+  wire404, labtimeout). Cross-engine standing re-receipted (muJS ceiling;
+  Duktape abort; QuickJS stall reproduced identically — twice). Phase-end
+  regression: all 10 Test-Cases pages green on engine 4 + strings-verified clean
+  prod restore (touch+rm dance). Network row ~80% → **~85%**. Edits in
+  `Source/core/http_client.c` only (capture statics + decision block + deferred
+  lane + front-door retire); zero netlab-server changes; logs banked under
+  `tests/logs/`.
+
+- **2026-10-21 (Network-Phase 2 CLOSED)** — the **extra-header wire lane + Range/206**
+  lands general-purpose: a page's `setRequestHeader` list rides the wire byte-for-byte
+  (bounded 6-pair lane, replace semantics for user-agent/accept/accept-language/
+  content-type, honest logged refusals for the forbidden/engine-owned set and CRLF
+  bytes, `", "` fold on repeats, redirects carry the list browser-true), and Range
+  requests reach the wire with 206 slices delivered as real 2xx successes. `headerecho`
+  (upgraded to GET **and** POST steps — both receipted on the lab trail) and `rangeseg`
+  flip PASS: **`netsum: pass=13 miss=4 policy=2 skip=0`** (phase-1 close was 11/6/2;
+  remaining MISS = Phase 3–4 owned). Frozen engines re-receipted standing (muJS ceiling
+  pass=1; Duktape abort line unchanged) plus one NEW standing finding: **QuickJS's
+  wire-battery promise pump stalls after its first wire completion** (first QJS wire
+  observation ever; follow-up candidate, no NetP2 dependency). Phase-end regression
+  battery: all 10 Test-Cases pages green on engine 4 + prod restore clean. Network row
+  ~75% → **~80%**. All edits in `Source/core/http_client.{c,h}`,
+  `Source/html/jsbridge.{c,{-internal.h}}` + the battery row shape; zero
+  netlab-server changes needed (the POST drain already existed); logs banked under
+  `tests/logs/`.
+
+- **2026-10-21 (Network-Phase 1 CLOSED)** — the **HTTP response cache tier** lands client-side:
+  a top-in-request LRU (8 entries / 512KB) storing final wire responses with validators, a
+  max-age freshness contract (fresh entries serve directly, stale entries revalidate with
+  injected `If-None-Match`/`If-Modified-Since`), and the 304→200 body swap so a revalidated
+  entry delivers its cached bytes as an honest 200 — `reval304` flips from open gap row to
+  **PASS** (`netsum: pass=11 miss=6 policy=2 skip=0`; 19 rows). `about:` and `file:` pages
+  bypass the tier by design; Phase 2–4 own all six standing MISS rows unchanged. Snap-cache
+  interplay receipted both directions: snapshot loads ON → snapshot fast-path wins
+  (unchanged); snapshot loads OFF (browser default) → the revisit falls through to the HTTP
+  cache and serves fresh with ZERO wire traffic (cached body verified as content). The
+  phase-end **regression battery booted all 10 Test-Cases pages on Phase-1 source** — all
+  green (api 14/0, forms 28/0/5, css PASS, jsext 8/0, jstest standing element-gEBTN
+  XS-NR-fork row documented, acidtest/formsval/blank/home clean) — plus cross-engine
+  standing receipts re-proven (muJS pass=1 ceiling, Duktape XHR-abort standing). The one
+  code edit outside the tier: `tests/netlab_server.py` `/fresh` + `/fresh2` now
+  POST-increment their ETag so a second request can actually revalidate (the lab-side bug
+  that blocked 304 answers; header comment updated). All 15 phase receipts banked under
+  `tests/logs/`.
+
+- **2026-10-21 (Network-Phase 0 CLOSED)** — `about:netprobe` lands as the **10th Test Cases
+  card** (`NETPROBE_HTML` in `Source/core/http_client.c`, `TEST_PAGES` entry after formval,
+  home-page count comment 9→10) with the 18-row battery: 4 local rows, 12 wire rows over the
+  netlab lab origin, 2 POLICY rows, `netsum: pass=N miss=M policy=K skip=S` close-out.
+  **Lab seam:** `tests/netlab_server.py` (stdlib-only, 127.0.0.1:8931, receipts to stdout)
+  reaches the app ONLY via the `PLUTO_NETLAB_ON` build define; the origin is bare
+  `PLUTO_NETLAB_HOST`/`PLUTO_NETLAB_PORT` defines + C-stringify — a bare URL define is
+  poisoned at translation phase 3 (the `//` eats the define as a comment; the first engine-4
+  boot receipted LAB collapsing to `'http:'`, dialing `http:443 (tls)` with an empty host —
+  receipted then re-seamed). **Engine receipts (final source, one build shape):** XS-NR
+  `netsum: pass=9 miss=7 policy=2 skip=0` (identical across two builds — deterministic);
+  muJS `pass=1 miss=15 policy=2 skip=0` (standing no-`fetch` ceiling, honest
+  `MISS no fetch on this engine (ceiling)` rows; `localxhr` PASS len=15545); Duktape 16 rows
+  + `page: ran=1 errs=0` then `[js] xhr completion aborted the engine — stop` — the
+  local-XHR completion lane kills the delivery pump, `netsum` stalls (standing defect,
+  Phase 4 owner; page hardening — try-wrap + 2s settle-guard timer — receipts it honestly
+  and cannot help: the abort precedes page code). **7 standing-defect MISS rows receipted
+  on XS-NR** (wirechunked raw-chunk-frame `b=a`; wire404 ok=false-but-st-0 with the error
+  body undelivered; headerecho the Content-Type-only wire boundary; redirverb307
+  `method=GET body=none` where 307 must preserve; reval304 no-validators full-200; rangeseg
+  dropped-Range full-200; labtimeout resolved-ok via the zombie-retry race — the watchdog
+  retry leaves the older attempt's socket alive and its late first byte completes the
+  fetch). Local rows all PASS (fixtures / localfetch len=23215 / localxhr len=15545 /
+  fetchpostlocal); wire PASSes receipt the standing surface: wireget, wiregzip (Content-
+  Encoding decode on the JS road), cookieecho (Set-Cookie → jar → Cookie replay over the
+  lab), redir302 (2-hop chain), redirget302 (302 rewrites POST→GET, body dropped —
+  browser-true). `/big?bytes=4194304` driver boot receipts the spill tier at scale
+  (`[http] spill: streaming body to disk` + `spill delivery over residency cap (ram=16240
+  disk=4178064)`); the page tier's budget rejects the 4MB text page (error page; the
+  driver's bounded retry restored the session page — standing retry semantics). Plain prod
+  build boots clean (0 autotest rows; heartbeats 50 fps) and carries the page (strings
+  receipt); the `count=11` crank receipt prints on the next manual crank. README documents
+  `about:netprobe`; roadmap section added with Phases 1–7 checkboxes. All Phase 0 changes
+  UNCOMMITTED (user handles git).
+- **2026-10-21 (Network program OPENED)** — Network row flips **NOT STARTED → IN
+  PROGRESS**. Standing-stack survey receipts the ~70% with line evidence (TLS, HTTP/1.1,
+  chunked, gzip, redirects-to-depth, cookies persisted across boots, timeouts, JS POST,
+  spill, snap); confirmed gaps = the HTTP response cache tier (no validators/freshness/304),
+  Range/206, redirect verb semantics (every 3xx re-fires as GET, body dropped), and
+  status/error-surface receipts. Simulator-only program; plan presented, implementation
+  pending go.
 - **2026-10-21 (Forms-Phase 7 CLOSED — program seal)** — Forms & interaction flips
   **COMPLETE**. The close lands two general-purpose frozen-engine fixes and ends with every
   Forms engine reading the full battery identically: **(1) element `.type` reflect on

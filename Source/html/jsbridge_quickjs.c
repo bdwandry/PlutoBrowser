@@ -3441,7 +3441,9 @@ static JSValue qjs_xhr_send(JSContext *ctx, JSValueConst this_val,
     st->xfn[fslot] = JS_DupValue(ctx, handler);
     JS_FreeValue(ctx, handler);
     st->xobj[oslot] = JS_DupValue(ctx, this_val);
-    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1),
+    /* Phase 4: no separate onerror pin in this engine yet (NULL routes
+     * the error dispatch through fnRef — standing). */
+    jsbridge_xhr_send(b, id, (void *)(intptr_t)(fslot + 1), NULL,
                       (void *)(intptr_t)(oslot + 1));
     return JS_UNDEFINED;
 }
@@ -3566,7 +3568,9 @@ static JSValue qjs_fetch(JSContext *ctx, JSValueConst this_val,
     }
     st->xres[slot][0] = funcs[0]; /* resolve */
     st->xres[slot][1] = funcs[1]; /* reject  */
-    jsbridge_xhr_send(b, id, (void *)(intptr_t)(slot + 1), NULL);
+    /* Phase 4: the fetch-mode store holds its own resolve/reject pair —
+     * no separate onerror pin needed here (NULL keeps the fallback). */
+    jsbridge_xhr_send(b, id, (void *)(intptr_t)(slot + 1), NULL, NULL);
     return promise; /* the script owns it from here */
 }
 
@@ -3711,8 +3715,10 @@ static int quickjs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
 
 /* XHR vtable: release the pinned completion + wrapper (slot inert); a
  * NULL objRef means fetch promise mode — free any unresolved funcs. */
-static void quickjs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void quickjs_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                                   void *objRef)
 {
+    (void)errFnRef; /* this engine resolves/rejects promises directly */
     QjsState *st = (QjsState *)b->implState;
     if (!st || !st->ctx)
     {

@@ -72,6 +72,13 @@
 #ifndef JSBRIDGE_XHR_URL_MAX
 #define JSBRIDGE_XHR_URL_MAX 512
 #endif
+/* NetP2: page-set request headers that ride the wire (per request).
+ * Caps mirror the client's HTTP_EXTRA_HEADERS_MAX lane (6 pairs) —
+ * keep them in sync. Value 240 covers Range/Authorization-sized
+ * fields on the device envelope. */
+#ifndef JSBRIDGE_XHR_EXTRA_MAX
+#define JSBRIDGE_XHR_EXTRA_MAX 6
+#endif
 
 typedef enum
 {
@@ -99,6 +106,12 @@ typedef struct
     char *body;          /* SDK-allocated response (owned; freed at sweep) */
     size_t bodyLen;
     void *fnRef;         /* engine-held completion handler */
+    /* Phase 4 (browser-true error routing): engine-held onerror ref,
+     * dispatched ONLY when the completion is a transport failure
+     * (status==0 && ok!=1). NULL on engines that do not pin a separate
+     * error handler — their dispatch falls back to fnRef (historical
+     * behavior; NR, the fetch-bearing engine, pins it). */
+    void *errFnRef;
     void *objRef;        /* engine-held wrapper object (this-binding) */
     /* C4 (fetch/POST, NR engine): send METHOD captured at open and the
      * REQUEST body (owned copy; freed with the request at sweep/abort/
@@ -108,14 +121,17 @@ typedef struct
     char *reqBody;
     size_t reqBodyLen;
     /* API-P2: setRequestHeader-carried request headers. Content-Type
-     * rides http_request_ct on wire POSTs (last write wins; zero-init =
-     * the historical application/json default — pre-existing callers stay
-     * byte-identical). Every OTHER header is RECORDed for receipts only:
-     * the HTTP client exposes no extra-header knob, so that's a
-     * documented boundary, never a faked conductor. */
+     * rides the wire via the client's Content-Type lane (last write
+     * wins; zero-init = the historical application/json default —
+     * pre-existing callers stay byte-identical). NetP2: every OTHER
+     * header is real now — the bounded per-request list rides the wire
+     * byte-for-byte (jsbridge_xhr_set_header refuses the engine-owned/
+     * spec-forbidden names and validates CRLF; a repeated name joins
+     * with the browser's ", " fold; cap refusals are logged). */
     char reqCt[64];
-    char xhdrName[40];
-    char xhdrVal[72];
+    char xhdrName[JSBRIDGE_XHR_EXTRA_MAX][44];
+    char xhdrVal[JSBRIDGE_XHR_EXTRA_MAX][240];
+    int xhdrCount;
 } JsHttpRequest;
 
 /* API-P3: the in-engine address journal (history.pushState/replaceState
@@ -583,8 +599,11 @@ typedef struct JsEngineImpl
     int (*run_xhr_ref)(JsBridge *b, void *fnRef, void *objRef,
                        const JsHttpRequest *r);
     /* Release one request's engine-held refs (slot already inert; called
-     * from the pump sweep and at close). Either pointer may be NULL. */
-    void (*clear_xhr_refs)(JsBridge *b, void *fnRef, void *objRef);
+     * from the pump sweep and at close). Any pointer may be NULL. NR
+     * errors ref the onerror pin (see JsHttpRequest.errFnRef); the other
+     * engines pass NULL there today. */
+    void (*clear_xhr_refs)(JsBridge *b, void *fnRef, void *errFnRef,
+                           void *objRef);
     /* Destroy the engine + engine-held references. */
     void (*close)(JsBridge *b);
     /* R20: per-frame engine pump (called from jsbridge_deferred_pump's
@@ -743,11 +762,13 @@ int jsbridge_timer_clear(JsBridge *b, int id);
  * idle, queues otherwise). abort: settle as JS_XHR_ABORTED (delivering
  * onerror through the pump). clear: deactivate (used before close). */
 int jsbridge_xhr_open(JsBridge *b, const char *method, const char *url);
-void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *objRef);
+void jsbridge_xhr_send(JsBridge *b, int id, void *fnRef, void *errFnRef,
+                       void *objRef);
 /* C4 (fetch/POST): twin of jsbridge_xhr_send that also carries the
  * REQUEST body (deep-copied). Frozen engines never call it. */
 void jsbridge_xhr_send_body(JsBridge *b, int id, const char *body,
-                            size_t bodyLen, void *fnRef, void *objRef);
+                            size_t bodyLen, void *fnRef, void *errFnRef,
+                            void *objRef);
 /* API-P2: the fetch shim's setRequestHeader lane. Content-Type overrides
  * the wire default on POSTs (http_request_ct); other headers are
  * recorded for receipts (documented wire boundary), an error text is

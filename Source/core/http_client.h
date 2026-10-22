@@ -93,6 +93,35 @@ int http_request_ct(const char *method, const char *urlString,
                     const char *contentType, const char *body, size_t bodyLen,
                     const HttpCallbacks *callbacks);
 
+/* ── NetP2: the extra-header wire lane ────────────────────────────────────
+ * Pages set real request headers via setRequestHeader (the fetch shim's
+ * `headers:` init object rides the same road). Every pair rides the wire
+ * byte-for-byte beside the engine's own base headers. The pair bytes are
+ * COPIED at call time (caller may hold transient storage), validated
+ * (CRLF/control chars and the wire-integrity set are refused with a log
+ * — never invented, never silently dropped), and re-armed across
+ * redirect hops (browser-true: a page's headers follow the request).
+ * `Range` requests by policy never serve/revalidate from a whole-body
+ * cache entry — byte-accurate segments come from the wire. */
+#define HTTP_EXTRA_HEADERS_MAX 6
+typedef struct HttpHeaderPair
+{
+    char name[44];
+    char value[240];
+} HttpHeaderPair;
+
+/* GET with the caller's extra wire headers (posted pages use
+ * http_request_h). NULL extra or nExtra<=0 = byte-identical to http_get. */
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks);
+/* General front door: METHOD + Content-Type + extra wire headers + body.
+ * Frozen callers (http_get/http_request_ct) delegate here with zero
+ * extras and keep byte-identical request behavior. */
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks);
+
 /* R15 + Compression setting: the request builder sends Accept-Encoding:
  * identity (raw bytes; reliable on weak radio) when the stored
  * encodingMode is Off (default), gzip when the user picks Gzip in

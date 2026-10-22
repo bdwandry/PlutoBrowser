@@ -22,6 +22,15 @@
 
 #define COOKIE_JAR_MAX 300
 
+/* Phase 5 domain-acceptance policy (RFC 6265 §5.3 step 6):
+ *  - numeric request-host (IP-literal) + ANY Domain attribute → the whole
+ *    Set-Cookie is refused (§5.1.3: IPs never domain-match);
+ *  - single-label public suffixes ("Domain=com") are already refused by the
+ *    dot rule in parse;
+ *  - KNOWN RESIDUAL: multi-label public-suffix entries (e.g.
+ *    Domain=co.uk on a bbc.co.uk response) cannot be refused without a
+ *    shipping the Public Suffix List — the jar accepts them by the plain
+ *    suffix rule. Documented, receipted, not a crash hazard. */
 typedef struct Cookie
 {
     char *name;        /* heap; never NULL for a stored cookie */
@@ -41,16 +50,28 @@ void cookie_jar_set_save_hook(void (*fn)(void));
 
 /* Parse a raw Set-Cookie value received from `host`. Returns a heap cookie
  * (caller frees with cookie_jar_free_cookie) or NULL if it must be ignored.
- * Sets cookie->deleteFlag for Max-Age<=0 / past Expires. */
+ * Sets cookie->deleteFlag for Max-Age<=0 / past Expires.
+ * The _ex form threads the REQUEST-URI path: RFC 6265 §5.1.4 default-path
+ * (and §5.2.4's leading-slash fallback) derive from the request-URI
+ * directory, not always "/". The non-_ex form is the legacy entry that
+ * assumes the request path has no directory component. */
+Cookie *cookie_jar_parse_set_cookie_ex(const char *host, const char *reqPath,
+                                       const char *raw);
 Cookie *cookie_jar_parse_set_cookie(const char *host, const char *raw);
 
 /* Free a cookie returned by parse. */
 void cookie_jar_free_cookie(Cookie *c);
 
-/* Store (or delete) a cookie received from `host`. */
+/* Store (or delete) a cookie received from `host`; _ex threads the request
+ * URI path for the RFC §5.1.4 default-path. */
+void cookie_jar_store_ex(const char *host, const char *reqPath,
+                         const char *raw);
 void cookie_jar_store(const char *host, const char *raw);
 
-/* Process all Set-Cookie values from one response. */
+/* Process all Set-Cookie values from one response; _ex threads the request
+ * URI path. */
+void cookie_jar_process_set_cookies_ex(const char *host, const char *reqPath,
+                                       char **list, int count);
 void cookie_jar_process_set_cookies(const char *host, char **list, int count);
 
 /* Build the Cookie request header value for host/path/ssl, or "" when none

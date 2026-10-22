@@ -48,10 +48,12 @@ extern PlaydateAPI *pluto_pd(void);
 /* Hidden props on element wrapper objects: */
 #define DUK_NODE_PROP "\xFF" "pluto.node" /* heapptr-free: raw DomNode* as pointer */
 static int duk_xhr_open(duk_context *ctx);
+static int duk_xhr_setheader(duk_context *ctx);
 static int duk_xhr_send(duk_context *ctx);
 static int duk_xhr_abort(duk_context *ctx);
 static void duk_push_xhr(duk_context *ctx, JsBridge *b);
 static void duktape_define_xhr(duk_context *ctx, JsBridge *b);
+static void duk_xhr_attach_accessors(duk_context *ctx, duk_idx_t obj);
 static void duktape_define_worker(duk_context *ctx, JsBridge *b);
 static void duktape_define_formdata(duk_context *ctx, JsBridge *b);
 static int duk_xhr_id(duk_context *ctx);
@@ -2482,6 +2484,176 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
 }
 
 /* ── vtable entry points ─────────────────────────────────────────────────── */
+
+/* Phase 6: the vendored duktape strips both the Promise builtins (they are
+ * throw-stubs behind DUK_USE_PROMISE_BUILTIN) and the executor job queue,
+ * and upstream never ships it here — so the fetch shim rides a small
+ * Promise polyfill injected as engine JS (the same pattern as the XS-NR
+ * fetch shim). Semantics kept honest: constructor executor, then/catch
+ * with value flattening (thenable adoption), pass-through settle, and
+ * resolve/reject. Callbacks on an ALREADY-settled promise run
+ * synchronously inside then() — the battery's then-chains never depend on
+ * microtask ordering (the real async comes from the xhr delivery pump,
+ * like every other engine). Promise.all/race stay unset: pages calling
+ * them on this engine get an honest TypeError, matching the vendored
+ * build's stripped promises rather than faking a partial polyfill. */
+static const char *g_dukPromiseSrc =
+    "/* pluto promise polyfill (engine-owned; duktape) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.Promise === 'function') { return; }\n"
+    "  function P(executor) {\n"
+    "    this._st = 'p'; this._x = undefined; this._q = [];\n"
+    "    var me = this; var done = 0;\n"
+    "    function rs(v) { if (!done) { done = 1; settle(me, 1, v); } }\n"
+    "    function rj(e) { if (!done) { done = 1; settle(me, 0, e); } }\n"
+    "    try { executor(rs, rj); }\n"
+    "    catch (er) { if (!done) { done = 1; rj(er); } }\n"
+    "  }\n"
+    "  function settle(p, ok, v) {\n"
+    "    p._st = ok ? 'f' : 'r'; p._x = v;\n"
+    "    var q = p._q; p._q = [];\n"
+    "    for (var i = 0; i < q.length; i++) { step(p, q[i]); }\n"
+    "  }\n"
+    "  function finish(p, ok, v) { settle(p, ok, v); }\n"
+    "  function step(p, q) {\n"
+    "    var cb = (p._st === 'f') ? q.onF : q.onR;\n"
+    "    if (typeof cb !== 'function') {\n"
+    "      finish(q.next, p._st === 'f', p._x);\n"
+    "      return;\n"
+    "    }\n"
+    "    try {\n"
+    "      var out = cb(p._x);\n"
+    "      if (out && (typeof out === 'object' || typeof out === 'function')) {\n"
+    "        var th = out.then;\n"
+    "        if (typeof th === 'function') {\n"
+    "          th.call(out,\n"
+    "            function (vv) { finish(q.next, true, vv); },\n"
+    "            function (ee) { finish(q.next, false, ee); });\n"
+    "          return;\n"
+    "        }\n"
+    "      }\n"
+    "      finish(q.next, true, out);\n"
+    "    } catch (er) { finish(q.next, false, er); }\n"
+    "  }\n"
+    "  P.prototype.then = function (onF, onR) {\n"
+    "    var next = new P(function () {});\n"
+    "    var q = { onF: onF, onR: onR, next: next };\n"
+    "    if (this._st === 'p') { this._q.push(q); }\n"
+    "    else { step(this, q); }\n"
+    "    return next;\n"
+    "  };\n"
+    "  P.prototype.catch = function (onR) { return this.then(undefined, onR); };\n"
+    "  P.resolve = function (v) {\n"
+    "    return new P(function (rs) { rs(v); });\n"
+    "  };\n"
+    "  P.reject = function (e) {\n"
+    "    return new P(function (rs, rj) { rj(e); });\n"
+    "  };\n"
+    "  g.Promise = P;\n"
+    "})(this);\n";
+
+/* Phase 6: the fetch shim on duktape — 1:1 with the receipted XS-NR shim
+ * (jsbridge_xs_nr.c g_fetchShimSrc). The xhr surface it needs exists
+ * engine-side: open/send/abort + setRequestHeader (added this phase) +
+ * per-instance status/readText accessors, and the onerror pin lands the
+ * taxonomy text as this.plutoError (see duktape_run_xhr_ref). */
+static const char *g_dukFetchShimSrc =
+    "/* pluto fetch shim (engine-owned) */\n"
+    "(function (g) {\n"
+    "  if (typeof g.fetch === 'function') { return; }\n"
+    "  if (typeof g.AbortSignal !== 'function') {\n"
+    "    var AS = function AbortSignal() {};\n"
+    "    AS.timeout = function (ms) {\n"
+    "      var n = 0;\n"
+    "      if (typeof ms === 'number' && ms === ms && ms > 0 &&\n"
+    "          ms <= 1200000) {\n"
+    "        n = Math.floor(ms);\n"
+    "      }\n"
+    "      return { aborted: false, reason: undefined, onabort: null,\n"
+    "        throwIfAborted: function () { if (this.aborted) {\n"
+    "            throw this.reason;\n"
+    "        } },\n"
+    "        addEventListener: function () {},\n"
+    "        removeEventListener: function () {},\n"
+    "        dispatchEvent: function () { return false; },\n"
+    "        plutoTimeoutMs: n };\n"
+    "    };\n"
+    "    g.AbortSignal = AS;\n"
+    "  }\n"
+    "  g.fetch = function (url, opts) {\n"
+    "    opts = opts || {};\n"
+    "    var ms = 0;\n"
+    "    var sig = opts.signal;\n"
+    "    if (sig && typeof sig.plutoTimeoutMs === 'number') {\n"
+    "      ms = sig.plutoTimeoutMs;\n"
+    "    }\n"
+    "    return new g.Promise(function (resolve, reject) {\n"
+    "      var xhr = new XMLHttpRequest();\n"
+    "      var timer = 0;\n"
+    "      try {\n"
+    "        xhr.open((opts.method || 'GET') + '', url + '');\n"
+    "      } catch (e) { reject(e); return; }\n"
+    "      var hs = opts.headers;\n"
+    "      if (hs && typeof hs === 'object') {\n"
+    "        for (var hk in hs) {\n"
+    "          try { xhr.setRequestHeader(String(hk), String(hs[hk])); }\n"
+    "          catch (hfe) {}\n"
+    "        }\n"
+    "      }\n"
+    "      if (ms > 0) {\n"
+    "        timer = setTimeout(function () {\n"
+    "          timer = 0;\n"
+    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
+    "        }, ms);\n"
+    "      }\n"
+    "      xhr.onload = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        var st = this.status || 0;\n"
+    "        var tx = this.responseText || '';\n"
+    "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
+    "          url: String(url), redirected: false,\n"
+    "          text: function () { return g.Promise.resolve(tx); },\n"
+    "          json: function () {\n"
+    "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
+    "            catch (e) { return g.Promise.reject(e); }\n"
+    "          } });\n"
+    "      };\n"
+    "      xhr.onerror = function () {\n"
+    "        if (timer) { clearTimeout(timer); timer = 0; }\n"
+    "        var detail = '';\n"
+    "        try {\n"
+    "          if (this && this.plutoError) { detail = ': ' + this.plutoError; }\n"
+    "        } catch (pe) {}\n"
+    "        reject(new Error('Fetch failed' + detail));\n"
+    "      };\n"
+    "      var body = opts.body;\n"
+    "      if (body === undefined || body === null) { xhr.send(); }\n"
+    "      else { xhr.send(String(body)); }\n"
+    "    });\n"
+    "  };\n"
+    "})(this);\n";
+
+static duk_ret_t duk_eval_shim_thunk(duk_context *ctx, void *ud)
+{
+    duk_eval_string(ctx, (const char *)ud);
+    return 1;
+}
+
+static void duktape_eval_protected(duk_context *ctx, const char *tag,
+                                   const char *src)
+{
+    if (duk_safe_call(ctx, duk_eval_shim_thunk, (void *)src, 0, 1) !=
+        DUK_EXEC_SUCCESS)
+    {
+        logger_log("[js] duktape %s eval FAILED: %s", tag,
+                   duk_safe_to_string(ctx, -1));
+        duk_pop(ctx); /* error */
+        return;
+    }
+    duk_pop(ctx); /* eval result */
+    logger_log("[js] duktape %s injected", tag);
+}
+
 static int duktape_init(JsBridge *b, const char *baseUrl)
 {
     duk_context *ctx = duk_create_heap(duk_sdk_alloc, duk_sdk_realloc,
@@ -2500,6 +2672,11 @@ static int duktape_init(JsBridge *b, const char *baseUrl)
     duktape_define_xhr(ctx, b);
     duktape_define_worker(ctx, b);
     duktape_define_formdata(ctx, b); /* Forms-Phase 5 */
+    /* Phase 6: promise polyfill + fetch shim ride post-defines (the page
+     * scripts then see fetch/Promise exactly like the XS-NR engine). */
+    duktape_eval_protected(ctx, "promise polyfill", g_dukPromiseSrc);
+    duktape_eval_protected(ctx, "fetch shim", g_dukFetchShimSrc);
+    logger_log("[js] duktape_init ctx=%p b=%p", (void *)ctx, (void *)b);
     return 0;
 }
 
@@ -2632,10 +2809,11 @@ static void duktape_clear_timer_ref(JsBridge *b, void *fnRef)
     }
     /* Find + delete the stash entry whose heapptr matches. */
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
+        const char *k = duk_get_lstring(ctx, -1, NULL);
         if (k && strstr(k, "\xFF" "pluto.tid."))
         {
             duk_get_prop(ctx, -2); /* stash[key] */
@@ -2652,6 +2830,35 @@ static void duktape_clear_timer_ref(JsBridge *b, void *fnRef)
     duk_pop_2(ctx); /* enum, stash */
 }
 
+/* Phase 4: name a thrown value honestly — Duktape's duk_safe_to_string
+ * walks a double coercion (throw → ToString → its own error) that can
+ * flatten genuine messages to "", so also pull .stack (Error objects
+ * carry it) and flatten it to one line. Reads the value at -1 and leaves
+ * the stack unchanged. */
+static void duk_log_throw(duk_context *ctx, const char *lane)
+{
+    duk_int_t t = duk_get_type(ctx, -1);
+    char flat[104];
+    flat[0] = '\0';
+    if (t == DUK_TYPE_OBJECT && duk_has_prop_string(ctx, -1, "stack"))
+    {
+        duk_get_prop_string(ctx, -1, "stack");
+        const char *st = duk_safe_to_string(ctx, -1);
+        snprintf(flat, sizeof(flat), "%s", st ? st : "");
+        duk_pop(ctx); /* stack string */
+    }
+    const char *msg = duk_safe_to_string(ctx, -1);
+    for (char *p = flat; *p; p++)
+    {
+        if (*p == '\n' || *p == '\r')
+        {
+            *p = '|';
+        }
+    }
+    logger_log("[js] duk %s threw type=%d msg=%.40s stack=%s", lane,
+               (int)t, msg ? msg : "", flat);
+}
+
 /* Invoke one pinned callback. Returns 0 ok, 1 contained error, -1 abort. */
 static int duktape_run_timer_ref(JsBridge *b, void *fnRef)
 {
@@ -2661,13 +2868,27 @@ static int duktape_run_timer_ref(JsBridge *b, void *fnRef)
         return 1;
     }
     duk_push_heapptr(ctx, fnRef);
-    duk_push_undefined(ctx); /* this */
+    /* duk_pcall(ctx, 0) has NO `this` slot: the TOP of the stack is the
+     * function. The old extra push_undefined became the call target —
+     * every fire rethrown "TypeError: undefined not callable" from
+     * duktape's internal call check, and the page's activity died on the
+     * first fire. */
     if (duk_pcall(ctx, 0) != DUK_EXEC_SUCCESS)
     {
-        int firstErr = !b->lastError[0];
+        /* Phase 4: same contract as run_xhr_ref above — a caught JS
+         * exception in a timer callback is a page error (errs++), never a
+         * fatal engine fault. The old firstErr contract's -1 aborted the
+         * timer pump for a thrown callback and then lost the retry
+         * ("firstErr" now false) — the receipted timer-fire abort shape. */
+        /* Read the true type BEFORE duk_safe_to_string — it coerces the
+         * value in place, so the old "type=string" lines described the
+         * stringified result, not the throw (agrees with the 39-byte
+         * "TypeError: ..." hex probe). */
+        duk_log_throw(ctx, "timer");
+        b->errs++;
         bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
-        duk_pop(ctx);
-        return firstErr ? -1 : 1;
+        duk_pop(ctx); /* error value */
+        return 0;
     }
     duk_pop(ctx);
     return 0;
@@ -2680,13 +2901,15 @@ static void duktape_close(JsBridge *b)
     {
         return;
     }
+    logger_log("[js] duktape_close ctx=%p b=%p", (void *)ctx, (void *)b);
     /* Safety net: sweep any timer stash pins the router did not release
      * (paranoia — js_doc_close clears the table before close). */
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
+        const char *k = duk_get_lstring(ctx, -1, NULL);
         if (k && strstr(k, "\xFF" "pluto.tid."))
         {
             duk_del_prop(ctx, -2);
@@ -2720,10 +2943,13 @@ static void duk_push_xhr(duk_context *ctx, JsBridge *b)
 
     duk_push_c_function(ctx, duk_xhr_open, 2);
     duk_put_prop_string(ctx, obj, "open");
-    duk_push_c_function(ctx, duk_xhr_send, 0);
+    duk_push_c_function(ctx, duk_xhr_setheader, 2);
+    duk_put_prop_string(ctx, obj, "setRequestHeader");
+    duk_push_c_function(ctx, duk_xhr_send, DUK_VARARGS);
     duk_put_prop_string(ctx, obj, "send");
     duk_push_c_function(ctx, duk_xhr_abort, 0);
     duk_put_prop_string(ctx, obj, "abort");
+    duk_xhr_attach_accessors(ctx, obj);
 }
 
 static int duk_xhr_open(duk_context *ctx)
@@ -2740,6 +2966,29 @@ static int duk_xhr_open(duk_context *ctx)
     }
     duk_push_pointer(ctx, (void *)(intptr_t)id);
     duk_put_prop_string(ctx, -2, DUK_XHR_ID_PROP);
+    return 0;
+}
+
+/* Phase 6: the fetch shim's setRequestHeader lane rides the SHARED
+ * bridge feature (API-P2 receipts: replace-lane content-type, forbidden
+ * set refusal with a logged reason, ", " fold for repeats, CRLF guard).
+ * Browser-faithful: only callable while the request is opened. */
+static int duk_xhr_setheader(duk_context *ctx)
+{
+    JsBridge *b = bridge_of(ctx);
+    int id = duk_xhr_id(ctx);
+    if (id <= 0)
+    {
+        return duk_error(ctx, DUK_ERR_ERROR, "xhr: header before open");
+    }
+    const char *name = duk_to_string(ctx, 0);
+    const char *value = duk_to_string(ctx, 1);
+    if (!jsbridge_xhr_set_header(b, id, name, value))
+    {
+        return duk_error(ctx, DUK_ERR_ERROR, "%s",
+                         b->lastError[0] ? b->lastError
+                                         : "xhr: header refused");
+    }
     return 0;
 }
 
@@ -2760,47 +3009,106 @@ static int duk_xhr_send(duk_context *ctx)
     {
         duk_error(ctx, DUK_ERR_ERROR, "xhr: send before open");
     }
+
+    /* Phase 6: optional body (varargs — the fetch shim posts stringified
+     * bodies). Read BEFORE any push so stack indexes stay clean. */
+    const char *reqBody = NULL;
+    duk_size_t reqLen = 0;
+    duk_idx_t top = duk_get_top(ctx);
+    if (top >= 1)
+    {
+        duk_size_t blen = 0;
+        const char *bp = duk_get_lstring(ctx, 0, &blen);
+        if (bp)
+        {
+            reqBody = bp;
+            reqLen = (size_t)blen;
+        }
+    }
+
     /* Pin the completion handler (onload → onerror → onreadystatechange
      * precedence) in the global stash and remember its heapptr. */
     static const char *const names[] = {"onload", "onerror",
                                         "onreadystatechange"};
-    void *fnHeapptr = NULL;
-    char key[40];
-    snprintf(key, sizeof(key), DUK_HIDDEN_SYMBOL("pluto.xfn.%d"),
+    char fkey[40];
+    char okey[40];
+    char ekey[40];
+    snprintf(fkey, sizeof(fkey), DUK_HIDDEN_SYMBOL("pluto.xfn.%d"),
              b->xhrIdSeq + 1); /* next id the router hands out on start */
+    snprintf(okey, sizeof(okey), DUK_HIDDEN_SYMBOL("pluto.xobj.%d"),
+             b->xhrIdSeq + 1);
+    snprintf(ekey, sizeof(ekey), DUK_HIDDEN_SYMBOL("pluto.xerr.%d"),
+             b->xhrIdSeq + 1);
+
+    void *fnHeapptr = NULL;
+    void *errHeapptr = NULL;
+    void *objHeapptr = NULL;
+
+    duk_push_this(ctx);
+    objHeapptr = duk_get_heapptr(ctx, -1);
+
+    /* Success ref: first callable in precedence order. Capture BEFORE the
+     * stash churn — the old capture ran after the pops, where index -2 was
+     * `this` (the wrapper), so fnHeapptr was the wrapper object and EVERY
+     * deferred delivery threw "TypeError: [object Object] not callable"
+     * from duktape's internal call check. */
     for (int i = 0; i < 3 && !fnHeapptr; i++)
     {
-        duk_push_this(ctx);
-        if (duk_get_prop_string(ctx, -1, names[i]) && duk_is_callable(ctx, -1))
+        duk_get_prop_string(ctx, -1, names[i]);
+        if (duk_is_callable(ctx, -1))
         {
+            fnHeapptr = duk_get_heapptr(ctx, -1);
             duk_push_global_stash(ctx);
             duk_dup(ctx, -2); /* the handler value */
-            duk_put_prop_string(ctx, -2, key);
+            duk_put_prop_string(ctx, -2, fkey);
             duk_pop(ctx); /* stash */
-            duk_dup(ctx, -2);
-            fnHeapptr = duk_get_heapptr(ctx, -1);
-            duk_pop(ctx); /* dup */
         }
-        duk_pop_2(ctx); /* prop value + this */
+        duk_pop(ctx); /* prop value */
     }
     if (!fnHeapptr)
     {
+        duk_pop(ctx); /* this */
         duk_error(ctx, DUK_ERR_ERROR,
                   "xhr: no onload/onerror/onreadystatechange handler");
     }
+
+    /* Phase 6: pin onerror SEPARATELY (browser-true transport-failure
+     * routing — the fetch shim rejects from it). Same pre-churn capture.
+     * A page reusing one fn for both events pins once (the pump routes
+     * both completion kinds to the same ref; exactly one dispatch per
+     * request). */
+    duk_get_prop_string(ctx, -1, "onerror");
+    if (duk_is_callable(ctx, -1))
+    {
+        void *hp = duk_get_heapptr(ctx, -1);
+        if (hp && hp != fnHeapptr)
+        {
+            errHeapptr = hp;
+            duk_push_global_stash(ctx);
+            duk_dup(ctx, -2); /* the onerror value */
+            duk_put_prop_string(ctx, -2, ekey);
+            duk_pop(ctx); /* stash */
+        }
+    }
+    duk_pop(ctx); /* onerror value */
+
     /* Pin the wrapper object as `this` for the completion. */
-    char okey[40];
-    snprintf(okey, sizeof(okey), DUK_HIDDEN_SYMBOL("pluto.xobj.%d"),
-             b->xhrIdSeq + 1);
-    duk_push_this(ctx);
-    void *objHeapptr = duk_get_heapptr(ctx, -1);
     duk_push_global_stash(ctx);
     duk_dup(ctx, -2);
     duk_put_prop_string(ctx, -2, okey);
     duk_pop(ctx); /* stash */
     duk_pop(ctx); /* this */
 
-    jsbridge_xhr_send(b, id, fnHeapptr, objHeapptr);
+    if (reqBody && reqLen > 0)
+    {
+        /* C4: the POST/PUT body twin carries the body + both refs. */
+        jsbridge_xhr_send_body(b, id, reqBody, reqLen, fnHeapptr,
+                               errHeapptr, objHeapptr);
+    }
+    else
+    {
+        jsbridge_xhr_send(b, id, fnHeapptr, errHeapptr, objHeapptr);
+    }
     return 0;
 }
 
@@ -2843,6 +3151,38 @@ static int duk_xhr_get_responseURL(duk_context *ctx)
     return 1;
 }
 
+/* Shared XHR getter table. Attached BOTH on the constructor's prototype
+ * and per-instance: duk_xmlhttprequest_new returns its own plain wrapper
+ * (instance), whose prototype is Object.prototype — a prototype-only
+ * attach never reaches the wrapper, and every probe then read
+ * "MISS st=undefined" on Duktape while muJS (per-instance accessors)
+ * passed the same row. */
+static const struct
+{
+    const char *name;
+    duk_c_function get;
+} duk_xhr_accs[] = {
+    {"readyState", duk_xhr_get_readyState},
+    {"status", duk_xhr_get_status},
+    {"responseText", duk_xhr_get_responseText},
+    {"response", duk_xhr_get_responseText},
+    {"responseURL", duk_xhr_get_responseURL},
+};
+
+static void duk_xhr_attach_accessors(duk_context *ctx, duk_idx_t obj)
+{
+    /* duk_def_prop expects the name + getter on top of the stack; `obj`
+     * is an index that still resolves with those two pushed. */
+    for (size_t i = 0; i < sizeof(duk_xhr_accs) / sizeof(duk_xhr_accs[0]);
+         i++)
+    {
+        duk_push_string(ctx, duk_xhr_accs[i].name);
+        duk_push_c_function(ctx, duk_xhr_accs[i].get, 0);
+        duk_def_prop(ctx, obj, DUK_DEFPROP_HAVE_GETTER |
+                                   DUK_DEFPROP_SET_ENUMERABLE);
+    }
+}
+
 /* Constructor global: new XMLHttpRequest() / XHR() both return a wrapper. */
 static duk_ret_t duk_xmlhttprequest_new(duk_context *ctx)
 {
@@ -2872,28 +3212,13 @@ static void duktape_define_xhr(duk_context *ctx, JsBridge *b)
     {
         duk_push_c_function(ctx, duk_xhr_open, 2);
         duk_put_prop_string(ctx, -2, "open");
-        duk_push_c_function(ctx, duk_xhr_send, 0);
+        duk_push_c_function(ctx, duk_xhr_setheader, 2);
+        duk_put_prop_string(ctx, -2, "setRequestHeader");
+        duk_push_c_function(ctx, duk_xhr_send, DUK_VARARGS);
         duk_put_prop_string(ctx, -2, "send");
         duk_push_c_function(ctx, duk_xhr_abort, 0);
         duk_put_prop_string(ctx, -2, "abort");
-        struct
-        {
-            const char *name;
-            duk_c_function get;
-        } accs[] = {
-            {"readyState", duk_xhr_get_readyState},
-            {"status", duk_xhr_get_status},
-            {"responseText", duk_xhr_get_responseText},
-            {"response", duk_xhr_get_responseText},
-            {"responseURL", duk_xhr_get_responseURL},
-        };
-        for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
-        {
-            duk_push_string(ctx, accs[i].name);
-            duk_push_c_function(ctx, accs[i].get, 0);
-            duk_def_prop(ctx, -3, DUK_DEFPROP_HAVE_GETTER |
-                                      DUK_DEFPROP_SET_ENUMERABLE);
-        }
+        duk_xhr_attach_accessors(ctx, -3); /* proto: see duk_xhr_accs */
     }
     duk_put_prop_string(ctx, -2, "prototype");
     duk_put_global_string(ctx, "XMLHttpRequest");
@@ -3348,10 +3673,11 @@ static void duktape_clear_worker_refs(JsBridge *b, void *objRef)
         return;
     }
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 1))
     {
-        const char *k = duk_get_string(ctx, -2);
+        const char *k = duk_get_lstring(ctx, -2, NULL);
         void *hp = NULL;
         char kb[40];
         if (k && strstr(k, "\xFF" "pluto.wobj."))
@@ -3421,30 +3747,39 @@ static int duktape_run_worker_ref(JsBridge *b, void *objRef,
 }
 
 /* XHR vtable: delete the stash pins whose heapptrs match. */
-static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void duktape_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                                   void *objRef)
 {
+    /* Phase 6: the onerror pin is real now (see duk_xhr_send) — the
+     * matching key scan includes pluto.xerr. below. */
     duk_context *ctx = (duk_context *)b->implState;
     if (!ctx)
     {
         return;
     }
     duk_push_global_stash(ctx);
-    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY);
+    duk_enum(ctx, -1, DUK_ENUM_OWN_PROPERTIES_ONLY |
+                          DUK_ENUM_INCLUDE_HIDDEN);
     while (duk_next(ctx, -1, 0))
     {
-        const char *k = duk_get_string(ctx, -1);
-        if (k && (strstr(k, "\xFF" "pluto.xfn.") || strstr(k, "\xFF" "pluto.xobj.")))
+        const char *k = duk_get_lstring(ctx, -1, NULL);
+        if (k && (strstr(k, "\xFF" "pluto.xfn.") || strstr(k, "\xFF" "pluto.xobj.") ||
+                  strstr(k, "\xFF" "pluto.xerr.")))
         {
-            duk_get_prop(ctx, -2); /* stash[key] */
+            /* Phase 6: read the VALUE through the STASH (stack:
+             * [stash(-3), enum(-2), key(-1)]) — the old read used -2, the
+             * enum itself, so the heapptr never matched any ref and the
+             * pins LEAKED until close (same class as the Phase 4 scan). */
+            duk_get_prop(ctx, -3); /* stash[key] */
             void *hp = duk_get_heapptr(ctx, -1);
             duk_pop(ctx);
-            if (hp == fnRef || hp == objRef)
+            if (hp == fnRef || hp == objRef || (errFnRef && hp == errFnRef))
             {
                 duk_del_prop(ctx, -2);
             }
         }
         duk_pop(ctx); /* key */
-        if (!fnRef && !objRef)
+        if (!fnRef && !objRef && !errFnRef)
         {
             break;
         }
@@ -3462,6 +3797,10 @@ static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     {
         return 1;
     }
+    /* Note: the send-time stash pin was verified end-to-end here — the
+     * delivery pushes the router's heapptr and runs the handler (Duktape
+     * localxhr PASS len=15545, receipted 2026-10-21). No per-delivery
+     * scan; the enum-based probe never surfaced the hidden keys. */
     duk_push_heapptr(ctx, fnRef);
     if (objRef)
     {
@@ -3471,13 +3810,44 @@ static int duktape_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
     {
         duk_push_undefined(ctx);
     }
+    /* Phase 5 parity: on the ERROR dispatch (the pump routes the onerror
+     * ref here on transport failures) attach the taxonomy text to the
+     * wrapper so the fetch shim builds the browser-faithful reject reason
+     * ('Fetch failed: <phrase> (err=N)') — the same surface the NR engine
+     * receipted in Phase 5. */
+    if (r && r->err[0] && r->errFnRef && fnRef == r->errFnRef)
+    {
+        /* Stack here: [fnRef(-3), wrapper(-2), errString(-1)] — the put
+         * target is the WRAPPER at -2. The first cut used -1, which aimed
+         * the put at the pushed STRING itself; duktape throws a
+         * strict-mode "cannot write property" there, and the throw exits
+         * through the unprotected C frame into duk_sdk_fatal, whose
+         * handler loops forever — the app froze whole (root-caused with a
+         * macOS `sample` of the frozen sim: duk_put_prop_string →
+         * duk_hobject_putprop → duk_err_handle_error_fmt → fatal). */
+        duk_push_string(ctx, r->err);
+        duk_put_prop_string(ctx, -2, "plutoError");
+    }
     duk_push_string(ctx, (r && r->body) ? r->body : "");
     if (duk_pcall_method(ctx, 1) != DUK_EXEC_SUCCESS)
     {
-        int firstErr = !b->lastError[0];
+        /* Phase 4: a caught JS exception inside the pinned completion is a
+         * PAGE error, not a fatal engine fault — the call DID run, exactly
+         * like the click/focus dispatcher (which counts errs++ and keeps
+         * pumping; see duktape_dispatch_focus). The old firstErr contract
+         * returned -1: the delivery pump aborted, the first follow-up
+         * delivery then hit `firstErr == false` and returned "success"
+         * with the callback never having run at all — every Duktape boot
+         * logged "xhr completion aborted" and lost the completion
+         * forever. */
+        /* Log the throw WITHOUT the long hex prefix — the logger clamps
+         * long lines and the message was being cut to "". Read the true
+         * type BEFORE duk_safe_to_string coerces the value in place. */
+        duk_log_throw(ctx, "xhr");
+        b->errs++;
         bridge_take_error_text(b, duk_safe_to_string(ctx, -1));
-        duk_pop(ctx);
-        return firstErr ? -1 : 1;
+        duk_pop(ctx); /* error value */
+        return 0;
     }
     duk_pop(ctx);
     return 0;

@@ -47,6 +47,21 @@ static size_t g_reqBodyLen;
 /* R56g: per-call POST Content-Type (set via http_request_ct; empty =
  * the historical "application/json" so existing callers stay identical). */
 static char g_reqContentType[64];
+/* NetP2: the overridable base builder lines — a page-set user-agent /
+ * accept / accept-language replaces the engine's default (the page's
+ * header wins, one line on the wire). Per-request flight state like
+ * reqMethod (reset_state clears them; the front door seeds). */
+static char g_reqUserAgent[96];
+static char g_reqAccept[128];
+static char g_reqAcceptLang[64];
+/* NetP2: the page's own request headers (setRequestHeader lane) deep-
+ * copied at call time — build_request emits them byte-for-byte beside
+ * the engine's base headers. Per-request flight state: reset_state
+ * clears the count; the front door re-fills it after its own reset
+ * (the same alive-after-reset pattern g_reqContentType rides), and the
+ * redirect lane deliberately re-arms it across hops (browser-true). */
+static HttpHeaderPair g_extraHeaders[HTTP_EXTRA_HEADERS_MAX];
+static int g_extraHeaderCount = 0;
 
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
@@ -165,11 +180,84 @@ static char g_setCookies[16][512];
 static char g_savedHeaders[64][2][256]; /* [i][0]=key [i][1]=value */
 static int g_savedHeaderCount;
 
+/* ── NetP1: HTTP response cache tier ────────────────────────────────────────
+ * GET-only, 200-only, byte-exact URL key, RAM-bounded per-boot LRU.
+ * Freshness: Cache-Control max-age honored; no-cache or no freshness
+ * directive stores with maxAge = -1 = ALWAYS revalidate (the conservative
+ * browser stance — reuse only what the server re-approves).
+ * Validators: ETag (If-None-Match) primary; Last-Modified rides along as
+ * If-Modified-Since when present. Both are injected by build_request from
+ * g_revalPending state — client-internal, never page-controlled, so the
+ * setRequestHeader boundary is unchanged.
+ * 304 handling is browser-true: the wire 304 never reaches the JS road.
+ * The pump swaps the cached body in (status 200 + cached content-type +
+ * cached bytes) and the ordinary completion check delivers; a cold 304
+ * (no pending reval) passes through verbatim as before.
+ * Skips storing: empty bodies, bodies over the per-entry cap, no-store,
+ * any Vary response, URLs over the key cap; spill zero-copy deliveries
+ * never reach the store hook (body stays NULL there) and about: pages
+ * bypass the tier entirely (the internal store answers before us). No
+ * persistence: RAM-only per boot — cookies stay the only store-backed
+ * transport state. */
+#define HTTP_CACHE_ENTRIES 8
+#define HTTP_CACHE_ENTRY_CAP (128 * 1024) /* per-entry body cap */
+#define HTTP_CACHE_TOTAL_CAP (512 * 1024) /* total body-bytes cap */
+#define HTTP_CACHE_KEY_CAP 512            /* max URL bytes kept as key */
+typedef struct HttpCacheEntry
+{
+    int used;
+    char url[HTTP_CACHE_KEY_CAP];
+    char etag[128];   /* verbatim wire token (quoted form preserved) */
+    char lastMod[64]; /* verbatim Last-Modified value */
+    long maxAge;      /* seconds; -1 = no freshness → always revalidate */
+    unsigned int fetchedAt;
+    char contentType[128];
+    char *body; /* decoded body copy (post-gzip/chunked) */
+    size_t bodyLen;
+    unsigned int touched; /* monotonic LRU stamp */
+} HttpCacheEntry;
+static HttpCacheEntry g_httpCache[HTTP_CACHE_ENTRIES];
+static unsigned int g_httpCacheStamp = 0;
+static size_t g_httpCacheBytes = 0;
+/* In-flight revalidation: set by the start_request consult, consumed by
+ * the pump's 304 swap; cleared by reset_state (a redirect mid-reval
+ * cancels it and the entry simply stays stale for next time). */
+static int g_revalPending = 0;
+static int g_revalIndex = -1;
+/* Delivery-source markers for the done-path store hook: never re-store a
+ * body the cache itself just delivered, and never rebuild a 304-revalidated
+ * entry from the wire-304's stripped header set (the swap already re-armed
+ * the entry's freshness clock — RFC 7234 §4.2.1 behavior). */
+static int g_servedFromCache = 0;
+static int g_revalServed304 = 0;
+
 /* Redirects: deferred to a later update tick (reference parity). */
 static char g_pendingRedirectUrl[1024];
 static HttpCallbacks g_pendingRedirectCb;
 static int g_hasPendingRedirect = 0;
 static int g_redirectDepth = 0;
+/* NetP3: redirect verb semantics (browser-true matrix). 301/302/303
+ * rewrite POST→GET with the body dropped — the standing, receipted
+ * behavior. 307/308 PRESERVE the method + body + Content-Type through
+ * the deferred restart. Capture happens in the redirect DECISION block
+ * (the body is an OWNED copy — the pointer is stolen there so the
+ * decision's reset_state cannot free it); the deferred restart lane
+ * re-arms it after its own reset, ownership moving back to
+ * g_reqBody. Unconsumed captures are freed by the front door (a
+ * brand-new request supersedes the pending hop) — never by
+ * reset_state, which must not see the steal. */
+static int g_redirectPreserveVerb = 0;   /* 1 = 307/308 hop */
+static char g_redirectHopMethod[8];      /* captured verb ("" = GET) */
+static char *g_redirectHopBody = NULL;   /* stolen owned body pointer */
+static size_t g_redirectHopBodyLen = 0;
+static char g_redirectHopCt[64];         /* captured Content-Type */
+/* NetP2/NetP3: the page's own request headers follow redirect hops
+ * (browser-true) — captured in the DECISION block as well, because the
+ * decision's reset_state clears the live lane before the deferred
+ * restart can read it. */
+static HttpHeaderPair g_hopExtra[HTTP_EXTRA_HEADERS_MAX];
+static int g_hopExtraCount = 0;
+static char g_hopUA[96], g_hopAccept[128], g_hopAcceptLang[64];
 
 static int g_writePending = 0; /* NET_WRITE_BUSY retry in flight */
 
@@ -2073,6 +2161,404 @@ static const char FORMVAL_HTML[] =
     "})();\n"
     "</script></body></html>\n";
 
+/* ── about:netprobe — Network program probe (Phase 0 + Phase 1, SIM driver
+ * builds) ──
+ * The network battery: 23 rows on the standing three-road surface —
+ *   SYNC/LOCAL (always run, engine-identical):
+ *     fixtures / localfetch / localxhr / fetchpostlocal
+ *   WIRE (17 rows, lab-origin builds only; honest SKIP rows in plain prod):
+ *     cachefresh wireget wiregzip wirechunked wire404 headerecho
+ *     cookieecho redir302 redirget302 redirverb307 reval304 rangeseg
+ *     labtimeout
+ *     cookieexp cookiedmn netdns netrefuse        (Phase 5: expiry,
+ *      IP-host Domain refusal, DNS taxonomy, refused taxonomy)
+ *   POLICY (2 rows, standing device stances):
+ *     policy-h1 policy-keepalive
+ * Final line — `[netprobe] netsum: pass=N miss=M policy=K skip=S` (sum +
+ * console, formprobe pattern). Wire rows ride the netlab server origin
+ * (tests/netlab_server.py on 127.0.0.1:8931) which reaches the app ONLY
+ * through the PLUTO_NETLAB_URL build define below — simulator driver
+ * builds set it via SIMDEFS (unquoted — stringify handles the C literal);
+ * the shipped app never references the lab, manual prod boots see wire
+ * rows as SKIP with the lab reasons printed.
+ * Phase 1 (response-cache tier) owns two rows. The lab alternates each
+ * endpoint's body version on every FULL GET (ETag "FRESH-<v>"), so a
+ * client WITHOUT a cache always gets a body bump (an honest MISS) and a
+ * working cache keeps the body byte-identical no matter how it answers:
+ *   cachefresh — /fresh (max-age=1): fetch twice back-to-back; the second
+ *               must be a fresh LOCAL serve (no wire round-trip at all)
+ *               → status 200 + byte-identical body.
+ *   reval304   — /fresh2 (max-age=0: immediately stale → revalidates
+ *               back-to-back with no timer): the client sends
+ *               If-None-Match, the wire answers 304, and the cache
+ *               serves the CACHED body as a browser-true 200 → status
+ *               200 + byte-identical body (the 304 itself is browser-true
+ *               invisible to JS).
+ *   Standing-defect MISS rows (flip in their owning phases):
+ *   (none — Phase 3 flipped redirverb307 PASS: the deferred redirect
+ *   restart now captures verb+body+Content-Type at the DECISION block and
+ *   re-arms them for 307/308 hops; 301/302/303 keep the browser-true
+ *   POST→GET rewrite standing. Phase 4 owns wirechunked, wire404,
+ *   labtimeout.)
+ * These MISS rows are the measurement, not a failure: they flip PASS in
+ * their owning phases. (reval304 flipped PASS in Phase 1; NetP2 flipped
+ * headerecho + rangeseg PASS — the page's setRequestHeader list rides
+ * the wire byte-for-byte and Range/206 delivers its slice as a 2xx;
+ * NetP3 flipped redirverb307 PASS — 307/308 preserve method+body.)
+ * Lab-origin seam: bare HOST+PORT defines (NOT a URL — a URL value would
+ * need quoting through make->sh->compiler AND its // reads as a
+ * preprocessor comment at translation phase 3 when unquoted; the first
+ * engine-4 probe boot receipted exactly that: LAB collapsed to 'http:'
+ * and every wire row dialed http:443-tls with an empty host).
+ * PLUTO_NETLAB_ON arms the lab at all (driver builds only — plain prod
+ * builds leave LAB='' and the wire rows print honest SKIPs). Defaults
+ * set the standing lab; driver builds simply pass:
+ *   -DPLUTO_NETLAB_ON   (override bare if the lab moves:
+ *    -DPLUTO_NETLAB_HOST=127.0.0.1 -DPLUTO_NETLAB_PORT=8931) */
+#ifdef PLUTO_NETLAB_ON
+#ifndef PLUTO_NETLAB_HOST
+#define PLUTO_NETLAB_HOST 127.0.0.1
+#endif
+#ifndef PLUTO_NETLAB_PORT
+#define PLUTO_NETLAB_PORT 8931
+#endif
+/* C-stringify the lab parts so bare numeric defines build clean. */
+#define PLUTO_NETLAB_Q_(x) #x
+#define PLUTO_NETLAB_Q(x) PLUTO_NETLAB_Q_(x)
+#define PLUTO_NETLAB_LABLINE \
+    "  var LAB = 'http://" PLUTO_NETLAB_Q(PLUTO_NETLAB_HOST) ":" PLUTO_NETLAB_Q(PLUTO_NETLAB_PORT) "';\n"
+#else
+#define PLUTO_NETLAB_LABLINE "  var LAB = '';\n"
+#endif
+static const char NETPROBE_HTML[] =
+    "<!DOCTYPE html><html><head><title>Net Probe</title><style>\n"
+    "body { background: white; color: black; }\n"
+    "h1 { font-size: 2em; }\n"
+    ".sum { font-weight: bold; }\n"
+    "</style></head><body>\n"
+    "<h1>Net Probe</h1>\n"
+    "<p>Network capability battery — Phase 0 baseline + Phase 1 response-cache run.</p>\n"
+    "<p class=\"sum\" id=\"netsum\">netsum: pending</p>\n"
+    "<div id=\"out\"></div>\n"
+    "<script>\n"
+    "(function () {\n"
+    "  var out = document.getElementById('out');\n"
+    "  var sumEl = document.getElementById('netsum');\n"
+    "  if (!out || !sumEl) { return; }\n"
+    PLUTO_NETLAB_LABLINE
+    "  var npass = 0, nmiss = 0, npol = 0, nskip = 0, ndone = 0;\n"
+    "  var TOTAL = 23;\n"
+    "  function row(name, verdict) {\n"
+    "    var d = document.createElement('p');\n"
+    "    d.textContent = name + ': ' + verdict;\n"
+    "    out.appendChild(d);\n"
+    "    var vs = String(verdict);\n"
+    "    if (vs.indexOf('PASS') === 0) { npass = npass + 1; }\n"
+    "    else if (vs.indexOf('POLICY') === 0) { npol = npol + 1; }\n"
+    "    else if (vs.indexOf('SKIP') === 0) { nskip = nskip + 1; }\n"
+    "    else { nmiss = nmiss + 1; }\n"
+    "    ndone = ndone + 1;\n"
+    "    console.log('[netprobe] ' + name + ': ' + vs);\n"
+    "    if (ndone >= TOTAL) {\n"
+    "      var line = 'netsum: pass=' + npass + ' miss=' + nmiss +\n"
+    "        ' policy=' + npol + ' skip=' + nskip;\n"
+    "      sumEl.textContent = line;\n"
+    "      console.log('[netprobe] ' + line);\n"
+    "    }\n"
+    "  }\n"
+    /* Local rows — the standing roads, every build, every engine: */
+    "  try { row('fixtures', (typeof fetch === 'function' &&\n"
+    "    typeof XMLHttpRequest !== 'undefined' &&\n"
+    "    typeof Promise === 'function') ? 'PASS' : 'MISS f=' + typeof fetch +\n"
+    "    ' x=' + typeof XMLHttpRequest); } catch (e) { row('fixtures', 'MISS'); }\n"
+    "  try { row('policy-h1', 'POLICY client speaks HTTP/1.1 line protocol only (no HTTP/2 negotiation)'); } catch (e) {}\n"
+    "  try { row('policy-keepalive', 'POLICY per-request TCP (Connection: close) through the single-flight client; no pooled reuse'); } catch (e) {}\n"
+    "  try {\n"
+    "    fetch('about:apiprobe').then(function (r) {\n"
+    "      if (r && r.ok === true && r.status === 200) {\n"
+    "        return r.text().then(function (t) {\n"
+    "          row('localfetch', t && t.length > 100 && t.indexOf('API') >= 0 ?\n"
+    "            'PASS len=' + t.length : 'MISS len=' + (t ? t.length : -1));\n"
+    "        });\n"
+    "      }\n"
+    "      row('localfetch', 'MISS');\n"
+    "    }).catch(function () { row('localfetch', 'MISS'); });\n"
+    "  } catch (e) { row('localfetch', 'MISS'); }\n"
+    "  try {\n"
+    "    var x = new XMLHttpRequest();\n"
+    "    var xdone = 0;\n"
+    "    x.open('GET', 'about:javascript');\n"
+    "    x.onload = function () {\n"
+    "      try {\n"
+    "        xdone = 1;\n"
+    "        row('localxhr', x.status === 200 && x.responseText &&\n"
+    "          x.responseText.length > 0 ? 'PASS len=' + x.responseText.length :\n"
+    "          'MISS st=' + String(x.status));\n"
+    "      } catch (e2) { row('localxhr', 'MISS inner ' + String(e2).substring(0, 40)); }\n"
+    "    };\n"
+    "    x.onerror = function () { try { xdone = 1; row('localxhr', 'MISS onerror'); } catch (e3) {} };\n"
+    "    x.send();\n"
+    "    /* Settle-guard: an engine that aborts the local XHR completion lane\n"
+    "     * (receipted aloud by the bridge) must not stall the battery — the\n"
+    "     * timer row is the grim honest fallback line. */\n"
+    "    try { setTimeout(function () {\n"
+    "      if (xdone) { return; }\n"
+    "      try { row('localxhr', 'MISS no-completion-in-2s (engine abort receipt stands)'); } catch (e4) {}\n"
+    "    }, 2000); } catch (e5) {}\n"
+    "  } catch (e) { row('localxhr', 'MISS'); }\n"
+    "  try {\n"
+    "    fetch('about:blank', { method: 'POST',\n"
+    "      headers: { 'content-type': 'application/x-www-form-urlencoded' },\n"
+    "      body: 'a=1&b=2' }).then(function (r) {\n"
+    "      row('fetchpostlocal', r && r.ok ? 'PASS' : 'MISS');\n"
+    "    }).catch(function () { row('fetchpostlocal', 'MISS'); });\n"
+    "  } catch (e) { row('fetchpostlocal', 'MISS'); }\n"
+    /* Wire rows — lab builds only; plain builds print honest SKIPs. */
+    "  if (LAB !== '') {\n"
+    "    var namesW = ['cachefresh', 'wireget', 'wiregzip', 'wirechunked',\n"
+    "      'wire404', 'headerecho', 'cookieecho', 'redir302', 'redirget302',\n"
+    "      'redirverb307', 'reval304', 'rangeseg', 'labtimeout',\n"
+    "      'cookieexp', 'cookiedmn', 'netdns', 'netrefuse'];\n"
+    "    var steps = [\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/fresh').then(function (r1) {\n"
+    "          return r1.text().then(function (b1) {\n"
+    "            fetch(LAB + '/fresh').then(function (r2) {\n"
+    "              return r2.text().then(function (b2) {\n"
+    "                var ok = r2 && r2.status === 200 && b2 === b1;\n"
+    "                row('cachefresh', ok ?\n"
+    "                  'PASS (fresh local serve — body identical within max-age)' :\n"
+    "                  'MISS st=' + String(r2 && r2.status) + ' eq=' +\n"
+    "                  String(b2 === b1) + ' (no freshness cache)');\n"
+    "                n();\n"
+    "              });\n"
+    "            }, function (e) { row('cachefresh', 'MISS ' + String(e)); n(); });\n"
+    "          });\n"
+    "        }, function (e) { row('cachefresh', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/text').then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('wireget', r && r.status === 200 &&\n"
+    "              b === 'NETLAB-OK-0123456789ABCDEF' ? 'PASS' :\n"
+    "              'MISS st=' + String(r && r.status) + ' b=' + String(b).substring(0, 12));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('wireget', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/gzip').then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('wiregzip', r && r.status === 200 &&\n"
+    "              b === 'NETLAB-OK-0123456789ABCDEF' ? 'PASS (decoded)' :\n"
+    "              'MISS st=' + String(r && r.status) + ' b=' + String(b).substring(0, 12));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('wiregzip', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/chunked').then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('wirechunked', r && r.status === 200 &&\n"
+    "              b === 'NETLAB-OK-0123456789ABCDEF' ? 'PASS (decoded)' :\n"
+    "              'MISS st=' + String(r && r.status) + ' b=' + String(b).substring(0, 12));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('wirechunked', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/status404').then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('wire404', r && r.ok === false && r.status === 404 &&\n"
+    "              b === 'NETLAB-404-BODY-00' ? 'PASS' :\n"
+    "              'MISS ok=' + String(r && r.ok) + ' st=' + String(r && r.status));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('wire404', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/hdr', { headers: { 'X-Pluto-Receipt': 'r1' } }).then(function (r) {\n"
+    "          return r.text().then(function (b1) {\n"
+    "            fetch(LAB + '/hdr', { method: 'POST', headers: {\n"
+    "              'X-Pluto-Receipt': 'p1', 'content-type': 'text/plain' },\n"
+    "              body: 'x=1' }).then(function (r2) {\n"
+    "              return r2.text().then(function (b2) {\n"
+    "                row('headerecho', b1 === 'HDR=r1' && b2 === 'HDR=p1' ?\n"
+    "                  'PASS (wire GET+POST)' :\n"
+    "                  'MISS b1=' + String(b1) + ' b2=' + String(b2));\n"
+    "                n();\n"
+    "              });\n"
+    "            }, function (e) { row('headerecho', 'MISS POST ' +\n"
+    "              String(e)); n(); });\n"
+    "          });\n"
+    "        }, function (e) { row('headerecho', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/setcookie').then(function () {\n"
+    "          fetch(LAB + '/echo').then(function (r2) {\n"
+    "            return r2.text().then(function (b) {\n"
+    "              row('cookieecho', b && b.indexOf('COOKIE=nlab=1') === 0 ?\n"
+    "                'PASS (jar round-trip)' : 'MISS v=' + String(b).substring(0, 30));\n"
+    "              n();\n"
+    "            });\n"
+    "          }, function (e) { row('cookieecho', 'MISS echo ' + String(e)); n(); });\n"
+    "        }, function (e) { row('cookieecho', 'MISS set ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/redirect?mode=302&hops=2').then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('redir302', r && r.status === 200 &&\n"
+    "              b === 'NETLAB-OK-0123456789ABCDEF' ? 'PASS (2 hops)' :\n"
+    "              'MISS st=' + String(r && r.status));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('redir302', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/redirectpost?mode=302', { method: 'POST',\n"
+    "          headers: { 'content-type': 'application/x-www-form-urlencoded' },\n"
+    "          body: 'a=1&b=2' }).then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('redirget302', b && b.indexOf('method=GET') === 0 ?\n"
+    "              'PASS (302 rewrites POST to GET, body dropped)' :\n"
+    "              'MISS v=' + String(b).substring(0, 30));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('redirget302', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/redirectpost?mode=307', { method: 'POST',\n"
+    "          headers: { 'content-type': 'application/x-www-form-urlencoded' },\n"
+    "          body: 'a=1&b=2' }).then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('redirverb307', b && b.indexOf('method=POST') === 0 ?\n"
+    "              'PASS (307 preserves method+body)' :\n"
+    "              'MISS v=' + String(b).substring(0, 40));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('redirverb307', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/fresh2').then(function (r1) {\n"
+    "          return r1.text().then(function (b1) {\n"
+    "            fetch(LAB + '/fresh2').then(function (r2) {\n"
+    "              return r2.text().then(function (b2) {\n"
+    "                var ok = r2 && r2.status === 200 && b2 === b1;\n"
+    "                row('reval304', ok ?\n"
+    "                  'PASS (stale entry revalidated: wire 304, cached body served as 200)' :\n"
+    "                  'MISS st=' + String(r2 && r2.status) + ' eq=' +\n"
+    "                  String(b2 === b1) + ' (stale entry not revalidated to its cached body)');\n"
+    "                n();\n"
+    "              });\n"
+    "            }, function (e) { row('reval304', 'MISS ' + String(e)); n(); });\n"
+    "          });\n"
+    "        }, function (e) { row('reval304', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/range', { headers: { 'Range': 'bytes=0-4' } }).then(function (r) {\n"
+    "          return r.text().then(function (b) {\n"
+    "            row('rangeseg', r && r.status === 206 && b === 'NETLA' ?\n"
+    "              'PASS (206 slice)' :\n"
+    "              'MISS st=' + String(r && r.status) + ' b=' + String(b).substring(0, 12));\n"
+    "            n();\n"
+    "          });\n"
+    "        }, function (e) { row('rangeseg', 'MISS ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/slow').then(function () {\n"
+    "          row('labtimeout', 'MISS resolved-ok (server answered ahead of watchdog)');\n"
+    "          n();\n"
+    "        }, function (e) {\n"
+    "          row('labtimeout', 'PASS (bounded rejection)');\n"
+    "          n();\n"
+    "        });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/setcookieexp').then(function () {\n"
+    "          setTimeout(function () {\n"
+    "            fetch(LAB + '/echo').then(function (r2) {\n"
+    "              return r2.text().then(function (b) {\n"
+    "                var replayed = b && b.indexOf('exp=') >= 0;\n"
+    "                var healthy = b && b.indexOf('COOKIE=nlab=1') === 0;\n"
+    "                row('cookieexp', !replayed && healthy ?\n"
+    "                  'PASS (Max-Age expiry pruned at replay)' :\n"
+    "                  'MISS replay=' + String(replayed) + ' jar=' +\n"
+    "                  String(healthy) + ' v=' + String(b).substring(0, 40));\n"
+    "                n();\n"
+    "              });\n"
+    "            }, function (e) { row('cookieexp', 'MISS echo ' + String(e)); n(); });\n"
+    "          }, 1200);\n"
+    "        }, function (e) { row('cookieexp', 'MISS set ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch(LAB + '/setcookiedmn').then(function () {\n"
+    "          fetch(LAB + '/echo').then(function (r2) {\n"
+    "            return r2.text().then(function (b) {\n"
+    "              var refused = b && b.indexOf('dmn=') < 0;\n"
+    "              var healthy = b && b.indexOf('COOKIE=nlab=1') === 0;\n"
+    "              row('cookiedmn', refused && healthy ?\n"
+    "                'PASS (Domain on IP host refused entirely)' :\n"
+    "                'MISS refused=' + String(refused) + ' jar=' +\n"
+    "                String(healthy) + ' v=' + String(b).substring(0, 40));\n"
+    "              n();\n"
+    "            });\n"
+    "          }, function (e) { row('cookiedmn', 'MISS echo ' + String(e)); n(); });\n"
+    "        }, function (e) { row('cookiedmn', 'MISS set ' + String(e)); n(); });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch('http://nosuchhost.invalid/').then(function () {\n"
+    "          row('netdns', 'MISS resolved-ok (bogus host answered?)');\n"
+    "          n();\n"
+    "        }, function (e) {\n"
+    "          var m = String(e);\n"
+    "          var dns = m.indexOf('not found') >= 0 || m.indexOf('resolve') >= 0 ||\n"
+    "                    m.indexOf('Name') >= 0;\n"
+    "          row('netdns', dns ? 'PASS (DNS taxonomy: ' + m.substring(0, 70) + ')'\n"
+    "                            : 'MISS rejected with: ' + m.substring(0, 80));\n"
+    "          n();\n"
+    "        });\n"
+    "      },\n"
+    "      function (n) {\n"
+    "        fetch('http://127.0.0.1:8939/').then(function () {\n"
+    "          row('netrefuse', 'MISS resolved-ok (nothing listens on 8939?)');\n"
+    "          n();\n"
+    "        }, function (e) {\n"
+    "          var m = String(e);\n"
+    "          row('netrefuse', m.indexOf('refused') >= 0 ?\n"
+    "            'PASS (refused taxonomy: ' + m.substring(0, 60) + ')'\n"
+    "            : 'MISS rejected with: ' + m.substring(0, 80));\n"
+    "          n();\n"
+    "        });\n"
+    "      }\n"
+    "    ];\n"
+    "    var qi = 0;\n"
+    "    function next() {\n"
+    "      if (typeof fetch !== 'function') {\n"
+    "        for (var wi2 = 0; wi2 < namesW.length; wi2++) {\n"
+    "          if (wi2 >= qi) { row(namesW[wi2], 'MISS no fetch on this engine (ceiling)'); }\n"
+    "        }\n"
+    "        return;\n"
+    "      }\n"
+    "      if (qi < steps.length) {\n"
+    "        var f = steps[qi];\n"
+    "        qi = qi + 1;\n"
+    "        f(next);\n"
+    "      }\n"
+    "    }\n"
+    "    next();\n"
+    "  } else {\n"
+    "    var names = ['cachefresh', 'wireget', 'wiregzip', 'wirechunked',\n"
+    "      'wire404', 'headerecho', 'cookieecho', 'redir302', 'redirget302',\n"
+    "      'redirverb307', 'reval304', 'rangeseg', 'labtimeout',\n"
+    "      'cookieexp', 'cookiedmn', 'netdns', 'netrefuse'];\n"
+    "    for (var wi = 0; wi < names.length; wi++) {\n"
+    "      row(names[wi], 'SKIP no lab in this build (wire rows are lab-driver receipts)');\n"
+    "    }\n"
+    "  }\n"
+    "})();\n"
+    "</script>\n"
+    "</body></html>";
+
 static const InternalPage INTERNAL_PAGES[] = {
     { "about:home", "PlutoBrowser",
       "<html><head><title>PlutoBrowser</title></head><body><h1>PlutoBrowser</h1><p>Ready.</p></body></html>" },
@@ -2085,6 +2571,9 @@ static const InternalPage INTERNAL_PAGES[] = {
     { "about:apiprobe", "API Probe", APIPROBE_HTML },
     { "about:formprobe", "Form Probe", FORMPROBE_HTML },
     { "about:formval", "Native Validation", FORMVAL_HTML },
+    /* Network program Phase 0: the wire battery (18 rows; wire rows ride
+     * the lab origin builds only — see NETPROBE_HTML above). */
+    { "about:netprobe", "Net Probe", NETPROBE_HTML },
     /* API-P5: fixture MODULES served from the same store road fetch()
      * and xhr use. Import-only — deliberately NOT in the PageDirectory:
      * the battery imports them by absolute key. */
@@ -2101,7 +2590,7 @@ static const InternalPage INTERNAL_PAGES[] = {
 
 /* Read-only directory view (http_client.h): name + title per internal page,
  * same order as INTERNAL_PAGES — the home page's Test Cases section lists
- * exactly these entries (all 9 programmed about: sites; the about:p5m0/
+ * exactly these entries (all 10 programmed about: sites; the about:p5m0/
  * about:p5m1 module fixtures stay import-only, deliberately NOT here). */
 static const HttpTestPage TEST_PAGES[] = {
     { "about:home", "PlutoBrowser Home" },
@@ -2113,6 +2602,7 @@ static const HttpTestPage TEST_PAGES[] = {
     { "about:apiprobe", "API Probe" },
     { "about:formprobe", "Form Probe" },
     { "about:formval", "Native Validation" },
+    { "about:netprobe", "Net Probe" },
 };
 
 size_t http_internal_page_body(const char *url, const char **bodyOut)
@@ -2216,9 +2706,19 @@ static void reset_state(void)
     g_radioHealUsed = 0;
     g_radioHealPhase = 0;
     g_radioCbErrLogged = 0;
+    /* NetP1: revalidation + delivery-source markers are per-request flight
+     * state — a serve or reval never outlives its request. */
+    g_revalPending = 0;
+    g_revalIndex = -1;
+    g_servedFromCache = 0;
+    g_revalServed304 = 0;
     /* C4: drop the request body + method with the rest of the request state
      * (both are per-request; a stale body outliving a cancel would leak AND
-     * a stale method would retag the NEXT page load as POST). */
+     * a stale method would retag the NEXT page load as POST). NetP3: the
+     * redirect verb capture (g_redirectHopBody) deliberately lives OUTSIDE
+     * this free — the decision block steals before any reset_state, the
+     * deferred restart lane re-owns after it, and the front door frees an
+     * unconsumed steal; aliasing never happens. */
     if (g_reqBody)
     {
         PLUTO_FREE(g_reqBody);
@@ -2226,7 +2726,184 @@ static void reset_state(void)
     }
     g_reqBodyLen = 0;
     g_reqMethod[0] = '\0';
+    /* R29 base-line overrides are per-request too (a page-set UA/Accept
+     * must never retag a different page's request). */
+    g_reqUserAgent[0] = '\0';
+    g_reqAccept[0] = '\0';
+    g_reqAcceptLang[0] = '\0';
+    /* NetP2: the page's header lane clears with the request — the front
+     * door re-seeds it; the redirect lane re-arms it deliberately. */
+    g_extraHeaderCount = 0;
     g_state = HS_IDLE;
+}
+/* ── NetP2: extra-header helpers ───────────────────────────────────────────
+ * Case-insensitive lane lookups against the page's stored pairs. */
+static int extra_find(const char *lname)
+{
+    for (int i = 0; i < g_extraHeaderCount; i++)
+    {
+        if (strcasecmp(g_extraHeaders[i].name, lname) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int extra_has_range(void)
+{
+    return extra_find("range") >= 0;
+}
+
+/* Wire-integrity guard. A request header the page sets must not be allowed
+ * to double the engine's framing/authority lines or corrupt the request
+ * itself: bytes outside printable ASCII (CRLF injection!) and tokens that
+ * would forge the client-owned lanes are refused. Refusals are logged —
+ * never invented, never silently dropped — and the remaining pairs still
+ * ride (one broken header must not take a whole page down). */
+static int extra_header_invalid(const char *name, const char *value,
+                                char *why, size_t whyLen)
+{
+    if (!name || !name[0])
+    {
+        snprintf(why, whyLen, "empty name");
+        return 1;
+    }
+    for (const char *p = name; *p; p++)
+    {
+        if (*p < 0x21 || *p > 0x7e)
+        {
+            snprintf(why, whyLen, "illegal byte 0x%02x in name", *p);
+            return 1;
+        }
+    }
+    for (const char *p = value ? value : ""; *p; p++)
+    {
+        if (*p < 0x20 || *p > 0x7e)
+        {
+            snprintf(why, whyLen, "illegal byte 0x%02x in value", *p);
+            return 1;
+        }
+    }
+    /* Forbidden request-header set (browser-faithful, fetch spec) plus the
+     * lanes the engine mediates for receipts and the cookie jar — a
+     * forged duplicate there would double-send a line or impersonate
+     * client-internal policy. The overridable identity headers
+     * (user-agent / accept / accept-language) and content-type are
+     * NOT here: they replace the builder's base value instead. */
+    static const char *const FORBIDDEN[] = {
+        "accept-charset", "accept-encoding", "access-control-request-headers",
+        "access-control-request-method", "connection", "content-length",
+        "cookie", "cookie2", "date", "dnt", "expect", "host",
+        "if-modified-since", "if-none-match", "keep-alive", "origin",
+        "referer", "te", "trailer", "transfer-encoding", "upgrade", "via"};
+    for (size_t i = 0;
+         i < sizeof(FORBIDDEN) / sizeof(FORBIDDEN[0]); i++)
+    {
+        if (strcasecmp(name, FORBIDDEN[i]) == 0)
+        {
+            snprintf(why, whyLen, "engine-owned or spec-forbidden");
+            return 1;
+        }
+    }
+    /* Structured-field families the base protocol machinery mediates: the
+     * hop-set itself, browser-credential hop lanes, and the client's own
+     * access-policy lanes. Browser-faithful: fetch spec forbids them. */
+    if (strncasecmp(name, "proxy-", 6) == 0 ||
+        strncasecmp(name, "sec-", 4) == 0)
+    {
+        snprintf(why, whyLen, "spec-forbidden family");
+        return 1;
+    }
+    return 0;
+}
+
+/* The overridable base builder lines: a page-set user-agent / accept /
+ * accept-language / content-type replaces the engine's default (browser
+ * semantics — the page's header wins, one line on the wire). */
+
+/* Route one validated page header to its landing spot: the four
+ * replace-lanes apply to the builder's base lines, everything else
+ * appends to the extra pair list (capped; a repeated name joins its
+ * values with the browser's ", " fold). */
+static void extra_route(const char *name, const char *value)
+{
+    if (strcasecmp(name, "user-agent") == 0)
+    {
+        snprintf(g_reqUserAgent, sizeof(g_reqUserAgent), "%s",
+                 value ? value : "");
+        return;
+    }
+    if (strcasecmp(name, "accept") == 0)
+    {
+        snprintf(g_reqAccept, sizeof(g_reqAccept), "%s", value ? value : "");
+        return;
+    }
+    if (strcasecmp(name, "accept-language") == 0)
+    {
+        snprintf(g_reqAcceptLang, sizeof(g_reqAcceptLang), "%s",
+                 value ? value : "");
+        return;
+    }
+    if (strcasecmp(name, "content-type") == 0)
+    {
+        snprintf(g_reqContentType, sizeof(g_reqContentType), "%s",
+                 value ? value : "");
+        return;
+    }
+    int dup = extra_find(name);
+    if (dup >= 0)
+    {
+        int vf = (int)strlen(g_extraHeaders[dup].value);
+        if (vf + 2 + (int)strlen(value ? value : "") <
+            (int)sizeof(g_extraHeaders[dup].value))
+        {
+            snprintf(g_extraHeaders[dup].value + vf,
+                     sizeof(g_extraHeaders[dup].value) - vf, ", %s",
+                     value ? value : "");
+            logger_log("[http] extra merged: %s (now %.60s)", name,
+                       g_extraHeaders[dup].value);
+            return;
+        }
+        logger_log("[http] extra merge overflow refused: %s", name);
+        return;
+    }
+    if (g_extraHeaderCount >= HTTP_EXTRA_HEADERS_MAX)
+    {
+        logger_log("[http] extra lane full (%d) — refused: %s (logged, "
+                   "never sent)",
+                   HTTP_EXTRA_HEADERS_MAX, name);
+        return;
+    }
+    snprintf(g_extraHeaders[g_extraHeaderCount].name,
+             sizeof(g_extraHeaders[g_extraHeaderCount].name), "%s", name);
+    snprintf(g_extraHeaders[g_extraHeaderCount].value,
+             sizeof(g_extraHeaders[g_extraHeaderCount].value), "%s",
+             value ? value : "");
+    g_extraHeaderCount++;
+    logger_log("[http] extra: %s: %.60s (%d on lane)", name, value,
+               g_extraHeaderCount);
+}
+
+/* Seed the whole lane from a caller's list: validate every pair first
+ * (invalid pairs log their reason and are skipped; the rest still ride),
+ * then route. Called by the front door after reset — the lane starts
+ * empty. */
+static void extra_seed(const HttpHeaderPair *extra, int nExtra)
+{
+    for (int i = 0; i < nExtra; i++)
+    {
+        const char *n = extra[i].name[0] ? extra[i].name : NULL;
+        const char *v = extra[i].value;
+        char why[48];
+        if (extra_header_invalid(n, v, why, sizeof(why)))
+        {
+            logger_log("[http] extra refused (%s): %s", why,
+                       n ? n : "(no name)");
+            continue;
+        }
+        extra_route(n, v);
+    }
 }
 
 /* Build a minimal HTTP request (reference buildRequest). GET carried the
@@ -2249,10 +2926,15 @@ static void build_request(StrBuf *out)
     /* R29: single source of truth (constants.h USER_AGENT) — the ad-hoc
      * short string here disagreed with the documented constant and both
      * invited bot-walls. Chrome-like per user decision (we render the
-     * desktop page anyway). */
-    strbuf_appendf(out, "User-Agent: %s\r\n", USER_AGENT);
-    strbuf_appendf(out, "Accept: text/html,text/plain;q=0.8\r\n");
-    strbuf_appendf(out, "Accept-Language: en-US,en;q=0.9\r\n");
+     * desktop page anyway). NetP2: a page-set user-agent/accept/
+     * accept-language REPLACES the base line (browser replace semantics,
+     * one line on the wire). */
+    strbuf_appendf(out, "User-Agent: %s\r\n",
+                   g_reqUserAgent[0] ? g_reqUserAgent : USER_AGENT);
+    strbuf_appendf(out, "Accept: %s\r\n",
+                   g_reqAccept[0] ? g_reqAccept : "text/html,text/plain;q=0.8");
+    strbuf_appendf(out, "Accept-Language: %s\r\n",
+                   g_reqAcceptLang[0] ? g_reqAcceptLang : "en-US,en;q=0.9");
     /* Compression setting (user decision, default Off): Off sends
      * Accept-Encoding: identity (raw bytes — reliable on weak radio);
      * Gzip opts back into gzip (smaller transfers on good WiFi).
@@ -2291,6 +2973,34 @@ static void build_request(StrBuf *out)
                        (unsigned)((g_reqBody && g_reqBodyLen)
                                       ? g_reqBodyLen
                                       : 0));
+    }
+    /* NetP2: the page's own request headers ride here, byte-for-byte —
+     * the browser's real header set. Emitted before the terminator; the
+     * validator lane below stays client-internal (pages never forge the
+     * revalidation lane). */
+    for (int i = 0; i < g_extraHeaderCount; i++)
+    {
+        strbuf_appendf(out, "%s: %s\r\n", g_extraHeaders[i].name,
+                       g_extraHeaders[i].value);
+    }
+    /* NetP1: client-internal validator lane for an in-flight revalidation
+     * of a stale cache entry. Injected ONLY from g_revalPending state —
+     * never page-controlled (the setRequestHeader boundary is unchanged). */
+    if (g_revalPending && g_revalIndex >= 0 &&
+        g_revalIndex < HTTP_CACHE_ENTRIES)
+    {
+        const HttpCacheEntry *e = &g_httpCache[g_revalIndex];
+        if (e->used && strcmp(e->url, g_url) == 0)
+        {
+            if (e->etag[0])
+            {
+                strbuf_appendf(out, "If-None-Match: %s\r\n", e->etag);
+            }
+            if (e->lastMod[0])
+            {
+                strbuf_appendf(out, "If-Modified-Since: %s\r\n", e->lastMod);
+            }
+        }
     }
     strbuf_appendf(out, "Connection: close\r\n\r\n");
     if (isPostReq && g_reqBody && g_reqBodyLen)
@@ -2631,7 +3341,11 @@ static int parse_headers_saved(void)
         {
             list[i] = setCookies[i];
         }
-        cookie_jar_process_set_cookies(g_parsed->host, list, setCookieCount);
+        /* Phase 5: thread the REQUEST-URI path so RFC 6265 §5.1.4
+         * default-path lands the cookie in its browser-correct directory
+         * (was: always "/"). */
+        cookie_jar_process_set_cookies_ex(g_parsed->host, g_parsed->path,
+                                          list, setCookieCount);
     }
 
     const char *te = saved_header("transfer-encoding");
@@ -2702,14 +3416,146 @@ static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
     }
 }
 
+/* ── Phase 5: connection-error taxonomy ──────────────────────────────────
+ * The PDNetErr enum has no dedicated DNS/refused codes — the simulator
+ * runtime reports every failed CONNECT as NET_CONNECTION_FAILED=-21
+ * (receipted boot19 2026-10-21: nosuchhost.invalid AND a closed port both
+ * arrived -21 via tcp_open_cb). Browsers distinguish by resolving FIRST;
+ * no lookup API exists in the SDK, so the client classes the failure by
+ * HOST SHAPE exactly as browsers do: a numeric host has no DNS step, so
+ * its immediate connect failure is the refused family; a name host's
+ * immediate connect failure may be resolution OR refusal — the phrase
+ * names the ambiguity honestly. The raw code always rides the surfaced
+ * text so a shape change is receiptable. The watchdog keeps its own
+ * "Connection timed out after N seconds." for the silent-dead lane.
+ *
+ * ALSO RECEIPTED: the vendored pd_api_network.h enum is STALE vs the
+ * runtime — the SDK's own reference enumerates NET_CONNECT_TIMEOUT=-18,
+ * NET_CONNECTION_CLOSED=-19 (the header claims -18), NET_PERMISSION_DENIED
+ * =-20 and NET_CONNECTION_FAILED=-21. The header's NET_CONNECTION_CLOSED
+ * case is therefore dead for runtime values; the four runtime constants
+ * are mirrored here without touching the SDK header. */
+#define PLUTO_NET_CONNECT_TIMEOUT   ((PDNetErr)(-18))
+#define PLUTO_NET_CLOSED_RUNTIME    ((PDNetErr)(-19))
+#define PLUTO_NET_PERMISSION_DENIED ((PDNetErr)(-20))
+#define PLUTO_NET_CONNECTION_FAILED ((PDNetErr)(-21))
+
+/* Browser-faithful IP-literal test: digits/dots/colons only (with digits)
+ * is a numeric address, never a DNS name — mirrors cookie_jar.c. */
+static int net_host_is_numeric(const char *h)
+{
+    if (!h || h[0] == '\0')
+    {
+        return 0;
+    }
+    int digits = 0;
+    for (const char *p = h; *p; p++)
+    {
+        if (*p >= '0' && *p <= '9')
+        {
+            digits++;
+        }
+        else if (*p != '.' && *p != ':')
+        {
+            return 0;
+        }
+    }
+    return digits > 0;
+}
+
+static const char *net_err_text(PDNetErr err)
+{
+    switch (err)
+    {
+    case NET_OK:
+        return "ok";
+    case NET_NO_DEVICE:
+        return "no network device";
+    case NET_BUSY:
+        return "network busy";
+    case NET_WRITE_ERROR:
+        return "write error";
+    case NET_WRITE_BUSY:
+        return "write busy";
+    case NET_WRITE_TIMEOUT:
+        return "write timeout";
+    case NET_READ_ERROR:
+        return "read error";
+    case NET_READ_BUSY:
+        return "read busy";
+    case NET_READ_TIMEOUT:
+        return "read timeout";
+    case NET_READ_OVERFLOW:
+        return "read overflow";
+    case NET_FRAME_ERROR:
+        return "frame error";
+    case NET_BAD_RESPONSE:
+        return "bad response";
+    case NET_ERROR_RESPONSE:
+        return "error response";
+    case NET_RESET_TIMEOUT:
+        return "reset timeout";
+    case NET_BUFFER_TOO_SMALL:
+        return "buffer too small";
+    case NET_UNEXPECTED_RESPONSE:
+        return "unexpected response";
+    case NET_NOT_CONNECTED_TO_AP:
+        return "not connected to WiFi";
+    case NET_NOT_IMPLEMENTED:
+        return "not implemented";
+    case PLUTO_NET_CLOSED_RUNTIME:
+        return "connection closed";
+    case PLUTO_NET_PERMISSION_DENIED:
+        return "network permission denied";
+    default:
+        return "unknown network error";
+    }
+}
+
+/* Mapped phrase for a FAILED OPEN (sync rc or async cb). The raw code is
+ * appended by the callers so the surfaced text stays receiptable. */
+static const char *net_open_err_text(const char *host, PDNetErr err)
+{
+    if (err == PLUTO_NET_CONNECT_TIMEOUT)
+    {
+        return "connect timed out";
+    }
+    if (err == PLUTO_NET_CONNECTION_FAILED)
+    {
+        if (net_host_is_numeric(host))
+        {
+            /* IP literal: no resolution exists, so an immediate connect
+             * failure is the refused family (closed port/unreachable). */
+            return "connection refused (server did not accept)";
+        }
+        /* Name host: the SDK resolves internally and reports both NXDOMAIN
+         * and refused-with-resolution the same way — name it honestly. */
+        return "host not found (could not resolve or connect)";
+    }
+    return net_err_text(err);
+}
+
 static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
 {
     unsigned int myId = (unsigned int)(uintptr_t)ud;
-    if (myId != g_requestId)
+    if (myId != g_requestId || conn != g_tcp)
     {
         /* Stale open (cancelled/superseded while connecting): the async open
          * has settled NOW, so closing+releasing is finally safe. This is the
-         * orphan handoff from close_tcp — plus a defensive pool check. */
+         * orphan handoff from close_tcp — plus a defensive pool check.
+         *
+         * Phase 4 (zombie-retry race): the id test alone had a hole — the
+         * R18b attempt-recycle hands the dead attempt to the orphan slot
+         * and nulls g_tcp WITHOUT bumping the generation id (the bump
+         * happens later, when the retry actually re-opens). A stale
+         * resolve landing inside that backoff window still matched the id
+         * and entered this live path: a success marked g_connOpen for an
+         * attempt that is not g_tcp's (the retry lane then believed its
+         * connection was already open and never opened it — the request
+         * sat silent until the 60s watchdog, the receipted zombie shape),
+         * and a failure killed the live retry outright. The conn-identity
+         * test (mirroring tcp_closed_cb's guard) makes any resolve that
+         * is not the live attempt's connection stale BY DEFINITION. */
         g_pd->network->tcp->close(conn);
         g_pd->network->tcp->release(conn);
         if (g_orphanTcp == conn)
@@ -2726,7 +3572,15 @@ static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
     {
         g_openFailed = 1;
         netmon_probe_fail(); /* network-layer fault */
-        snprintf(g_error, sizeof(g_error), "Connection failed: %d", (int)err);
+        /* Phase 5 taxonomy: the raw SDK code stays on the log so the
+         * refused/DNS shapes are receipted, and the mapped phrase rides
+         * the user-visible error (surfaced to JS via the bridge). */
+        logger_log("[http] open-async fail host=%.80s err=%d (%s)",
+                   g_parsed ? g_parsed->host : "?", (int)err,
+                   net_open_err_text(g_parsed ? g_parsed->host : "", err));
+        snprintf(g_error, sizeof(g_error), "Connection failed: %s (err=%d)",
+                 net_open_err_text(g_parsed ? g_parsed->host : "", err),
+                 (int)err);
         g_state = HS_ERROR;
         return;
     }
@@ -2800,6 +3654,244 @@ static void about_timer_cb(void *ud)
     reset_state();
 }
 
+/* ── NetP1: response-cache primitives ─────────────────────────────────────── */
+static int http_cache_lookup(const char *url)
+{
+    for (int i = 0; i < HTTP_CACHE_ENTRIES; i++)
+    {
+        if (g_httpCache[i].used && strcmp(g_httpCache[i].url, url) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void http_cache_evict_lru(void)
+{
+    int victim = -1;
+    for (int i = 0; i < HTTP_CACHE_ENTRIES; i++)
+    {
+        if (g_httpCache[i].used &&
+            (victim < 0 ||
+             g_httpCache[i].touched < g_httpCache[victim].touched))
+        {
+            victim = i;
+        }
+    }
+    if (victim >= 0)
+    {
+        logger_log("[http] cache evict url=%.80s", g_httpCache[victim].url);
+        g_httpCacheBytes -= g_httpCache[victim].bodyLen;
+        PLUTO_FREE(g_httpCache[victim].body);
+        memset(&g_httpCache[victim], 0, sizeof(g_httpCache[victim]));
+    }
+}
+
+/* Freshness test within the max-age window (wrap-safe unsigned math;
+ * maxAge < 0 is never fresh — the always-revalidate stance). */
+static int http_cache_fresh(int idx, unsigned int now)
+{
+    if (idx < 0 || idx >= HTTP_CACHE_ENTRIES || !g_httpCache[idx].used)
+    {
+        return 0;
+    }
+    if (g_httpCache[idx].maxAge < 0)
+    {
+        return 0;
+    }
+    long elapsedMs = (long)(unsigned int)(now - g_httpCache[idx].fetchedAt);
+    long window = g_httpCache[idx].maxAge * 1000L; /* clamped at store */
+    return elapsedMs < window;
+}
+
+/* Fresh hit → synthesize a fully completed response state; the pump's
+ * ordinary HS_DONE delivery runs unchanged next tick (the about: page
+ * rehearsed this one-content-type shape; budgets, materialization and
+ * snap rendering all apply identically). No parse, no network, no TLS
+ * access gate touched. */
+static void http_cache_serve(int idx, unsigned int now)
+{
+    HttpCacheEntry *e = &g_httpCache[idx];
+    strbuf_reset(&g_buf);
+    strbuf_append_n(&g_buf, e->body, e->bodyLen);
+    g_status = 200;
+    g_bodyStart = 0; /* g_buf IS the body → the done path resolves bodyOff 0 */
+    g_isChunked = 0;
+    g_contentLength = (long)e->bodyLen;
+    g_isGzip = 0; /* stored bodies are already decoded */
+    g_gzipHold = 0;
+    g_spillMode = SPILL_NONE;
+    g_bodySpilled = 0;
+    g_connClosed = 1; /* no wire involved */
+    g_error[0] = '\0';
+    g_savedHeaderCount = 0;
+    if (e->contentType[0])
+    {
+        snprintf(g_savedHeaders[0][0], sizeof(g_savedHeaders[0][0]),
+                 "content-type");
+        snprintf(g_savedHeaders[0][1], sizeof(g_savedHeaders[0][1]),
+                 "%.250s", e->contentType);
+        g_savedHeaderCount = 1;
+    }
+    g_state = HS_DONE;
+    g_servedFromCache = 1;
+    e->touched = ++g_httpCacheStamp;
+    logger_log("[http] cache serve (fresh) url=%.90s bytes=%zu age=%ums",
+               e->url, e->bodyLen, (unsigned int)(now - e->fetchedAt));
+}
+
+/* Case-insensitive token find for header VALUES (values keep wire casing;
+ * the parser lowercases only the KEYS). */
+static const char *cache_find_ci(const char *hay, const char *needle)
+{
+    if (!hay)
+    {
+        return NULL;
+    }
+    size_t nlen = strlen(needle);
+    for (const char *p = hay; *p; p++)
+    {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (c == needle[0] && strncasecmp(p, needle, nlen) == 0)
+        {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Store hook (done path, pre-reset: g_url + saved headers are intact).
+ * The caller gates method (GET) and status (200); here we gate caps,
+ * no-store and Vary, then parse validators + freshness. The cache keeps
+ * its OWN copy — the caller PLUTO_FREEs its delivery buffer. */
+static void http_cache_store(const char *url, const char *body, size_t bodyLen)
+{
+    if (!body || bodyLen == 0 || !url || url[0] == '\0')
+    {
+        return; /* nothing redeliverable — empty bodies are never cached */
+    }
+    if (bodyLen > (size_t)HTTP_CACHE_ENTRY_CAP)
+    {
+        logger_log("[http] cache skip (body over %dk cap) url=%.90s bytes=%zu",
+                   (int)(HTTP_CACHE_ENTRY_CAP / 1024), url, bodyLen);
+        return;
+    }
+    if (strlen(url) >= HTTP_CACHE_KEY_CAP)
+    {
+        logger_log("[http] cache skip (url over key cap) url=%.90s", url);
+        return;
+    }
+    const char *cc = saved_header("cache-control");
+    if (cc && cache_find_ci(cc, "no-store"))
+    {
+        logger_log("[http] cache skip (no-store) url=%.90s", url);
+        return;
+    }
+    const char *vary = saved_header("vary");
+    if (vary && vary[0])
+    {
+        logger_log("[http] cache skip (vary) url=%.90s vary=%.40s", url, vary);
+        return;
+    }
+    /* Freshness: an explicit max-age wins; anything else (no-cache, no
+     * directive) → -1 = always revalidate before reuse. */
+    long maxAge = -1;
+    if (cc)
+    {
+        const char *ma = cache_find_ci(cc, "max-age=");
+        if (ma)
+        {
+            maxAge = atol(ma + 8);
+            if (maxAge < 0)
+            {
+                maxAge = -1;
+            }
+            else if (maxAge > 86400)
+            {
+                maxAge = 86400; /* 1-day clamp: fresh() math stays 32-bit safe */
+            }
+        }
+    }
+    int i = http_cache_lookup(url);
+    if (i < 0)
+    {
+        /* Evict LRU entries (oldest reuse stamp first) until a free slot
+         * exists AND the total cap admits the body. With a 512KB total and
+         * a 128KB per-entry cap this always terminates. */
+        for (int guard = 0; guard < HTTP_CACHE_ENTRIES + 1; guard++)
+        {
+            int freeSlot = -1;
+            int lru = -1;
+            for (int j = 0; j < HTTP_CACHE_ENTRIES; j++)
+            {
+                if (!g_httpCache[j].used)
+                {
+                    freeSlot = j;
+                }
+                else if (lru < 0 || g_httpCache[j].touched <
+                                        g_httpCache[lru].touched)
+                {
+                    lru = j;
+                }
+            }
+            if (freeSlot >= 0 && g_httpCacheBytes + bodyLen <=
+                                     (size_t)HTTP_CACHE_TOTAL_CAP)
+            {
+                i = freeSlot;
+                break;
+            }
+            if (lru < 0)
+            {
+                break; /* nothing left to evict */
+            }
+            http_cache_evict_lru();
+        }
+    }
+    if (i < 0)
+    {
+        logger_log("[http] cache skip (cap pressure) url=%.90s", url);
+        return;
+    }
+    HttpCacheEntry *e = &g_httpCache[i];
+    if (e->used)
+    {
+        g_httpCacheBytes -= e->bodyLen;
+        PLUTO_FREE(e->body);
+        e->body = NULL;
+        logger_log("[http] cache replace url=%.90s", url);
+    }
+    e->body = (char *)PLUTO_MALLOC(bodyLen + 1);
+    if (!e->body)
+    {
+        memset(e, 0, sizeof(*e));
+        logger_log("[http] cache store failed (OOM) url=%.90s", url);
+        return;
+    }
+    memcpy(e->body, body, bodyLen);
+    e->body[bodyLen] = '\0';
+    e->bodyLen = bodyLen;
+    e->used = 1;
+    snprintf(e->url, sizeof(e->url), "%s", url);
+    const char *etag = saved_header("etag");
+    const char *lastMod = saved_header("last-modified");
+    const char *ctype = saved_header("content-type");
+    snprintf(e->etag, sizeof(e->etag), "%.124s", etag ? etag : "");
+    snprintf(e->lastMod, sizeof(e->lastMod), "%.60s", lastMod ? lastMod : "");
+    snprintf(e->contentType, sizeof(e->contentType), "%.124s",
+             (ctype && ctype[0]) ? ctype : "application/octet-stream");
+    e->maxAge = maxAge;
+    e->fetchedAt = g_pd->system->getCurrentTimeMilliseconds();
+    e->touched = ++g_httpCacheStamp;
+    g_httpCacheBytes += bodyLen;
+    logger_log("[http] cache store url=%.90s etag=%.44s maxage=%ld bytes=%zu",
+               url, (etag && etag[0]) ? etag : "(none)", maxAge, bodyLen);
+}
+
 static int start_request(const char *urlString, const HttpCallbacks *callbacks)
 {
     if (callbacks)
@@ -2831,6 +3923,13 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_radioHealUsed = 0;
     g_radioHealPhase = 0;
     g_radioCbErrLogged = 0;
+    /* NetP1: belt-and-braces clears — request entry points that skip
+     * reset_state cannot inherit a prior flight's reval/serve markers;
+     * the consult below may set these for stale entries. */
+    g_revalPending = 0;
+    g_revalIndex = -1;
+    g_servedFromCache = 0;
+    g_revalServed304 = 0;
 
     /* ── Internal about: pages ────────────────────────────────────────────── */
     if (strncmp(g_url, "about:", 6) == 0)
@@ -2892,6 +3991,40 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
             reset_state();
         }
         return 1;
+    }
+
+    /* ── NetP1: response-cache consult (GET only; about: bypassed above) ────
+     * Runs BEFORE the URL parse: a fresh hit needs no host, no TLS access
+     * gate and no network — the pump's ordinary done path delivers it.
+     * NetP2 policy: a request carrying a Range header skips the whole
+     * consult — byte-accurate segments come from the wire; serving a
+     * whole-body entry for a range-slice request (or revalidating it)
+     * would fabricate endpoint semantics. */
+    if ((g_reqMethod[0] == '\0' || strcmp(g_reqMethod, "GET") == 0) &&
+        !extra_has_range())
+    {
+        int ci = http_cache_lookup(g_url);
+        if (ci >= 0)
+        {
+            unsigned int cnow = g_pd->system->getCurrentTimeMilliseconds();
+            if (http_cache_fresh(ci, cnow))
+            {
+                http_cache_serve(ci, cnow);
+                return 1;
+            }
+            /* Stale: the request proceeds to the wire carrying client-
+             * internal validators; the pump's 304 swap delivers the cached
+             * body as a browser-true 200. max-age=0-style entries sit here
+             * on every fetch (immediately stale). */
+            g_revalPending = 1;
+            g_revalIndex = ci;
+            g_httpCache[ci].touched = ++g_httpCacheStamp;
+            logger_log("[http] cache revalidate url=%.90s etag=%.44s maxage=%ld",
+                       g_url,
+                       g_httpCache[ci].etag[0] ? g_httpCache[ci].etag
+                                                : "(no etag)",
+                       g_httpCache[ci].maxAge);
+        }
     }
 
     /* ── Parse URL ────────────────────────────────────────────────────────── */
@@ -3013,7 +4146,14 @@ static void open_connection(void)
         if (g_cb.onError)
         {
             char msg[300];
-            snprintf(msg, sizeof(msg), "Could not open connection to %s", g_parsed->host);
+            /* Phase 5 taxonomy: newConnection==NULL is its own audible lane
+             * (SDK could not even build the connection object for the
+             * host) — logged with the host + the mapped async-open code
+             * when one is known. */
+            logger_log("[http] open-sync: newConnection NULL host=%.80s",
+                       g_parsed->host);
+            snprintf(msg, sizeof(msg), "Could not open connection to %s",
+                     g_parsed->host);
             g_cb.onError(msg);
         }
         reset_state();
@@ -3053,7 +4193,14 @@ static void open_connection(void)
         if (g_cb.onError)
         {
             char msg[300];
-            snprintf(msg, sizeof(msg), "Could not open connection to %s", g_parsed->host);
+            /* Phase 5 taxonomy: the synchronous open rc carries its mapped
+             * phrase + raw code (reveals refused/DNS shapes the SDK
+             * reports synchronously). */
+            logger_log("[http] open-sync fail host=%.80s err=%d (%s)",
+                       g_parsed->host, (int)rc, net_open_err_text(g_parsed->host, rc));
+            snprintf(msg, sizeof(msg), "Could not open connection to %s "
+                                       "(err=%d %s)",
+                     g_parsed->host, (int)rc, net_open_err_text(g_parsed->host, rc));
             g_cb.onError(msg);
         }
         g_tcp = NULL; /* callback ownership not transferred on sync failure */
@@ -3078,14 +4225,29 @@ void http_client_init(PlaydateAPI *pd)
 
 /* Shared front door for GET (http_get) and C4 POST (http_request): the
  * reset happens FIRST, the method/body set AFTER it (reset_state clears
- * the previous request's params), then start_request. */
-static int http_call(const char *method, const char *urlString,
-                     const char *body, size_t bodyLen,
-                     const HttpCallbacks *callbacks)
+ * the previous request's params), then start_request. NetP2: the extra
+ * header lane seeds after the reset too — same alive-after-reset
+ * pattern the method/body ride. */
+static int http_call_ex(const char *method, const char *urlString,
+                        const char *contentType, const HttpHeaderPair *extra,
+                        int nExtra, const char *body, size_t bodyLen,
+                        const HttpCallbacks *callbacks)
 {
     reset_state();
     g_hasPendingRedirect = 0;
     g_redirectDepth = 0;
+    /* NetP3: a brand-new request supersedes any pending redirect hop —
+     * retire an unconsumed capture (the stolen body is owned here until
+     * a hop lane consumes it; reset_state must never see the steal,
+     * which is why g_reqBody and g_redirectHopBody are never aliased —
+     * the steal nulls one, the re-arm nulls the other). */
+    if (g_redirectHopBody)
+    {
+        PLUTO_FREE(g_redirectHopBody);
+        g_redirectHopBody = NULL;
+    }
+    g_redirectHopBodyLen = 0;
+    g_redirectPreserveVerb = 0;
     memset(g_reqMethod, 0, sizeof(g_reqMethod));
     method = (method && method[0]) ? method : "GET";
     for (int i = 0; i < (int)sizeof(g_reqMethod) - 1 && method[i]; i++)
@@ -3109,7 +4271,32 @@ static int http_call(const char *method, const char *urlString,
         g_reqBody = NULL;
         g_reqBodyLen = 0;
     }
+    g_reqContentType[0] = '\0';
+    if (contentType && contentType[0])
+    {
+        snprintf(g_reqContentType, sizeof(g_reqContentType), "%s",
+                 contentType);
+    }
+    g_reqUserAgent[0] = '\0';
+    g_reqAccept[0] = '\0';
+    g_reqAcceptLang[0] = '\0';
+    g_extraHeaderCount = 0;
+    if (extra && nExtra > 0)
+    {
+        /* Bytes are copied into client-owned state: the caller's buffers
+         * (the bridge's JsHttpRequest) may be transient; the wire
+         * builders read state after the caller has returned. */
+        extra_seed(extra, nExtra);
+    }
     return start_request(urlString, callbacks);
+}
+
+static int http_call(const char *method, const char *urlString,
+                     const char *body, size_t bodyLen,
+                     const HttpCallbacks *callbacks)
+{
+    return http_call_ex(method, urlString, NULL, NULL, 0, body, bodyLen,
+                        callbacks);
 }
 
 int http_get(const char *urlString, const HttpCallbacks *callbacks)
@@ -3135,13 +4322,32 @@ int http_request_ct(const char *method, const char *urlString,
                     const char *contentType, const char *body, size_t bodyLen,
                     const HttpCallbacks *callbacks)
 {
-    g_reqContentType[0] = '\0';
-    if (contentType && contentType[0])
-    {
-        snprintf(g_reqContentType, sizeof(g_reqContentType), "%s",
-                 contentType);
-    }
-    return http_call(method, urlString, body, bodyLen, callbacks);
+    /* NetP2: ct routes through the shared front door (set after its own
+     * reset — the pre-reset write could not survive); zero extras keeps
+     * every existing caller byte-identical. */
+    return http_call_ex(method, urlString, contentType, NULL, 0, body,
+                        bodyLen, callbacks);
+}
+
+/* NetP2: GET with the page's extra wire headers (the fetch shim's
+ * headers: init object reaches here via the bridge's setRequestHeader
+ * lane). NULL/<=0 extras = byte-identical to http_get. */
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks)
+{
+    return http_call_ex("GET", urlString, NULL, extra, nExtra, NULL, 0,
+                        callbacks);
+}
+
+/* NetP2: the fully general front door (method + Content-Type + extra
+ * wire headers + body) — pages and future roads. */
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks)
+{
+    return http_call_ex(method, urlString, contentType, extra, nExtra,
+                        body, bodyLen, callbacks);
 }
 
 void http_cancel(void)
@@ -3193,14 +4399,56 @@ void http_update(void)
     }
 
     /* A deferred redirect (from a prior tick) opens the next connection now,
-     * well after the previous connection was closed by us. */
+     * well after the previous connection was closed by us. All hop state
+     * (the page's header lane + the 307/308 verb capture) is captured in
+     * the DECISION block — this lane only re-arms it after its own
+     * reset_state (which clears method/body/lanes; the hop statics live
+     * outside reset_state's reach and cannot be freed by it). */
     if (g_hasPendingRedirect)
     {
         HttpCallbacks cb = g_pendingRedirectCb;
+        int preserveVerb = g_redirectPreserveVerb;
         g_hasPendingRedirect = 0;
+        g_redirectPreserveVerb = 0;
         reset_state();
         /* No stack copy needed: start_request memcpy's the URL into g_url
          * before anything else can touch g_pendingRedirectUrl. */
+        /* NetP2: the captured base-line overrides re-arm first. */
+        snprintf(g_reqUserAgent, sizeof(g_reqUserAgent), "%s", g_hopUA);
+        snprintf(g_reqAccept, sizeof(g_reqAccept), "%s", g_hopAccept);
+        snprintf(g_reqAcceptLang, sizeof(g_reqAcceptLang), "%s",
+                 g_hopAcceptLang);
+        /* NetP3: a 307/308 hop re-fires the page's verb — method, the
+         * stolen body pointer (ownership moves back to the live request),
+         * and the captured Content-Type. */
+        if (preserveVerb && g_redirectHopMethod[0])
+        {
+            snprintf(g_reqMethod, sizeof(g_reqMethod), "%s",
+                     g_redirectHopMethod);
+        }
+        if (preserveVerb && g_redirectHopBody)
+        {
+            g_reqBody = g_redirectHopBody;
+            g_reqBodyLen = g_redirectHopBodyLen;
+            g_redirectHopBody = NULL;
+            g_redirectHopBodyLen = 0;
+            logger_log("[http] redirect hop re-fires %s (preserved body "
+                       "%zu bytes, ct=%.40s)",
+                       g_reqMethod, g_reqBodyLen, g_redirectHopCt);
+        }
+        if (preserveVerb && g_redirectHopCt[0])
+        {
+            snprintf(g_reqContentType, sizeof(g_reqContentType), "%s",
+                     g_redirectHopCt);
+        }
+        g_redirectHopMethod[0] = '\0';
+        g_redirectHopCt[0] = '\0';
+        /* NetP2: the page's extra-header lane re-arms for the hop. */
+        if (g_hopExtraCount > 0)
+        {
+            extra_seed(g_hopExtra, g_hopExtraCount);
+        }
+        g_hopExtraCount = 0;
         start_request(g_pendingRedirectUrl, &cb);
         return;
     }
@@ -3656,6 +4904,71 @@ void http_update(void)
                         g_pendingRedirectUrl[sizeof(g_pendingRedirectUrl) - 1] = '\0';
                     }
                     g_pendingRedirectCb = g_cb;
+                    /* NetP3: verb capture — BEFORE the reset_state below
+                     * (it clears method + body + the extra-header lane).
+                     * Browser-true matrix: 301/302/303 rewrite POST→GET,
+                     * body dropped (standing receipted rows); 307/308
+                     * preserve the method + body + Content-Type. The
+                     * body pointer is STOLEN here (g_reqBody nulled) so
+                     * the decision's reset_state frees nothing; the
+                     * deferred lane re-owns it. */
+                    g_redirectPreserveVerb = (g_status == 307 ||
+                                              g_status == 308);
+                    if (g_redirectHopBody)
+                    {
+                        /* A prior hop's steal was never consumed (e.g. a
+                         * 307→302 chain rewrite) — retire it now. */
+                        PLUTO_FREE(g_redirectHopBody);
+                        g_redirectHopBody = NULL;
+                        g_redirectHopBodyLen = 0;
+                    }
+                    g_redirectHopMethod[0] = '\0';
+                    g_redirectHopCt[0] = '\0';
+                    if (g_redirectPreserveVerb)
+                    {
+                        snprintf(g_redirectHopMethod,
+                                 sizeof(g_redirectHopMethod), "%s",
+                                 g_reqMethod);
+                        if (g_reqBody)
+                        {
+                            g_redirectHopBody = g_reqBody;
+                            g_redirectHopBodyLen = g_reqBodyLen;
+                            g_reqBody = NULL;
+                            g_reqBodyLen = 0;
+                        }
+                        snprintf(g_redirectHopCt, sizeof(g_redirectHopCt),
+                                 "%s", g_reqContentType);
+                        logger_log("[http] redirect %d preserves verb "
+                                   "(%s bodyLen=%zu ct=%.40s)",
+                                   g_status, g_redirectHopMethod,
+                                   g_redirectHopBodyLen, g_redirectHopCt);
+                    }
+                    else
+                    {
+                        logger_log("[http] redirect %d rewrites to GET "
+                                   "(browser-true)",
+                                   g_status);
+                    }
+                    /* NetP2/NetP3: the page's header set follows the hop
+                     * (browser-true) — captured HERE, not in the deferred
+                     * lane: the reset_state below clears the live lane
+                     * first. (Phase 2 captured in the deferred lane,
+                     * after the clear — an inert ordering for extras; the
+                     * verb capture demanded the decision point.) */
+                    g_hopExtraCount = g_extraHeaderCount;
+                    if (g_hopExtraCount > HTTP_EXTRA_HEADERS_MAX)
+                    {
+                        g_hopExtraCount = HTTP_EXTRA_HEADERS_MAX;
+                    }
+                    memcpy(g_hopExtra, g_extraHeaders,
+                           sizeof(HttpHeaderPair) *
+                           (size_t)g_hopExtraCount);
+                    snprintf(g_hopUA, sizeof(g_hopUA), "%s",
+                             g_reqUserAgent);
+                    snprintf(g_hopAccept, sizeof(g_hopAccept), "%s",
+                             g_reqAccept);
+                    snprintf(g_hopAcceptLang, sizeof(g_hopAcceptLang),
+                             "%s", g_reqAcceptLang);
                     g_hasPendingRedirect = 1;
                 }
                 else
@@ -3666,6 +4979,51 @@ void http_update(void)
                 }
                 reset_state(); /* closes TCP; redirect opens next tick */
                 return;
+            }
+
+            /* NetP1: 304 revalidation — browser-true transparent service.
+             * The wire 304 NEVER reaches the JS road: the cached body is
+             * swapped in (status 200 + cached content-type + cached bytes)
+             * and the ordinary contentLength completion check below
+             * delivers it. Guards: a pending reval AND an entry whose URL
+             * still matches this wire request — an LRU eviction or a
+             * restart mid-reval must not corrupt a foreign entry; a cold
+             * 304 (no pending reval) passes through verbatim as before.
+             * The 304 saw no spill (parse arms disk only for 2xx) and no
+             * gzip — the cached body is injected into g_buf directly and
+             * completes this very tick. */
+            if (g_status == 304 && g_revalPending &&
+                g_revalIndex >= 0 && g_revalIndex < HTTP_CACHE_ENTRIES)
+            {
+                HttpCacheEntry *e = &g_httpCache[g_revalIndex];
+                g_revalPending = 0;
+                g_revalIndex = -1;
+                if (e->used && e->body && strcmp(e->url, g_url) == 0)
+                {
+                    if (e->contentType[0])
+                    {
+                        g_savedHeaderCount = 1;
+                        snprintf(g_savedHeaders[0][0],
+                                 sizeof(g_savedHeaders[0][0]), "content-type");
+                        snprintf(g_savedHeaders[0][1],
+                                 sizeof(g_savedHeaders[0][1]), "%.250s",
+                                 e->contentType);
+                    }
+                    strbuf_append_n(&g_buf, e->body, e->bodyLen);
+                    g_contentLength = (long)e->bodyLen;
+                    g_status = 200;
+                    g_revalServed304 = 1;
+                    e->fetchedAt = g_pd->system->getCurrentTimeMilliseconds();
+                    e->touched = ++g_httpCacheStamp;
+                    logger_log("[http] cache revalidated (304 -> 200) url=%.90s "
+                               "bytes=%zu",
+                               g_url, e->bodyLen);
+                }
+                else
+                {
+                    logger_log("[http] cache reval lost (entry gone; raw 304 "
+                               "delivers) url=%.90s", g_url);
+                }
             }
         }
     }
@@ -4059,6 +5417,34 @@ void http_update(void)
                 }
                 body[done] = '\0';
                 deliveredLen = done;
+                if (g_savedIsChunked && deliveredLen > 0)
+                {
+                    /* Phase 4: a spilled chunked stream materializes with
+                     * its framing intact (de-chunking happens once at
+                     * delivery, SW2b). The XHR road never binds
+                     * onSuccessSpill (the zero-copy lane above is gated on
+                     * it), so its fallback delivered the RAW chunk frames
+                     * to JS — the standing wirechunked MISS. Decode the
+                     * reassembled buffer: success swaps in the decoded
+                     * body; a decode failure delivers the raw bytes
+                     * honestly with a log. */
+                    size_t decLen = 0;
+                    char *dec = decode_chunked(body, deliveredLen, &decLen);
+                    if (dec)
+                    {
+                        PLUTO_FREE(body);
+                        body = dec;
+                        deliveredLen = decLen;
+                        logger_log("[http] spill chunked decoded %zu -> %zu "
+                                   "bytes", done, decLen);
+                    }
+                    else
+                    {
+                        logger_log("[http] spill chunked decode failed; "
+                                   "delivering raw (%zu bytes)",
+                                   deliveredLen);
+                    }
+                }
             }
             pluto_spill_discard(sp);
         }
@@ -4091,6 +5477,19 @@ void http_update(void)
                     body[bodyLen] = '\0';
                 }
             }
+        }
+
+        /* NetP1: response-cache store — still pre-reset (g_url, the saved
+         * header set and the method are intact). The redirect path exits
+         * earlier, so only final 200s land here; cache-serve deliveries
+         * and 304 revalidations skip it (delivering the cache to the
+         * cache is a no-op, and a revalidated entry keeps ITS metadata —
+         * the swap already re-armed its freshness clock). */
+        if (g_savedStatus == 200 && body && deliveredLen > 0 &&
+            !g_servedFromCache && !g_revalServed304 &&
+            (g_reqMethod[0] == '\0' || strcmp(g_reqMethod, "GET") == 0))
+        {
+            http_cache_store(g_url, body, deliveredLen);
         }
 
         /* Headers stay in BSS g_savedHeaders (reset_state does not clear it,

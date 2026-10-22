@@ -2993,7 +2993,9 @@ static void js_xhr_send(js_State *J)
         js_unref(J, fnRef);
         js_error(J, "xhr: pin failed");
     }
-    jsbridge_xhr_send(b, *box, (void *)fnRef, (void *)objRef);
+    /* Phase 4: no separate onerror pin in this engine yet — NULL routes
+     * the error dispatch through fnRef (standing). */
+    jsbridge_xhr_send(b, *box, (void *)fnRef, NULL, (void *)objRef);
     js_pushundefined(J);
 }
 
@@ -3063,8 +3065,10 @@ static void mujs_define_xhr(js_State *J)
 
 /* XHR vtable: release the pinned completion + wrapper refs (slot inert).
  * Both refs are registry keys (see xhr_pin_completion / js_xhr_send). */
-static void mujs_clear_xhr_refs(JsBridge *b, void *fnRef, void *objRef)
+static void mujs_clear_xhr_refs(JsBridge *b, void *fnRef, void *errFnRef,
+                                void *objRef)
 {
+    (void)errFnRef; /* this engine pins no separate onerror ref yet */
     js_State *J = (js_State *)b->implState;
     if (!J)
     {
