@@ -1170,6 +1170,21 @@ static void nr_revisit_autotest_tick(void)
     {
         return; /* settle ~0.5s per phase */
     }
+    /* R-home phase 5: the cycle ended on an about:/file: probe page —
+     * give the page 30s of rest (late module tickets, resting renders),
+     * then navigate home so the device is back on the home screen. */
+    if (g_nrSnapPhase == 5)
+    {
+        if (g_nrSnapFrames >= 1500)
+        {
+            logger_log("[nr-autotest] probe rest done (1500 frames) — "
+                       "navigating home");
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+            g_nrSnapPhase = 3;
+        }
+        return;
+    }
     if (g_nrSnapPhase == 0)
     {
         /* R47: state=3 is the ERROR page (network dead zone — run 41's
@@ -1234,7 +1249,12 @@ static void nr_revisit_autotest_tick(void)
         {
             logger_log("[nr-autotest] about: probe page — snapshot-revisit "
                        "phases skipped (snap_skip_url by design)");
-            g_nrSnapPhase = 3;
+            /* R-home (2026-10-22): don't end on the probe page. Arm a
+             * phase-5 rest (30s — post-battery module tickets land in
+             * that window) then navigate home so the device is back on
+             * the home screen after every probe cycle. */
+            g_nrSnapPhase = 5;
+            g_nrSnapFrames = 0;
             return;
         }
         if (strncmp(currentUrlObj->normalized, "file:", 5) == 0)
@@ -1247,7 +1267,9 @@ static void nr_revisit_autotest_tick(void)
              * Same design as the about: probe skip. */
             logger_log("[nr-autotest] file: fixture page — snapshot-revisit "
                        "phases skipped (local test page)");
-            g_nrSnapPhase = 3;
+            /* R-home: same deferred return as the about: probe lane. */
+            g_nrSnapPhase = 5;
+            g_nrSnapFrames = 0;
             return;
         }
         snprintf(g_nrSnapUrl, sizeof(g_nrSnapUrl), "%s",
@@ -1359,6 +1381,10 @@ static void nr_revisit_autotest_tick(void)
                        currentDoc ? currentDoc->jsErrors : -1);
             memwatch_disarm();
             g_nrSnapPhase = 3;
+            /* R-home: end every cycle on the home page. */
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+            logger_log("[nr-autotest] navigating home");
         }
         return;
     }
@@ -1411,8 +1437,17 @@ static void nr_revisit_autotest_tick(void)
             snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
             logger_log("[nr-autotest] navigating home");
         }
+        /* R-home (2026-10-22): standard single-cycle runs end the same
+         * way — navigate home after the PASS so the device never lingers
+         * on a test page (the deploy-collect flow unmounts right after). */
+        if (g_nrSoakTotal == 0)
+        {
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+            logger_log("[nr-autotest] navigating home");
+        }
     }
-    else if (g_nrSnapFrames > 600)
+    else if (g_nrSnapPhase != 5 && g_nrSnapFrames > 600)
     {
         logger_log("[nr-autotest] FAIL: revisit missed the snapshot "
                    "(hits=%d state=%d baseUrl=%.80s)",
@@ -1420,6 +1455,10 @@ static void nr_revisit_autotest_tick(void)
                    currentDoc ? currentDoc->baseUrl : "(none)");
         memwatch_disarm();
         g_nrSnapPhase = 3;
+        /* R-home: end every cycle on the home page, FAIL included. */
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "about:home");
+        logger_log("[nr-autotest] navigating home");
     }
 }
 
