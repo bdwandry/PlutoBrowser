@@ -458,12 +458,32 @@ build/Source/render/decoders/dav1d/src/%.o: OPT = -O3
 
 
 # Plain `make` (and explicit `make all`) must end in the SHIPPABLE bundle —
-# device binary + simulator dylib in ONE PlutoBrowser.pdx. The SDK's all
-# only builds the two binaries and NEVER assembles (the pdc step lives only
-# in the device/simulator recipes), so a goal-less make left no fresh PDX at
-# all. With the goal-aware SRC above, plain `make` compiles the same blessed
-# source list `make device` uses for BOTH binaries (both XS engines ride —
-# exactly the configuration the device receipted), then assembles once.
+# device binary + simulator dylib in ONE PlutoBrowser.pdx. The goal-less
+# default pulled the SDK's `all`, which built both binaries under the
+# sim-only source list — the device link died there (undefined fxAbort)
+# before assembly could ever run. With the goal-aware SRC append above,
+# plain `make` compiles the same blessed source list `make device` uses for
+# BOTH binaries (both XS engines ride — exactly the configuration the
+# device receipted), then assembles once.
 .PHONY: all
 all: device_bin simulator_bin
 	@$(PDC) $(PDCFLAGS) Source $(PRODUCT)
+
+# `make device` ships a DEVICE-ONLY bundle: after device_bin stages the
+# fresh ARM binary, the recipe removes BOTH stale carriers before packing:
+# (1) a simulator dylib staged in Source/ by an earlier `make` /
+# `make simulator` — the device goal itself never stages one, so a leftover
+# from a dual-build WOULD otherwise be packed right back in, and (2) the
+# whole product directory — pdc MERGES into an existing PDX and never
+# deletes stale files from it, so a previously packed dylib would survive
+# inside the bundle (both lanes receipted 2026-10-21). Result: pdex.bin +
+# assets and NOTHING the Playdate Simulator can launch. Plain `make` /
+# `make all` still stage a fresh dylib and assemble the dual-target
+# bundle; `make simulator` keeps the sim-only lab build. Recipe override,
+# last wins — same pattern as the `all` override above (the "overriding
+# commands" warning is cosmetic).
+.PHONY: device
+device: device_bin
+	rm -f Source/pdex.dylib
+	rm -rf $(PRODUCT)
+	$(PDC) $(PDCFLAGS) Source $(PRODUCT)
