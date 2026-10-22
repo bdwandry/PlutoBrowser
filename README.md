@@ -178,6 +178,19 @@ Or directly using `pdc`:
 pdc Source PlutoBrowser.pdx
 ```
 
+### 1b. Device-only production build (`make device`)
+```bash
+make device
+```
+Ships a **device-only** `PlutoBrowser.pdx` (`pdex.bin` + assets, no simulator dylib inside — a leftover sim dylib from an earlier `make` cannot survive in the bundle). Side-load this bundle to the console (section 3).
+
+All 230 device objects — app code, all four JS engines (muJS, Duktape, QuickJS shim, stock XS), the XS No-Recursion fork, dav1d, and the whole browser pipeline — compile at **`-O3` by default** (device receipts 2026-10-22: real-site full cycle + 5-page internal battery, zero crashlog; stack-usage audit ≤ +48B per frame). The simulator build never reads this flag and stays unchanged.
+
+Rollback valve (per build, no file edits):
+```bash
+make device DEVICEOPT=-O2
+```
+
 ### 2. Run in Playdate Simulator
 ```bash
 make simulator
