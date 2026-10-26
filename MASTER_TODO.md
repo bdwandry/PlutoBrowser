@@ -9146,3 +9146,37 @@ Keyed entry: empty → inline error card; filled → "Sending..." → sent-email
   the user's gate; gzip on the OS stack (open receipt); the OS redirect behavior
   (3xx following is OS-internal — our 307/308 verb lane bypassed on this stack);
   the wire response-cache/304 lane is TCP-only (documented difference).
+
+## R62 device receipts (2026-10-26, the user's device gate) — the OS stack SURVIVES facebook on hardware
+- TEST A — the FULL CONTACT CYCLE ON THE OS STACK (harness build TAP+TYPE +
+  PLUTO_OSHTTP_AUTOTEST forcing netProtocol=1; full checklist, MD5
+  7add4490… MATCH): ALL 8 contact-page resources delivered through the OS
+  stack on the DEVICE (page 15627 RAM; CSS 7618 + all 7 chunks disk-spilled:
+  170495/229820/10030/14962/2930/112594/32103 — every byte) → the autotest
+  typed 3 fields → the send_email POST RODE THE OS STACK
+  ([http] route=OS-HTTP https://server.bryanwandrych.com/send_email →
+  [oshttp] done status=200 hdrs=13 ram=17 — the server's 17-byte ack) →
+  [fbform] POST done status=200 → RESULT inPlace=yes jsErrors=1 (was 1, the
+  standing react OOM) blocks=22 sentCard=1 errState=0 — BYTE-IDENTICAL to the
+  TCP receipts. The retire policy visibly worked on device ("retiring
+  UN-NOTIFIED connection (kept open, leak-1)" — the bounded leak instead of
+  the crash). ZERO crashlog/errorlog.
+- TEST B — FACEBOOK.COM ON THE OS STACK, DEVICE (temp autotest URL build —
+  note: the FIRST redeploy edited the WRONG #ifdef branch (the TAP default
+  while the build had no TAP define) and re-ran the home page — a clean OS-
+  stack home-page pass as a side effect; the second edit fixed the non-TAP
+  default. MD5 70f81f7e… MATCH): navigate_to facebook.com → [oshttp] headers
+  read: status=200 hdrs=29 cookies=2 len=-1 (chunked/streamed, no
+  Content-Length — a shape the raw-TCP stack never survived) → done status=200
+  ram=419819 (419,819-byte HTML delivered, NO CRASH — the raw-TCP stack died
+  DETERMINISTICALLY on this exact navigation, R62 bisect receipt) → host
+  switch to static.xx.fbcdn.net → a 1,394,584-byte stylesheet STREAMED TO DISK
+  → the page RENDERED (title='Facebook', blocks=1 — facebook's JS shell; the
+  content shape is facebook's own choice for a non-JS client) → the device ran
+  HEALTHY for minutes after (50fps, stackPeak 5504B, heap stable 2186KB,
+  refusals=0) → session end = the datadisk pull (kEventTerminate). ZERO
+  crashlog/errorlog. THE E0 ESCAPE HATCH IS PROVEN ON HARDWARE: the Network
+  Protocol → HTTP setting is the facebook route.
+- PRODUCTION RESTORED: the temp URL edit reverted (git checkout); the clean
+  production 1.2.2 build (0 harness strings) deployed, MD5 38f97fcb… MATCH,
+  3 logs cleared, relaunched (boot → home launcher, netProtocol defaults TCP).
