@@ -121,6 +121,7 @@ SRC_DEVICE = \
 	Source/html/jsbridge_quickjs.c \
 	Source/html/webstorage.c \
 	Source/html/jsext.c \
+	Source/html/sdisco.c \
 	Source/html/css.c \
 	Source/keyboard/keyboard.c \
 	Source/core/tasks.c \

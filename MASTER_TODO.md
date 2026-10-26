@@ -8986,3 +8986,86 @@ Keyed entry: empty → inline error card; filled → "Sending..." → sent-email
 - OPEN SCRAYS: TAP2 device phase-4 false-skip quirk (gate the auto-press on !inFlight) — unchanged; Source/pdex.elf
   stray copy in the source tree (user-owned, untouched, flag it for git status).
 
+
+## R61 — form_sites.txt REMOVED; the no-action form route is now script-derived (sdisco) — device -O3 PROVEN (2026-10-25)
+- USER REPORT (regression): on the DEVICE (sim fine), tapping "Send email" on
+  https://bryanwandrych.com/contact reloaded the page and CLEARED the typed
+  fields (the R56g-era behavior: send → "Sending…" → status=200 → summary
+  card was gone). Reproduced with -O3 AND -O2 → not an optimizer issue.
+- ROOT CAUSE (log-forensics + code walk): the R56g fallback's route (b) read
+  a Data/form_sites.txt profile. That file is NOT in the deploy checklist
+  (AGENTS.md copies only the PDX), and the device Data dir had no copy — the
+  loader found nothing, the form (no action=) hit route (c): "legacy static
+  GET" → submit_form self-GET → the reload the user saw. The route was never
+  broken in code; its DATA was missing → by design it degraded to 2010-era
+  static-browser behavior.
+- USER DIRECTIVE: no site hard-coding anywhere; remove form_sites.txt
+  completely; the browser must work like a normal one (JS-tied buttons work:
+  change text, redirect, send a request, run a function); if RAM overflows,
+  data goes to disk. Do NOT revert the scorecard/Forms machinery.
+- THE FIX — sdisco (NEW Source/html/sdisco.c/h, Script-Derived Submission
+  Discovery): a preload-scanner-style pass (the browser's own speculative-
+  parse idea) over the page's OWN scripts, lifting each fetch()/XHR .open()
+  POST target + its Content-Type + its JSON.stringify({...}) payload keys
+  into a bounded page-scoped BSS table. Zero site knowledge, zero deployed
+  data files, no allocation, dies at the page boundary (page_swap_doc →
+  sdisco_reset). Scan points: jsext fetch_on_success (RAM bodies — runs on
+  EVERY delivered script BEFORE any execution gating: a script the engine
+  can never run still names its routes), fetch_on_success_spill (disk bodies
+  scanned in bounded 1.5KB windows + 1280B carry — the bulk never
+  materializes in RAM, honoring the disk/RAM contract), jsext_local_fill
+  (about: fixtures), and the three jsbridge inline-queue sites. The fallback
+  route (b) is now: score discovered endpoints against the form's OWN
+  collected fields (payload key ↔ field-name ci-equal-or-suffix match — key
+  "email" ↔ field "contact-email", the page's own naming convention); best
+  evidence wins; a LONE POST endpoint with no key evidence (FormData/plain
+  body) still wins; zero evidence → the legacy static GET stands (route (c)
+  unchanged). POST body = the discovered keys mapped onto field values
+  (fb_json_emit; unmapped fields ride raw DOM names) — the exact wire shape
+  the page's own script would have sent. Removed: FormSite struct, profile
+  loader/lookup, fb_map_get/fb_list_has, form_sites.txt (repo root AND the
+  device Data copy). main.c/jsext.c/jsbridge.c/Makefile touched; no engine
+  files touched; -O3 device default untouched.
+- SIM PROOF (autotest TAP+TYPE build, local e2e rig: python http.server on
+  127.0.0.1:8000 serving a no-action form page + /api/send_email POST
+  logger): [sdisco] scan len=244 → endpoint discovered keys=3 → fields
+  collected WITH typed values (id-fallback names) → route=discovered → POST
+  body=133 (application/json) — the server logged the EXACT body
+  {"email":"autotest@example.com","subject":"Sim autotest subject",
+  "message":"Hello from …"} (suffix mapping produced the site's own key
+  names) → status=200 → summary hid 11 children (kept card) → RESULT
+  inPlace=yes jsErrors=0 blocks=9 errCard=0 sentCard=1 errState=0.
+  REGRESSION GATE on the real site (same build): sim react hydration still
+  SUPPRESSED-dominant (rc=2 on submit dispatch), zero fbform rows (fallback
+  inert when scripts live), RESULT inPlace=yes blocks=20 sentCard=1 — C4
+  behavior byte-standing.
+- DEVICE PROOF (make device -j16, autotest TAP+TYPE build, full AGENTS.md
+  checklist, MD5 d9cde192… MATCH pre-eject): boot → auto-nav contact → all 7
+  chunks download + scan ([sdisco] rows on every body) → [sdisco] endpoint
+  discovered: https://server.bryanwandrych.com/send_email ct=application/json
+  keys=3 (from the page's OWN 2930B chunk — zero site data) → autotest typed
+  3 fields → [fbform] fields WITH values → route=discovered → POST body=133
+  (application/json) → POST done status=200 (REAL email delivered) → summary
+  hid 5 child node(s) → RESULT inPlace=yes jsErrors=1 (was 1, the standing
+  react OOM) sentCard=1 errState=0 — NO RELOAD, typed values preserved into
+  the summary rows. stackPeak 5504B (= the -O3 receipt), heartbeats 50fps
+  after, ZERO crashlog/errorlog. The device regression is FIXED under -O3.
+- PRODUCTION REDEPLOY (R58b purity contract): make device -j16 clean (NO
+  DEVICEDEFS) — after a touch-all Source pass (R58 BUILD-LESSON: make cannot
+  see define flips; the first "clean" relink reused the harness objects —
+  ELF strings audit caught it: nr-autotest 17 → touch → 0). MD5
+  f5544f8d619e19fdd2a7b05a0fbac2ae MATCH; form_sites.txt deleted from the
+  device Data dir; 3 logs cleared; boot-verified clean (0 autotest/auto-nav
+  rows, home launcher). sdisco strings present (19) — the production binary
+  carries the new route.
+- SIM-LOAD NOTE (cost: 2 confusing sim runs): passing Source/pdex.dylib to
+  the Simulator launched the REGISTERED game (~/Developer/PlutoBrowserWork/
+  PlutoBrowser.pdx — a DIFFERENT working copy, stale binary) instead of the
+  named dylib. lsof <sim pid> shows the loaded pdex.dylib path. Launching
+  with the PDX PATH (PlutoBrowser.pdx) loads the intended build. If sim rows
+  "don't exist in the binary", lsof the sim BEFORE doubting the link.
+- OPEN: the discovered-endpoint route needs the same real-site spot-checks
+  the R56g profiles got (any action= form; urlencoded GET path) — the
+  machinery is the battery's (formsum/formval ride action= forms, unchanged);
+  keyless-POST discovery (FormData bodies) is exercised by no automated page
+  yet. Honeypot/skip semantics unchanged (fb_collect_fields).

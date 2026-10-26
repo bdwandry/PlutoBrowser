@@ -58,6 +58,7 @@
 #include "html/jsbridge.h"
 #include "html/jsbridge_internal.h" /* Forms-Phase 3: the shared validity layer */
 #include "html/jsext.h"
+#include "html/sdisco.h" /* the script-derived submission routes (no site data) */
 #include "html/readability.h"
 #include "keyboard/keyboard.h"
 #include "core/constants.h"
@@ -668,6 +669,9 @@ static void page_swap_doc(RenderTask *rt)
         g_fbSummaryOn = 0;
         g_fbSummaryForm = NULL;
         g_fbSavedCount = 0;
+        /* sdisco: the discovered submission routes belong to the OLD
+         * page's own scripts — a new page rediscovers from its own. */
+        sdisco_reset();
         /* Page boundary: re-base the funnel's live counter to the tracked
          * truth — drift across this page's engine churn would otherwise
          * shrink the next page's usable budget (device flip-crash, 2026-09-22). */
@@ -6422,266 +6426,46 @@ static void form_node_form(char *out, size_t cap, const DomNode *n)
     }
 }
 
-/* ══ R56f/R56g: NATIVE FORM FALLBACK (the script-dead submit) — GENERAL ══
+/* ══ R56f/R56g → sdisco: NATIVE FORM FALLBACK (the script-dead submit) ══
  * When NO script ran for a submit (JSB_EVENT_NONE — on-device react-dom's
  * 209KB factory cannot compile: R56d device [mem] trace, ~+5.75MB codegen
  * vs a ~9.4MB pool wall) the SSR DOM still shows the REAL form with the
  * REAL typed values (dom_set_attr "value" — the keyboard/autotest writes
  * it; it survives rewalks). The browser performs the submission itself,
  * GENERICALLY: all named successful controls, HTML5-lite validation
- * (required + type=email), the HTML-standard routing (form action= →
- * GET-navigate or urlencoded POST), else a Data/form_sites.txt profile
- * (endpoint/body/card-string overrides — per-site data, not code), else
- * the byte-identical static-page GET. Cards ride the dom_create helpers
- * + dom_append_child + page_rewalk_now (the same plumbing the JS DOM
- * services use), so the autotest DOM scans see them. The POST rides the
- * http_request_ct path (caller-chosen Content-Type; the legacy callers'
- * application/json is unchanged). A live script (rc=SUPPRESSED/NAVIGATE)
- * NEVER reaches this path — the sim's hydration stays on react's own
- * handlers. */
+ * (required + type=email), and the HTML-standard routing (form action= →
+ * GET-navigate or urlencoded POST); a form with NO action= rides the
+ * page's OWN script-discovered endpoint (sdisco — html/sdisco.c lifted
+ * the fetch/XHR POST target + payload keys out of the page's own scripts
+ * at download time; zero site data — the old Data/form_sites.txt profiles
+ * were removed with the user's no-site-hard-coding directive). Cards ride
+ * the dom_create helpers + dom_append_child + page_rewalk_now (the same
+ * plumbing the JS DOM services use), so the autotest DOM scans see them.
+ * The POST rides the http_request_ct path (caller-chosen Content-Type;
+ * the legacy callers' application/json is unchanged). A live script
+ * (rc=SUPPRESSED/NAVIGATE) NEVER reaches this path — the sim's hydration
+ * stays on react's own handlers. */
 
-/* The GENERIC browser strings (every site without a profile gets these;
- * a Data/form_sites.txt profile overrides per host — data, not code). */
+/* The GENERIC browser strings — every script-dead submission gets these;
+ * the browser owns its own fallback copy, exactly as a browser owns its
+ * own "Reload?" chrome. No site data anywhere. */
 static const char FB_TXT_SUCCESS[] = "Sent.";
 static const char FB_TXT_FAIL[] = "Something went wrong.";
 static const char FB_TXT_INVALID[] =
     "Please check the form fields and try again.";
 static const char FB_TXT_SENDING[] = "Sending\u2026";
 
-/* ── Site profiles: Data/form_sites.txt (deployed DATA, not code) ─────
- * One profile block per host; keys only:
- *   host=example.com
- *   endpoint=https://server.example.com/api
- *   body=json            (or "url")
- *   keys=dom-name:payload-key;dom-name2:payload-key2
- *   labels=dom-name:Shown Label;dom-name2:Label
- *   summary=name1,name2  (rows shown; empty = every submitted field)
- *   success=... failure=... invalid=... sending=...
- * A form with its own action= never consults profiles (standard HTML
- * semantics run first). The file lives in the browser's data dir, so a
- * new site is an edit, not a recompile. */
-typedef struct
-{
-    char host[64];
-    char endpoint[160];
-    int bodyJson;
-    char keys[128];
-    char labels[128];
-    char summary[96];
-    char success[192];
-    char failure[96];
-    char invalid[96];
-    char sending[24];
-} FormSite;
-enum
-{
-    FB_SITE_MAX = 4
-};
-static FormSite g_fbSites[FB_SITE_MAX];
-static int g_fbSiteCount;
-static int g_fbSitesLoaded;
-
-static void fb_site_reset(FormSite *s)
-{
-    memset(s, 0, sizeof(*s));
-    s->bodyJson = 1; /* modern script-driven endpoints post JSON */
-    snprintf(s->success, sizeof(s->success), "%s", FB_TXT_SUCCESS);
-    snprintf(s->failure, sizeof(s->failure), "%s", FB_TXT_FAIL);
-    snprintf(s->invalid, sizeof(s->invalid), "%s", FB_TXT_INVALID);
-    snprintf(s->sending, sizeof(s->sending), "%s", FB_TXT_SENDING);
-}
-
-static void fb_site_value(FormSite *s, const char *key, const char *val)
-{
-    if (!strcmp(key, "host"))
-        snprintf(s->host, sizeof(s->host), "%s", val);
-    else if (!strcmp(key, "endpoint"))
-        snprintf(s->endpoint, sizeof(s->endpoint), "%s", val);
-    else if (!strcmp(key, "body"))
-        s->bodyJson = (strstr(val, "json") == NULL) ? 0 : 1;
-    else if (!strcmp(key, "keys"))
-        snprintf(s->keys, sizeof(s->keys), "%s", val);
-    else if (!strcmp(key, "labels"))
-        snprintf(s->labels, sizeof(s->labels), "%s", val);
-    else if (!strcmp(key, "summary"))
-        snprintf(s->summary, sizeof(s->summary), "%s", val);
-    else if (!strcmp(key, "success"))
-        snprintf(s->success, sizeof(s->success), "%s", val);
-    else if (!strcmp(key, "failure"))
-        snprintf(s->failure, sizeof(s->failure), "%s", val);
-    else if (!strcmp(key, "invalid"))
-        snprintf(s->invalid, sizeof(s->invalid), "%s", val);
-    else if (!strcmp(key, "sending"))
-        snprintf(s->sending, sizeof(s->sending), "%s", val);
-    /* unknown keys ignored (forward compatibility) */
-}
-
-static void pluto_form_sites_load(void)
-{
-    SDFile *fp;
-    int flen, got;
-    char *buf;
-    g_fbSitesLoaded = 1;
-    fp = pd->file->open("form_sites.txt", kFileReadData);
-    if (!fp)
-    {
-        logger_log("[fbform] no form_sites.txt — generic fallback only");
-        return;
-    }
-    pd->file->seek(fp, 0, SEEK_END);
-    flen = pd->file->tell(fp);
-    pd->file->seek(fp, 0, SEEK_SET);
-    if (flen <= 0 || flen > 4096)
-    {
-        logger_log("[fbform] form_sites.txt bad size %d", flen);
-        pd->file->close(fp);
-        return;
-    }
-    buf = (char *)malloc((size_t)flen + 1);
-    if (!buf)
-    {
-        pd->file->close(fp);
-        return;
-    }
-    got = pd->file->read(fp, buf, (unsigned int)flen);
-    pd->file->close(fp);
-    if (got != flen)
-    {
-        free(buf);
-        return;
-    }
-    buf[flen] = '\0';
-    {
-        FormSite cur;
-        int have = 0;
-        char *line = buf;
-        while (line && line[0])
-        {
-            char *nl = strchr(line, '\n');
-            if (nl)
-                *nl = '\0';
-            {
-                char *eq;
-                char *p = line;
-                while (*p == ' ' || *p == '\t' || *p == '\r')
-                    p++;
-                if (*p && *p != '#')
-                {
-                    eq = strchr(p, '=');
-                    if (eq)
-                    {
-                        char key[16];
-                        size_t klen = (size_t)(eq - p);
-                        char *val = eq + 1, *vend;
-                        while (klen > 0 &&
-                               (p[klen - 1] == ' ' || p[klen - 1] == '\t'))
-                            klen--;
-                        if (klen < sizeof(key))
-                        {
-                            memcpy(key, p, klen);
-                            key[klen] = '\0';
-                            vend = val + strlen(val);
-                            while (vend > val &&
-                                   (vend[-1] == ' ' || vend[-1] == '\t' ||
-                                    vend[-1] == '\r'))
-                                *--vend = '\0';
-                            if (!strcmp(key, "host"))
-                            {
-                                if (have && g_fbSiteCount < FB_SITE_MAX)
-                                    g_fbSites[g_fbSiteCount++] = cur;
-                                fb_site_reset(&cur);
-                                have = 1;
-                            }
-                            if (have)
-                                fb_site_value(&cur, key, val);
-                        }
-                    }
-                }
-            }
-            line = nl ? nl + 1 : NULL;
-        }
-        if (have && g_fbSiteCount < FB_SITE_MAX)
-            g_fbSites[g_fbSiteCount++] = cur;
-    }
-    {
-        int i;
-        for (i = 0; i < g_fbSiteCount; i++)
-            logger_log("[fbform] profile[%d] host=%s endpoint=%.60s json=%d",
-                       i, g_fbSites[i].host, g_fbSites[i].endpoint,
-                       g_fbSites[i].bodyJson);
-    }
-    logger_log("[fbform] %d site profile(s) loaded", g_fbSiteCount);
-    free(buf);
-}
-
-static const FormSite *fb_site_lookup(void)
-{
-    int i;
-    const char *host =
-        (currentUrlObj && currentUrlObj->host[0]) ? currentUrlObj->host : "";
-    if (!host[0])
-        return NULL;
-    for (i = 0; i < g_fbSiteCount; i++)
-    {
-        if (g_fbSites[i].host[0] && strstr(host, g_fbSites[i].host))
-            return &g_fbSites[i];
-    }
-    return NULL;
-}
-
-/* "name:Payload;other:Key2" map lookup — bounded copy of the value after
- * the ':' matching token `name` (up to ';' or end). out = "" when absent. */
-static void fb_map_get(const char *raw, const char *name, size_t nameLen,
-                       char *out, size_t cap)
-{
-    size_t vLen;
-    out[0] = '\0';
-    while (raw && *raw)
-    {
-        const char *semi = strchr(raw, ';');
-        const char *colon = strchr(raw, ':');
-        size_t segLen = semi ? (size_t)(semi - raw) : strlen(raw);
-        size_t colonOff = colon ? (size_t)(colon - raw) : (size_t)-1;
-        if (colon && colonOff < segLen && colonOff == nameLen &&
-            strncmp(raw, name, nameLen) == 0)
-        {
-            vLen = segLen - colonOff - 1;
-            if (vLen + 1 > cap)
-                vLen = cap - 1;
-            memcpy(out, colon + 1, vLen);
-            out[vLen] = '\0';
-            return;
-        }
-        if (!semi)
-            break;
-        raw = semi + 1;
-    }
-}
-
-static int fb_list_has(const char *csv, const char *name)
-{
-    size_t n = strlen(name);
-    while (csv && *csv)
-    {
-        const char *comma = strchr(csv, ',');
-        size_t segLen = comma ? (size_t)(comma - csv) : strlen(csv);
-        const char *s = csv;
-        while (segLen && (*s == ' ' || *s == '\t'))
-        {
-            s++;
-            segLen--;
-        }
-        while (segLen &&
-               (s[segLen - 1] == ' ' || s[segLen - 1] == '\t'))
-            segLen--;
-        if (segLen == n && strncmp(s, name, n) == 0)
-            return 1;
-        if (!comma)
-            break;
-        csv = comma + 1;
-    }
-    return 0;
-}
+/* ── Site profiles: REMOVED (2026-10-25, user directive) ────────────────
+ * The R56g Data/form_sites.txt profiles were per-site hard-coding by
+ * another name — and any redeploy that forgot the manual Data copy
+ * silently downgraded every no-action form to the legacy static GET
+ * (the reported Send-email reload regression). The GENERAL mechanism
+ * that replaced them: sdisco (html/sdisco.c) lifts each page's OWN
+ * submission endpoints out of the page's own scripts at download time —
+ * fetch/XHR POST targets with Content-Type and JSON.stringify payload
+ * keys — and the fallback below submits to the discovered endpoint that
+ * best matches the form's own fields. Zero site knowledge, nothing
+ * deployed beside the pdx, works like a browser's preload scanner. */
 
 /* case-insensitive comparison without strcasecmp (newlib-safe). */
 static int fb_ieq(const char *a, const char *b)
@@ -7002,26 +6786,19 @@ static int g_fbRowCount;
 static char g_fbTextSent[192];
 static char g_fbTextFail[96];
 
-/* Rows + texts snapshot for THIS post: profile `summary=` filters the
- * rows, `labels=`/`success=`/`failure=` rename/copy the strings. */
-static void fb_summary_persist(const FormSite *site)
+/* Rows + texts snapshot for THIS post: generic browser strings, the
+ * labels the page's own <label> text supplied at collection time. */
+static void fb_summary_persist(void)
 {
     int i;
     g_fbRowCount = 0;
-    snprintf(g_fbTextSent, sizeof(g_fbTextSent), "%s",
-             (site && site->success[0]) ? site->success : FB_TXT_SUCCESS);
-    snprintf(g_fbTextFail, sizeof(g_fbTextFail), "%s",
-             (site && site->failure[0]) ? site->failure : FB_TXT_FAIL);
+    snprintf(g_fbTextSent, sizeof(g_fbTextSent), "%s", FB_TXT_SUCCESS);
+    snprintf(g_fbTextFail, sizeof(g_fbTextFail), "%s", FB_TXT_FAIL);
     for (i = 0; i < g_fbFieldCount && g_fbRowCount < FB_FIELD_MAX; i++)
     {
         const FbField *f = &g_fbFields[i];
-        char labBuf[64];
-        if (site && site->summary[0] && !fb_list_has(site->summary, f->name))
-            continue; /* the profile's row filter */
-        fb_map_get(site ? site->labels : NULL, f->name, strlen(f->name),
-                   labBuf, sizeof(labBuf));
         snprintf(g_fbRowLabel[g_fbRowCount], sizeof(g_fbRowLabel[0]), "%s",
-                 (labBuf[0]) ? labBuf : f->label);
+                 f->label);
         snprintf(g_fbRowValue[g_fbRowCount], sizeof(g_fbRowValue[0]), "%s",
                  f->value);
         g_fbRowCount++;
@@ -7175,92 +6952,140 @@ static void fb_pairs_urlenc(char *out, size_t cap)
     }
 }
 
-/* JSON.stringify-style body: {"payloadKey":"value",...}. The payload key
- * comes from the profile's keys= map (the server's contract); no profile
- * = the DOM name itself. Values stream-escape directly into the buffer. */
-static void fb_pairs_json(const FormSite *site, char *out, size_t cap)
+/* JSON.stringify-style body built from the DISCOVERED payload keys (the
+ * page's own contract — sdisco lifted them from the page's own fetch
+ * code). Each key takes the field it names: case-insensitive equal OR
+ * suffix (key "email" ↔ field "contact-email" — the site's own naming
+ * convention, any separator or camelCase). Fields no key claimed ride
+ * their raw DOM names, in field order, after the mapped keys. */
+static int fb_key_field_match(const char *fieldName, const char *key)
+{
+    size_t fl = strlen(fieldName), kl = strlen(key);
+    if (!kl || fl < kl)
+        return 0;
+    if (kl < 3 && fl != kl)
+        return 0; /* a 2-char key never suffix-matches (noise guard) */
+    {
+        const char *tail = fieldName + (fl - kl);
+        size_t i;
+        for (i = 0; i < kl; i++)
+        {
+            char a = tail[i], b = key[i];
+            if (a >= 'A' && a <= 'Z')
+                a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z')
+                b = (char)(b - 'A' + 'a');
+            if (a != b)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* One "key":"value" member (JSON.stringify's shape: " \ and C0 →
+ * escapes). Appends at u (the comma decided by *first), NUL-terminates,
+ * truncates at cap. Returns the new write position. */
+static size_t fb_json_emit(char *out, size_t cap, size_t u, const char *key,
+                           const char *raw, int *first)
 {
     static const char hex[] = "0123456789abcdef";
+    if (u + 8 >= cap)
+        return u;
+    if (!*first)
+        out[u++] = ',';
+    *first = 0;
+    out[u++] = '"';
+    for (; *key && u + 4 < cap; key++)
+    {
+        char c = *key;
+        if (c == '"')
+        {
+            out[u++] = '\\';
+            out[u++] = '"';
+        }
+        else
+            out[u++] = c;
+    }
+    out[u++] = '"';
+    if (u + 2 < cap)
+    {
+        out[u++] = ':';
+        out[u] = '\0';
+    }
+    if (u + 2 < cap)
+    {
+        out[u++] = '"';
+        for (; *raw && u + 7 < cap; raw++)
+        {
+            char c = *raw;
+            if (c == '"' || c == '\\')
+            {
+                out[u++] = '\\';
+                out[u++] = c;
+            }
+            else if (c == '\n')
+            {
+                out[u++] = '\\';
+                out[u++] = 'n';
+            }
+            else if (c == '\r')
+            {
+                out[u++] = '\\';
+                out[u++] = 'r';
+            }
+            else if (c == '\t')
+            {
+                out[u++] = '\\';
+                out[u++] = 't';
+            }
+            else if ((unsigned char)c < 0x20)
+            {
+                out[u++] = '\\';
+                out[u++] = 'u';
+                out[u++] = '0';
+                out[u++] = '0';
+                out[u++] = hex[((unsigned char)c >> 4) & 0xF];
+                out[u++] = hex[(unsigned char)c & 0xF];
+            }
+            else
+                out[u++] = c;
+        }
+        if (u + 1 < cap)
+            out[u++] = '"';
+    }
+    out[u] = '\0';
+    return u;
+}
+
+static void fb_pairs_json(const SdiscoEndpoint *ep, char *out, size_t cap)
+{
     size_t u = 1; /* the '{' */
-    int i;
+    int first = 1;
+    int used[FB_FIELD_MAX] = {0};
+    int i, k;
     out[0] = '{';
+    /* the discovered keys first, in the page's own order */
+    for (k = 0; k < ep->keyCount; k++)
+    {
+        for (i = 0; i < g_fbFieldCount; i++)
+        {
+            if (!used[i] &&
+                fb_key_field_match(g_fbFields[i].name, ep->keys[k]))
+            {
+                used[i] = 1;
+                u = fb_json_emit(out, cap, u, ep->keys[k], g_fbFields[i].value,
+                                 &first);
+                break;
+            }
+        }
+    }
+    /* the fields no key claimed keep their DOM names */
     for (i = 0; i < g_fbFieldCount; i++)
     {
-        const FbField *f = &g_fbFields[i];
-        char keyBuf[48];
-        const char *raw = f->value;
-        if (u + 8 >= cap)
-            break;
-        if (i)
-            out[u++] = ',';
-        out[u++] = '"';
-        /* key: characters until '"' (config-supplied payload key) */
-        {
-            const char *k;
-            fb_map_get(site ? site->keys : NULL, f->name, strlen(f->name),
-                       keyBuf, sizeof(keyBuf));
-            k = (keyBuf[0]) ? keyBuf : f->name;
-            while (*k && u + 4 < cap)
-            {
-                char c = *k++;
-                if (c == '"')
-                {
-                    out[u++] = '\\';
-                    out[u++] = '"';
-                }
-                else
-                    out[u++] = c;
-            }
-        }
-        out[u++] = '"';
-        if (u + 2 < cap)
-        {
-            out[u++] = ':';
-            out[u] = '\0';
-        }
-        /* value with the full JSON escapes */
-        if (u + 2 < cap)
-        {
-            out[u++] = '"';
-            for (; *raw && u + 7 < cap; raw++)
-            {
-                char c = *raw;
-                if (c == '"' || c == '\\')
-                {
-                    out[u++] = '\\';
-                    out[u++] = c;
-                }
-                else if (c == '\n')
-                {
-                    out[u++] = '\\';
-                    out[u++] = 'n';
-                }
-                else if (c == '\r')
-                {
-                    out[u++] = '\\';
-                    out[u++] = 'r';
-                }
-                else if (c == '\t')
-                {
-                    out[u++] = '\\';
-                    out[u++] = 't';
-                }
-                else if ((unsigned char)c < 0x20)
-                {
-                    out[u++] = '\\';
-                    out[u++] = 'u';
-                    out[u++] = '0';
-                    out[u++] = '0';
-                    out[u++] = hex[((unsigned char)c >> 4) & 0xF];
-                    out[u++] = hex[(unsigned char)c & 0xF];
-                }
-                else
-                    out[u++] = c;
-            }
-            if (u + 1 < cap)
-                out[u++] = '"';
-        }
-        out[u] = '\0';
+        if (used[i])
+            continue;
+        u = fb_json_emit(out, cap, u, g_fbFields[i].name, g_fbFields[i].value,
+                         &first);
     }
     if (u + 1 < cap)
         out[u++] = '}';
@@ -7268,10 +7093,8 @@ static void fb_pairs_json(const FormSite *site, char *out, size_t cap)
 }
 
 /* HTML5-lite validation on the GENERIC collected fields: required-empty
- * fails, type=email fails unless it passes the spec-shaped regex. The
- * card text = the profile's invalid= (data) or the generic default. */
-static int fb_fields_valid(const FormSite *site, DomResult *dom,
-                           DomNode *form)
+ * fails, type=email fails unless it passes the spec-shaped regex. */
+static int fb_fields_valid(DomResult *dom, DomNode *form)
 {
     int i;
     for (i = 0; i < g_fbFieldCount; i++)
@@ -7281,9 +7104,7 @@ static int fb_fields_valid(const FormSite *site, DomResult *dom,
         {
             logger_log("[fbform] validation: required '%s' is empty",
                        f->name);
-            fb_card_insert(dom, form,
-                           (site && site->invalid[0]) ? site->invalid
-                                                      : FB_TXT_INVALID);
+            fb_card_insert(dom, form, FB_TXT_INVALID);
             return 0;
         }
         if (!strcmp(f->type, "email") && f->value[0] &&
@@ -7291,29 +7112,78 @@ static int fb_fields_valid(const FormSite *site, DomResult *dom,
         {
             logger_log("[fbform] validation: invalid email '%s' (name=%s)",
                        f->value, f->name);
-            fb_card_insert(dom, form,
-                           (site && site->invalid[0]) ? site->invalid
-                                                      : FB_TXT_INVALID);
+            fb_card_insert(dom, form, FB_TXT_INVALID);
             return 0;
         }
     }
     return 1;
 }
 
+/* Score the discovered endpoints against the form's OWN collected
+ * fields: an endpoint's payload keys that name fields (the fb key↔field
+ * match) are its evidence — the page's own naming convention (key
+ * "email" ↔ field "contact-email") is exactly what makes the right
+ * endpoint score. Best evidence wins; a LONE POST endpoint with no key
+ * evidence (a FormData/plain body the scanner cannot see into) still
+ * wins when it is the page's only POST candidate — a form with no
+ * action and exactly one script POST target has one honest reading.
+ * Zero evidence anywhere = no route (the caller's legacy static GET). */
+static const SdiscoEndpoint *fb_disco_pick(void)
+{
+    const SdiscoEndpoint *best = NULL;
+    int bestScore = 0, postCount = 0;
+    int n = sdisco_count();
+    for (int i = 0; i < n; i++)
+    {
+        const SdiscoEndpoint *e = sdisco_at(i);
+        int score = 0;
+        if (!e->methodPost || !e->url[0])
+            continue;
+        postCount++;
+        for (int k = 0; k < e->keyCount; k++)
+        {
+            for (int f = 0; f < g_fbFieldCount; f++)
+            {
+                if (fb_key_field_match(g_fbFields[f].name, e->keys[k]))
+                {
+                    score++;
+                    break;
+                }
+            }
+        }
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best = e;
+        }
+    }
+    if (!best && postCount == 1)
+    {
+        for (int i = 0; i < n; i++)
+        {
+            const SdiscoEndpoint *e = sdisco_at(i);
+            if (e->methodPost && e->url[0])
+                return e;
+        }
+    }
+    return best;
+}
+
 /* Returns 1 when the fallback OWNS the submit, 0 = no route (no form
- * action, no site profile) → the caller keeps the byte-identical legacy
- * static GET path — exactly what a script-less browser did. */
+ * action, no script-discovered endpoint) → the caller keeps the
+ * byte-identical legacy static GET path — exactly what a script-less
+ * browser did. */
 static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
                                const char *actionOverride,
                                const char *methodOverride,
                                int skipValidation, DomNode *submitterNode)
 {
     DomResult *dom = currentDoc ? (DomResult *)currentDoc->_dom : NULL;
-    const FormSite *site;
     char ep[224];
     char ct[48];
     int methodGet = 0;
-    int routeProfile = 0;
+    int routeDisco = 0;
+    const SdiscoEndpoint *disco = NULL;
     if (!dom || !form || g_fbInFlight)
     {
         if (g_fbInFlight)
@@ -7333,9 +7203,6 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
     logger_log("[fbform] form tag=%s kind=%d kids=%d attrs=%d node=%p",
                form->tag ? form->tag : "?", (int)form->kind, form->childCount,
                form->attrCount, (void *)form);
-    if (!g_fbSitesLoaded)
-        pluto_form_sites_load();
-    site = fb_site_lookup();
     g_fbFieldCount = 0;
     fb_collect_fields(form, 0);
     if (g_fbFieldCount == 0)
@@ -7349,7 +7216,7 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
      * passes skipValidation=0 — byte-identical standing behavior; its
      * empty-required case is already caught by the Phase-3 gate
      * upstream. */
-    if (!skipValidation && !fb_fields_valid(site, dom, form))
+    if (!skipValidation && !fb_fields_valid(dom, form))
         return 1; /* the validation card is up; the form stays */
     /* Forms-Phase 6: METHOD=DIALOG resolves BEFORE any route selection.
      * The spec's dict-defining description: the submission is "intended
@@ -7374,13 +7241,14 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
             return 1;
         }
     }
-    fb_summary_persist(site);
+    fb_summary_persist();
     /* ── ROUTE: first match wins ─────────────────────────────────────
      * a. the form has its own action → the HTML-standard submission
      *    (GET navigates action?query; POST sends urlencoded). Works for
      *    EVERY site's real HTML form with zero site knowledge.
-     * b. no action, but a form_sites.txt profile matches the host →
-     *    that site's endpoint + body format (data-driven).
+     * b. no action → the page's OWN script-discovered submission
+     *    endpoint (sdisco lifted it from the page's fetch/XHR code at
+     *    download time — zero site data, the preload-scanner model).
      * c. neither → the legacy static-page GET behavior unchanged. */
     {
         char actionAbs[224];
@@ -7432,21 +7300,41 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
             logger_log("[fbform] route=standard action=%.80s method=%s",
                        ep, fb_method_log_name(idlMethod));
         }
-        else if (site && site->endpoint[0])
-        {
-            snprintf(ep, sizeof(ep), "%s", site->endpoint);
-            snprintf(ct, sizeof(ct), "%s", site->bodyJson
-                                                ? "application/json"
-                                                : "application/x-www-form-urlencoded");
-            routeProfile = 1;
-            logger_log("[fbform] route=profile host=%.40s endpoint=%.70s "
-                       "body=%s",
-                       site->host, ep, site->bodyJson ? "json" : "url");
-        }
         else
         {
-            logger_log("[fbform] no action, no profile — legacy static GET");
-            return 0;
+            /* Route b: the page's own discovered endpoint. Relative
+             * targets resolve against the document base (the classic-
+             * script fetch() rule). */
+            disco = fb_disco_pick();
+            if (!disco)
+            {
+                logger_log("[fbform] no action, no script-discovered route "
+                           "— legacy static GET");
+                return 0;
+            }
+            {
+                char *abs = url_resolve(
+                    (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
+                                                        : "",
+                    disco->url);
+                if (abs)
+                {
+                    snprintf(ep, sizeof(ep), "%s", abs);
+                    pluto_free(abs);
+                }
+                else
+                {
+                    snprintf(ep, sizeof(ep), "%s", disco->url);
+                }
+            }
+            snprintf(ct, sizeof(ct), "%s",
+                     disco->contentType[0] ? disco->contentType
+                                           : "application/json");
+            routeDisco = 1;
+            logger_log("[fbform] route=discovered endpoint=%.70s keys=%d "
+                       "ct=%s",
+                       ep, disco->keyCount,
+                       disco->contentType[0] ? disco->contentType : "(default)");
         }
     }
     /* Forms-Phase 6: the dialog-method hold happens BEFORE the route
@@ -7491,10 +7379,18 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
     {
         HttpCallbacks cbs;
         int started;
-        if (routeProfile && site->bodyJson)
-            fb_pairs_json(site, g_fbBody, sizeof(g_fbBody));
-        else if (routeProfile)
+        if (routeDisco && disco->keyCount > 0)
+        {
+            /* the page's own payload contract: discovered keys, mapped
+             * onto the form's fields (fb_pairs_json) */
+            fb_pairs_json(disco, g_fbBody, sizeof(g_fbBody));
+        }
+        else if (routeDisco)
+        {
+            /* a keyless discovered POST (FormData/plain body the scanner
+             * cannot see into): the browser-true urlencoded field set */
             fb_pairs_urlenc(g_fbBody, sizeof(g_fbBody));
+        }
         else
         {
             /* Forms-Phase 5: the route-standard POST body is the SAME
@@ -7538,7 +7434,7 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
         }
         logger_log("[fbform] POST %s body=%u (%s)", ep,
                    (unsigned)strlen(g_fbBody), ct);
-        if (!routeProfile)
+        if (!routeDisco)
         {
             /* Forms-Phase 5 receipt: the browser-true body bytes on the
              * record (pairs in tree order; the battery pairs this with
@@ -7546,9 +7442,7 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
             logger_log("[fbform] POST body bytes=%s", g_fbBody);
         }
         g_fbDom = dom;
-        fb_card_insert(dom, form,
-                       (site && site->sending[0]) ? site->sending
-                                                  : FB_TXT_SENDING);
+        fb_card_insert(dom, form, FB_TXT_SENDING);
         memset(&cbs, 0, sizeof(cbs));
         cbs.onSuccess = fb_on_success;
         cbs.onError = fb_on_error;

@@ -34,6 +34,7 @@
 #include "html/jsext.h"
 #include "html/jsbridge.h"
 #include "html/jsbridge_internal.h" /* jsbridge_script_type_is_data */
+#include "html/sdisco.h"
 #include "core/url.h"
 #include "core/logger.h"
 #include "core/http_client.h"
@@ -731,6 +732,9 @@ int jsext_local_fill(JsExtArena *arena, JsExtScript *ext, int extCount)
             continue;
         }
         size_t len = strlen(hit->source);
+        /* sdisco: local fixtures go through the same discovery pass as
+         * the network path — about: test pages keep full route parity. */
+        sdisco_scan_script(hit->source, len);
         if (len > JSBRIDGE_MAX_SCRIPT_SOURCE)
         {
             /* SW2b: the SOURCE ceiling (execution), not a download cap. */
@@ -1039,85 +1043,98 @@ static void fetch_on_success(int status, char **keys, char **vals, int hc,
     {
         logger_log("[jsext] FAIL %s empty body", url);
     }
-    else if (bodyLen > JSEXT_SPILL_THRESHOLD ||
-             bodyLen >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
-    {
-        /* Disk-resident adoption: write the delivered body to a spill file
-         * (one sequential flash write; the RAM copy dies with the callback).
-         * No page budget: disk residency is the point of SW2b. Bodies over
-         * the one-frame parse cap adopt disk residency too, so materiali-
-         * zation runs per-segment on the chunked stream path instead of a
-         * monolith admission no engine can grant (see the local path). */
-        SpillFile sp = pluto_spill_begin();
-        if (sp != PLUTO_SPILL_INVALID &&
-            pluto_spill_write(sp, body, bodyLen) == 0)
-        {
-            pluto_spill_finish(sp);
-            f->ext[i].body = NULL;
-            f->ext[i].spill = sp;
-            f->ext[i].len = bodyLen;
-            f->totalBytes += bodyLen;
-            logger_log("[jsext] ok %s (%zu bytes, disk-resident)", url,
-                       bodyLen);
-        }
-        else
-        {
-            if (sp != PLUTO_SPILL_INVALID)
-            {
-                pluto_spill_discard(sp);
-            }
-            logger_log("[jsext] FAIL %s spill write (no disk?)", url);
-        }
-    }
-    else if (bodyLen > g_pageBudget ||
-             bodyLen > pluto_mem_headroom_bytes())
-    {
-        /* SW3a AUTO-PLACEMENT (the runtime budget manager): RAM residency is
-         * granted only while BOTH the page budget AND the live app heap have
-         * room — the same uniform threshold for every site, no site knowledge.
-         * Under pressure the body goes to DISK instead and materializes
-         * just-in-time at execution (SW2b path): behavior is identical, only
-         * residency changes. NULL-body slots still run from disk via spill. */
-        SpillFile sp = pluto_spill_begin();
-        if (sp != PLUTO_SPILL_INVALID &&
-            pluto_spill_write(sp, body, bodyLen) == 0)
-        {
-            pluto_spill_finish(sp);
-            f->ext[i].body = NULL;
-            f->ext[i].spill = sp;
-            f->ext[i].len = bodyLen;
-            f->totalBytes += bodyLen;
-            logger_log("[jsext] ok %s (%zu bytes, disk-resident [heap-pressure])",
-                       url, bodyLen);
-        }
-        else
-        {
-            if (sp != PLUTO_SPILL_INVALID)
-            {
-                pluto_spill_discard(sp);
-            }
-            logger_log("[jsext] FAIL %s over page budget (%zu left, need %zu) "
-                       "and spill write failed",
-                       url, g_pageBudget, bodyLen);
-        }
-    }
     else
     {
-        char *copy = (char *)arena_alloc(f->arena, bodyLen + 1);
-        if (copy)
+        /* sdisco: the preload-scanner pass runs on EVERY delivered script
+         * body here — execution is what later gates (budget, engine
+         * admission); discovery is not. A script the engine can never
+         * run still names its fetch targets, so a script-dead page keeps
+         * its own submission routes. */
+        sdisco_scan_script(body, bodyLen);
+        if (bodyLen > JSEXT_SPILL_THRESHOLD ||
+            bodyLen >= (size_t)JSBRIDGE_ONE_FRAME_SCRIPT_MAX)
         {
-            memcpy(copy, body, bodyLen);
-            copy[bodyLen] = '\0';
-            f->ext[i].body = copy;
-            f->ext[i].len = bodyLen;
-            f->totalBytes += bodyLen;
-            g_pageBudget -= bodyLen;
-            logger_log("[jsext] ok %s (%zu bytes, ram-resident, %zu budget left)",
-                       url, bodyLen, g_pageBudget);
+            /* Disk-resident adoption: write the delivered body to a spill
+             * file (one sequential flash write; the RAM copy dies with the
+             * callback). No page budget: disk residency is the point of
+             * SW2b. Bodies over the one-frame parse cap adopt disk
+             * residency too, so materialization runs per-segment on the
+             * chunked stream path instead of a monolith admission no
+             * engine can grant (see the local path). */
+            SpillFile sp = pluto_spill_begin();
+            if (sp != PLUTO_SPILL_INVALID &&
+                pluto_spill_write(sp, body, bodyLen) == 0)
+            {
+                pluto_spill_finish(sp);
+                f->ext[i].body = NULL;
+                f->ext[i].spill = sp;
+                f->ext[i].len = bodyLen;
+                f->totalBytes += bodyLen;
+                logger_log("[jsext] ok %s (%zu bytes, disk-resident)", url,
+                           bodyLen);
+            }
+            else
+            {
+                if (sp != PLUTO_SPILL_INVALID)
+                {
+                    pluto_spill_discard(sp);
+                }
+                logger_log("[jsext] FAIL %s spill write (no disk?)", url);
+            }
+        }
+        else if (bodyLen > g_pageBudget ||
+                 bodyLen > pluto_mem_headroom_bytes())
+        {
+            /* SW3a AUTO-PLACEMENT (the runtime budget manager): RAM
+             * residency is granted only while BOTH the page budget AND the
+             * live app heap have room — the same uniform threshold for
+             * every site, no site knowledge. Under pressure the body goes
+             * to DISK instead and materializes just-in-time at execution
+             * (SW2b path): behavior is identical, only residency changes.
+             * NULL-body slots still run from disk via spill. */
+            SpillFile sp = pluto_spill_begin();
+            if (sp != PLUTO_SPILL_INVALID &&
+                pluto_spill_write(sp, body, bodyLen) == 0)
+            {
+                pluto_spill_finish(sp);
+                f->ext[i].body = NULL;
+                f->ext[i].spill = sp;
+                f->ext[i].len = bodyLen;
+                f->totalBytes += bodyLen;
+                logger_log("[jsext] ok %s (%zu bytes, disk-resident "
+                           "[heap-pressure])",
+                           url, bodyLen);
+            }
+            else
+            {
+                if (sp != PLUTO_SPILL_INVALID)
+                {
+                    pluto_spill_discard(sp);
+                }
+                logger_log("[jsext] FAIL %s over page budget (%zu left, need "
+                           "%zu) and spill write failed",
+                           url, g_pageBudget, bodyLen);
+            }
         }
         else
         {
-            logger_log("[jsext] FAIL %s arena OOM", url);
+            char *copy = (char *)arena_alloc(f->arena, bodyLen + 1);
+            if (copy)
+            {
+                memcpy(copy, body, bodyLen);
+                copy[bodyLen] = '\0';
+                f->ext[i].body = copy;
+                f->ext[i].len = bodyLen;
+                f->totalBytes += bodyLen;
+                g_pageBudget -= bodyLen;
+                logger_log("[jsext] ok %s (%zu bytes, ram-resident, %zu "
+                           "budget left)",
+                           url, bodyLen, g_pageBudget);
+            }
+            else
+            {
+                logger_log("[jsext] FAIL %s arena OOM", url);
+            }
         }
     }
     f->fetching = 0;
@@ -1195,6 +1212,10 @@ static void fetch_on_success_spill(int status, SpillFile spill,
         f->totalBytes += bodyLen;
         logger_log("[jsext] ok %s (%zu bytes, disk-resident, zero-copy)",
                    url, bodyLen);
+        /* sdisco: scan the disk body in bounded windows — the bulk never
+         * materializes in RAM (the disk/RAM contract holds for discovery
+         * exactly as it does for execution). */
+        sdisco_scan_spill(spill, (long)bodyLen);
     }
     f->fetching = 0;
     f->idx++;
