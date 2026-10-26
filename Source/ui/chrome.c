@@ -132,10 +132,23 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     int iconX = SCREEN_WIDTH - 6 - rightW - 8 - 15; /* 15px icon, 8px gaps */
 
     /* 5. Reader-mode badge — SAME font + SAME baseline as host and time
-     * (body bold, y=4): the whole top bar reads as one text line. */
+     * (body bold, y=4): the whole top bar reads as one text line.
+     * R62b: the badge names the LIVE network protocol (the Settings
+     * "Network Protocol" row): [WEB-TCP]/[WEB-HTTP] in web mode,
+     * [READER-TCP]/[READER-HTTP] in reader mode. */
     if (urlObj && strcmp(urlObj->scheme, "about") != 0 && !isLoading)
     {
-        const char *badgeText = isReaderMode ? "[READ]" : "[WEB]";
+        char badgeText[16];
+        const char *proto =
+            (storage_setting_int("netProtocol") == 1) ? "HTTP" : "TCP";
+        if (isReaderMode)
+        {
+            snprintf(badgeText, sizeof(badgeText), "[READER-%s]", proto);
+        }
+        else
+        {
+            snprintf(badgeText, sizeof(badgeText), "[WEB-%s]", proto);
+        }
         pd->graphics->setFont(font);
         int badgeW = style_get_text_width(PLUTO_FONT_BODY_BOLD, badgeText);
         pd->graphics->drawText(badgeText, strlen(badgeText), kUTF8Encoding,

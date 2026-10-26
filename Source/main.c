@@ -10386,6 +10386,12 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         storage_set_setting_int("jsEnabled", 2); /* Full */
         storage_set_setting_int("jsEngine", PLUTO_NR_AUTOTEST_ENGINE);
         jsbridge_set_engine(PLUTO_NR_AUTOTEST_ENGINE);
+#if defined(PLUTO_OSHTTP_AUTOTEST)
+        /* R62 sim test build: force the OS-HTTP backend for this run
+         * (the production default stays netProtocol=0, TCP raw). */
+        storage_set_setting_int("netProtocol", 1);
+        logger_log("[oshttp-autotest] netProtocol forced to 1 (OS HTTP stack)");
+#endif
         /* Snapshots persist across sessions (by design), so a bryanwandrych
          * page snap from any previous run would otherwise fast-path this
          * boot navigation and the watchdog test would never touch the

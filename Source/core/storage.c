@@ -55,9 +55,10 @@ static Setting g_settings[16] = {
     {"jsEngine", "", 4, 1}, /* JavaScript engine: 0=muJS 1=Duktape 2=QuickJS 3=XS 4=XS-NR default (only used when jsEnabled != 0) */
     {"encodingMode", "", 0, 1}, /* Compression: 0=Off/raw identity (default) 1=Gzip */
     {"cacheWebsite", "", 0, 1}, /* Cached Website: 0=Off/fresh fetch (default) 1=On/snapshot */
-    {"clockFormat", "", 0, 1} /* Clock: 0=12-Hour (default) 1=24-Hour */
+    {"clockFormat", "", 0, 1}, /* Clock: 0=12-Hour (default) 1=24-Hour */
+    {"netProtocol", "", 0, 1} /* Network Protocol: 0=TCP raw (default) 1=OS HTTP stack */
 };
-static int g_settingCount = 13;
+static int g_settingCount = 14;
 
 static int g_haveDefaults = 0;
 
@@ -377,6 +378,7 @@ void storage_load(void)
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
     storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
+    storage_set_setting_int("netProtocol", 0); /* Network Protocol: TCP raw by default */
 
     char *line = g_loadLine;
     char section[32] = "";
@@ -722,6 +724,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
     storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
+    storage_set_setting_int("netProtocol", 0); /* Network Protocol: TCP raw by default */
     storage_load();
     logger_log("STORAGE: init exit");
 }

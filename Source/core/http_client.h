@@ -42,6 +42,26 @@
  *     accessWait state added; the 60s watchdog deliberately does NOT cover it
  *     (a permission dialog must not kill the request — matches the Lua ref,
  *     whose runtime was paused while the dialog was up).
+ *
+ * ══ R62: DUAL-STACK ROUTING (TCP | OS HTTP) ══════════════════════════════
+ * THIS HEADER IS THE PUBLIC CALLER VIEW: the http_* functions below are
+ * the FRONT DISPATCHER (Source/core/http_front.c) — the Settings
+ * "Network Protocol" row (storage netProtocol: 0=TCP raw, the standing
+ * default; 1=OS HTTP stack) routes every request to its backend:
+ *
+ *   TCP backend: Source/core/http_client.c — the standing, receipted
+ *     implementation. Its SOURCE stays byte-untouched: it is compiled
+ *     through Source/core/http_tcp_backend.c (a wrapper TU that defines
+ *     PLUTO_COMPILE_TCP_BACKEND then includes the .c file), and the
+ *     rename macros in Source/core/http_tcp_rename.h map its public
+ *     symbols to http_tcp_* for that one compilation. Callers and
+ *     http_front.c see the http_tcp_* declarations through
+ *     Source/core/http_tcp_impl.h.
+ *
+ * In-flight requests keep THEIR backend (both pumps run every frame);
+ * the setting routes NEW requests only. about: URLs are
+ * network-independent (answered locally) and ride the TCP
+ * implementation on either setting.
  */
 #ifndef PLUTO_HTTP_CLIENT_H
 #define PLUTO_HTTP_CLIENT_H
@@ -69,7 +89,8 @@ typedef struct
     void (*onProgress)(int cur, int total);
 } HttpCallbacks;
 
-/* Initialize (stores the API pointer). Call once at boot. */
+/* Initialize (stores the API pointer). Call once at boot — inits BOTH
+ * backends; the routing setting picks per request. */
 void http_client_init(PlaydateAPI *pd);
 
 /* Start a GET. Cancels any in-flight request first (Lua parity).
@@ -144,7 +165,8 @@ void http_update(void);
  * Read-only name/title view of http_client's INTERNAL_PAGES table (same
  * order; html bodies stay internal). Single source of truth for UI that
  * lists the built-in pages — the home page's Test Cases section renders one
- * card per entry and navigates to entry.name. */
+ * card per entry and navigates to entry.name. Network-independent (the
+ * pages are answered locally on either protocol setting). */
 typedef struct
 {
     const char *name;  /* navigable URL, e.g. "about:javascript" */

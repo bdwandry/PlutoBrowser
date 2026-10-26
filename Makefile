@@ -32,7 +32,9 @@ SRC_DEVICE = \
 	Source/core/encoding.c \
 	Source/core/cookie_jar.c \
 	Source/core/storage.c \
-	Source/core/http_client.c \
+	Source/core/http_tcp_backend.c \
+	Source/core/http_front.c \
+	Source/core/http_os.c \
 	Source/core/pluto_mem.c \
 	Source/core/pluto_spill.c \
 	Source/core/pluto_snap.c \
