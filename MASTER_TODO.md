@@ -9069,3 +9069,80 @@ Keyed entry: empty → inline error card; filled → "Sending..." → sent-email
   machinery is the battery's (formsum/formval ride action= forms, unchanged);
   keyless-POST discovery (FormData bodies) is exercised by no automated page
   yet. Honeypot/skip semantics unchanged (fb_collect_fields).
+
+## R62 — DUAL NETWORK STACK: the OS-HTTP backend + the Network Protocol setting (branch develop_oshttp_stack, 2026-10-26)
+- CONTEXT: the E0 device crash (duckduckgo → search facebook → click → crash on
+  facebook's response arrival, 2026-10-26 01:45). Crashlog: cfsr 0x82 (DACCVIOL),
+  pc=0x24056c10 — OUTSIDE the app's code (the app runs at 0x90000000+) — the CPU
+  executing heap content as code; the fault address 0x61662e7b = ASCII "{.fa"
+  (response content). lldb on the sim reproduced the class: EXC_BAD_ACCESS inside
+  the Simulator's own notifyRequestComplete (ldr x8,[x0,#0x28]; blr x8) — the OS's
+  QUEUED request-complete notification firing on a connection my code had already
+  close()+release()d. THE RULE LEARNED: a playdate.network.http connection may be
+  closed/released only AFTER its completion notification was OBSERVED in our
+  callback; an early close is the crash.
+- BISECT RECEIPT (the crash is PRE-EXISTING): the v1.2.0 tag build (throwaway
+  worktree, autotest URL → facebook, buildNumber 7) crashed IDENTICALLY on the
+  device — same pc, same fault address, same registers, deterministic — the R61
+  sdisco change is EXONERATED (its scanner never even ran in the crashing
+  session: the DDG lite page has no scripts — zero [sdisco] rows). The raw-TCP
+  stack (playdate.network.tcp driven by our HTTP/1.1 hand-rolled client) dies on
+  facebook's response shape. facebook.com on the SIM renders facebook's OWN
+  bot-detection error page ("Sorry, something went wrong.") — the real page is
+  never served to this client; that is facebook's wall, not the browser's.
+- THE FEATURE (user directive): both network routes implemented + a Settings row
+  to pick. Branch develop_oshttp_stack. v1.2.2 (buildNumber 7).
+- ARCHITECTURE (zero TCP edits): Source/core/http_client.c is INCLUDED (never
+  edited — git diff main on the file is EMPTY) by Source/core/http_tcp_backend.c,
+  a wrapper TU that defines PLUTO_COMPILE_TCP_BACKEND — arming the rename macros
+  (http_tcp_rename.h) so the whole TCP machine compiles ONCE with its public
+  symbols mapped to http_tcp_*. Source/core/http_client.h is now the PUBLIC
+  caller view: the http_* names declare the FRONT DISPATCHER
+  (Source/core/http_front.c), which reads storage netProtocol (0=TCP raw default,
+  1=OS HTTP) and routes per request. about: URLs always ride the TCP
+  implementation (internal pages: zero wire). In-flight requests keep THEIR
+  backend (both pumps run every frame); the setting routes NEW requests only.
+  Callers: ZERO edits (main.c/jsbridge.c/jsext.c/image_decoder.c/home_page.c
+  keep including http_client.h and calling http_*).
+- THE OS BACKEND (Source/core/http_os.c/h — NEW): playdate.network.http behind
+  the unchanged HttpCallbacks contract (onSuccess/onSuccessSpill/onError/
+  onProgress). Connection created FROM THE UPDATE PUMP (the permission dialog's
+  coroutine yield is only legal in update() — the TCP client's defer-to-frame
+  rule). Headers arrive per-pair (setHeaderReceivedCallback — multiple
+  Set-Cookie SURVIVE, richer than the TCP single-line scan); headers-read feeds
+  the cookie jar + records status/length/encoding + makes the SW2b residency
+  decision (spill ONLY when the receiver advertises onSuccessSpill — the first
+  run's bug: the page receiver got a spill handle it never registered for).
+  Bodies pump via read() in bounded 16KB windows (spill streaming / RAM staging
+  under the 2MB cap). v1 requests IDENTITY encoding always (the OS stack's gzip
+  behavior is an open receipt; a gzip response delivers raw + WARNING).
+- THE TWO SIM BUGS FIXED EN ROUTE: (1) EARLY DELIVERY — the OS fires
+  request-complete when IT has received everything (its buffer outruns the pump
+  by frames): completion now DRAINS every available window first (bounded loop),
+  then honors the marks — the first run delivered HALF the page (7812/15627) and
+  an EMPTY stylesheet. (2) PRE-HEADERS CLOSE — one connection died before headers
+  under rapid sequential queueing: one re-queue (retry) absorbs it. (3) The
+  keep-alive A/B: setKeepAlive(1) left the OS stack silently never processing
+  the queued request (60s watchdog) — keep-alive is DOCUMENTED OFF (no reuse;
+  every request takes a fresh connection through the retire policy).
+- THE SETTINGS ROW: "Network Protocol" (row 13, OPTION_COUNT 13) — TCP / HTTP,
+  cycled both directions, staged+committed like the JS-engine row; storage
+  netProtocol (0=TCP default) added to the table + both default-reset paths.
+- SIM RECEIPTS (the user's sim-first gate): OS-STACK RUN — all 8 contact-page
+  resources delivered byte-complete through the OS stack (page 15627 RAM; CSS +
+  7 chunks disk-spilled incl. the 229KB 3dmm) + the send_email POST (status=200,
+  hdrs=13, ram=17 — the server's 17-byte ack) + RESULT inPlace=yes jsErrors=0
+  blocks=20 sentCard=1 errState=0 — BYTE-IDENTICAL to the TCP receipts, sim
+  alive throughout. TCP GATE on the final build (netProtocol reset to 0): ZERO
+  route=OS-HTTP rows (the front routed everything to TCP) + the identical
+  RESULT — the standing behavior untouched.
+- DEVICE: NOT TOUCHED (the user's explicit sim-first gate — device testing on
+  their word). facebook.com on DEVICE: EXPLICITLY OUT OF SCOPE until the user
+  says so; the OS stack is the intended escape hatch for the raw-TCP facebook
+  crash (to be proven on device when the user gates it).
+- Version 1.2.1 → 1.2.2 (buildNumber 7). Branch pushed to GitHub per the user's
+  visibility request; NO merge, NO main push (never push without the user's say).
+- OPEN: device receipt for the OS stack (facebook + the contact regression) on
+  the user's gate; gzip on the OS stack (open receipt); the OS redirect behavior
+  (3xx following is OS-internal — our 307/308 verb lane bypassed on this stack);
+  the wire response-cache/304 lane is TCP-only (documented difference).
