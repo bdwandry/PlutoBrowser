@@ -20,6 +20,7 @@
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
 #include "jsext.h"
+#include "sdisco.h"
 #include "pd_api.h" /* API-P5: module-lane file: fetches (kFileReadData) */
 #include "../core/logger.h"
 #include "../core/url.h"
@@ -1484,6 +1485,14 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
              * semantics, same log rows, browser doc order preserved). */
             for (int i = 0; i < totalS; i++)
             {
+                /* sdisco: inline bodies get the discovery pass here (their
+                 * external siblings are scanned at download time). */
+                if (!slots[i].isExt && slots[i].inlineStart &&
+                    slots[i].inlineLen)
+                {
+                    sdisco_scan_script(slots[i].inlineStart,
+                                       slots[i].inlineLen);
+                }
                 b->scriptQueue[b->scriptQueueCount++] = slots[i];
             }
             logger_log("[jsbridge] attach parked %d script slot(s) for "
@@ -1510,6 +1519,7 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
                 s.tagLen = tagLens[i];
                 s.isModule = jsbridge_script_type_is_module(
                     tags[i], tags[i] + tagLens[i]);
+                sdisco_scan_script(s.inlineStart, s.inlineLen);
                 b->scriptQueue[b->scriptQueueCount++] = s;
             }
         }
@@ -1546,6 +1556,7 @@ int js_doc_attach(JsBridge **out, DocParseResult *doc, DocScriptPolicy policy)
             s.tagLen = tagLens[i];
             s.isModule = jsbridge_script_type_is_module(
                 tags[i], tags[i] + tagLens[i]);
+            sdisco_scan_script(s.inlineStart, s.inlineLen);
             b->scriptQueue[b->scriptQueueCount++] = s;
         }
     }
