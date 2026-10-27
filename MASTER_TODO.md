@@ -10,6 +10,94 @@
 > Nothing else counts as "next" unless it lands here. Order = priority; every item ships via the
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
+
+> **R63b — DEVICE AVIF DECODE-WATCHDOG FIX (2026-10-26): EVERY bryanwandrych.com/about image
+> NOW DECODES ON HARDWARE — 8/8 IMGDEC ok with ZERO refusals, ZERO watchdog, steady 50fps
+> (seam run, errorlog EMPTY).** Root cause was never the Hybrid split (the A/B all-TCP
+> control crashed identically). Two receipts de-fanged the M7's one-frame decode:
+> (1) POST-DECODE WASTE GONE — the wrapper built a FULL-RES gray buffer (rows = W*H malloc)
+> from every source pixel just to feed ≤72K dithered output samples, and under heap pressure
+> that ~307KB malloc returned NULL AFTER dav1d had paid its full 6-9 s / 546K-px decode
+> ("[avif] decoded 480x640" then IMGDEC FAIL — the "missing one" the user had on device).
+> avif.c now converts PER SAMPLED OUTPUT pixel straight from the dav1d picture planes
+> (AvifPix carries Y/U/V + strides; NO rows/xmap/ymap): − ~1 s of frame time and the
+> pressure-refusal point is GONE. (2) IN-LOOP FILTERS OFF FOR BIG STILLS — ispe (declared
+> frame size; parsed via the iprp→ipco descent — receipted: iprp is a PLAIN container, its
+> body opens DIRECTLY with the ipco box header; a fullbox skip misaligned the walk and ispe
+> was never found in the first attempt) drives the filter choice: area > 200K px ⇒
+> DAV1D_INLOOPFILTER_NONE (drop deblock too; invisible at thumbnail scale), else the old
+> byte-proxy rule (deblock-only > 8KB / all). (3) CATASTROPHIC OUTLIER GUARD ONLY — the
+> ispe budget now fires at 700K px (dav1d's own cap is 2.56M px ⇒ ~28-40 s = guaranteed
+> watchdog; a 640x853 site image is 546K px and DECODES). Framing: dav1d decode is the ONLY
+> un-sliceable stage (no partial API, no threads on Playdate) — a 6-9 s single frame IS the
+> device's envelope for this size class and the trimmed frame (~6-8 s) carries real margin.
+> DEVICE SEAM RUN (PLUTO_HYBRID_AUTOTEST, URL forced to /about, MD5-matched):
+> 9× route=Hybrid-TCP + 8× route=Hybrid-OSIMAGE + 8/8 IMGDEC ok (0 fail, 0 budget skips,
+> filters=none for 640x853/512x512/640x640; nextcloud 400x400 keeps ALL) — heartbeats 50fps
+> frame=11361, stackPeak 5504B, refusals 0, empty crashlog+errorlog
+> (tests/logs/device_hybrid_allimg_decoded_20261026_*.log). SIM PARITY: 8/8 IMGDEC ok with
+> the grid-sample path (skips=0 on sim — the guard/filters arm is device-only)
+> (tests/logs/sim_hybrid_gridsample_20261026_*.log + _gridsample_ipco_). CLEAN RELEASE
+> restored with all R63b fixes (0bfe8539…, seam strings absent), boot PASS 50fps refusals 0
+> empty logs (device_r63b_clean_boot_20261026_*.log), DEVICE LEFT RUNNING IT. LESSON: "why
+> don't all images decode" — the refusal-first instinct was wrong: measure the stage that
+> actually fails; the wrapper's OWN post-decode stage (not dav1d) was eating devices, and
+> the cost driver was discoverable without touching any vendored line.
+>
+> **R63b CORRECTION (2026-10-26, deployed receipt correction): the 21:05 "clean release"
+> deploy copied the SEAM build (a stale-rebuild mistake — make had nothing to build between
+> deploys; MD5 was verified but it verified the seam ELF, caught by
+> device_r63b_clean_boot's own [hybrid-autotest] boot lines). The TRUE clean release
+> (46396ea447d27b1a…) was rebuilt (touch main.c + make device → 0 seam strings in pdex.elf),
+> deployed MD5-matched, reboot-verified: 0 seam lines, 50fps heartbeats, stackPeak 656B,
+> EMPTY crashlog+errorlog (device_r63b_true_clean_boot_20261026_*.log); DEVICE LEFT RUNNING
+> IT. LESSON: verify seam ABSENCE in build/pdex.elf before EVERY deploy, exactly as fixed:
+> MD5 alone cannot tell a seam build apart.
+>
+
+> **R63 — HYBRID NETWORK PROTOCOL (2026-10-26): pages ride the receipts TCP machine, layout
+> images ride the OS HTTP stack — COMPLETE, proven SIMULATOR + DEVICE, with a device A/B that
+> QUANTIFIES a pre-existing (protocol-independent) AVIF-decode watchdog exposure.** Settings
+> "Network Protocol" row 13 is now a 3-way cycle TCP(0, default) → HTTP(1) → HYBRID(2);
+> chrome badge [WEB-HYBRID]/[READER-HYBRID]. Implementation is DISPATCH-ONLY: http_front.c
+> gained pluto_http_route_request_kind (GENERIC vs IMAGE) + the public http_get_image front
+> door (declared in http_client.h); render/image_decoder.c's single fetch site calls it;
+> settings_page stages 0/1/2 (out-of-range → TCP). NEITHER backend's source is touched
+> (http_client.c / http_os.c byte-untouched) — on settings 0/1 routing is byte-identical
+> stock (control: 0 OSIMAGE lines under TCP). Image URLs arrive absolute (resolve_href);
+> the OS lane requests identity (raw image bytes); the image queue's own gating is
+> untouched (process_next refuses while http_is_loading() over BOTH pumps ⇒ ≤1 request on
+> the wire, as stock). SIM receipt (seam PLUTO_HYBRID_AUTOTEST, sim URL forced to
+> bryanwandrych.com/about; every prior attempt to pass the URL via SIMDEFS silently fell
+> back — check strings in the dylib): 9× [http] route=Hybrid-TCP (page + all _next CSS/JS
+> chunks) + 8/8 route=Hybrid-OSIMAGE → [oshttp] 200s → 8/8 IMGDEC ok (AVIF ftyp heads),
+> blocks=97 links=24 "About Me | Bryan Wandrych", 50fps steady, refusals=0, one contained
+> [xs] "too much computation" abort (the site's own Next.js script — receipted pre-existing,
+> engine reset, page kept its render) (tests/logs/sim_hybrid_autotest_20261026_200138.log).
+> DEVICE (6.5MB-pool seam build, MD5 4870690814…): run #1 CLEAN through the first full image
+> round trip — homelab-rack-640.avif 29,299B via OS-HTTP 200 with FNV 5fc5de7e BYTE-EXACT vs
+> sim, decoded 640×853→150×200 on hardware (IMGDEC ok), page rendered blocks=97, zero
+> error/fail lines, killed by MY datadisk pull — then a 2nd deploy of the same seam WATCHDOG'D
+> ("Run loop stalled >10 s") ~9s into the SAME AVIF decode, and the A/B CONTROL
+> (-DPLUTO_HYBRID_AUTOTEST_PROTO=0 — all-TCP stock machine, 0 OSIMAGE lines) CRASHED THE
+> SAME WAY at the same spot ⇒ the watchdog is NOT the Hybrid split: it is the NEW-EXPOSED
+> pre-existing single-frame AVIF cost on the M7 (this /about page's 640×853 images ⇒ dav1d
+> ~9 s in ONE update frame, 860KB arena — the Makefile's own "640px ≈ 6 s, flirting with the
+> 10 s watchdog" note, now crossed with 8 images queued; these images were likely never
+> decoded on-device before). Receipts: device_hybrid_seam_run2_watchdog_20261026_*.log (+
+> errorlog twin), device_tcp_control_crash_watchdog_20261026_*.log. CLEAN RELEASE restored
+> (MD5 a634a949…, seam strings absent from pdex.elf: "hybrid-autotest"=0 while stock
+> "STORAGE: init exit"/"route=OS-HTTP" and NEW production strings "route=Hybrid-TCP" /
+> "route=Hybrid-OSIMAGE" all present) — device left running it, boot PASS 50fps stackPeak
+> 656B refusals 0, EMPTY crashlog+errorlog
+> (tests/logs/device_clean_release_boot_hybrid_work_20261026_*.log). LESSONS: (1) make does
+> not rebuild on flag changes — after ANY -D seam change touch the TU or delete the object;
+> (2) a stale build/pdex.dylib silently serves old binaries — verify seam strings in the
+> artifact before launching; (3) pdex.bin inside the PDX is ciphered — string audits must
+> run on build/pdex.elf. NEXT CANDIDATES: image-decode watchdog work (slice AWAY-FROM-FRAME
+> OR dim-cap the M7 AVIF path — touches ONLY decode, protocol-agnostic); Hybrid device proof
+> on a light-image page (e.g. wikipedia.org badges) if a second on-device image round is
+> wanted; 3-way settings seam for row-13 label/cycle proof.
 >
 > **R26 — NR FORK: bryanwandrych.com HOME PAGE RENDERS (2026-10-04) — the original R20 goal is
 > DONE in the host harness; one device-only finding remains.** Home page now exits 0 with

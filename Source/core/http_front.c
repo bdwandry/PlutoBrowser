@@ -3,8 +3,8 @@
  * The dual-stack FRONT DISPATCHER (R62). Owns the public http_* names:
  * every caller (main.c, jsbridge.c, jsext.c, …) keeps calling the same
  * functions; this file reads the Settings "Network Protocol" row
- * (storage netProtocol: 0=TCP raw — the standing default, 1=OS HTTP)
- * and routes each request to the selected backend.
+ * (storage netProtocol: 0=TCP raw — the standing default, 1=OS HTTP,
+ * 2=HYBRID) and routes each request to the selected backend.
  *
  *   TCP backend: Source/core/http_client.c (compiled as http_tcp_* via
  *                the header's rename macros — the file's SOURCE is
@@ -17,6 +17,22 @@
  * In-flight requests keep THEIR backend (both pumps run every frame);
  * the setting only routes NEW requests — a flip mid-load can never
  * strand a connection.
+ *
+ * ── HYBRID (R63) ─────────────────────────────────────────────────────────
+ * netProtocol=2 splits BY REQUEST KIND, not by URL sniffing: page/document
+ * traffic (HTML, CSS, scripts, XHR/fetch, form posts — every caller that
+ * keeps using the generic http_* names) rides the raw-TCP stack — the
+ * reliable machine; the DISPLAY-IMAGE lane rides the OS HTTP stack — the
+ * fast machine. Only the image pipeline's one fetch site is told apart:
+ * render/image_decoder.c fetches through http_get_image() (a kind-carrying
+ * front door), and this dispatcher consults the kind ONLY while Hybrid is
+ * selected. On netProtocol 0/1 (and for about: URLs in every mode) the
+ * kind is ignored — routing is byte-identical to stock. NEITHER backend's
+ * process flow is touched: TCP stays the receipted single-flight machine,
+ * OS HTTP stays the receipted stack — Hybrid merely routes BETWEEN them.
+ * Under Hybrid both backends stay idle-or-busy exactly as the image queue
+ * already gates (process_next refuses to start while http_is_loading() is
+ * true over BOTH pumps), so at most one request is ever on the wire.
  */
 #include <string.h>
 
@@ -42,11 +58,17 @@
 #undef http_is_loading
 #undef http_update
 
-int pluto_http_route_request(const char *method, const char *urlString,
-                             const char *contentType,
-                             const HttpHeaderPair *extra, int nExtra,
-                             const char *body, size_t bodyLen,
-                             const HttpCallbacks *callbacks)
+/* Request kinds (R63). GENERIC = page/document/script/CSS/XHR traffic;
+ * IMAGE = the layout display-image pipeline's fetch. Only the Hybrid
+ * setting consults the kind. */
+#define PLUTO_HTTP_ROUTE_GENERIC 0
+#define PLUTO_HTTP_ROUTE_IMAGE 1
+
+int pluto_http_route_request_kind(const char *method, const char *urlString,
+                                  const char *contentType,
+                                  const HttpHeaderPair *extra, int nExtra,
+                                  const char *body, size_t bodyLen,
+                                  const HttpCallbacks *callbacks, int kind)
 {
     int proto = storage_setting_int("netProtocol");
     if (!urlString || strncmp(urlString, "about:", 6) == 0)
@@ -61,8 +83,36 @@ int pluto_http_route_request(const char *method, const char *urlString,
         return oshttp_request_h(method, urlString, contentType, extra,
                                 nExtra, body, bodyLen, callbacks);
     }
+    if (proto == 2)
+    {
+        /* HYBRID: image fetches ride the OS HTTP stack, everything else
+         * rides the raw-TCP stack. about: never reaches here (the early
+         * return above already answered it on TCP). */
+        if (kind == PLUTO_HTTP_ROUTE_IMAGE)
+        {
+            logger_log("[http] route=Hybrid-OSIMAGE %.70s", urlString);
+            return oshttp_request_h(method, urlString, contentType, extra,
+                                    nExtra, body, bodyLen, callbacks);
+        }
+        logger_log("[http] route=Hybrid-TCP %.70s", urlString);
+        return http_tcp_request_h(method, urlString, contentType, extra,
+                                  nExtra, body, bodyLen, callbacks);
+    }
     return http_tcp_request_h(method, urlString, contentType, extra,
                               nExtra, body, bodyLen, callbacks);
+}
+
+int pluto_http_route_request(const char *method, const char *urlString,
+                             const char *contentType,
+                             const HttpHeaderPair *extra, int nExtra,
+                             const char *body, size_t bodyLen,
+                             const HttpCallbacks *callbacks)
+{
+    /* GENERIC kind: on TCP/OS-HTTP settings the kind is ignored, so the
+     * stock routes are unchanged; only Hybrid distinguishes lanes. */
+    return pluto_http_route_request_kind(method, urlString, contentType,
+                                         extra, nExtra, body, bodyLen,
+                                         callbacks, PLUTO_HTTP_ROUTE_GENERIC);
 }
 
 void http_client_init(PlaydateAPI *pd)
@@ -98,6 +148,19 @@ int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
 {
     return pluto_http_route_request(NULL, urlString, NULL, extra, nExtra,
                                     NULL, 0, callbacks);
+}
+
+/* R63: the display-image lane's front door. Same GET contract as
+ * http_get (same callbacks struct, same cancel-first single-flight
+ * discipline, body never cached as HTML); ONLY the routing hint
+ * differs. The kind is consulted by the dispatcher ONLY under the
+ * Hybrid setting — on TCP (0) and OS HTTP (1) this is byte-identical
+ * to http_get. */
+int http_get_image(const char *urlString, const HttpCallbacks *callbacks)
+{
+    return pluto_http_route_request_kind(NULL, urlString, NULL, NULL, 0,
+                                         NULL, 0, callbacks,
+                                         PLUTO_HTTP_ROUTE_IMAGE);
 }
 
 int http_request_h(const char *method, const char *urlString,

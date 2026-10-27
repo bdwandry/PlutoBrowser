@@ -134,13 +134,13 @@ void chrome_draw(const UrlParsed *urlObj, const char *pageTitle, int isLoading,
     /* 5. Reader-mode badge — SAME font + SAME baseline as host and time
      * (body bold, y=4): the whole top bar reads as one text line.
      * R62b: the badge names the LIVE network protocol (the Settings
-     * "Network Protocol" row): [WEB-TCP]/[WEB-HTTP] in web mode,
-     * [READER-TCP]/[READER-HTTP] in reader mode. */
+     * "Network Protocol" row): [WEB-TCP]/[WEB-HTTP]/[WEB-HYBRID] in web
+     * mode, [READER-TCP]/[READER-HTTP]/[READER-HYBRID] in reader mode. */
     if (urlObj && strcmp(urlObj->scheme, "about") != 0 && !isLoading)
     {
         char badgeText[16];
-        const char *proto =
-            (storage_setting_int("netProtocol") == 1) ? "HTTP" : "TCP";
+        int np = storage_setting_int("netProtocol");
+        const char *proto = (np == 1) ? "HTTP" : (np == 2) ? "Hybrid" : "TCP";
         if (isReaderMode)
         {
             snprintf(badgeText, sizeof(badgeText), "[READER-%s]", proto);

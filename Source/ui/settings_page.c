@@ -80,7 +80,7 @@ static struct
     int encodingMode;             /* 0/1 — Compression: Off(raw identity)/Gzip */
     int cacheWebsite;             /* 0/1 — Cached Website: Off(fresh fetch)/On(snapshot) */
     int clockFormat;              /* 0/1 — Clock: 12-Hour (default)/24-Hour */
-    int netProtocol;              /* 0/1 — Network Protocol: TCP(raw, default)/OS HTTP */
+    int netProtocol;              /* 0/1/2 — Network Protocol: TCP(raw, default)/OS HTTP/Hybrid */
 } g_staged;
 
 void settings_page_set_onchange_callback(void (*fn)(void));
@@ -256,9 +256,9 @@ void settings_page_open(int prevState)
         g_staged.clockFormat = 0; /* 12-Hour/24-Hour — out-of-range → 12-Hour (default) */
     }
     g_staged.netProtocol = storage_setting_int("netProtocol");
-    if (g_staged.netProtocol != 1)
+    if (g_staged.netProtocol < 0 || g_staged.netProtocol > 2)
     {
-        g_staged.netProtocol = 0; /* TCP/OS-HTTP — out-of-range → TCP (default) */
+        g_staged.netProtocol = 0; /* TCP/OS-HTTP/Hybrid — out-of-range → TCP (default) */
     }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
@@ -374,8 +374,10 @@ const char *settings_page_staged_value(int optionIndex)
         return "";
     case 12: /* Clock Format: 12-Hour (default) / 24-Hour */
         return g_staged.clockFormat == 1 ? "24-Hour" : "12-Hour";
-    case 13: /* Network Protocol: TCP (raw, default) / HTTP (OS stack) */
-        return g_staged.netProtocol == 1 ? "HTTP" : "TCP";
+    case 13: /* Network Protocol: TCP (raw, default) / HTTP (OS stack) / Hybrid */
+        return g_staged.netProtocol == 1 ? "HTTP"
+               : g_staged.netProtocol == 2 ? "Hybrid"
+                                           : "TCP";
     default:
         return "";
     }
@@ -469,8 +471,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 12: /* Clock Format: 12-Hour ↔ 24-Hour */
             g_staged.clockFormat = !g_staged.clockFormat;
             break;
-        case 13: /* Network Protocol: TCP ↔ OS HTTP */
-            g_staged.netProtocol = !g_staged.netProtocol;
+        case 13: /* Network Protocol: 3-way (TCP ↔ OS HTTP ↔ Hybrid);
+                  * left is the inverse of right: -1 ≡ +2 (mod 3) */
+            g_staged.netProtocol = (g_staged.netProtocol + 2) % 3;
             break;
         default:
             break;
@@ -541,8 +544,9 @@ char *settings_page_handle_input(unsigned int pushed, void (*clearCookiesCb)(voi
         case 12: /* Clock Format: 12-Hour ↔ 24-Hour */
             g_staged.clockFormat = !g_staged.clockFormat;
             break;
-        case 13: /* Network Protocol: TCP ↔ OS HTTP (same cycle both ways) */
-            g_staged.netProtocol = !g_staged.netProtocol;
+        case 13: /* Network Protocol: TCP → HTTP → Hybrid → TCP (same
+                  * 3-way cycle both directions) */
+            g_staged.netProtocol = (g_staged.netProtocol + 1) % 3;
             break;
         default:
             break;

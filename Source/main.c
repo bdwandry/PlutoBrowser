@@ -10339,6 +10339,36 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         logger_log("[img-autotest] navigating to about page");
 #endif
 
+#if defined(PLUTO_HYBRID_AUTOTEST)
+#ifndef PLUTO_HYBRID_AUTOTEST_URL
+#define PLUTO_HYBRID_AUTOTEST_URL "https://bryanwandrych.com/about"
+#endif
+#ifndef PLUTO_HYBRID_AUTOTEST_PROTO
+#define PLUTO_HYBRID_AUTOTEST_PROTO 2 /* 0 = A/B control (all-TCP stock) */
+#endif
+        /* TEMPORARY (Hybrid test builds, sim + device): force the Network
+         * Protocol for the run (default Hybrid=2; pass
+         * -DPLUTO_HYBRID_AUTOTEST_PROTO=0 for the all-TCP A/B control —
+         * the production standing default). Navigate straight to an
+         * image-bearing page. The pluto.log proof of the split routing:
+         * the page/HTML fetch logs [http] route=Hybrid-TCP …, every
+         * layout image logs [http] route=Hybrid-OSIMAGE … + the OS stack's
+         * [oshttp] request … lines, and the decode completes through the
+         * normal image-cache path. On the control build (proto=0) every
+         * line is route-TCP stock behavior — no [oshttp] request lines. */
+        storage_set_setting_int("netProtocol", PLUTO_HYBRID_AUTOTEST_PROTO);
+        logger_log("[hybrid-autotest] netProtocol forced to %d (%s)",
+                   (int)PLUTO_HYBRID_AUTOTEST_PROTO,
+                   PLUTO_HYBRID_AUTOTEST_PROTO == 0 ? "TCP control"
+                   : PLUTO_HYBRID_AUTOTEST_PROTO == 1 ? "OS HTTP"
+                                                      : "Hybrid");
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 PLUTO_HYBRID_AUTOTEST_URL);
+        logger_log("[hybrid-autotest] navigating to %s",
+                   PLUTO_HYBRID_AUTOTEST_URL);
+#endif
+
 #if defined(PLUTO_NR_AUTOTEST)
 #ifndef PLUTO_NR_AUTOTEST_URL
 #if defined(PLUTO_NR_AUTOTEST_TAP)

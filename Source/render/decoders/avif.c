@@ -4,9 +4,10 @@
  *
  * Pipeline:
  *   ftyp brand check → meta walk (pitm primary id, iinf av01 id, iloc
- *   extents for the primary item) → concat extents → dav1d (n_threads=1,
- *   max_frame_delay=1, grain off, frame_size_limit cap) → YUV→gray rows →
- *   dither_to_bitmap (360x200 convention).
+ *   extents for the primary item, ispe declared frame size) → concat
+ *   extents → dav1d (n_threads=1, max_frame_delay=1, grain off,
+ *   frame_size_limit cap) → per-SAMPLE-GRID YUV→gray → dither_to_bitmap
+ *   (360x200 convention; no full-res rows buffer — see AvifPix).
  *
  * dav1d diagnostics are silenced (noop logger); all outcomes are logged
  * by us as [avif] lines. dav1d owns nothing: the payload buffer is ours
@@ -27,6 +28,24 @@
 /* Container sanity: refuse absurd box/item counts from hostile files. */
 #define AVIF_MAX_EXTENTS 16
 #define AVIF_MAX_ITEMS 64
+
+/* ── DECODE-TIME budget (device watchdog survival, R63b) ────────────────
+ * The device's 10 s run-loop watchdog kills the app on any single
+ * update-frame stall. Receipted decode economics on the M7 (R63 A/B):
+ * a 546K-px (640x853) still costs 6-9 s INSIDE ONE dav1d call — the
+ * ONLY un-sliceable stage (no partial-progress API, no threads). The
+ * browser-side mitigations trim the frame: the post-decode full-grid
+ * pass is GONE (per-sample conversion) and in-loop filters are skipped
+ * for large stills ⇒ the site's ≤546K images decode in a ~6-8 s frame
+ * with real margin. The budget therefore guards only CATASTROPHIC
+ * outliers (dav1d's own cap is 1600x1600 = 2.56M px ⇒ ~28-40 s — a
+ * guaranteed watchdog): 700K px is ABOVE every receipted web still and
+ * refuses the never-hurdles, keeping ALL of bryanwandrych.com/about's
+ * images decoding. Refusal = NULL → placeholder card (clean, logged).
+ * The simulator (host CPU, no watchdog) decodes unlimited sizes so the
+ * decoder stays fully testable — device-only via the same arm guard as
+ * the fiber path below. */
+#define AVIF_DEVICE_DECODE_MAX_PIXELS 700000
 
 /* ── bit readers ─────────────────────────────────────────────────────── */
 
@@ -62,6 +81,13 @@ typedef struct
     int ext_count;
     uint32_t want_id;    /* item whose extents iloc collects */
     int collecting;
+    /* R63b: ispe (declared frame size) — pre-decode device budget. The
+     * LAST ispe wins (the common single-av01 still: exactly one). A
+     * multi-ispe MISREAD worst case refuses a decodable small image —
+     * contained damage, logged, never a stall. */
+    uint32_t ispe_w;
+    uint32_t ispe_h;
+    int ispe_count;
 } AvifMeta;
 
 typedef void (*AvifBoxFn)(uint32_t type, const uint8_t *body, size_t bodyLen,
@@ -99,6 +125,35 @@ static void avif_meta_child(uint32_t type, const uint8_t *b, size_t n,
                             void *ctx)
 {
     AvifMeta *m = (AvifMeta *)ctx;
+    if (type == 0x69737065) /* ispe — declared frame size (fullbox) */
+    {
+        /* Passive read (pass 1 only; pass 2 is extents-only). Version +
+         * 3 flag bytes, then width/height as 4-byte big-endian. Reached
+         * VIA the descent below (ispe nests under iprp→ipco, never as
+         * a direct meta child). */
+        if (m->collecting || n < 12)
+            return;
+        m->ispe_w = avif_rd32(b + 4);
+        m->ispe_h = avif_rd32(b + 8);
+        m->ispe_count++;
+        return;
+    }
+    if (type == 0x69707270 && !m->collecting) /* iprp — PLAIN container */
+    {
+        /* ISO-BMFF: ItemPropertyContainerBox has NO fullbox header
+         * (receipted against a real bryanwandrych.com heading AVIF —
+         * its body opens with the ipco box header directly). Descend
+         * into its boxes to reach ipco's properties. */
+        avif_walk(b, n, avif_meta_child, ctx);
+        return;
+    }
+    if (type == 0x6970636f && !m->collecting) /* ipco — plain container */
+    {
+        /* Its body is a sequence of property boxes directly (ispe is
+         * one of them); no header to skip. */
+        avif_walk(b, n, avif_meta_child, ctx);
+        return;
+    }
     if (type == 0x7069746d) /* pitm */
     {
         int ver;
@@ -342,11 +397,21 @@ static void avif_pic_release(Dav1dPicture *pic, void *cookie)
 }
 
 /* BT.601 full-range YUV→gray via integer math (matches dither's style:
- * (r*306 + g*601 + b*117) >> 10). Subsampled chroma is nearest-held. */
+ * (r*306 + g*601 + b*117) >> 10). Subsampled chroma is nearest-held.
+ * R63b: NO full-res rows buffer anymore — gray is computed PER SAMPLED
+ * OUTPUT pixel (≤380x240 grid). This removes the W*H malloc whose
+ * pressure-time failure dropped a 480x640 still AFTER dav1d had paid
+ * its full decode cost (receipted 2026-10-26 20:47:24: "[avif] decoded
+ * 480x640" then IMGDEC FAIL — the missing image on bryanwandrych.com/
+ * about) AND the ~1 s full-grid conversion pass that fed ≤72K output
+ * samples from 546K source rows. */
 typedef struct
 {
-    uint8_t *rows;
-    int width, height;
+    const uint8_t *Y, *U, *V; /* dav1d picture planes (arena-backed) */
+    ptrdiff_t ys, us;         /* plane strides */
+    int width, height;        /* source dims */
+    int cw, ch;               /* chroma dims */
+    int mono;
     int scaleNum, scaleDen; /* nearest-sample to 360x200 (tif.c style) */
 } AvifPix;
 
@@ -355,6 +420,7 @@ static uint8_t avif_pixel_gray(void *userdata, int x, int y)
     AvifPix *p = (AvifPix *)userdata;
     int sx = (int)((long long)x * p->scaleNum / p->scaleDen);
     int sy = (int)((long long)y * p->scaleNum / p->scaleDen);
+    int yy, cy, cx, u, v, r, gg, b, g;
     if (sx < 0)
         sx = 0;
     if (sy < 0)
@@ -363,7 +429,32 @@ static uint8_t avif_pixel_gray(void *userdata, int x, int y)
         sx = p->width - 1;
     if (sy >= p->height)
         sy = p->height - 1;
-    return p->rows[(size_t)sy * p->width + sx];
+    yy = p->Y[(size_t)sy * p->ys + sx];
+    if (p->mono)
+    {
+        return (uint8_t)yy;
+    }
+    cy = (int)((long long)sy * p->ch / p->height);
+    cx = (int)((long long)sx * p->cw / p->width);
+    u = p->U[(size_t)cy * p->us + cx] - 128;
+    v = p->V[(size_t)cy * p->us + cx] - 128;
+    r = yy + ((359 * v) >> 8);
+    gg = yy - ((88 * u + 183 * v) >> 8);
+    b = yy + ((454 * u) >> 8);
+    if (r < 0)
+        r = 0;
+    if (r > 255)
+        r = 255;
+    if (gg < 0)
+        gg = 0;
+    if (gg > 255)
+        gg = 255;
+    if (b < 0)
+        b = 0;
+    if (b > 255)
+        b = 255;
+    g = (r * 306 + gg * 601 + b * 117) >> 10;
+    return (uint8_t)g;
 }
 
 #if defined(TARGET_PLAYDATE) && defined(__arm__)
@@ -412,7 +503,6 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
     Dav1dContext *c = NULL;
     Dav1dData dd;
     Dav1dPicture pic;
-    uint8_t *rows = NULL;
     LCDBitmap *img = NULL;
     int have_pic = 0;
 
@@ -454,23 +544,61 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
         memcpy(obu + w, data + m.ext_off[i], m.ext_len[i]);
         w += m.ext_len[i];
     }
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    /* R63b DEVICE DECODE-TIME budget — fires BEFORE dav1d (the whole
+     * pipeline below is one unbreakable call; refusing afterwards
+     * would still pay the stall). The ispe dims are the file's own
+     * declared frame size; a lying header just changes WHICH images
+     * get refused — never a crash (downstream hostile-dims gates
+     * remain). See AVIF_DEVICE_DECODE_MAX_PIXELS for the math. */
+    if (m.ispe_count >= 1)
+    {
+        uint64_t px = (uint64_t)m.ispe_w * (uint64_t)m.ispe_h;
+        if (px > (uint64_t)AVIF_DEVICE_DECODE_MAX_PIXELS)
+        {
+            logger_log("[avif] budget: skip %ux%u (%llu px > cap %u) — "
+                       "one-frame dav1d decode would stall the watchdog",
+                       (unsigned)m.ispe_w, (unsigned)m.ispe_h,
+                       (unsigned long long)px,
+                       (unsigned)AVIF_DEVICE_DECODE_MAX_PIXELS);
+            goto done; /* c NULL, have_pic 0 — frees obu, returns NULL */
+        }
+    }
+#endif
 
     dav1d_default_settings(&s);
     s.n_threads = 1;        /* every thread primitive is gated on n_tc > 1 */
     s.max_frame_delay = 1;  /* stills: no frame threading either */
     s.apply_grain = 0;      /* skip film-grain synthesis (1-bit output) */
     s.frame_size_limit = AVIF_MAX_PIXELS;
-    /* Watchdog survival: full AV1 decode of a 546K-px still exceeds the
-     * 10s run-loop budget on the M7 (sampled in loopfilter, decode_b,
-     * and idct across runs). Post-filters are ~1/3 of the work and the
-     * least visible at thumbnail scale, so big inputs keep edge
-     * deblocking only and skip CDEF + restoration. Small inputs (fast
-     * either way) keep ALL for pixel-exactness. Threshold is input
-     * bytes (proxy for frame area; dims aren't known pre-open). */
-    s.inloop_filters = (total > 8192) ? DAV1D_INLOOPFILTER_DEBLOCK
-                                      : DAV1D_INLOOPFILTER_ALL;
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    /* Watchdog survival, R63b — measured on the M7 (R63 A/B receipts):
+     * in-loop post-filters are ~1/3 of decode work and INVISIBLE at the
+     * dithered thumbnail scale the browser draws. Cost driver is frame
+     * AREA (now known pre-open via ispe): beyond 200K px run the
+     * entropy+reconstruction path with NO in-loop filtering (deblock
+     * included) — trims ~0.5-1.5 s off the 6-9 s a 546K-px still costs
+     * inside ONE update frame; under 200K px keep ALL filters for
+     * pixel-exactness (small stills were never the watchdog problem).
+     * (Was: byte-size proxy + deblock-only; the arena is unchanged.) */
+    if (m.ispe_count >= 1 &&
+        (uint64_t)m.ispe_w * (uint64_t)m.ispe_h > 200000ULL)
+    {
+        s.inloop_filters = DAV1D_INLOOPFILTER_NONE;
+        logger_log("[avif] filters=none (%ux%u ispe area)", m.ispe_w,
+                   m.ispe_h);
+    }
+    else
+#endif
+    {
+        s.inloop_filters = (total > 8192) ? DAV1D_INLOOPFILTER_DEBLOCK
+                                          : DAV1D_INLOOPFILTER_ALL;
+    }
     logger_log("[avif] filters=%s (%zu bytes)",
-               (total > 8192) ? "deblock-only" : "all", total);
+               (s.inloop_filters == DAV1D_INLOOPFILTER_ALL) ? "all"
+               : (s.inloop_filters == DAV1D_INLOOPFILTER_NONE) ? "none"
+                                                               : "deblock-only",
+               total);
     s.logger.callback = NULL; /* dav1d logging off; we log our own lines */
     /* Picture arena (see above): one malloc reused across decodes; on
      * failure the default allocator stays (slower under pressure, but
@@ -548,67 +676,9 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
             logger_log("[avif] hostile dims %dx%d", W, H);
             goto done;
         }
-        rows = (uint8_t *)malloc((size_t)W * H);
-        if (!rows)
-            goto done;
-        /* Coordinate maps (exact same math as the inline version below,
-         * hoisted out of the hot loop: integer division on the M7 has no
-         * hardware support, and 2 divs × 546K pixels dominated conversion
-         * time). NULL map = fall back to inline math (always correct). */
-        {
-            int *xmap = (int *)malloc((size_t)W * sizeof(int));
-            int *ymap = (int *)malloc((size_t)H * sizeof(int));
-            int useMap = (xmap && ymap);
-            int xi, yi;
-            if (useMap)
-            {
-                for (xi = 0; xi < W; xi++)
-                    xmap[xi] = (int)((long long)xi * cw / W);
-                for (yi = 0; yi < H; yi++)
-                    ymap[yi] = (int)((long long)yi * ch / H);
-            }
-            for (int y = 0; y < H; y++)
-            {
-                int cy = useMap ? ymap[y] : (int)((long long)y * ch / H);
-                for (int x = 0; x < W; x++)
-                {
-                    int yy = Y[(size_t)y * ys + x];
-                    int g;
-                    if (mono)
-                    {
-                        g = yy;
-                    }
-                    else
-                    {
-                        int cx = useMap ? xmap[x]
-                                        : (int)((long long)x * cw / W);
-                        int u = U[(size_t)cy * us + cx] - 128;
-                    int v = V[(size_t)cy * us + cx] - 128;
-                    int r = yy + ((359 * v) >> 8);
-                    int gg = yy - ((88 * u + 183 * v) >> 8);
-                    int b = yy + ((454 * u) >> 8);
-                    if (r < 0)
-                        r = 0;
-                    if (r > 255)
-                        r = 255;
-                    if (gg < 0)
-                        gg = 0;
-                    if (gg > 255)
-                        gg = 255;
-                    if (b < 0)
-                        b = 0;
-                    if (b > 255)
-                        b = 255;
-                    g = (r * 306 + gg * 601 + b * 117) >> 10;
-                }
-                rows[(size_t)y * W + x] = (uint8_t)g;
-                }
-            }
-            if (xmap)
-                free(xmap);
-            if (ymap)
-                free(ymap);
-        }
+        /* R63b: no rows buffer, no full-grid gray pass, no coordinate
+         * maps — avif_pixel_gray converts per SAMPLED pixel straight
+         * from the picture planes (see its comment). */
         if (W > 360 || H > 200)
         {
             if ((long long)W * 200 >= (long long)H * 360)
@@ -628,7 +698,14 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
             if (targetH < 1)
                 targetH = 1;
         }
-        p.rows = rows;
+        p.Y = Y;
+        p.U = U;
+        p.V = V;
+        p.ys = ys;
+        p.us = us;
+        p.cw = cw;
+        p.ch = ch;
+        p.mono = mono;
         p.width = W;
         p.height = H;
         p.scaleNum = scaleNum;
@@ -639,8 +716,6 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
     }
 
 done:
-    if (rows)
-        free(rows);
     if (have_pic)
         dav1d_picture_unref(&pic);
     if (c)

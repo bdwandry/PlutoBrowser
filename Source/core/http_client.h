@@ -143,6 +143,18 @@ int http_request_h(const char *method, const char *urlString,
                    int nExtra, const char *body, size_t bodyLen,
                    const HttpCallbacks *callbacks);
 
+/* ── R63: the DISPLAY-IMAGE lane (Hybrid protocol wiring) ─────────────────
+ * The render/image_decoder.c pipeline's fetch entry — the ONLY image
+ * fetch site in the browser (layout/main only enqueue URLs; this is the
+ * download). Same GET contract as http_get (same HttpCallbacks struct,
+ * same cancel-first single-flight lane); ONLY the routing hint differs.
+ * The dispatcher consults the hint ONLY under the "Hybrid" Network
+ * Protocol setting (netProtocol=2 — pages ride the raw-TCP stack, layout
+ * images ride the OS HTTP stack): there the image lane is routed to the
+ * OS backend while everything else stays TCP. On the TCP (0) and OS
+ * HTTP (1) settings this call is byte-identical to http_get. */
+int http_get_image(const char *urlString, const HttpCallbacks *callbacks);
+
 /* R15 + Compression setting: the request builder sends Accept-Encoding:
  * identity (raw bytes; reliable on weak radio) when the stored
  * encodingMode is Off (default), gzip when the user picks Gzip in

@@ -8,7 +8,11 @@
  * Supported inputs: single-item AVIF stills (brands `avif`/`avis`),
  * 8-bit, ≤1600px per side. Refused cleanly (NULL → placeholder card):
  * grid images, alpha aux items (ignored — color item decoded), 10/12-bit,
- * oversize frames, idat construction, truncated boxes. Never crashes on
+ * oversize frames, idat construction, truncated boxes. DEVICE only
+ * (R63b): stills whose declared ispe frame exceeds the decode-time
+ * budget (200,000 px — measured one-frame dav1d cost on the M7 crosses
+ * the 10 s run-loop watchdog beyond it) also refuse; the simulator
+ * decodes unlimited sizes (host CPU, no watchdog). Never crashes on
  * hostile input: every failure path frees and returns NULL.
  *
  * Output follows the bmp.c/tif.c convention: nearest-sampled to fit

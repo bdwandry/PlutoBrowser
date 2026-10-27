@@ -443,7 +443,13 @@ static void process_next(void)
         memset(&cb, 0, sizeof(cb));
         cb.onSuccess = http_on_success;
         cb.onError = http_on_error;
-        if (!http_get(url, &cb))
+        /* R63: the display-image fetch rides the IMAGE lane front door.
+         * Identical GET/callback contract to http_get; the dispatcher
+         * only uses the hint under the Hybrid setting (images → OS HTTP
+         * stack), byte-identical routing on TCP/OS-HTTP settings. The
+         * image queue's own gating is untouched (still refuses to start
+         * while http_is_loading() is true over both backends). */
+        if (!http_get_image(url, &cb))
         {
             /* Immediate failure: onError already fired (cache + timer
              * scheduled). Return, exactly like the recursive original, so

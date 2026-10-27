@@ -56,7 +56,7 @@ static Setting g_settings[16] = {
     {"encodingMode", "", 0, 1}, /* Compression: 0=Off/raw identity (default) 1=Gzip */
     {"cacheWebsite", "", 0, 1}, /* Cached Website: 0=Off/fresh fetch (default) 1=On/snapshot */
     {"clockFormat", "", 0, 1}, /* Clock: 0=12-Hour (default) 1=24-Hour */
-    {"netProtocol", "", 0, 1} /* Network Protocol: 0=TCP raw (default) 1=OS HTTP stack */
+    {"netProtocol", "", 0, 1} /* Network Protocol: 0=TCP raw (default) 1=OS HTTP stack 2=Hybrid (pages TCP, images OS HTTP) */
 };
 static int g_settingCount = 14;
 
