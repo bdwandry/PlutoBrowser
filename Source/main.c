@@ -5847,6 +5847,20 @@ static void navigate_to(const char *urlString)
      * its onComplete would otherwise fire later and hijack the new page. */
     tasks_cancel_all();
     jsext_abort_active(); /* FULL-mode prefetch: kill any in-flight session */
+    /* R65: the pre-cancel — EVERY leave-a-page route funnels through here
+     * (B+Left back, the loading-screen aborts, menu/home, hyperlinks,
+     * redirects). Without it an in-flight fetch from the OLD page rides
+     * past the navigation: both lanes were stale-guarded once their
+     * callbacks fired, but under the Hybrid split an image fetch on the
+     * OS lane continued PUMPING while the new page rode TCP (receipted
+     * gap; the loading-screen aborts alreadyReceipted this exact pair
+     * before go_back/go_home). http_cancel() takes BOTH lanes and is
+     * safe when idle. */
+    http_cancel();
+    pluto_spill_reset(); /* SW2b page-close contract: the old page's
+                          * session stream files die HERE (abort receipts
+                          * already did this pair); snapshots + the SW4
+                          * persistent store survive reset by design. */
     isRendering = 0;
     /* Drop the previous page's layout (borrows doc strings) before the doc
      * is freed here. */
@@ -9894,6 +9908,39 @@ static int updateFrame(void *userdata)
     }
 
 
+
+    /* R65 BATTERY (Hybrid autotest builds only): the staged leave-mid-download
+     * cycle — boot navigates to the seam URL (wikipedia), images start
+     * downloading, THEN the battery leaves to about:home DURING the queue
+     * (the user's crash scenario), then loads a second image-bearing site
+     * (bryanwandrych.com/about) so the receipts prove BOTH halves: the
+     * in-flight fetches/cancels + teardown at the leave AND the new site's
+     * images still decoding under the current build. Frame-count staged:
+     * 50fps ≈ 60s / 90s; on the device the slower chain keeps the queue
+     * mid-download well past the leave. */
+#if defined(PLUTO_HYBRID_AUTOTEST)
+    {
+        static int hbStage = 0;
+        if (hbStage == 0)
+        {
+            hbStage = 1;
+        }
+        else if (hbStage == 1 && frameCount == 3000)
+        {
+            hbStage = 2;
+            logger_log("[hybrid-autotest] BATTERY 1: leave-mid-download → "
+                       "about:home");
+            navigate_to("about:home");
+        }
+        else if (hbStage == 2 && frameCount == 4500)
+        {
+            hbStage = 3;
+            logger_log("[hybrid-autotest] BATTERY 2: second site (images must "
+                       "still work)");
+            navigate_to("https://bryanwandrych.com/about");
+        }
+    }
+#endif
 
     /* Log a periodic heartbeat every 300 frames so logs show liveness. */
     if (frameCount % 300 == 0)

@@ -150,6 +150,7 @@ static void cache_put(const char *url, LCDBitmap *bmp)
 static void process_next_timer(void *userdata);
 static void process_next(void);
 
+
 /* ── Async decode task (one step does the work; mirrors Tasks.run's contract) ── */
 
 typedef struct AsyncDecodeState
@@ -162,6 +163,13 @@ typedef struct AsyncDecodeState
     LCDBitmap *result;
     TaskCtx *ctx;    /* set by the step for yield_check parity */
 } AsyncDecodeState;
+/* R65: an in-flight decode task armed for the queue. tasks_cancel_all()
+ * (navigation) drops the task WITHOUT its onDone, so the state — with
+ * its OWN body copy, up to a few hundred KB for the big srcset JPEGs —
+ * would leak at every mid-decode leave (the old page's RAM surviving
+ * navigation). This pointer keeps the reach; imgdec_clear_cache() and
+ * the stall recovery free the orphan. */
+static AsyncDecodeState *g_activeDecode = NULL;
 
 static int async_decode_step(TaskCtx *ctx)
 {
@@ -191,6 +199,7 @@ static void async_decode_done(void *result, void *userdata)
     AsyncDecodeState *st = (AsyncDecodeState *)result;
     (void)userdata;
     g_isDecoding = 0;
+    g_activeDecode = NULL;
     if (!st) return;
     /* P33 diagnostics: decode outcome per image. */
     if (st->result)
@@ -218,6 +227,7 @@ static void async_decode_error(const char *message, void *userdata)
     (void)message;
     (void)userdata;
     g_isDecoding = 0;
+    g_activeDecode = NULL;
     pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
 }
 
@@ -290,6 +300,7 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
                 snprintf(st->url, IMGDEC_URL_MAX, "%s", url ? url : "");
                 st->kind = kind;
                 g_isDecoding = 1;
+                g_activeDecode = st;
                 if (tasks_run(async_decode_step, st, async_decode_done,
                               async_decode_error, NULL) != 0)
                 {
@@ -620,6 +631,18 @@ void imgdec_clear_cache(void)
     g_queueCount = 0;
     g_isDownloading = 0;
     g_isDecoding = 0;
+    /* R65: a decode task cancelled by navigation never runs onDone —
+     * free its orphan state (with the body copy) HERE, so the old
+     * page's decode RAM leaves with the page. */
+    if (g_activeDecode)
+    {
+        if (g_activeDecode->data)
+        {
+            free(g_activeDecode->data);
+        }
+        free(g_activeDecode);
+        g_activeDecode = NULL;
+    }
 }
 
 void imgdec_enqueue(const char *src)
@@ -687,7 +710,19 @@ void imgdec_update(void)
         g_isDownloading = 0;
     /* A decode task cancelled by navigation never runs onDone. */
     if (g_isDecoding && !tasks_is_running())
+    {
+        /* R65: free the orphaned decode state the cancel left behind. */
+        if (g_activeDecode)
+        {
+            if (g_activeDecode->data)
+            {
+                free(g_activeDecode->data);
+            }
+            free(g_activeDecode);
+            g_activeDecode = NULL;
+        }
         g_isDecoding = 0;
+    }
     if (!g_isDownloading && !g_isDecoding && g_queueCount > 0 && !http_is_loading())
         process_next();
 }
