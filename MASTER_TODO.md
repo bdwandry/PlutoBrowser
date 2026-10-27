@@ -11,6 +11,34 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R65 — THE LEAVE-A-PAGE CONTRACT + THE TRANSPORT AUTO-RETRY (2026-10-27): any navigation
+> (B+Left back, menu/home, hyperlink, redirect, loading-screen abort) now FULLY severs the
+> previous site — in-flight fetches STOPMED BOTH LANES (`http_cancel()` at navigate_to's
+> start: the cross-lane catch under Hybrid where an image fetch on the OS lane rode past a
+> TCP page load), old-page RAM freed before the new fetch (receipts unchanged: teardown before
+> the new build — never 2 sites resident), the image queue + decoded-bitmap cache cleared
+> (imgdec_clear_cache), and the cancel-orphans CLOSED — a decode task cancelled by
+> tasks_cancel_all never ran onDone, so its body copy (up to a few hundred KB per big
+> srcset JPEG) leaked at every mid-decode leave: the armed g_activeDecode pointer frees the
+> orphan at imgdec_clear_cache + the stall recovery. pluto_spill_reset() at navigation start
+> drops the abandoned page's session stream files (the SW4/snapshot store survives by the
+> receipted guard). DEVICE RECEIPTS: the user's manual wiesmann session receipted the
+> prompt-stop line-by-line ([oshttp] cancel → [nav] old page torn down → snapshot purged →
+> 0 rows from the departed host afterward) AND the automated staged battery
+> (boot→wikipedia→leave at ~T+65s mid-queue→home→about at ~T+90s): wiki rows-after-leave = 0,
+> about 8/8 AVIFs ok, zero watchdog, 49 fps steady, heap 1588KB, refusals 0. THE TRANSPORT
+> AUTO-RETRY: the device receipted the "network parse error" class — the about page's TLS
+> connect read-timeout (err=-8) the same second the wifi dropped 3→2 bars — the first
+> attempt surfaced the error page while the receipted radio-heal machinery RECOVERED on the
+> automatic second navigation; http_on_error now AUTO-RETRIES transport-class failures
+> ("Connection failed"/"Connection timed out"/read timeouts) ONCE per navigation after
+> 2s (g_navAutoRetried; re-armed per manual navigation — never loops), logging
+> `[nav] AUTO-RETRY (transport failure)`; content failures still error-page immediately.
+> TEMP probe lines ([cacheprobe]/[svgd]/[mem] census) compile into the CURRENT builds per
+> the log rule — strip decision with the user. Log:
+> tests/logs/device_r65_autoretry_battery_20261027_*.log + the wiesmann manual log.
+> v1.2.5 (build 10) — the prod PDX (seam compiled out: 0 seam strings in BOTH binaries).
+>
 > **R64b — THE DEVICE PLACEHOLDER MYSTERY SOLVED + THE FPS STEADY-STATE RESTORED (2026-10-26):
 > the wikipedia page renders EVERY image on hardware (23 OSIMAGE routes ⇒ 23/23 distinct
 > IMGDEC ok, EACH EXACTLY ONCE — the receipted loop killed), steady funnel ~2.5MB (peak

@@ -345,6 +345,8 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
                             int headerCount, const char *body, size_t bodyLen,
                             const char *url);
 static void http_on_error(const char *message);
+static void nav_autoretry_cb(void *ud); /* R65: one-shot transport retry */
+static int g_navAutoRetried = 0;        /* R65: one retry per navigation */
 static void update_system_menu(void);
 static void settings_on_change(void);
 static void view_menu_callback(void *ud);
@@ -5919,6 +5921,10 @@ static void navigate_to(const char *urlString)
     snprintf(urlBuf, sizeof(urlBuf), "%s", trimmed ? trimmed : urlString);
     pluto_free(trimmed);
 
+    g_navAutoRetried = 0; /* R65: each manual navigation re-arms the
+                           * ONE transport auto-retry (a user re-click
+                           * after a failed retry never loops). */
+
     /* Reset per-navigation state (Lua runNavigation). The old layout items
      * (with their owned values) are freed by layout_clear during the render
      * task, so no form-value cleanup is needed here. */
@@ -6226,10 +6232,52 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 static void http_on_error(const char *message)
 {
     logger_log("[net] http error: %s", message ? message : "(null)");
+    /* R65: transport-class failures (the machine's own receipts:
+     * "Connection failed", "Connection timed out" — the TLS open's
+     * err=-8 class, HTTP connect refusals) were a device receipt: the
+     * radio blipped (wifi 3→2 bars at the same second) and the FIRST
+     * navigation surfaced its error page while the receipted radio-heal
+     * machinery RECOVERED on the automatic second navigation. Content
+     * failures (parse/4xx-class) never retry — only the transport class,
+     * ONCE per URL, after a beat that lets the stall machinery's radio
+     * cycle run. The retry is the same navigate_to the user's own
+     * second click ran. */
+    int autoRetry = message &&
+                    (strstr(message, "Connection failed") != NULL ||
+                     strstr(message, "Connection timed out") != NULL ||
+                     strstr(message, "read timeout") != NULL);
+    if (autoRetry && !g_navAutoRetried &&
+        currentUrlObj && strncmp(currentUrlObj->scheme, "about", 5) != 0 &&
+        isRendering == 0)
+    {
+        char retry[648];
+        snprintf(retry, sizeof(retry), "%s", currentUrlObj->normalized);
+        g_navAutoRetried = 1;
+        logger_log("[nav] AUTO-RETRY (transport failure): %s",
+                   currentUrlObj->normalized);
+        pdtimer_perform_after_delay(pd, 2000, nav_autoretry_cb, pluto_strdup(retry));
+        currentState = STATE_LOADING;
+        snprintf(pageTitle, sizeof(pageTitle), "Retrying...");
+        update_system_menu();
+        return;
+    }
     error_page_show(message, currentUrlObj ? currentUrlObj->normalized : "");
     currentState = STATE_ERROR;
     snprintf(pageTitle, sizeof(pageTitle), "Connection Error");
     update_system_menu();
+}
+
+/* R65: the one-shot transport auto-retry's timer callback (re-navigates
+ * the SAME URL through the normal funnel — the full old-page teardown +
+ * pre-cancel ran already, so nothing is mid-flight against it). */
+static void nav_autoretry_cb(void *ud)
+{
+    char *url = (char *)ud;
+    if (url)
+    {
+        navigate_to(url);
+        pluto_free(url);
+    }
 }
 
 /* ── Live re-walk after JS DOM mutation (preventDefault path) ───────────── */
