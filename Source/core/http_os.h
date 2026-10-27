@@ -5,7 +5,8 @@
  * the browser's standing HttpCallbacks contract.
  *
  * Selected by the Settings "Network Protocol" row (storage netProtocol:
- * 0=TCP raw — the standing default, 1=OS HTTP). The dispatcher lives in
+ * 0=TCP raw, 1=OS HTTP, 2=Hybrid default — pages TCP, layout images
+ * OS HTTP). The dispatcher lives in
  * Source/core/http_front.c; the raw-TCP implementation
  * (Source/core/http_client.c, compiled as http_tcp_*) is untouched.
  *

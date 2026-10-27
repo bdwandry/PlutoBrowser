@@ -46,8 +46,9 @@
  * ══ R62: DUAL-STACK ROUTING (TCP | OS HTTP) ══════════════════════════════
  * THIS HEADER IS THE PUBLIC CALLER VIEW: the http_* functions below are
  * the FRONT DISPATCHER (Source/core/http_front.c) — the Settings
- * "Network Protocol" row (storage netProtocol: 0=TCP raw, the standing
- * default; 1=OS HTTP stack) routes every request to its backend:
+ * "Network Protocol" row (storage netProtocol: 0=TCP raw, 1=OS HTTP
+ * stack, 2=HYBRID the default — pages TCP, layout images OS HTTP) routes
+ * every request to its backend:
  *
  *   TCP backend: Source/core/http_client.c — the standing, receipted
  *     implementation. Its SOURCE stays byte-untouched: it is compiled

@@ -56,7 +56,7 @@ static Setting g_settings[16] = {
     {"encodingMode", "", 0, 1}, /* Compression: 0=Off/raw identity (default) 1=Gzip */
     {"cacheWebsite", "", 0, 1}, /* Cached Website: 0=Off/fresh fetch (default) 1=On/snapshot */
     {"clockFormat", "", 0, 1}, /* Clock: 0=12-Hour (default) 1=24-Hour */
-    {"netProtocol", "", 0, 1} /* Network Protocol: 0=TCP raw (default) 1=OS HTTP stack 2=Hybrid (pages TCP, images OS HTTP) */
+    {"netProtocol", "", 2, 1} /* Network Protocol: 0=TCP raw 1=OS HTTP stack 2=Hybrid — the DEFAULT (pages TCP, layout images OS HTTP) */
 };
 static int g_settingCount = 14;
 
@@ -378,7 +378,7 @@ void storage_load(void)
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
     storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
-    storage_set_setting_int("netProtocol", 0); /* Network Protocol: TCP raw by default */
+    storage_set_setting_int("netProtocol", 2); /* Network Protocol: Hybrid by default (pages TCP, layout images OS HTTP) */
 
     char *line = g_loadLine;
     char section[32] = "";
@@ -724,7 +724,7 @@ void storage_init(PlaydateAPI *pd)
     storage_set_setting_int("encodingMode", 0); /* Compression Off (raw) by default */
     storage_set_setting_int("cacheWebsite", 0); /* Cached Website Off (fresh fetch) by default */
     storage_set_setting_int("clockFormat", 0); /* 12-Hour clock by default */
-    storage_set_setting_int("netProtocol", 0); /* Network Protocol: TCP raw by default */
+    storage_set_setting_int("netProtocol", 2); /* Network Protocol: Hybrid by default (pages TCP, layout images OS HTTP) */
     storage_load();
     logger_log("STORAGE: init exit");
 }

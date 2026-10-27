@@ -258,18 +258,22 @@ void settings_page_open(int prevState)
     g_staged.netProtocol = storage_setting_int("netProtocol");
     if (g_staged.netProtocol < 0 || g_staged.netProtocol > 2)
     {
-        g_staged.netProtocol = 0; /* TCP/OS-HTTP/Hybrid — out-of-range → TCP (default) */
+        g_staged.netProtocol = 2; /* TCP/OS-HTTP/Hybrid — out-of-range → Hybrid (default) */
     }
 
     /* Settings-panel audit line: logs the exact on-screen label + staged
      * value of the JavaScript row so simulator/device pluto.log runs can
-     * verify the row set without human eyes on the panel. */
+     * verify the row set without human eyes on the panel. Row 13 rides
+     * the same receipt (R64: the Network Protocol row and its
+     * Hybrid default are verifiable in every settings-open log). */
     logger_log("SETTINGS: open label7='%s' staged7='%s'",
                settings_page_label(7), settings_page_staged_value(7));
     /* Row 8 is derived from row 7 (see file comment) — logged so simulator
      * and device pluto.log runs can verify the mirror stays in sync. */
     logger_log("SETTINGS: open label8='%s' staged8='%s'",
                settings_page_label(8), settings_page_staged_value(8));
+    logger_log("SETTINGS: open label13='%s' staged13='%s'",
+               settings_page_label(13), settings_page_staged_value(13));
 }
 
 void settings_page_close(void)
@@ -374,7 +378,8 @@ const char *settings_page_staged_value(int optionIndex)
         return "";
     case 12: /* Clock Format: 12-Hour (default) / 24-Hour */
         return g_staged.clockFormat == 1 ? "24-Hour" : "12-Hour";
-    case 13: /* Network Protocol: TCP (raw, default) / HTTP (OS stack) / Hybrid */
+    case 13: /* Network Protocol: TCP (raw) / HTTP (OS stack) / Hybrid (DEFAULT:
+              * pages ride raw TCP, layout images ride the OS HTTP stack) */
         return g_staged.netProtocol == 1 ? "HTTP"
                : g_staged.netProtocol == 2 ? "Hybrid"
                                            : "TCP";

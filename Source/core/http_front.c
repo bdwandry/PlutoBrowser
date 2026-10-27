@@ -3,8 +3,9 @@
  * The dual-stack FRONT DISPATCHER (R62). Owns the public http_* names:
  * every caller (main.c, jsbridge.c, jsext.c, …) keeps calling the same
  * functions; this file reads the Settings "Network Protocol" row
- * (storage netProtocol: 0=TCP raw — the standing default, 1=OS HTTP,
- * 2=HYBRID) and routes each request to the selected backend.
+ * (storage netProtocol: 0=TCP raw, 1=OS HTTP, 2=HYBRID — the default
+ * since R64: pages ride raw TCP, layout images ride the OS HTTP stack)
+ * and routes each request to the selected backend.
  *
  *   TCP backend: Source/core/http_client.c (compiled as http_tcp_* via
  *                the header's rename macros — the file's SOURCE is
@@ -64,6 +65,34 @@
 #define PLUTO_HTTP_ROUTE_GENERIC 0
 #define PLUTO_HTTP_ROUTE_IMAGE 1
 
+/* R64: the front door OWNS the "return 0 ⇒ onError already fired"
+ * contract (http_client.h). The OS backend (stock, byte-untouched)
+ * may refuse BEFORE arming its request (url/parse OOM, empty target,
+ * body OOM) and returns 0 WITHOUT callbacks — the dispatch glue fires
+ * the error here so every caller's immediate-refusal handling (the
+ * image queue's negative cache; the page's error page) always lands,
+ * and the queue never re-hammers a refused URL (receipted: 140
+ * identical parse-fail retries with no negative entry). */
+static int oshttp_route_or_refuse(const char *method, const char *urlString,
+                                  const char *contentType,
+                                  const HttpHeaderPair *extra, int nExtra,
+                                  const char *body, size_t bodyLen,
+                                  const HttpCallbacks *callbacks)
+{
+    int rc = oshttp_request_h(method, urlString, contentType, extra,
+                              nExtra, body, bodyLen, callbacks);
+    if (rc == 0)
+    {
+        logger_log("[http] OS route refused (onError fired) full=%.140s len=%zu",
+                   urlString ? urlString : "", urlString ? strlen(urlString) : 0);
+        if (callbacks && callbacks->onError)
+        {
+            callbacks->onError("OS-HTTP request refused (no wire started).");
+        }
+    }
+    return rc;
+}
+
 int pluto_http_route_request_kind(const char *method, const char *urlString,
                                   const char *contentType,
                                   const HttpHeaderPair *extra, int nExtra,
@@ -80,8 +109,8 @@ int pluto_http_route_request_kind(const char *method, const char *urlString,
     if (proto == 1)
     {
         logger_log("[http] route=OS-HTTP %.70s", urlString);
-        return oshttp_request_h(method, urlString, contentType, extra,
-                                nExtra, body, bodyLen, callbacks);
+        return oshttp_route_or_refuse(method, urlString, contentType, extra,
+                                      nExtra, body, bodyLen, callbacks);
     }
     if (proto == 2)
     {
@@ -91,8 +120,9 @@ int pluto_http_route_request_kind(const char *method, const char *urlString,
         if (kind == PLUTO_HTTP_ROUTE_IMAGE)
         {
             logger_log("[http] route=Hybrid-OSIMAGE %.70s", urlString);
-            return oshttp_request_h(method, urlString, contentType, extra,
-                                    nExtra, body, bodyLen, callbacks);
+            return oshttp_route_or_refuse(method, urlString, contentType,
+                                          extra, nExtra, body, bodyLen,
+                                          callbacks);
         }
         logger_log("[http] route=Hybrid-TCP %.70s", urlString);
         return http_tcp_request_h(method, urlString, contentType, extra,

@@ -34,7 +34,12 @@ static unsigned long mem_budget = 0; /* 0 = telemetry only */
  * delta (n - old_n); free(ptr, 0) subtracts the pointer's tracked size.
  * A tiny open-addressing table keyed by pointer holds tracked sizes.
  * Overhead: 24B entry per live allocation, table sized for our scale. */
-#define MEMTRACK_SLOTS 2048 /* power of two */
+#define MEMTRACK_SLOTS 8192 /* R64: 2048 saturated on long-lived page churn
+                             * (wikipedia receipted: track table full + the
+                             * untracked-alloc drift walked the counter to the
+                             * 8MB budget with frees unable to subtract — the
+                             * gate then refused everything, incl. the image
+                             * lane's own URL mallocs). 96KB BSS. */
 
 typedef struct
 {

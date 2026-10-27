@@ -11,6 +11,60 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R64b — THE DEVICE PLACEHOLDER MYSTERY SOLVED + THE FPS STEADY-STATE RESTORED (2026-10-26):
+> the wikipedia page renders EVERY image on hardware (23 OSIMAGE routes ⇒ 23/23 distinct
+> IMGDEC ok, EACH EXACTLY ONCE — the receipted loop killed), steady funnel ~2.5MB (peak
+> 7347KB under the 8MB budget), refusals 0, EMPTY errorlog, and the AUDIO-BOOK FPS profile
+> is 50/50/49/50 → 42-43 during the decode-burst → steady 49-50 AFTER the queue drains — the
+> user's "50fps on wikipedia" is back.** TWO device-truth bugs fixed with a probe receipt:
+> (1) THE CACHE-KEY TRUNCATION — the OS lane's delivery url snapshot (`urlSnap[128]`, a
+> receipted shape) cut the cache keys at 127 chars while layout's lookups carry the full
+> 153-char strings — EVERY URL with a long UTM query (ALL wikimedia thumbs) decoded ok then
+> drew its placeholder FOREVER (the sim couldn't show it — it counts decodes, not keys; the
+> probe receipt: enqueue len=153 vs put len=127). FIX (general-purpose): the image cache
+> keys by the QUEUE'S OWN STRING (g_currentUrl — exactly what layout enqueued and asks for)
+> on the disk-delivery receiver; the shorter delivered key never enters the cache; the
+> delivered-param stays log-only. (2) THE SYNC-SVG DELIVERY STALLS — 3-5 big SVGs decoded
+> INLINE during the OS lane's deliver (200-400ms one-frame stalls): SVG is now ASYNC kind=5
+> (magic scan bounded 200B; rides the same task-step contract as jpeg; 5 kind=5 receipts on
+> the run). Plus the fb-receipt: the re-fetched-19× loop dies with (1) (put-hit now finds
+> the 153-char key). PROBES: [cacheprobe] enqueue/put lines (TEMP, kept per the AGENTS log
+> rule) + the [svgd]/[mem] TEMP lines — STRIP DECISION still open with the user. RECEIPTS:
+> device_wikipedia_final_receipt_20261026_*.log (the 23/23 + fps table), sim log
+> sim_wikipedia_svgasync_*.log, device_r64b_clean_boot_*.log. CLEAN RELEASE restored
+> (0d46aa9849…, 0 seam strings), boot PASS 50fps refusals 0 EMPTY logs, DEVICE LEFT RUNNING
+> IT. LESSON: "images decoded" ≠ "images drawn" — the two layers' keys must be RECEIPTED
+> equal, not assumed equal; on device every ok needs a drawn counterpart.
+>
+
+> same-day follow-ups to R63/R63b): the wikipedia Main_Page now loads EVERY image on hardware
+> (42/42 decode receipts — SUPERSEDED by R64b's 23/23-distinct-each-once keys fix —
+> 0 refused, 0 decode failures) at a 2421KB steady funnel (was 8191KB
+> ceiling + 11,376 refusals), peak 7341KB under the budget, empty errorlog, 41-50fps.** FOUR
+> general-purpose fixes (no site-scoped hacks; flows of TCP/OS-HTTP backends byte-untouched):
+> (A) SW1 DRIFT CURED — the track table's saturation made frees unable to subtract and the
+> counter walked to the 8MB budget MID-PAGE (untracked allocations count up, never down):
+> table 2048→8192 slots + a 128-frame re-base in the update loop (the receipts' page-boundary
+> resync medicine applied to the in-page lifetime); (B) IMAGE-LANE SPILL DELIVERY — the
+> image queue's HttpCallbacks now advertise onSuccessSpill (general-purpose, ANY site, ANY
+> size, both backends — the OS lane's RAM staging + its 2MB-cap class gone via the receipted
+> SW2b/R15 machinery; the receiver adopts the handle, materializes ONCE for the decode,
+> discards — ONE body copy instead of channel+copy; net: `done status=200 spilled=… (disk
+> delivery)` × 42 on the receipt run; small bodies still ride RAM exactly as stock decides);
+> (C) THE FRONT DOOR OWNS THE REFUSAL CONTRACT — an OS-route immediate-refusal (return 0,
+> request never armed) now fires onError from http_front.c (the OS backend stays untouched),
+> and the image queue treats that class as RETRYABLE — a momentary budget pressure had become
+> PERMANENT placeholders for those URLs in the receipted failure storm; negative caches stay
+> for real content/transport failures; (D) the TEMP svgd/census probes logged the receipts
+> (instrumented builds under DEVICEDEFS/SIMDEFS only). RECEIPTS: device census run (mem-dump
+> at render boundaries — live=4.6MB vs tracked 883KB ⇒ the drift quantified); device
+> full-page run (43 OSIMAGE routes, 42/42 decode, all thumbnails + badges decoded); logs
+> device_wikipedia_allimg_receipt_20261026_*.log, sim_wikipedia_allimg_spill_*.log,
+> device_r64_clean_boot_*.log. CLEAN RELEASE restored (2975e4b0…, 0 seam strings), boot PASS
+> 50fps stackPeak 648B refusals 0, EMPTY logs, DEVICE LEFT RUNNING IT. NOTE — the AGENTS.md
+> "log everything" rule kept the [svgd]/[mem] TEMP lines compiling in the CURRENT builds
+> pending an explicit strip decision (the receipts DO strip after use — ask the user).
+>
 > **R63b — DEVICE AVIF DECODE-WATCHDOG FIX (2026-10-26): EVERY bryanwandrych.com/about image
 > NOW DECODES ON HARDWARE — 8/8 IMGDEC ok with ZERO refusals, ZERO watchdog, steady 50fps
 > (seam run, errorlog EMPTY).** Root cause was never the Hybrid split (the A/B all-TCP

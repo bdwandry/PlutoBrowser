@@ -5666,6 +5666,13 @@ static void render_done(void *result, void *userdata)
     /* R30l: what did this render actually produce? (pre-JS doc on the fresh
      * path — the post-eval truth logs at the rewalk site). */
     log_render_result(wasRewalk ? "done(rewalk)" : "done(fresh)", currentDoc);
+    /* TEMP R64: the live-block census at the render boundary — the
+     * wikipedia 258KB-page burst (7.4MB in one segment) needs a street
+     * address; the dump shows the biggest tracked blocks + the tracked
+     * sum (which is also what resync re-bases from). */
+    logger_log("[mem] render_done live=%luKB refusals=%lu (P22 TEMP)",
+               pluto_mem_live() / 1024, pluto_mem_refusals());
+    pluto_mem_dump_live(logger_log);
 
     /* Phase 10: the end-event lanes drain here — the visible render IS
      * the completed state, so animationend/transitionend dispatch now. */
@@ -9897,6 +9904,19 @@ static int updateFrame(void *userdata)
                    pluto_mem_peak_alloc() / 1024, pluto_mem_refusals());
     }
 
+    /* R64: re-base the funnel's live counter to its tracked truth every
+     * 128 frames (~2.5s at 50fps). The page-boundary resyncs cannot keep
+     * up with a page's long lifetime: the wikipedia receipt showed the
+     * counter drift to the 8MB budget MID-PAGE (allocations > the track
+     * table, frees unable to subtract) and the gate then refused even
+     * the image lane's URL mallocs. A periodic re-base keeps the gate
+     * reading the tracked sum (the SW1 receipts' medicine at page-boundary
+     * cadence applies to the in-page lifetime too). */
+    if (frameCount % 128 == 0)
+    {
+        pluto_mem_resync_live();
+    }
+
 
 
     /* FPS sampling: exponential moving average of the instantaneous
@@ -10341,17 +10361,19 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
 #if defined(PLUTO_HYBRID_AUTOTEST)
 #ifndef PLUTO_HYBRID_AUTOTEST_URL
-#define PLUTO_HYBRID_AUTOTEST_URL "https://bryanwandrych.com/about"
+#define PLUTO_HYBRID_AUTOTEST_URL "https://en.wikipedia.org/wiki/Main_Page"
 #endif
 #ifndef PLUTO_HYBRID_AUTOTEST_PROTO
 #define PLUTO_HYBRID_AUTOTEST_PROTO 2 /* 0 = A/B control (all-TCP stock) */
 #endif
         /* TEMPORARY (Hybrid test builds, sim + device): force the Network
-         * Protocol for the run (default Hybrid=2; pass
-         * -DPLUTO_HYBRID_AUTOTEST_PROTO=0 for the all-TCP A/B control —
-         * the production standing default). Navigate straight to an
-         * image-bearing page. The pluto.log proof of the split routing:
-         * the page/HTML fetch logs [http] route=Hybrid-TCP …, every
+         * Protocol for the run (default Hybrid=2, which since R64 IS the
+         * production default — the force mainly proves routing without
+         * depending on what storage had saved; pass
+         * -DPLUTO_HYBRID_AUTOTEST_PROTO=0 for the all-TCP A/B control).
+         * Navigate straight to an image-bearing page. The pluto.log proof
+         * of the split routing: the page/HTML fetch logs
+         * [http] route=Hybrid-TCP …, every
          * layout image logs [http] route=Hybrid-OSIMAGE … + the OS stack's
          * [oshttp] request … lines, and the decode completes through the
          * normal image-cache path. On the control build (proto=0) every
@@ -10362,6 +10384,7 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
                    PLUTO_HYBRID_AUTOTEST_PROTO == 0 ? "TCP control"
                    : PLUTO_HYBRID_AUTOTEST_PROTO == 1 ? "OS HTTP"
                                                       : "Hybrid");
+        snapBypass = 1; /* snapshots persist across sessions: force fresh */
         pendingNavUrlSet = 1;
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
                  PLUTO_HYBRID_AUTOTEST_URL);
@@ -10418,7 +10441,8 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
         jsbridge_set_engine(PLUTO_NR_AUTOTEST_ENGINE);
 #if defined(PLUTO_OSHTTP_AUTOTEST)
         /* R62 sim test build: force the OS-HTTP backend for this run
-         * (the production default stays netProtocol=0, TCP raw). */
+         * (the production default is netProtocol=2, Hybrid, since R64 —
+         * R62's era defaulted to 0, TCP raw). */
         storage_set_setting_int("netProtocol", 1);
         logger_log("[oshttp-autotest] netProtocol forced to 1 (OS HTTP stack)");
 #endif

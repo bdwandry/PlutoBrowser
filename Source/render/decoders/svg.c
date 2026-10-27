@@ -1755,12 +1755,54 @@ static int svg_paint_op(const SvgPaint *p, float groupAlpha, LCDColor *out)
 
 /* ── Polygon fill buffer (path subpath accumulation) ──────────────────────── */
 #define SVG_MAX_POLY_PTS 2048
+/* R64: maximum vertices SUBMITTED to pd->graphics->fillPolygon in one
+ * call. Real-world SVG paths (enwiki-25.svg receipted: submits of 962,
+ * 1393 and 1036 RAW curve vertices) emit long runs of pixel-identical
+ * points from the curve→screen math, and the OS's fillPolygon crashes
+ * the gameTask (stack overflow receipted 2026-10-26, device) on that
+ * data shape — the crash point MOVED between instrumented builds (a
+ * timing-dependent corruption class) while identical vector content
+ * returned. Submit-time normalization: consecutive-duplicate points
+ * dropped + even-sample thinned to the cap below, applied per submit
+ * (polyline STROKES keep the raw set; the wireframe draws were always
+ * receipted-crash-free). */
+#define SVG_POLY_SUBMIT_CAP 512
 static int g_poly[2 * SVG_MAX_POLY_PTS];
 static int g_polyN = 0;
 
 static void svg_poly_reset(void)
 {
     g_polyN = 0;
+}
+
+/* R64: normalize the accumulated polygon IN PLACE before a fillPolygon
+ * submit — drop consecutive pixel-identical vertices (curve bloat), then
+ * even-sample thin to SVG_POLY_SUBMIT_CAP. Returns the submitted count. */
+static int svg_poly_submit_prep(void)
+{
+    int m = 0;
+    for (int i = 0; i < g_polyN; i++)
+    {
+        if (m == 0 || g_poly[2 * m] != g_poly[2 * i] ||
+            g_poly[2 * m + 1] != g_poly[2 * i + 1])
+        {
+            g_poly[2 * m] = g_poly[2 * i];
+            g_poly[2 * m + 1] = g_poly[2 * i + 1];
+            m++;
+        }
+    }
+    g_polyN = m;
+    if (g_polyN > SVG_POLY_SUBMIT_CAP)
+    {
+        for (int k = 0; k < SVG_POLY_SUBMIT_CAP; k++)
+        {
+            long idx = ((long)k * (long)g_polyN) / SVG_POLY_SUBMIT_CAP;
+            g_poly[2 * k] = g_poly[2 * idx];
+            g_poly[2 * k + 1] = g_poly[2 * idx + 1];
+        }
+        g_polyN = SVG_POLY_SUBMIT_CAP;
+    }
+    return g_polyN;
 }
 
 static void svg_poly_add(int x, int y)
@@ -1962,6 +2004,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     {
         return NULL;
     }
+    logger_log("[svgd] enter %zu bytes (P22 TEMP)", len); /* TEMP R64 */
+    logger_stack_touch();
     svg_build_patterns(pd);
     svg_collect_gradients(xml, len);
 
@@ -1974,6 +2018,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     svg_expand_uses(xml, len, &body);
     const char *doc = body.data ? body.data : "";
     size_t docLen = body.len;
+    logger_log("[svgd] uses expanded -> %zu px, grads=%d (P22 TEMP)",
+               docLen, g_gradN);
 
     LCDBitmap *img = pd->graphics->newBitmap(targetW, targetH, (LCDColor)kColorWhite);
     if (!img)
@@ -1983,6 +2029,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     }
 
     pd->graphics->pushContext(img);
+    logger_log("[svgd] draw start %dx%d scale=%.3f (P22 TEMP)",
+               targetW, targetH, scale);
 
     g_vbMinX = minX;
     g_vbMinY = minY;
@@ -2017,8 +2065,14 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     size_t tagLen = 0;
     static SvgAttrs attrs; /* 1.4KB off the game-task stack (see above) */
     int isClose = 0, isSelfClose = 0;
+    int svgdOps = 0; /* TEMP R64 */
     while (svg_scan_next(doc, docLen, &pos, &tagName, &tagLen, &attrs, &isClose, &isSelfClose))
     {
+        if (++svgdOps % 32 == 0)
+        {
+            logger_log("[svgd] el#%d tag=%.10s peak=%u (P22 TEMP)",
+                       svgdOps, tagName ? tagName : "?", logger_stack_peak());
+        }
         if (!isClose)
         {
             svg_merge_style(&attrs);
@@ -2155,9 +2209,11 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                         {
                             if (op == 2)
                             {
+                                logger_log("[svgd] fp n=%d (P22 TEMP)", g_polyN);
                                 pd->graphics->fillPolygon(4, g_poly, (LCDColor)kColorWhite,
                                                           kPolygonFillNonZero);
                             }
+                            logger_log("[svgd] fp n=%d (P22 TEMP)", g_polyN);
                             pd->graphics->fillPolygon(4, g_poly, col,
                                                       S.evenOdd ? kPolygonFillEvenOdd
                                                                 : kPolygonFillNonZero);
@@ -2236,7 +2292,7 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                         {
                             if (opFill == 2)
                             {
-                                pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
+                                    pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
                                                           kPolygonFillNonZero);
                             }
                             pd->graphics->fillPolygon(g_polyN, g_poly, col,
@@ -2319,7 +2375,7 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                         {
                             if (opFill == 2)
                             {
-                                pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
+                                    pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
                                                           kPolygonFillNonZero);
                             }
                             pd->graphics->fillPolygon(g_polyN, g_poly, col,
@@ -2374,9 +2430,11 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                         int op = svg_paint_op(&S.fill, S.opacity, &col);
                         if (op)
                         {
+                            int nPre = svg_poly_submit_prep(); /* TEMP R64 */
+                            logger_log("[svgd] fill %d\u2192%d (P22 TEMP)", nPre, g_polyN);
                             if (op == 2)
                             {
-                                pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
+                                    pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,
                                                           kPolygonFillNonZero);
                             }
                             pd->graphics->fillPolygon(g_polyN, g_poly, col,
@@ -2429,6 +2487,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     {                                                                                \
         if (fillOn && g_polyN >= 3)                                                  \
         {                                                                            \
+            int nPre = svg_poly_submit_prep(); /* TEMP R64 log kept for receipt */   \
+            logger_log("[svgd] fill %d→%d (P22 TEMP)", nPre, g_polyN);              \
             if (fillOp == 2)                                                         \
             {                                                                        \
                 pd->graphics->fillPolygon(g_polyN, g_poly, (LCDColor)kColorWhite,    \
@@ -2876,6 +2936,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
             }
         }
     }
+    logger_log("[svgd] walk done ops=%d drawn=%d (P22 TEMP)",
+               svgdOps, drawn);
 
     pd->graphics->popContext();
     strbuf_free(&body);

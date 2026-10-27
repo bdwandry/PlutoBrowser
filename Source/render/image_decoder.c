@@ -28,9 +28,12 @@
 #include "render/image_decoder.h"
 #include "core/http_client.h"
 #include "core/tasks.h"
+#include "core/pluto_mem.h"
+#include "core/pluto_spill.h" /* R64 the disk-delivery image receiver */
 #include "util/pdtimer.h"
 #include "render/style.h"
 #include "render/decoders/bmp.h"
+#include "render/decoders/svg.h" /* R64b async kind 5 */
 #include "render/decoders/gif.h"
 #include "render/decoders/png.h"
 #include "render/decoders/svg.h"
@@ -68,6 +71,12 @@ static int g_queueCount = 0;
 
 static int g_isDownloading = 0;
 static int g_isDecoding = 0;
+
+/* R64: the retry pacing for transient refusal errors (see http_on_error):
+ * a refused fetch re-tries on this cadence instead of the 16ms pacing,
+ * so a funnel-pressure moment gives the resync window time to reopen
+ * headroom before the URL's next attempt. */
+static unsigned g_refusalRetryBackoff = 1000;
 static char g_currentUrl[IMGDEC_URL_MAX]; /* URL being downloaded (for callbacks) */
 
 /* ── Cache helpers ────────────────────────────────────────────────────────── */
@@ -81,6 +90,19 @@ static ImgCacheEntry *cache_find(const char *url)
     return NULL;
 }
 
+/* TEMP R64: one-line probes for the device placeholder loop receipt
+ * (who re-enqueues, who puts, who misses — a fingerprint of the
+ * key set at BOTH sides). The Mookie-style non-thumb unscaled URL
+ * is the receipted 20-decode looper. */
+static void cache_probe(const char *tag, const char *url)
+{
+    if (url && strstr(url, "Mookie_Wilson") != NULL)
+    {
+        logger_log("[cacheprobe] %s len=%zu tail=%.60s count=%d",
+                   tag, url ? strlen(url) : 0, (url + (strlen(url) > 60 ? strlen(url) - 60 : 0)),
+                   g_cacheCount);
+    }
+}
 static void cache_put(const char *url, LCDBitmap *bmp)
 {
     if (!url || !url[0]) return;
@@ -90,8 +112,10 @@ static void cache_put(const char *url, LCDBitmap *bmp)
         if (e->bmp && e->bmp != bmp) pd->graphics->freeBitmap(e->bmp);
         e->bmp = bmp;
         e->present = 1;
+        cache_probe("put-hit", url);
         return;
     }
+    cache_probe("put-new", url);
     if (g_cacheCount >= IMGDEC_CACHE_CAP)
     {
         /* Full: first drop a NEGATIVE entry (failed URLs are only hints),
@@ -133,7 +157,7 @@ typedef struct AsyncDecodeState
     uint8_t *data;   /* owned copy of the body */
     size_t len;
     char url[IMGDEC_URL_MAX];
-    int kind;        /* 0 jpeg, 1 png, 2 webp, 3 gif */
+    int kind;        /* 0 jpeg, 1 png, 2 webp, 3 gif, 4 avif, 5 svg */
     int phase;       /* 0 = decode pending, 1 = finished */
     LCDBitmap *result;
     TaskCtx *ctx;    /* set by the step for yield_check parity */
@@ -152,6 +176,7 @@ static int async_decode_step(TaskCtx *ctx)
     case 1: st->result = png_decode(st->data, st->len, 360, 200); break;
     case 2: st->result = webp_decode(st->data, st->len, 360, 200); break;
     case 3: st->result = gif_decode(st->data, st->len, 360, 200); break;
+    case 5: st->result = svg_decode((const char *)st->data, 360, 200); break;
     default: st->result = avif_decode(st->data, st->len); break;
     }
 
@@ -200,6 +225,28 @@ static void process_next(void);
 
 /* ── decodeRawImageData (magic dispatch) ──────────────────────────────────── */
 
+/* R64b: SVG magic scan for the async-kind routing — an SVG file's
+ * markup may start with a decl, a comment, whitespace, or the <svg root
+ * directly. Bounded scan: first 200 bytes. */
+static int svg_magic(const uint8_t *data, size_t len)
+{
+    const char *s = (const char *)data;
+    size_t n = len < 200 ? len : 200;
+    for (size_t i = 0; i + 5 <= n; i++)
+    {
+        if (s[i] == '<' && strncmp(s + i + 1, "svg", 3) == 0)
+        {
+            char c = s[i + 4];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '>' ||
+                c == '/')
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static void decode_raw_image_data(const uint8_t *data, size_t len, const char *url)
 {
     if (!data || len < 4)
@@ -208,9 +255,7 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
         cache_put(url, NULL);
         g_isDecoding = 0;
         return;
-    }
-
-    uint8_t b1 = data[0], b2 = data[1], b3 = data[2], b4 = data[3];
+    }    uint8_t b1 = data[0], b2 = data[1], b3 = data[2], b4 = data[3];
 
     int kind = -1; /* -1 = not async */
     if (b1 == 0xFF && b2 == 0xD8)
@@ -225,6 +270,12 @@ static void decode_raw_image_data(const uint8_t *data, size_t len, const char *u
              (memcmp(data + 8, "avif", 4) == 0 ||
               memcmp(data + 8, "avis", 4) == 0))
         kind = 4; /* AVIF stills (mif1 alone may be HEIC: not claimed) */
+    else if (svg_magic(data, len))
+        kind = 5; /* R64b: SVGs ride the ASYNC task pipeline — the receipted
+                     sync-in-deliver path stalled the OS lane's frame for
+                     200-400ms per big SVG (wikipedia receipted: enwiki-25
+                     + wordmark + tagline inline during delivery). Kind 5
+                     moves them into the queue's step contract. */
 
     if (kind >= 0)
     {
@@ -396,9 +447,94 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 
 static void http_on_error(const char *message)
 {
-    cache_put(g_currentUrl, NULL);
+    /* R64: the dispatcher's immediate-refusal class ("OS-HTTP request
+     * refused (no wire started)." — fired by the front door when the
+     * OS backend refuses BEFORE arming a request, e.g. a transient
+     * funnel-budget malloc refusal) is NOT a content failure: caching
+     * it here made a momentary resource condition a PERMANENT
+     * placeholder for that URL (the wikipedia receipted class). No
+     * negative entry: the URL leaves the cache unwritten, so the next
+     * in-view re-enqueue (layout's per-frame enqueue policy) retries
+     * it like any never-fetched image. Real transport/content failures
+     * keep the receipted negative-cache behavior below. */
+    int transientRefusal =
+        message &&
+        strncmp(message, "OS-HTTP request refused", 22) == 0;
+    if (!transientRefusal)
+    {
+        cache_put(g_currentUrl, NULL);
+    }
     g_isDownloading = 0;
-    pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
+    pdtimer_perform_after_delay(pd, g_refusalRetryBackoff, process_next_timer,
+                                NULL);
+}
+
+/* R64: the disk-delivery receiver (general-purpose, any site, both
+ * backends). The channel streamed the body to disk via the receipted
+ * SW2b/R15 spill machinery; ADOPT the handle, materialize the body
+ * ONCE for the decode batch (the decoders take a RAM pointer — the
+ * materialize-then-discard pattern is the receipted consumer shape),
+ * then feed the normal decode path and own the buffer. The channel's
+ * own RAM staging copy and its 2MB RAM-cap delivery class are gone
+ * for spilled bodies; net decode-time RAM becomes exactly ONE body
+ * copy instead of channel + copy. */
+static void http_on_success_spill(int status, SpillFile spill,
+                                  size_t bodyLen, const char *url)
+{
+    (void)status;
+    /* R64b: key by the QUEUE's own string (g_currentUrl) — exactly what
+     * layout enqueued and what layout's draw lookup asks for. The
+     * delivered-url parameter is the channel's OWN snapshot (receipted
+     * truncation class: the 128-char delivery snap cut the cache key at
+     * 127 while the lookup string runs longer — receipted on the
+     * wikipedia page: enqueue=153 chars vs put=127, every long URL
+     * decode-ok'd yet drew its placeholder). Using the queue string
+     * aligns put/get at the consumer for EVERY site and every URL
+     * length; the shorter delivered key never enters the cache. */
+    const char *urlKey = g_currentUrl;
+    uint8_t *body = (bodyLen > 0)
+                        ? (uint8_t *)pluto_mem_realloc(NULL, bodyLen + 1)
+                        : NULL;
+    if (!body)
+    {
+        /* Read/alloc failure: adopt-discard + negative cache (same
+         * shape as the RAM receiver's empty body). */
+        if (spill != PLUTO_SPILL_INVALID)
+        {
+            pluto_spill_discard(spill);
+        }
+        cache_put(urlKey, NULL);
+        g_isDownloading = 0;
+        pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
+        return;
+    }
+    size_t off = 0;
+    while (off < bodyLen)
+    {
+        long r = pluto_spill_read(spill, (long)off, body + off,
+                                  bodyLen - off);
+        if (r <= 0)
+        {
+            break;
+        }
+        off += (size_t)r;
+    }
+    pluto_spill_discard(spill);
+    if (off < bodyLen)
+    {
+        pluto_mem_realloc(body, 0);
+        cache_put(urlKey, NULL);
+        g_isDownloading = 0;
+        pdtimer_perform_after_delay(pd, 16, process_next_timer, NULL);
+        return;
+    }
+    body[bodyLen] = '\0'; /* RAM-delivery parity */
+
+    decode_raw_image_data(body, bodyLen, urlKey);
+    /* Ownership: the decode path either copied the bytes into its own
+     * state (async kinds) or finished synchronously — the caller of the
+     * spill receiver is the only bone holding this buffer. */
+    pluto_mem_realloc(body, 0);
 }
 
 static void process_next(void)
@@ -439,16 +575,20 @@ static void process_next(void)
 
         snprintf(g_currentUrl, IMGDEC_URL_MAX, "%s", url);
         g_isDownloading = 1;
-        HttpCallbacks cb;
-        memset(&cb, 0, sizeof(cb));
-        cb.onSuccess = http_on_success;
-        cb.onError = http_on_error;
         /* R63: the display-image fetch rides the IMAGE lane front door.
          * Identical GET/callback contract to http_get; the dispatcher
          * only uses the hint under the Hybrid setting (images → OS HTTP
          * stack), byte-identical routing on TCP/OS-HTTP settings. The
          * image queue's own gating is untouched (still refuses to start
-         * while http_is_loading() is true over both backends). */
+         * while http_is_loading() is true over both backends).
+         * R64: the lane ALSO advertises the disk-delivery receiver, so
+         * spilled bodies never RAM-stage in the channel — every site,
+         * any size, same decode path. */
+        HttpCallbacks cb;
+        memset(&cb, 0, sizeof(cb));
+        cb.onSuccess = http_on_success;
+        cb.onSuccessSpill = http_on_success_spill;
+        cb.onError = http_on_error;
         if (!http_get_image(url, &cb))
         {
             /* Immediate failure: onError already fired (cache + timer
@@ -485,6 +625,13 @@ void imgdec_clear_cache(void)
 void imgdec_enqueue(const char *src)
 {
     if (!src || !src[0]) return;
+    if (strstr(src, "Mookie_Wilson") != NULL)
+    {
+        logger_log("[cacheprobe] enqueue len=%zu tail=%.60s inqueue=%d cache=%d",
+                   strlen(src),
+                   (src + (strlen(src) > 60 ? strlen(src) - 60 : 0)),
+                   g_queueCount, g_cacheCount); /* TEMP R64 */
+    }
     if (cache_find(src)) return;
     for (int i = 0; i < g_queueCount; i++)
         if (strncmp(g_queue[i], src, IMGDEC_URL_MAX) == 0) return;
