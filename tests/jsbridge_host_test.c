@@ -67,6 +67,7 @@ static struct playdate_sys g_fakeSys;
 static struct playdate_file g_fakeFile;
 static PlaydateAPI g_fakeApi;
 static int g_fakeInit = 0;
+PlaydateAPI *playdate = NULL;
 PlaydateAPI *pluto_pd(void)
 {
     if (!g_fakeInit)
@@ -82,6 +83,7 @@ PlaydateAPI *pluto_pd(void)
         g_fakeFile.close = fake_file_close;
         g_fakeFile.write = fake_file_write;
         g_fakeApi.file = &g_fakeFile;
+        playdate = &g_fakeApi;
         g_fakeInit = 1;
     }
     return &g_fakeApi;
@@ -142,6 +144,29 @@ void http_client_init(PlaydateAPI *pd) { (void)pd; }
 void http_set_identity_encoding(int on) { (void)on; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks)
+{
+    (void)urlString; (void)extra; (void)nExtra; (void)callbacks;
+    return 0;
+}
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)body;
+    (void)bodyLen; (void)callbacks;
+    return 0;
+}
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)extra;
+    (void)nExtra; (void)body; (void)bodyLen; (void)callbacks;
+    return 0;
+}
 /* Router's local about: path: answer XHRs for any 'about:' URL with a
  * tiny page so tests need no real http_client.c. */
 size_t http_internal_page_body(const char *url, const char **bodyOut)

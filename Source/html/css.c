@@ -125,9 +125,11 @@ void css_log_stats(void)
  * (node, engine, generation, pseudo-lane): engine guards arena-reused
  * pointers across documents; generation (bumped at each top-level walk)
  * guards JS mutations between walks. Direct-mapped collisions just
- * recompute. ruleCount never exceeds CSS_MAX_RULES (128): bits beyond
- * the mask always re-test. */
-#define CSS_MASK_SIZE 128
+ * recompute. R66: the mask covers ALL CSS_MAX_RULES (was 128) — without
+ * that, a 384-rule page re-matched every rule on every property lookup,
+ * which stalled the device past the 10s watchdog. */
+#define CSS_MASK_SIZE 64
+#define CSS_MASK_WORDS ((CSS_MAX_RULES + 63) / 64)
 typedef struct
 {
     const void *node;
@@ -135,8 +137,7 @@ typedef struct
     unsigned gen;
     unsigned char pseudo;
     unsigned char pad[3];
-    uint64_t lo;
-    uint64_t hi;
+    uint64_t bits[CSS_MASK_WORDS];
     /* Winning specificity per matching rule (max over the rule's MATCHING
      * selectors, exactly as the cascade computes it). Lets consults skip
      * chain re-matching entirely: spec comes from storage, values from
@@ -157,10 +158,10 @@ void css_match_cache_bump(void)
     }
 }
 
-/* Fetch: 1 + entry borrowed (spec array read-only through the call;
+/* Fetch: 1 + entry borrowed (bits/spec read-only through the call;
  * single thread, no mutation mid-lookup). */
 static int css_mask_fetch(const void *node, const void *eng,
-                          unsigned char pseudo, uint64_t *lo, uint64_t *hi,
+                          unsigned char pseudo, const uint64_t **bits,
                           const unsigned short **spec)
 {
     CssMaskEntry *e;
@@ -172,8 +173,10 @@ static int css_mask_fetch(const void *node, const void *eng,
     if (e->node == node && e->eng == eng && e->gen == g_maskGen &&
         e->pseudo == pseudo)
     {
-        *lo = e->lo;
-        *hi = e->hi;
+        if (bits)
+        {
+            *bits = e->bits;
+        }
         if (spec)
         {
             *spec = e->spec;
@@ -184,7 +187,7 @@ static int css_mask_fetch(const void *node, const void *eng,
 }
 
 static void css_mask_store(const void *node, const void *eng,
-                           unsigned char pseudo, uint64_t lo, uint64_t hi,
+                           unsigned char pseudo, const uint64_t *bits,
                            const unsigned short *spec)
 {
     CssMaskEntry *e;
@@ -197,8 +200,14 @@ static void css_mask_store(const void *node, const void *eng,
     e->eng = eng;
     e->gen = g_maskGen;
     e->pseudo = pseudo;
-    e->lo = lo;
-    e->hi = hi;
+    if (bits)
+    {
+        memcpy(e->bits, bits, sizeof(e->bits));
+    }
+    else
+    {
+        memset(e->bits, 0, sizeof(e->bits));
+    }
     if (spec)
     {
         memcpy(e->spec, spec, sizeof(e->spec));
@@ -447,7 +456,7 @@ static size_t css_lite_attr_copy(const char *s, const char *z, char *dst,
 static int media_holds(const char *qs, const char *qe);
 
 int css_ext_scan_links(const char *html,
-                       char hrefs[PLUTO_CSS_EXT_MAX][512],
+                       char hrefs[PLUTO_CSS_EXT_MAX][PLUTO_CSS_HREF_MAX],
                        unsigned char mediaOk[PLUTO_CSS_EXT_MAX])
 {
     if (!html)
@@ -479,7 +488,7 @@ int css_ext_scan_links(const char *html,
             int isSheet = 0;
             int typeOk = 1;
             int someHref = 0;
-            char hrefBuf[512];
+            char hrefBuf[PLUTO_CSS_HREF_MAX];
             int hrefOff = 0;
             hrefBuf[0] = '\0';
             int mediaAll = 1; /* absent/empty ⇒ all media */
@@ -3062,6 +3071,96 @@ const char *css_anim_registered_name(const CssEngine *eng, const char *val,
     return NULL;
 }
 
+/* R66: does this declaration affect WHAT is visible (as opposed to only
+ * typography/spacing)? Presence rules are the ones that must survive when
+ * the rule table fills — they are what stops hidden menus, modal dialogs and
+ * no-JS fallback duplicates from rendering as page content. */
+static int css_prop_is_presence(const char *p, size_t n)
+{
+    static const char *const names[] = {
+        "display", "visibility", "position", "top", "left", "right",
+        "bottom", "z-index", "overflow", "overflow-x", "overflow-y",
+        "clip", "clip-path", "opacity", "width", "height", "max-width",
+        "max-height", "min-width", "min-height", "float", "transform",
+        "content", "text-indent"
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        size_t l = strlen(names[i]);
+        if (l == n && memcmp(p, names[i], l) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int css_rule_has_presence(const CssRule *r)
+{
+    for (unsigned char i = 0; i < r->propCount; i++)
+    {
+        if (css_prop_is_presence(r->prop[i], r->propLen[i]))
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int css_prop_value_has(const char *v, size_t n, const char *needle)
+{
+    size_t nl = strlen(needle);
+    if (nl == 0 || n < nl)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i + nl <= n; i++)
+    {
+        if (memcmp(v + i, needle, nl) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int css_rule_has_hide(const CssRule *r)
+{
+    for (unsigned char i = 0; i < r->propCount; i++)
+    {
+        const char *p = r->prop[i];
+        size_t pl = r->propLen[i];
+        const char *v = r->val[i];
+        size_t vl = r->valLen[i];
+        if (pl == 7 && memcmp(p, "display", 7) == 0 &&
+            css_prop_value_has(v, vl, "none"))
+        {
+            return 1;
+        }
+        if (pl == 10 && memcmp(p, "visibility", 10) == 0 &&
+            css_prop_value_has(v, vl, "hidden"))
+        {
+            return 1;
+        }
+        if (pl == 7 && memcmp(p, "opacity", 7) == 0)
+        {
+            const char *q = v;
+            const char *qe = v + vl;
+            while (q < qe && (*q == ' ' || *q == '\t'))
+            {
+                q++;
+            }
+            if (q < qe && q[0] == '0' &&
+                (q + 1 == qe || q[1] == '.' || q[1] == '%' || q[1] == ' ' ||
+                 q[1] == '\t'))
+            {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
 {
     memset(eng, 0, sizeof(*eng));
@@ -3069,35 +3168,50 @@ void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
     {
         return;
     }
-    static char bufs[CSS_MAX_SHEETS][CSS_SHEET_MAX]; /* static: off the
-                                                     * device game-task
-                                                     * stack. One buffer
-                                                     * PER SHEET: rule
-                                                     * pointers aim into
-                                                     * these, so sharing a
-                                                     * single buffer would
-                                                     * corrupt earlier
-                                                     * sheets' rules when
-                                                     * the next sheet
-                                                     * copies over them. */
-    unsigned short order = 0;
-
-    for (int si = 0; si < sheetCount && si < CSS_MAX_SHEETS; si++)
+    /* ONE shared text arena: every sheet is copied here before parsing, so
+     * rule tokens (selectors/properties/values) stay valid for the page's
+     * lifetime. This replaces the old per-sheet 16KB buffers, which capped
+     * the engine at 8 sheets and dropped the rest of every modern page's
+     * CSS. Static (BSS) so the device game-task stack is untouched. */
+    static char text[CSS_TEXT_MAX];
+    size_t offs[CSS_MAX_SHEETS];
+    int stored = 0;
+    size_t used = 0;
+    for (int si = 0; si < sheetCount && stored < CSS_MAX_SHEETS; si++)
     {
-        size_t len = sheets[si].len;
         if (!sheets[si].start)
         {
             continue;
         }
+        size_t len = sheets[si].len;
         if (len > CSS_SHEET_MAX - 1)
         {
             len = CSS_SHEET_MAX - 1;
             eng->truncated = 1;
         }
-        char *buf = bufs[si];
-        memcpy(buf, sheets[si].start, len);
-        buf[len] = '\0';
-        char *e = strip_comments(buf, buf + len);
+        if (used + len + 1 > CSS_TEXT_MAX)
+        {
+            eng->truncated = 1;
+            break;
+        }
+        offs[stored] = used;
+        memcpy(text + used, sheets[si].start, len);
+        text[used + len] = '\0';
+        used += len + 1;
+        stored++;
+    }
+
+    unsigned short order = 0;
+    /* Scratch rule (parsed first, then copied into the table): a new
+     * presence rule may evict a presentation-only rule when the table is
+     * full, and the scratch keeps the incoming rule addressable without
+     * writing past rules[]. Static: ~1.4KB off the device stack. */
+    static CssRule scratch;
+
+    for (int si = 0; si < stored; si++)
+    {
+        char *buf = text + offs[si];
+        char *e = strip_comments(buf, buf + strlen(buf));
         /* @media pre-pass: held bodies join the rule stream in order,
          * dropped queries blank out (remaining at-rules skip as before). */
         flatten_media(buf, e, 0);
@@ -3187,17 +3301,8 @@ void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
                 break;
             }
 
-            CssRule *r = (eng->ruleCount < CSS_MAX_RULES)
-                             ? &eng->rules[eng->ruleCount]
-                             : NULL;
-            if (r)
-            {
-                memset(r, 0, sizeof(*r));
-            }
-            else
-            {
-                eng->truncated = 1;
-            }
+            CssRule *r = &scratch;
+            memset(r, 0, sizeof(*r));
 
             /* selector group: keep every usable selector. The comma split
              * is bracket/quote-aware ([a=","] is one selector). */
@@ -3325,7 +3430,7 @@ void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
                                 bad = 1; /* trailing '>' */
                             }
                         }
-                        if (!bad && np > 0 && r &&
+                        if (!bad && np > 0 &&
                             (!havePseudo || pseudo == rulePseudo))
                         {
                             unsigned spec = 0;
@@ -3368,22 +3473,93 @@ void css_parse_sheets(CssEngine *eng, const CssSheet *sheets, int sheetCount)
                 }
             }
 
-            if (r)
+            if (selIdx > 0)
             {
                 r->selCount = selIdx;
-                r->order = order++;
-                if (selIdx > 0)
+                parse_decl_block(eng, r, brace + 1, bend);
+                if (r->propCount > 0)
                 {
-                    parse_decl_block(eng, r, brace + 1, bend);
-                    eng->ruleCount++;
+                    r->presence = (unsigned char)css_rule_has_presence(r);
+                    r->hide = (unsigned char)css_rule_has_hide(r);
+                    r->order = order;
+                    int slot = -1;
+                    if (eng->ruleCount < CSS_MAX_RULES)
+                    {
+                        slot = eng->ruleCount++;
+                    }
+                    else if (r->presence)
+                    {
+                        /* Table full. Retention priority:
+                         *   hide rule      → evict any non-hide rule
+                         *   presence rule  → evict a non-presence rule
+                         *   other rule     → drop
+                         * Presence/hide rules already stored keep their
+                         * order; the new rule takes a fresh order value so
+                         * the cascade still sees it as later in the sheet. */
+                        if (r->hide)
+                        {
+                            for (int k = 0; k < CSS_MAX_RULES; k++)
+                            {
+                                if (!eng->rules[k].hide)
+                                {
+                                    slot = k;
+                                    break;
+                                }
+                            }
+                        }
+                        if (slot < 0)
+                        {
+                            for (int k = 0; k < CSS_MAX_RULES; k++)
+                            {
+                                if (!eng->rules[k].presence)
+                                {
+                                    slot = k;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (slot >= 0)
+                    {
+                        memcpy(&eng->rules[slot], r, sizeof(*r));
+                        order++;
+                    }
+                    else
+                    {
+                        eng->truncated = 1;
+                    }
                 }
                 else
                 {
                     r->skipped = 1;
                 }
             }
+            else
+            {
+                r->skipped = 1;
+            }
             p = (char *)bend + 1;
         }
+    }
+    /* R66 diagnostic: how much of the page's CSS survived the caps. */
+    {
+        int pres = 0;
+        int hide = 0;
+        for (int i = 0; i < eng->ruleCount; i++)
+        {
+            if (eng->rules[i].presence)
+            {
+                pres++;
+            }
+            if (eng->rules[i].hide)
+            {
+                hide++;
+            }
+        }
+        logger_log("[css] parsed sheets=%d text=%zu rules=%d presence=%d "
+                   "hide=%d truncated=%d",
+                   stored, used, eng->ruleCount, pres, hide,
+                   (int)eng->truncated);
     }
 }
 
@@ -5649,14 +5825,16 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
     /* Mask consult: a previous lookup for this (element, pseudo-lane)
      * already tested every rule. Hit: only matching rules reach the
      * cascade below, with their stored winning specificity (no chains). */
-    uint64_t mlo = 0, mhi = 0;
+    const uint64_t *mbits = NULL;
     const unsigned short *storedSpec = NULL;
     unsigned short fillSpec[CSS_MAX_RULES];
+    uint64_t fillBits[CSS_MASK_WORDS];
     int useMask = css_mask_fetch(node, eng, (unsigned char)wantPseudo,
-                                 &mlo, &mhi, &storedSpec);
+                                 &mbits, &storedSpec);
     if (!useMask)
     {
         memset(fillSpec, 0, sizeof(fillSpec));
+        memset(fillBits, 0, sizeof(fillBits));
     }
 
     for (int ri = 0; ri < eng->ruleCount; ri++)
@@ -5666,13 +5844,9 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
         if (useMask)
         {
             int bit = 0;
-            if (ri < 64)
+            if (mbits)
             {
-                bit = (int)((mlo >> ri) & 1ULL);
-            }
-            else if (ri < 128)
-            {
-                bit = (int)((mhi >> (ri - 64)) & 1ULL);
+                bit = (int)((mbits[ri >> 6] >> (ri & 63)) & 1ULL);
             }
             if (!bit)
             {
@@ -5717,16 +5891,9 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
                 continue;
             }
             /* Record the outcome for later lookups of this element. */
-            if (ri < 64)
-            {
-                mlo |= 1ULL << ri;
-            }
-            else if (ri < 128)
-            {
-                mhi |= 1ULL << (ri - 64);
-            }
             if (ri < CSS_MAX_RULES)
             {
+                fillBits[ri >> 6] |= 1ULL << (ri & 63);
                 fillSpec[ri] = (unsigned short)(spec > 0xFFFF ? 0xFFFF
                                                               : spec);
             }
@@ -5758,7 +5925,7 @@ static const char *winning_core(const CssEngine *eng, const char *tagLower,
     }
     if (!useMask)
     {
-        css_mask_store(node, eng, (unsigned char)wantPseudo, mlo, mhi,
+        css_mask_store(node, eng, (unsigned char)wantPseudo, fillBits,
                        fillSpec);
     }
     if (have && best && val_needs_resolve(best, blen))
@@ -5870,6 +6037,51 @@ static int css_flexgrid_name(const char *n, size_t len)
         }
     }
     return 0;
+}
+
+/* R66: a negative offset large enough to park a box outside the viewport
+ * (the skip-link recipe: left:-9999px; text-indent:-9999px). Small negative
+ * offsets are ordinary layout and stay in flow. */
+static int css_negative_far(const char *s)
+{
+    while (*s == ' ' || *s == '\t')
+    {
+        s++;
+    }
+    if (*s != '-')
+    {
+        return 0;
+    }
+    s++;
+    while (*s == ' ' || *s == '\t')
+    {
+        s++;
+    }
+    long v = 0;
+    int digits = 0;
+    while (*s >= '0' && *s <= '9')
+    {
+        digits = 1;
+        v = v * 10 + (*s - '0');
+        if (v > 100000)
+        {
+            return 1;
+        }
+        s++;
+    }
+    if (!digits)
+    {
+        return 0;
+    }
+    while (*s == ' ' || *s == '\t')
+    {
+        s++;
+    }
+    if (*s == '%')
+    {
+        return v >= 100;
+    }
+    return v >= 200;
 }
 
 static void apply_prop(CssEngine *eng, unsigned *out, const char *prop,
@@ -6029,11 +6241,42 @@ static void apply_prop(CssEngine *eng, unsigned *out, const char *prop,
     {
         /* Offset SIGNAL: any non-auto value participates (0px IS an
          * offset; auto = the static position per CSS, no signal).
-         * inherit/initial/unset cannot resolve here — no signal. */
+         * inherit/initial/unset cannot resolve here — no signal.
+         * R66: a large negative offset is the off-screen hiding recipe —
+         * that is the only out-of-flow case the walker drops. */
         if (!strstr(buf, "auto") && !strstr(buf, "inherit") &&
             !strstr(buf, "initial") && !strstr(buf, "unset"))
         {
             *out |= CSS_F_OFF;
+            if (css_negative_far(buf))
+            {
+                *out |= CSS_F_OFFSCREEN;
+            }
+        }
+    }
+    else if (plen == 9 && memcmp(prop, "text-indent", 9) == 0)
+    {
+        /* Image-replacement hiding recipe: text-indent:-9999px. */
+        if (css_negative_far(buf))
+        {
+            *out |= CSS_F_OFFSCREEN;
+        }
+    }
+    else if (plen == 7 && memcmp(prop, "opacity", 7) == 0)
+    {
+        /* opacity:0 is visually invisible (the common modal/overlay
+         * pre-animation state). A static first render honors it; the
+         * animation lane is not a compositor. */
+        const char *q = buf;
+        while (*q == ' ' || *q == '\t')
+        {
+            q++;
+        }
+        if ((q[0] == '0' && (q[1] == '\0' || q[1] == '.' || q[1] == '%' ||
+                             q[1] == ' ' || q[1] == '\t')) ||
+            strstr(buf, "transparent"))
+        {
+            *out |= CSS_F_HIDDEN;
         }
     }
     else if (plen == 7 && memcmp(prop, "z-index", 7) == 0)
@@ -6288,7 +6531,8 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
      * MATCHING selectors (winning_core semantics — a non-matching group
      * member must not inflate the win; this also fixes the old max-over-
      * all behavior for mixed-specificity groups). */
-    uint64_t cmlo = 0, cmhi = 0;
+    uint64_t cbits[CSS_MASK_WORDS];
+    memset(cbits, 0, sizeof(cbits));
     unsigned short cspec[CSS_MAX_RULES];
     memset(cspec, 0, sizeof(cspec));
     /* Per property, find the winning declaration among matching rules. */
@@ -6345,16 +6589,9 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
         {
             continue;
         }
-        if (ri < 64)
-        {
-            cmlo |= 1ULL << ri;
-        }
-        else if (ri < 128)
-        {
-            cmhi |= 1ULL << (ri - 64);
-        }
         if (ri < CSS_MAX_RULES)
         {
+            cbits[ri >> 6] |= 1ULL << (ri & 63);
             cspec[ri] = (unsigned short)(spec > 0xFFFF ? 0xFFFF : spec);
         }
         for (unsigned char pj = 0; pj < r->propCount; pj++)
@@ -6408,7 +6645,10 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
             bestUa[bi] = 0;
         }
     }
-    css_mask_store(node, eng, 0, cmlo, cmhi, cspec);
+    if (eng->ruleCount <= CSS_MAX_RULES)
+    {
+        css_mask_store(node, eng, 0, cbits, cspec);
+    }
     for (unsigned char bi = 0; bi < bestCount; bi++)
     {
         if (bestVal[bi])

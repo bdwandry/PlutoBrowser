@@ -1842,7 +1842,13 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     double vbMinX = 0, vbMinY = 0, vbW = 0, vbH = 0;
     int haveVb = 0;
     {
+        /* Our DOM serializer lowercases attribute keys (viewbox); hand-written
+         * SVG test fixtures use the spec spelling (viewBox). Accept both. */
         const char *v = strstr(xml, "viewBox");
+        if (!v)
+        {
+            v = strstr(xml, "viewbox");
+        }
         if (v)
         {
             /* viewBox%s*=%s*["']%s*number %s+ number %s+ number %s+ number */

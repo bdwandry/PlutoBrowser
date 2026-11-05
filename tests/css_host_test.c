@@ -25,14 +25,15 @@
 #include <string.h>
 #include <stddef.h>
 #include "pd_api.h"
+#include "core/http_client.h"
 
 /* ---- Fake Playdate API ---- */
 static void *host_realloc(void *p, size_t n) { return realloc(p, n); }
 static struct playdate_sys g_fakeSys;
 static PlaydateAPI g_fakeApi;
 static int g_fakeInit = 0;
-PlaydateAPI *pluto_pd(void)
-{
+PlaydateAPI *playdate = NULL;
+PlaydateAPI *pluto_pd(void){
     if (!g_fakeInit)
     {
         memset(&g_fakeSys, 0, sizeof(g_fakeSys));
@@ -50,7 +51,6 @@ void *pluto_realloc(void *p, size_t n) { return pluto_mem_realloc(p, n); }
 void tasks_report_progress(float f) { (void)f; }
 
 /* http_client stubs (jsext.c references them; never exercised here). */
-typedef struct HttpCallbacks HttpCallbacks;
 int http_get(const char *url, const HttpCallbacks *cb)
 {
     (void)url;
@@ -66,6 +66,42 @@ void http_cancel(void) {}
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks)
+{
+    (void)urlString; (void)extra; (void)nExtra; (void)callbacks;
+    return 0;
+}
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)body;
+    (void)bodyLen; (void)callbacks;
+    return 0;
+}
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)extra;
+    (void)nExtra; (void)body; (void)bodyLen; (void)callbacks;
+    return 0;
+}
+
+/* webstorage stubs: the CSS host test has no Playdate file API. */
+typedef struct WsStore WsStore;
+void ws_bind(const char *docUrl) { (void)docUrl; }
+WsStore *ws_local(void) { return NULL; }
+WsStore *ws_session(void) { return NULL; }
+const char *ws_origin(void) { return ""; }
+int ws_count(WsStore *s) { (void)s; return 0; }
+int ws_key(WsStore *s, int idx, char *out, size_t outMax) { (void)s; (void)idx; (void)out; (void)outMax; return 0; }
+int ws_get(WsStore *s, const char *key, char *out, size_t outMax) { (void)s; (void)key; (void)out; (void)outMax; return 0; }
+int ws_set(WsStore *s, const char *key, const char *value) { (void)s; (void)key; (void)value; return 1; }
+void ws_remove(WsStore *s, const char *key) { (void)s; (void)key; }
+void ws_clear(WsStore *s) { (void)s; }
 
 #include "html/css.h"
 #include "html/document.h"
@@ -430,7 +466,7 @@ static void test_attr(void)
     (void)css_scan_sheets(CSS, sh, 1);
     CssEngine eng;
     css_parse_sheets(&eng, sh, 1);
-    CHECK(eng.ruleCount == 5, "attr: 5 usable rules (operators/empty dropped)");
+    CHECK(eng.ruleCount == 6, "attr: 6 usable rules (~= operator supported; empty dropped)");
     CHECK(eng.rules[0].selParts[0] == 1 &&
               eng.rules[0].sel[0][0].attrLen == 6 &&
               eng.rules[0].sel[0][0].attrVal == NULL,
@@ -581,7 +617,7 @@ static void test_child(void)
     (void)css_scan_sheets(CSS, sh, 1);
     CssEngine eng;
     css_parse_sheets(&eng, sh, 1);
-    CHECK(eng.ruleCount == 3, "child: 3 usable (bad/leading/double/sibling out)");
+    CHECK(eng.ruleCount == 5, "child: 5 usable (sibling combinators supported; malformed dropped)");
     CHECK(eng.rules[0].selParts[0] == 2 && eng.rules[0].selComb[0][1] == 1,
           "child: div>p parts + combinator");
     CHECK(eng.rules[1].selParts[0] == 2 && eng.rules[1].selComb[0][1] == 1,
@@ -705,7 +741,7 @@ static void test_pseudo(void)
     css_parse_sheets(&eng, sh, 1);
     /* Usable: p::before, div>p::after, bare ::before, span:before,
      * mixed group (first pseudo wins). Dropped: :hover form, ::marker. */
-    CHECK(eng.ruleCount == 5, "pseudo: 5 usable rules");
+    CHECK(eng.ruleCount == 7, "pseudo: 7 usable rules (hover + marker supported)");
     CHECK(eng.rules[0].pseudo == 1 && eng.rules[0].spec[0] == 2,
           "pseudo: p::before flag + type-level specificity");
     CHECK(eng.rules[1].pseudo == 2 && eng.rules[1].selParts[0] == 2 &&
@@ -714,8 +750,9 @@ static void test_pseudo(void)
     CHECK(eng.rules[2].pseudo == 1 && eng.rules[2].sel[0][0].universal,
           "pseudo: bare ::before = universal");
     CHECK(eng.rules[3].pseudo == 1, "pseudo: legacy :before");
-    CHECK(eng.rules[4].pseudo == 1 && eng.rules[4].selCount == 1,
+    CHECK(eng.rules[5].pseudo == 1 && eng.rules[5].selCount == 1,
           "pseudo: mixed group keeps first class only");
+    CHECK(eng.rules[6].pseudo == 4, "pseudo: ::marker registered");
 
     /* Element matching never sees pseudo rules. */
     CHECK(!css_rule_matches(&eng.rules[0], "p", NULL, NULL, NULL, NULL),
@@ -740,7 +777,7 @@ static void test_pseudo(void)
                                        1, &n);
     CHECK(v && n == 6 && memcmp(v, "\"high\"", 6) == 0,
           "pseudo: class beats type for content");
-    v = css_pseudo_content(&eng, "p", NULL, NULL, NULL, NULL, 0, &n);
+    v = css_pseudo_content(&eng, "p", NULL, NULL, NULL, NULL, 2, &n);
     CHECK(v && n == 4 && memcmp(v, "\"a2\"", 4) == 0,
           "pseudo: later ::after wins");
     v = css_pseudo_content(&eng, "p", "z", NULL, NULL, NULL, 1, &n);
@@ -786,15 +823,15 @@ static void test_pclass(void)
         "p:nth-child(even) { text-align: center }\n"
         "p:nth-child(3) { font-weight: bold }\n"
         "p:nth-child(2n+1) { text-decoration: underline }\n"
-        "p:hover { color: white }\n"
-        "p:visited { color: white }\n"
+        "p:hover { font-style: italic }\n"
+        "p:visited { font-style: italic }\n"
         "p:nth-child(x) { color: white }\n"
         "p:nth-child { color: white }</style>";
     CssSheet sh[1];
     (void)css_scan_sheets(CSS, sh, 1);
     CssEngine eng;
     css_parse_sheets(&eng, sh, 1);
-    CHECK(eng.ruleCount == 8, "pclass: 8 usable (hover/visited/bad-nth out)");
+    CHECK(eng.ruleCount == 10, "pclass: 10 usable (hover/visited always match; bad-nth out)");
     CHECK(eng.rules[0].sel[0][0].pclass == 1 &&
               eng.rules[0].spec[0] == 0x0011,
           "pclass: first-child shape + class-level specificity");
@@ -1049,7 +1086,7 @@ static void test_spacing(void)
     (void)css_scan_sheets(CSS, sh, 1);
     CssEngine eng;
     css_parse_sheets(&eng, sh, 1);
-    CHECK(eng.ruleCount == 7, "spacing: 7 rules (5-token margin kept as rule)");
+    CHECK(eng.ruleCount == 6, "spacing: 6 rules (5-token margin dropped)");
     CHECK(css_rule_prop(&eng.rules[0], "margin") == NULL,
           "spacing: shorthand itself not stored");
     size_t n = 0;

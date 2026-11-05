@@ -86,7 +86,7 @@ typedef struct
 
     /* request side (owned copies) */
     UrlParsed url;
-    char fullPath[512];
+    char fullPath[8192];
     char method[8];
     char headerBlock[OS_HTTP_HEADER_BLOCK_MAX];
     char *body;
@@ -468,6 +468,9 @@ int oshttp_request_h(const char *method, const char *urlString,
              (method && method[0]) ? method : "GET");
     snprintf(g_req.fullPath, sizeof(g_req.fullPath), "%s",
              g_req.url.fullPath[0] ? g_req.url.fullPath : "/");
+    /* R66: prefer the raw URL's request-target when it fits (long modern
+     * script/CSS URLs exceed UrlParsed.fullPath's compact storage). */
+    url_request_target(urlString, g_req.fullPath, sizeof(g_req.fullPath));
     if (body && bodyLen > 0)
     {
         g_req.body = (char *)PLUTO_MALLOC(bodyLen);

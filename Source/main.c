@@ -5162,6 +5162,12 @@ static void log_render_result(const char *tag, DocParseResult *doc)
         }
         logger_log("[render-result]   block[%d] type=%d text='%.60s'",
                    bi, blk->type, text);
+        if (blk->type == DOC_BLOCK_INPUT_SUBMIT)
+        {
+            logger_log("[render-result]     submit value='%.40s' name='%.40s'",
+                       blk->value ? blk->value : "",
+                       blk->name ? blk->name : "");
+        }
     }
 }
 
@@ -5223,9 +5229,11 @@ static int render_step(TaskCtx *ctx)
         {
             if (rt->cssPhase == 0)
             {
-                /* C1: scan + resolve (no network in this step). */
+                /* C1: scan + resolve (no network in this step). Static:
+                 * 24 x 1024 href bytes is too much for the device
+                 * game-task stack (one render task at a time). */
                 rt->cssPhase = 1;
-                char hrefs[PLUTO_CSS_EXT_MAX][512];
+                static char hrefs[PLUTO_CSS_EXT_MAX][PLUTO_CSS_HREF_MAX];
                 unsigned char mediaOk[PLUTO_CSS_EXT_MAX];
                 memset(hrefs, 0, sizeof(hrefs));
                 memset(mediaOk, 0, sizeof(mediaOk));
@@ -5508,8 +5516,7 @@ static int render_step(TaskCtx *ctx)
         }
 
         int rc = document_parse_ex(rt->body, rt->url, currentBrowseMode,
-                                   rt->isToggle ? &opts : NULL, jsPolicy, NULL,
-                                   rt->doc);
+                                   &opts, jsPolicy, NULL, rt->doc);
         if (rc != 0 || rt->doc->parseError)
         {
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
@@ -6187,9 +6194,11 @@ void pluto_ui_net_progress(int cur, int total)
     progressNetTotal = total;
     /* Log every 64KB so pluto.log alone proves real bytes moved on the
      * device (user trust: "show me more than 0 bytes"). Log the start and
-     * every 64KB step even when total is unknown (chunked responses). */
+     * every 64KB step even when total is unknown (chunked responses).
+     * R66: this used to shift by 6 (every 64 BYTES), turning a 263KB
+     * script into ~200 file-open/close log lines and starving the fetch. */
     static int lastLoggedK = -1;
-    int k = cur >> 6;
+    int k = cur >> 16;
     if (k != lastLoggedK)
     {
         lastLoggedK = k;

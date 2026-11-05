@@ -751,6 +751,54 @@ char *url_build_search_url(const char *searchEngineUrl, const char *queryText)
     return out;
 }
 
+/* R66: the request-target comes from the RAW URL, not UrlParsed.fullPath —
+ * long modern URLs (google.com xjs bundle: 3660 chars) must reach the wire
+ * intact. Fragment is not sent. */
+const char *url_request_target(const char *url, char *out, size_t cap)
+{
+    if (!out || cap == 0)
+    {
+        return out;
+    }
+    if (!url || !url[0])
+    {
+        snprintf(out, cap, "/");
+        return out;
+    }
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    while (*p && *p != '/' && *p != '?' && *p != '#')
+    {
+        p++;
+    }
+    if (*p == '\0' || *p == '#')
+    {
+        snprintf(out, cap, "/");
+        return out;
+    }
+    size_t n = strcspn(p, "#");
+    if (*p == '?')
+    {
+        if (n + 2 > cap)
+        {
+            n = cap - 2;
+        }
+        out[0] = '/';
+        memcpy(out + 1, p, n);
+        out[n + 1] = '\0';
+    }
+    else
+    {
+        if (n >= cap)
+        {
+            n = cap - 1;
+        }
+        memcpy(out, p, n);
+        out[n] = '\0';
+    }
+    return out;
+}
+
 char *url_normalize_dup(const char *urlString)
 {
     static UrlParsed p; /* hoisted: device gameTask stack is tiny */

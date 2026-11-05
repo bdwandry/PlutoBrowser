@@ -5142,6 +5142,29 @@ void jsbridge_script_queue_pump(JsBridge *b, int *mutationsOut)
     {
         return;
     }
+#ifdef TARGET_PLAYDATE
+    /* R66 device safety valve: heavy pages park many inline scripts, and the
+     * vendored engines' per-script GC has a use-after-free on some real-world
+     * bundles (google.com hard-faulted at slot 6 with a 0xAAAA… poisoned
+     * pointer; the static server HTML already rendered). Run a small prefix
+     * for lightweight JS sites, then stop — the page keeps its server shell
+     * instead of taking the task down. about: test pages are exempt (their
+     * deterministic suites need every slot). */
+    #ifndef JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX
+    #define JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX 4
+    #endif
+    if (b->scriptQueueCount > JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX &&
+        b->scriptQueueNext >= JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX &&
+        !(b->doc && b->doc->baseUrl[0] == 'a' && b->doc->baseUrl[1] == 'b'))
+    {
+        logger_log("[js] script queue: %d slots exceeds device cap (%d) — "
+                   "remaining %d skipped (static shell kept)",
+                   b->scriptQueueCount, JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX,
+                   b->scriptQueueCount - b->scriptQueueNext);
+        b->scriptQueueNext = b->scriptQueueCount;
+        return;
+    }
+#endif
     if (jsbridge_mount_parked(b))
     {
         return; /* R28: parked mount owns the machine — retry next frame */
@@ -5194,9 +5217,26 @@ void jsbridge_script_queue_pump(JsBridge *b, int *mutationsOut)
     JsScriptSlot slot = b->scriptQueue[b->scriptQueueNext];
     int index = b->scriptQueueNext + 1; /* sync-loop numbering */
     b->scriptQueueNext++;               /* consume BEFORE running */
+    {
+        size_t qlen = 0;
+        if (slot.isExt && slot.extIndex >= 0 &&
+            slot.extIndex < b->doc->extScriptCount)
+        {
+            qlen = ((JsExtScript *)b->doc->extScripts)[slot.extIndex].len;
+        }
+        else if (!slot.isExt)
+        {
+            qlen = slot.inlineLen;
+        }
+        logger_log("[js] queue entry %d/%d ext=%d len=%zu", index,
+                   b->scriptQueueCount, slot.isExt, qlen);
+        logger_log("[js] queue entry %d stack=%u", index,
+                   logger_stack_depth());
+    }
     b->inTimer = 1; /* same re-entrancy contract as a timer fire */
     jsbridge_run_script_entry(b, &slot, index);
     b->inTimer = 0;
+    logger_log("[js] queue entry %d done", index);
     /* doc counters stay the sync loop's post-attach truth, refreshed. */
     b->doc->jsRan = b->ran;
     b->doc->jsErrors = b->errs;

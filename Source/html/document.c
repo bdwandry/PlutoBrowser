@@ -6156,7 +6156,7 @@ static void handle_element(Walker *w, const DomNode *node)
         if (wd <= 0 || ht <= 0)
         {
             /* viewBox: ^%s*([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+) */
-            const char *vb = attr_or_d(a, "viewBox", "");
+            const char *vb = attr_or_d(a, "viewbox", "");
             const char *p = vb;
             double nums[4] = {0, 0, 0, 0};
             int got = 1;
@@ -6752,15 +6752,16 @@ static void walk_node(Walker *w, const DomNode *node)
     {
         cssBits = walk_css_compute(w, node, node->tag, a);
         cssHidden = (cssBits & CSS_F_HIDDEN) != 0;
-        /* Phase 4 positioning policy: out-of-flow (fixed/absolute) WITH
-         * an overlay signal (a non-auto offset or a numeric z-index)
-         * would render ON TOP of the document in a compositor; the flat
-         * 1-bit flow has no overlay layer, so such page chrome drops
-         * (reader-mode precedent; one-line reversible in css.h's policy
-         * note). WITHOUT a signal the CSS static-position rule applies:
-         * the absolute box flows exactly where written. */
-        cssOverlay = (cssBits & CSS_F_OOF) &&
-                     (cssBits & (CSS_F_OFF | CSS_F_OZ));
+        /* R66 positioning policy: out-of-flow boxes (fixed/absolute) are
+         * NOT dropped just because they declare an offset or z-index.
+         * Modern sites put their primary header/search box in fixed
+         * positioning (bing.com's .sbox, google.com's header) — the old
+         * "overlay = drop" rule deleted the page's main content and left
+         * only the footer menus, which is exactly the out-of-order render
+         * users saw. The flat flow now renders them in document order.
+         * The only out-of-flow drop left is the genuine off-screen hiding
+         * recipe (left:-9999px / text-indent:-9999px). */
+        cssOverlay = (cssBits & CSS_F_OFFSCREEN) != 0;
         /* Phase 5 overflow policy: the W3C "visually-hidden" recipe —
          * out-of-flow (fixed/absolute) + overflow:hidden + a concealing
          * clip shape OR a 1px-ish box — IS invisible on the real web
@@ -7641,14 +7642,25 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     /* Caller-provided Full-mode ext table (html/jsext results, attached by
      * main.c's render task BEFORE this call) must survive the zeroing below
      * — js_doc_attach executes doc->extScripts at their page positions, and
-     * document_free owns freeing bodies + arena. */
+     * document_free owns freeing bodies + arena. The external CSS bodies
+     * (Phase 1.5, fetched by the render task) are the same contract: they
+     * are doc-lifetime buffers joined into the CSS engine below. */
     struct JsExtScript_ *savedExt = out->extScripts;
     int savedExtCount = out->extScriptCount;
     void *savedExtArena = out->_extArena;
+    char **savedCssBody = out->cssExtBody;
+    size_t *savedCssLen = out->cssExtLen;
+    int savedCssN = out->cssExtN;
     memset(out, 0, sizeof(*out));
     out->extScripts = savedExt;
     out->extScriptCount = savedExtCount;
     out->_extArena = savedExtArena;
+    out->cssExtBody = savedCssBody;
+    out->cssExtLen = savedCssLen;
+    out->cssExtN = savedCssN;
+    out->svgDecoder = opts ? opts->svgDecoder : NULL;
+    out->detailsOpen = opts ? opts->detailsOpen : NULL;
+    out->detailsOpenCount = opts ? opts->detailsOpenCount : 0;
     if (outBridge)
     {
         *outBridge = NULL;
@@ -8013,7 +8025,12 @@ int document_rewalk(DocParseResult *doc)
     Walker w;
     memset(&w, 0, sizeof(w));
     w.doc = doc;
-    w.opts = NULL;
+    DocParseOpts rewalkOpts;
+    memset(&rewalkOpts, 0, sizeof(rewalkOpts));
+    rewalkOpts.svgDecoder = doc->svgDecoder;
+    rewalkOpts.detailsOpen = doc->detailsOpen;
+    rewalkOpts.detailsOpenCount = doc->detailsOpenCount;
+    w.opts = &rewalkOpts;
     w.walkDom = dom; /* Phase 10: the live heap DomResult */
     w.formAction = NULL;
     w.formMethod = doc_arena_str_lower(&w, "get");

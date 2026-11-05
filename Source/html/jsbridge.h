@@ -76,7 +76,11 @@
 
 /* ── External <script src> support (Full mode) ───────────────────────────── */
 #define JSBRIDGE_MAX_EXT_SCRIPTS 24            /* unique external files per page */
-#define JSBRIDGE_EXT_URL_MAX 512               /* per-URL storage */
+/* R66: modern script URLs are long (google.com's xjs bundle src is 3660
+ * chars). The old 512-byte storage silently refused it as "unresolvable",
+ * so Google's own bundle never ran and its JS-added hide classes never
+ * appeared — the no-JS fallback UI rendered on top of the real page. */
+#define JSBRIDGE_EXT_URL_MAX 4096              /* per-URL storage */
 #define JS_SCRIPT_DATA (-2)                    /* SW2d: slot holds a data: URL
                                                 * payload (inlineStart/inlineLen
                                                 * locate it in the page html) */

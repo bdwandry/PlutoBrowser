@@ -452,6 +452,14 @@ typedef struct
         void *node; /* live DomNode that completed the run */
     } pendEnd[DOC_PEND_END_MAX];
     int pendEndCount;
+    /* R66: the walk options must survive a JS-mutation rewalk. Before this,
+     * document_rewalk ran with w.opts=NULL, so inline SVG logos disappeared
+     * after the first DOM mutation and details toggles lost their state.
+     * The decoder pointer and the browser's details-open array are stable
+     * for the page's lifetime (main.c owns the array). */
+    DocSvgDecoderFn svgDecoder;
+    int *detailsOpen;
+    int detailsOpenCount;
 } DocParseResult;
 
 /* Inline <script> execution (attach/flush/close + click dispatch) lives in

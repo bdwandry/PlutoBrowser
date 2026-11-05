@@ -26,12 +26,14 @@
 #include <string.h>
 #include <stddef.h>
 #include "pd_api.h"
+#include "core/http_client.h"
 
 /* ---- Fake Playdate API ---- */
 static void *host_realloc(void *p, size_t n) { return realloc(p, n); }
 static struct playdate_sys g_fakeSys;
 static PlaydateAPI g_fakeApi;
 static int g_fakeInit = 0;
+PlaydateAPI *playdate = NULL;
 PlaydateAPI *pluto_pd(void)
 {
     if (!g_fakeInit)
@@ -52,7 +54,6 @@ void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
 /* http_client stubs: html/jsext.c (linked for jsext_arena_free) references
  * these; the network prefetch path is never exercised here. */
-typedef struct HttpCallbacks HttpCallbacks;
 int http_get(const char *url, const HttpCallbacks *cb)
 {
     (void)url;
@@ -68,6 +69,44 @@ void http_cancel(void) {}
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks)
+{
+    (void)urlString; (void)extra; (void)nExtra; (void)callbacks;
+    return 0;
+}
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)body;
+    (void)bodyLen; (void)callbacks;
+    return 0;
+}
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)extra;
+    (void)nExtra; (void)body; (void)bodyLen; (void)callbacks;
+    return 0;
+}
+/* webstorage stubs: no Playdate file API in this harness. */
+typedef struct WsStore WsStore;
+void ws_bind(const char *docUrl) { (void)docUrl; }
+WsStore *ws_local(void) { return NULL; }
+WsStore *ws_session(void) { return NULL; }
+const char *ws_origin(void) { return ""; }
+int ws_count(WsStore *s) { (void)s; return 0; }
+int ws_key(WsStore *s, int idx, char *out, size_t outMax) { (void)s; (void)idx; (void)out; (void)outMax; return 0; }
+int ws_get(WsStore *s, const char *key, char *out, size_t outMax) { (void)s; (void)key; (void)out; (void)outMax; return 0; }
+int ws_set(WsStore *s, const char *key, const char *value) { (void)s; (void)key; (void)value; return 1; }
+void ws_remove(WsStore *s, const char *key) { (void)s; (void)key; }
+void ws_clear(WsStore *s) { (void)s; }
+void http_set_identity_encoding(int on) { (void)on; }
+void pluto_ui_net_progress(int cur, int total) { (void)cur; (void)total; }
+struct LCDFont *style_font(int role) { (void)role; return NULL; }
 
 #include "html/document.h"
 #include "html/jsbridge_internal.h"

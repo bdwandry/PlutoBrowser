@@ -2296,6 +2296,22 @@ static duk_ret_t duk_clearInterval(duk_context *ctx)
     return 1;
 }
 
+/* R66: document.fonts.load() stub (see the QuickJS/muJS twins). */
+static duk_ret_t duk_promise_noop(duk_context *ctx)
+{
+    (void)ctx;
+    return 0;
+}
+
+static duk_ret_t duk_fonts_load(duk_context *ctx)
+{
+    duk_idx_t p = duk_push_object(ctx);
+    put_method(ctx, p, "then", duk_promise_noop, 1);
+    put_method(ctx, p, "catch", duk_promise_noop, 1);
+    put_method(ctx, p, "finally", duk_promise_noop, 1);
+    return 1;
+}
+
 /* ── API-P7: localStorage / sessionStorage (see webstorage.h) ────────── */
 #define WS_DUK_KIND_KEY "\xff" "wsKind" /* hidden per-instance store kind */
 
@@ -2406,6 +2422,10 @@ static void define_globals(duk_context *ctx, JsBridge *b, const char *baseUrl)
     DomNode *body = first_element(b->dom->root, "body");
     duk_push_element(ctx, b, body ? body : b->dom->root);
     duk_put_prop_string(ctx, doc, "body");
+    /* R66: document.fonts (see duk_fonts_load). */
+    duk_idx_t fonts = duk_push_object(ctx);
+    put_method(ctx, fonts, "load", duk_fonts_load, 2);
+    duk_put_prop_string(ctx, doc, "fonts");
     duk_put_global_lstring(ctx, "document", 8);
 
     /* navigator */

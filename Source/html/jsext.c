@@ -42,6 +42,9 @@
 #include "../core/pluto_mem.h"
 #include "../core/pluto_spill.h"
 
+/* main.c owns the global SDK handle (same contract as the keyboard port). */
+extern PlaydateAPI *playdate;
+
 /* SW2b: bodies at or over this size become disk-resident (re-spilled);
  * smaller ones stay arena RAM copies exactly as before. The old per-script
  * cap REFUSED these; they now download fully and live on disk. R15: 256KB
@@ -563,7 +566,9 @@ int jsext_collect(const char *html, const char *pageUrl,
     size_t budget = jsext_page_budget();
     for (int i = 0; i < extCount; i++)
     {
-        char raw[JSBRIDGE_EXT_URL_MAX];
+        /* Static: 4KB URL storage must not ride the 61.8KB game-task stack
+         * (the R66 URL cap raise made this a real frame-size hazard). */
+        static char raw[JSBRIDGE_EXT_URL_MAX];
         snprintf(raw, sizeof(raw), "%s", extRaw[i]);
         char *abs = url_resolve(pageUrl ? pageUrl : "", raw);
         int ok = 0;
@@ -1005,7 +1010,15 @@ struct JsExtFetch
     int fetching;   /* 1 while an http_get is in flight */
     int overCap;    /* current file exceeded the response cap (RAM fallback) */
     size_t totalBytes;
+    /* R66: never let the preload scanner hold the page hostage. A slow or
+     * huge external script is skipped after a bounded wall-clock budget and
+     * an over-ceiling Content-Length aborts the transfer early. The page
+     * parses/renders with the scripts that DID arrive (browser-progressive
+     * behavior for a device whose radio is much slower than a desktop). */
+    unsigned long startMs;
+    int overCeiling;
 };
+#define JSEXT_PREFETCH_BUDGET_MS 12000UL
 
 static JsExtFetch *g_fetch = NULL; /* one session at a time (single-flight) */
 static size_t g_lastBytes = 0;
@@ -1152,6 +1165,14 @@ static void fetch_on_progress(int cur, int total)
     {
         return;
     }
+    /* R66: an external above the execution ceiling can never run — flag it
+     * for the next prefetch step to cancel (never call http_cancel from
+     * inside the client's own progress callback). */
+    if ((total > 0 && (size_t)total > JSBRIDGE_MAX_SCRIPT_SOURCE) ||
+        (cur > 0 && (size_t)cur > JSBRIDGE_MAX_SCRIPT_SOURCE))
+    {
+        f->overCeiling = 1;
+    }
     /* R30l: feed the loading screen's byte counter (see jsext.h) — the
      * 502716-byte bundle is the only transfer big enough to be visible,
      * so this is the line the user actually watches move. */
@@ -1258,6 +1279,9 @@ JsExtFetch *jsext_prefetch_begin(JsExtArena *arena,
     g_fetch = f;
     g_lastBytes = 0;
     g_pageBudget = jsext_page_budget();
+    f->startMs = (playdate && playdate->system)
+                     ? playdate->system->getCurrentTimeMilliseconds()
+                     : 0;
     return f;
 }
 
@@ -1267,6 +1291,40 @@ int jsext_prefetch_step(void *state)
     if (!f)
     {
         return 0;
+    }
+    /* R66: an over-ceiling script (Content-Length or delivered bytes above
+     * the execution ceiling) can never run — cancel it now and move on. */
+    if (f->overCeiling && f->fetching)
+    {
+        logger_log("[jsext] skip over-ceiling script (%s) — cancelling",
+                   f->ext[f->idx].url[0] ? f->ext[f->idx].url : "(url)");
+        f->fetching = 0;
+        http_cancel();
+        f->overCeiling = 0;
+        f->idx++;
+        return 1;
+    }
+    /* R66: bounded preload budget. A slow radio must not keep the page on
+     * the loading screen forever: after the budget, remaining externals are
+     * skipped and the page parses with what arrived. */
+    if (f->startMs && playdate && playdate->system)
+    {
+        unsigned long now = playdate->system->getCurrentTimeMilliseconds();
+        if (now - f->startMs > JSEXT_PREFETCH_BUDGET_MS)
+        {
+            logger_log("[jsext] preload budget (%lums) reached at file %d/%d "
+                       "— parsing with delivered scripts",
+                       (unsigned long)JSEXT_PREFETCH_BUDGET_MS, f->idx,
+                       f->extCount);
+            if (f->fetching)
+            {
+                f->fetching = 0;
+                http_cancel();
+            }
+            f->idx = f->extCount;
+            g_lastBytes = f->totalBytes;
+            return 0;
+        }
     }
     if (f->fetching)
     {

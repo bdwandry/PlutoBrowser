@@ -4332,6 +4332,21 @@ static void xs_document_getCurrentScript(xsMachine *the)
 
 /* document.title: walk the live tree's <title> so scripts and the chrome
  * agree (doc->title is only filled by the walker, after scripts). */
+/* R66: document.fonts.load() stub (see the other engine bridges). */
+static void xs_promise_noop(xsMachine *the)
+{
+    xsResult = xsUndefined;
+}
+
+static void xs_fonts_load(xsMachine *the)
+{
+    xsSlot p = xsNewHostObject(NULL);
+    def_fn(the, p, "then", xs_promise_noop, 1);
+    def_fn(the, p, "catch", xs_promise_noop, 1);
+    def_fn(the, p, "finally", xs_promise_noop, 1);
+    xsResult = p;
+}
+
 static void xs_document_getTitle(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -6348,6 +6363,12 @@ static void xs_build_globals(JsBridge *b)
          * library's own try/catch (swallowed). Without the property, the walk
          * returns undefined/null and the caller crashes on `sheet.addRule`. */
         def_val(the, doc, "styleSheets", xsNewArray(0));
+        /* R66: document.fonts (see xs_fonts_load). */
+        {
+            xsSlot fonts = xsNewHostObject(NULL);
+            def_fn(the, fonts, "load", xs_fonts_load, 2);
+            def_val(the, doc, "fonts", fonts);
+        }
         def_val(the, glob, "document", doc);
     }
 

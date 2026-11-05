@@ -110,7 +110,9 @@ static PlaydateAPI *g_pd = NULL;
 
 static TCPConnection *g_tcp = NULL;
 static HttpCallbacks g_cb;
-static char g_url[1024];
+static char g_url[8192];
+/* R66: request-target from the raw URL (see url_request_target). */
+static char g_requestTarget[8192];
 static UrlParsed *g_parsed = NULL; /* heap: UrlParsed is ~1.7KB */
 
 static HttpState g_state = HS_IDLE;
@@ -232,7 +234,7 @@ static int g_servedFromCache = 0;
 static int g_revalServed304 = 0;
 
 /* Redirects: deferred to a later update tick (reference parity). */
-static char g_pendingRedirectUrl[1024];
+static char g_pendingRedirectUrl[8192];
 static HttpCallbacks g_pendingRedirectCb;
 static int g_hasPendingRedirect = 0;
 static int g_redirectDepth = 0;
@@ -2914,7 +2916,8 @@ static void build_request(StrBuf *out)
     strbuf_reset(out);
     strbuf_appendf(out, "%s %s HTTP/1.1\r\n",
                    g_reqMethod[0] ? g_reqMethod : "GET",
-                   g_parsed->fullPath);
+                   g_requestTarget[0] ? g_requestTarget
+                                      : g_parsed->fullPath);
     if (g_parsed->port != 80 && g_parsed->port != 443)
     {
         strbuf_appendf(out, "Host: %s:%d\r\n", g_parsed->host, g_parsed->port);
@@ -4059,6 +4062,9 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
         reset_state();
         return 0;
     }
+    /* R66: the request line uses the RAW URL's target, not the parser's
+     * fixed-size fullPath (long script/CSS URLs are legal). */
+    url_request_target(g_url, g_requestTarget, sizeof(g_requestTarget));
 
     /* ── Network availability ─────────────────────────────────────────────── */
     if (!g_pd->network || !g_pd->network->tcp)

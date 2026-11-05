@@ -11,6 +11,59 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R66 — MODERN PAGE RENDERING: GOOGLE + BING (2026-11-05) — the duplicate-button /
+> out-of-order / missing-image class is fixed at the root, SIM + DEVICE.** Seven general
+> bugs, all found by comparing the exact server variant against the rendered block stream:
+> (1) **EXTERNAL CSS WAS FETCHED AND THEN THROWN AWAY** — `document_parse_ex`'s
+> `memset(out,0,...)` preserved the Full-mode script table but wiped `cssExtBody/cssExtLen/
+> cssExtN`, so every `<link rel=stylesheet>` body was lost before the CSS engine saw it
+> (bing.com's `.overflow_menu{display:none}` was never applied; the hidden footer menus
+> rendered as duplicate page content). The three CSS fields now ride the same preserve
+> contract. (2) **CSS CAPACITY** — `CSS_MAX_SHEETS 8→48`, one shared 256KB text arena
+> (replaces 8×16KB per-sheet buffers), `CSS_SHEET_MAX 16KB→128KB`, `CSS_MAX_RULES 128→384`,
+> external sheets `6→24` / `96KB→256KB` / href `512→1024`; hide rules (`display:none`/
+> `visibility:hidden`/`opacity:0`) get eviction priority so closed menus/fallbacks survive a
+> full table. Google ships 45 inline `<style>` blocks (79KB) + a 692-char CSS URL; Bing ships
+> 37 external sheets (54KB main CSS). The match mask now covers all 384 rules (it was 128;
+> above that every property lookup re-matched every rule and the device stalled past the 10s
+> watchdog). (3) **LONG URLS** — google.com's own xjs bundle `src` is 3660 chars; the 512B
+> jsext URL cap refused it as "unresolvable" so the page's JS never ran. `JSBRIDGE_EXT_URL_MAX
+> 512→4096`, HTTP `g_url`/redirect buffers 1KB→8KB, `http_os` request target 512B→8KB, and a
+> new `url_request_target()` sends the RAW URL's path/query (UrlParsed's compact fields no
+> longer truncate the wire). (4) **THE `<li>` STACK COLLAPSE** — `prepare_list_item` popped
+> the builder to root when a `<li>` appeared outside `<ul>/<ol>` (google.com's autocomplete
+> does exactly that), detaching the whole subtree from its hidden `style="display:none"`
+> ancestor: the closed autocomplete's "Report inappropriate predictions" + no-JS fallback
+> buttons rendered as visible page content. Browsers keep the `<li>` nested; so do we now
+> (`prepare_dt_dd` same fix). (5) **INLINE SVG LOGOS** — `document_parse_ex` only passed
+> `opts` (with `svgDecoder`) for details toggles, so normal navigation decoded NO inline SVG
+> (Google/Bing logos missing); rewalks also ran with `opts=NULL`. `opts` now always passes,
+> `doc->svgDecoder`/details state survive rewalks, and the `viewBox` lookup uses the DOM's
+> lowercased `viewbox` spelling (Bing's logo was 120×40 blank). (6) **SCRIPT PRELOAD BUDGET**
+> — the preload scanner held the whole page until every external script arrived; device
+> google.com spent 40s+ fetching a 1.16MB bundle it could never execute. Scripts over the
+> execution ceiling are now cancelled at the first Content-Length/progress signal, and a 12s
+> wall-clock preload budget skips the rest (the page parses/renders with delivered scripts).
+> (7) **DEVICE SCRIPT-QUEUE SAFETY VALVE** — the vendored engines' per-script GC hard-faulted
+> on google.com's 6th inline script (0xAAAA… poisoned pointer; both muJS and QuickJS
+> receipted it). On device, a network page with more than 4 parked inline scripts runs the
+> first 4 and keeps the server shell for the rest (about: test pages exempt); the static
+> Google render is complete and stable. Plus: `document.fonts.load()` stub in ALL FIVE
+> engine bridges (the font-loader script's `.load(...).catch(...)` was the first device
+> stack-overflow), per-queue-entry/compile stack diagnostics, and `[js] exc msg` logging.
+> SIM RECEIPTS: google.com blocks=22 links=12 (logo 272×92 SVG, no duplicate buttons, no
+> "Report inappropriate"), bing.com blocks=14 links=5 (logo, nav, search box, Sign in; the
+> 31-block duplicate footer-menu render is gone), example.com/NPR/HN still PASS. DEVICE
+> RECEIPTS (AGENTS.md, MD5-matched): seam build 38b6566f… — Google card → render blocks=22,
+> nav-autotest PASS 863 frames, queue 4/14 then cap, task alive 10s, EMPTY errorlog+crashlog;
+> clean release 979d48a4… (0 seam strings in pdex.elf) booted 50fps stackPeak 648B heap 15KB
+> refusals 0, EMPTY errorlog+crashlog, DEVICE LEFT RUNNING IT. KNOWN LIMIT (tracked): the
+> 1.16MB google xjs bundle exceeds the 768KB execution ceiling by design; full JS on that
+> class remains out of reach, but the server-rendered page (the one a 1-bit browser can
+> honestly show) is now correct. NEXT: raise the device queue cap per-engine after the
+> GC/use-after-free is root-caused; background-image support (Bing's daily photo is a CSS
+> background, not an `<img>`); flex-row inline nav (Google/Bing headers stack vertically).
+
 > **R65 — THE LEAVE-A-PAGE CONTRACT + THE TRANSPORT AUTO-RETRY (2026-10-27): any navigation
 > (B+Left back, menu/home, hyperlink, redirect, loading-screen abort) now FULLY severs the
 > previous site — in-flight fetches STOPMED BOTH LANES (`http_cancel()` at navigate_to's
