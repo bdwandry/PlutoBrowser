@@ -4892,6 +4892,26 @@ void http_update(void)
             }
             if (g_status >= 300 && g_status < 400 && loc && loc[0])
             {
+                /* R66: a self-redirect is a loop, not a navigation. Stop it
+                 * immediately (daringfireball.net/css/ie_sucks.php 301s to
+                 * itself; the old path burned the whole redirect budget and
+                 * held the page's stylesheet stage hostage). */
+                char *loopCheck = url_resolve(g_url, loc);
+                if (loopCheck && strcmp(loopCheck, g_url) == 0)
+                {
+                    logger_log("[http] redirect loop: %s", g_url);
+                    pluto_free(loopCheck);
+                    if (g_cb.onError)
+                    {
+                        g_cb.onError("redirect loop");
+                    }
+                    reset_state();
+                    return;
+                }
+                if (loopCheck)
+                {
+                    pluto_free(loopCheck);
+                }
                 g_redirectDepth++;
                 if (g_redirectDepth <= MAX_REDIRECTS)
                 {

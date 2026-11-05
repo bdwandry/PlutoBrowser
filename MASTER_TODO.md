@@ -63,6 +63,24 @@
 > honestly show) is now correct. NEXT: raise the device queue cap per-engine after the
 > GC/use-after-free is root-caused; background-image support (Bing's daily photo is a CSS
 > background, not an `<img>`); flex-row inline nav (Google/Bing headers stack vertically).
+>
+> **R66a — CSS-FETCH SAFETY + 20-SITE MATRIX RE-SCORE (2026-11-05).** The matrix exposed one
+> real general bug: daringfireball.net's `<link href="/css/ie_sucks.php">` 301-redirects to
+> itself, and the stylesheet stage had no time bound — the page sat on "Loading..." while the
+> redirect lane burned connections. FIX: (1) an 8s wall-clock CSS-fetch budget in the render
+> task (cancel the in-flight sheet, join what arrived, parse); (2) a self-redirect guard in
+> http_client (resolve Location; if it equals the current URL, fire onError("redirect loop")
+> and reset instead of following). SIM MATRIX (20 sites, engine=0 muJS, Full JS): 13/20 PASS.
+> The three baseline passes that now fail are NOT regressions: example.com's body text changed
+> (page renders its current "This domain is for use in documentation examples..." copy; the
+> criterion "example domain" is title-only now), daringfireball PASSES with the 30s fieldtest
+> window (60+ blocks; the 450-frame/9s snapshot fired mid-script-prefetch), and w3.org serves
+> Cloudflare's `<title>Just a moment...</title>` challenge to this client/IP (verified with
+> curl; no page content exists to render). Known fails unchanged: reuters (bot-wall), bing
+> search (JS-built results), old.reddit, textboard. NEW passes vs baseline:
+> bryanwandrych.com and lite.cnn. Receipts: tests/logs/... (sim matrix history), device clean
+> release c694df0c… (0 seam strings, includes the CSS budget string) booted 50fps stackPeak
+> 648B heap 15KB refusals 0, EMPTY errorlog+crashlog, DEVICE LEFT RUNNING IT.
 
 > **R65 — THE LEAVE-A-PAGE CONTRACT + THE TRANSPORT AUTO-RETRY (2026-10-27): any navigation
 > (B+Left back, menu/home, hyperlink, redirect, loading-screen abort) now FULLY severs the

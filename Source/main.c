@@ -584,6 +584,7 @@ typedef struct RenderTask
     int cssUrlN;                         /* hrefs resolved & queued */
     int cssIdx;                          /* current fetch slot */
     size_t cssBytes;                     /* RAM envelope (PLUTO_CSS_EXT_TOTAL_MAX) */
+    unsigned long cssStartMs;            /* R66: wall-clock budget start */
     char *cssUrls[PLUTO_CSS_EXT_MAX];    /* resolved, still owned here */
     char *cssBody[PLUTO_CSS_EXT_MAX];    /* captured bodies */
     size_t cssLen[PLUTO_CSS_EXT_MAX];
@@ -5233,6 +5234,7 @@ static int render_step(TaskCtx *ctx)
                  * 24 x 1024 href bytes is too much for the device
                  * game-task stack (one render task at a time). */
                 rt->cssPhase = 1;
+                rt->cssStartMs = pd->system->getCurrentTimeMilliseconds();
                 static char hrefs[PLUTO_CSS_EXT_MAX][PLUTO_CSS_HREF_MAX];
                 unsigned char mediaOk[PLUTO_CSS_EXT_MAX];
                 memset(hrefs, 0, sizeof(hrefs));
@@ -5278,6 +5280,34 @@ static int render_step(TaskCtx *ctx)
             }
             if (rt->cssPhase == 2)
             {
+                /* R66: bounded stylesheet stage. A redirecting/hanging CSS
+                 * URL must never hold the page on "Loading..." forever
+                 * (daringfireball.net/css/ie_sucks.php loops 301s). After
+                 * 8s, cancel the in-flight sheet and join what arrived. */
+                if (rt->cssStartMs &&
+                    pd->system->getCurrentTimeMilliseconds() - rt->cssStartMs >
+                        8000UL)
+                {
+                    if (rt->cssIdx < rt->cssUrlN)
+                    {
+                        logger_log("[css-ext] budget reached at %d/%d — "
+                                   "skipping remaining sheets",
+                                   rt->cssIdx, rt->cssUrlN);
+                    }
+                    if (g_cssInFlight)
+                    {
+                        g_cssInFlight = 0;
+                        g_cssDone = 0;
+                        http_cancel();
+                    }
+                    if (g_cssBody)
+                    {
+                        pluto_mem_realloc(g_cssBody, 0);
+                        g_cssBody = NULL;
+                        g_cssLen = 0;
+                    }
+                    rt->cssIdx = rt->cssUrlN;
+                }
                 if (g_cssInFlight && g_cssDone)
                 {
                     /* Consume the finished fetch (success, error, or
