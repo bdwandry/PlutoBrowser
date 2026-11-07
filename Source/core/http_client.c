@@ -2962,6 +2962,8 @@ static void build_request(StrBuf *out)
     {
         strbuf_appendf(out, "Cookie: %s\r\n", cookie);
     }
+    logger_log("[http] req host=%s target=%zu cookie=%zu",
+               g_parsed->host, strlen(g_requestTarget), strlen(cookie));
     /* C4: body requests carry the JSON content type + exact length (the
      * response reader keys off Content-Length/chunked exactly as before;
      * no transfer-encoding surprises on the send path). A bodyless POST

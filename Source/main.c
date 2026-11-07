@@ -70,6 +70,18 @@
 
 static PlaydateAPI *pd = NULL;
 
+/* R66a stylesheet-stage budget. The simulator's TLS handshakes finish in
+ * well under a second; the device's take 4-8s (receipted against google.com).
+ * The original 8s bound cancelled Google's main stylesheet mid-handshake,
+ * which exposed the page's hidden AI-mode chrome (device vs simulator
+ * rendering divergence). The device gets enough room for one stalled connect
+ * attempt plus a retry; the simulator keeps its original bound. */
+#if defined(TARGET_PLAYDATE)
+#define PLUTO_CSS_EXT_BUDGET_MS 30000UL
+#else
+#define PLUTO_CSS_EXT_BUDGET_MS 8000UL
+#endif
+
 /* The Raphcal keyboard port reads this global (declared in keyboard.h). */
 PlaydateAPI *playdate = NULL;
 
@@ -548,7 +560,7 @@ static void css_ext_on_spill(int status, SpillFile spill, size_t bodyLen,
 
 static void css_ext_on_error(const char *message)
 {
-    (void)message;
+    logger_log("[css-ext] error: %.120s", message ? message : "(null)");
     g_cssErr = 1;
     g_cssDone = 1;
 }
@@ -5282,11 +5294,13 @@ static int render_step(TaskCtx *ctx)
             {
                 /* R66: bounded stylesheet stage. A redirecting/hanging CSS
                  * URL must never hold the page on "Loading..." forever
-                 * (daringfireball.net/css/ie_sucks.php loops 301s). After
-                 * 8s, cancel the in-flight sheet and join what arrived. */
+                 * (daringfireball.net/css/ie_sucks.php loops 301s). The
+                 * budget is device-sized (see PLUTO_CSS_EXT_BUDGET_MS):
+                 * device TLS handshakes are slow enough that an 8s bound
+                 * dropped Google's main sheet mid-connect. */
                 if (rt->cssStartMs &&
                     pd->system->getCurrentTimeMilliseconds() - rt->cssStartMs >
-                        8000UL)
+                        PLUTO_CSS_EXT_BUDGET_MS)
                 {
                     if (rt->cssIdx < rt->cssUrlN)
                     {
@@ -5328,6 +5342,8 @@ static int render_step(TaskCtx *ctx)
                     }
                     else
                     {
+                        logger_log("[css-ext] miss-status=%d err=%d len=%zu",
+                                   g_cssStatus, g_cssErr, g_cssLen);
                         logger_log("[css-ext] miss %s (status=%d err=%d)",
                                    rt->cssUrls[rt->cssIdx], g_cssStatus,
                                    g_cssErr);
