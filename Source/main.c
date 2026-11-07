@@ -644,7 +644,7 @@ static void page_swap_doc(RenderTask *rt)
             else
             {
                 unsigned long now = 0;
-                uint32_t ms = 0;
+                unsigned int ms = 0;
                 now = pd->system->getSecondsSinceEpoch(&ms);
                 pluto_snap_save(currentDoc, currentUrlObj->normalized,
                                 (int)currentBrowseMode, now);
@@ -719,7 +719,7 @@ static void page_swap_doc(RenderTask *rt)
         else
         {
             unsigned long now = 0;
-            uint32_t ms = 0;
+            unsigned int ms = 0;
             now = pd->system->getSecondsSinceEpoch(&ms);
             pluto_snap_save(currentDoc, currentUrlObj->normalized,
                             (int)currentBrowseMode, now);
@@ -6021,7 +6021,7 @@ static void navigate_to(const char *urlString)
         {
             char withScheme[648 + 16];
             snprintf(withScheme, sizeof(withScheme), "https://%s", urlBuf);
-            snprintf(urlBuf, sizeof(urlBuf), "%s", withScheme);
+            snprintf(urlBuf, sizeof(urlBuf), "%.647s", withScheme);
         }
     }
 
@@ -6039,7 +6039,7 @@ static void navigate_to(const char *urlString)
      * any miss/expiry falls through to the classic fetch path. */
     {
         unsigned long now = 0;
-        uint32_t ms = 0;
+        unsigned int ms = 0;
         now = pd->system->getSecondsSinceEpoch(&ms);
         /* Load with the SAME key the save used: currentUrlObj->normalized.
          * The raw urlBuf differs whenever url_parse canonifies the input
@@ -6517,7 +6517,7 @@ static const LayoutItem *form_key_item(void)
 static void form_node_form(char *out, size_t cap, const DomNode *n)
 {
     out[0] = '\0';
-    const char *base = (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl : "";
+    const char *base = (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl : "";
     for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
     {
         if (p->kind == DOM_ELEMENT && p->tag && strcmp(p->tag, "form") == 0)
@@ -7373,8 +7373,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
         if (resolved && resolved[0])
         {
             char *abs = url_resolve(
-                (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
-                                                    : "",
+                (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl
+                                                       : "",
                 resolved);
             if (abs)
             {
@@ -7422,8 +7422,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
             }
             {
                 char *abs = url_resolve(
-                    (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
-                                                        : "",
+                    (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl
+                                                           : "",
                     disco->url);
                 if (abs)
                 {
@@ -7477,7 +7477,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
         if (enc[0])
         {
             const char *join = strchr(url, '?') ? "&" : "?";
-            snprintf(url + off, sizeof(url) - off, "%s%s", join, enc);
+            strncat(url + off, join, sizeof(url) - off - 1);
+            strncat(url + off, enc, sizeof(url) - off - strlen(url + off) - 1);
         }
         logger_log("[fbform] GET submit → url=%.110s", url);
         pendingNavUrlSet = 1;
@@ -7632,7 +7633,7 @@ static DomNode *form_node_search(DomNode *n, int *ord, int depth)
                 const char *fact = form_node_attr(n, "formaction");
                 if (fact)
                 {
-                    const char *base = (currentDoc && currentDoc->baseUrl)
+                    const char *base = (currentDoc && currentDoc->baseUrl[0])
                                            ? currentDoc->baseUrl
                                            : "";
                     char *abs = url_resolve(base, fact);

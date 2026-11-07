@@ -23,6 +23,34 @@
 #define __PLUTO_XSPLATFORM__
 
 /*
+ * Warning containment for the vendored XS engine (stock + no-recursion
+ * fork). These pragmas are in OUR platform header, not in the engine
+ * sources, so the vendored trees stay byte-identical. Header-level
+ * diagnostics are suppressed for every TU (the bridges include the same
+ * engine headers); code-level diagnostics are engine-only, keeping the
+ * bridge TUs' own warnings visible (they define PLUTO_XS_BRIDGE_TU).
+ */
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
+#pragma GCC diagnostic ignored "-Wsequence-point"
+#endif
+#ifndef PLUTO_XS_BRIDGE_TU
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wdouble-promotion"
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wdiscarded-qualifiers"
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+#pragma GCC diagnostic ignored "-Wmultistatement-macros"
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#endif
+#if defined(__clang__)
+#pragma GCC diagnostic ignored "-Wvoid-pointer-to-int-cast"
+#pragma GCC diagnostic ignored "-Wint-to-void-pointer-cast"
+#endif
+#endif /* !PLUTO_XS_BRIDGE_TU */
+
+/*
  * ── 1. libc environment ─────────────────────────────────────────────
  * Mirrors the stock host platform headers (mac_xs.h et al.). No fdlibm:
  * the c_exp/c_log/c_pow math hooks fall back to libc in the stock

@@ -84,7 +84,10 @@ extern void pluto_free(void *p);
  * host tool (xs/tools/xst.c) but pointed at the FORK: xsAll.h pulls
  * xsPlatform.h → our Source/html/xs_platform.h via -DINCLUDE_XSPLATFORM,
  * then the public xs.h macros. xsCommon.h includes xs_nr_rename.h first,
- * so every engine symbol used below lands on its _nr twin. */
+ * so every engine symbol used below lands on its _nr twin. This TU is OUR
+ * bridge, not a vendored engine source, so xs_platform.h keeps its own
+ * diagnostics visible. */
+#define PLUTO_XS_BRIDGE_TU 1
 #include "../js/xs_moddable_no_recursion/sources/xsAll.h"
 #include "../js/xs_moddable_no_recursion/sources/xsScript.h"
 #include "../js/xs_moddable_no_recursion/includes/xs.h"
@@ -580,7 +583,7 @@ void pluto_fork_stack_overflow_probe(long want, long depth)
     logger_log("[slotstack] overflow alloc: want=%ld depth=%ld", want, depth);
 }
 
-/* ── host-provided platform functions (mxUseDefault* = 0) ────────────
+/* ── host-provided platform functions (mxUseDefault* = 0) ──────────── */
 
 /* These five hooks (fxAbort, fxCStackLimit, fxQueuePromiseJobs,
  * fxCreateMachinePlatform, fxDeleteMachinePlatform) are engine-wide
@@ -2725,11 +2728,11 @@ static void xs_push_style(JsBridge *b, DomNode *node)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(xsResult, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(xsResult, xsID((char *)accs[i].name), getter, xsIsGetter);
         /* getter is now linked on the anchored target, so the setter's
          * allocation below cannot sweep it */
         xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-        xsDefine(xsResult, xsID(accs[i].name), setter, xsIsSetter);
+        xsDefine(xsResult, xsID((char *)accs[i].name), setter, xsIsSetter);
     }
     /* Host data = the element node: classList/style METHODS run with `this`
      * = the object itself, so this_node(the) resolves through it. */
@@ -4764,6 +4767,26 @@ static const char *xs_hist_current(JsBridge *b)
     return (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
 }
 
+/* Bounded copy for the journal's fixed-size URL slots (the source may be
+ * the document's 512-byte baseUrl or a caller-supplied long URL). */
+static void xs_hist_copy(char *dst, size_t cap, const char *src)
+{
+    size_t n = src ? strlen(src) : 0;
+    if (cap == 0)
+    {
+        return;
+    }
+    if (n >= cap)
+    {
+        n = cap - 1;
+    }
+    if (n)
+    {
+        memcpy(dst, src, n);
+    }
+    dst[n] = '\0';
+}
+
 /* Seed entry 0 with the doc base on first journal use. */
 static void xs_hist_seed(JsBridge *b)
 {
@@ -4772,7 +4795,7 @@ static void xs_hist_seed(JsBridge *b)
         return;
     }
     const char *base = (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
-    snprintf(b->histUrl[0], JSBRIDGE_HIST_URL_MAX, "%s", base);
+    xs_hist_copy(b->histUrl[0], sizeof(b->histUrl[0]), base);
     b->histCount = 1;
     b->histIdx = 0;
 }
@@ -4794,13 +4817,13 @@ static void xs_hist_arm_delivery(JsBridge *b, const char *fromUrl,
         char fh[JSBRIDGE_HIST_URL_MAX], th[JSBRIDGE_HIST_URL_MAX];
         const char *fh2 = fromUrl ? strchr(fromUrl, '#') : NULL;
         const char *th2 = toUrl ? strchr(toUrl, '#') : NULL;
-        snprintf(fh, sizeof(fh), "%s", fh2 ? fh2 + 1 : "");
-        snprintf(th, sizeof(th), "%s", th2 ? th2 + 1 : "");
+        xs_hist_copy(fh, sizeof(fh), fh2 ? fh2 + 1 : "");
+        xs_hist_copy(th, sizeof(th), th2 ? th2 + 1 : "");
         if (strcmp(fh, th) != 0) /* hash really moved → hashchange */
         {
             st->histPendHash = 1;
-            snprintf(st->histFromUrl, JSBRIDGE_HIST_URL_MAX, "%s", fromUrl);
-            snprintf(st->histToUrl, JSBRIDGE_HIST_URL_MAX, "%s", toUrl);
+            xs_hist_copy(st->histFromUrl, sizeof(st->histFromUrl), fromUrl);
+            xs_hist_copy(st->histToUrl, sizeof(st->histToUrl), toUrl);
         }
     }
 }
@@ -4843,7 +4866,7 @@ static void xs_history_setState_common(xsMachine *the, int mode)
     }
 
     char fromUrl[JSBRIDGE_HIST_URL_MAX];
-    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    xs_hist_copy(fromUrl, sizeof(fromUrl), xs_hist_current(b));
     if (mode) /* push: grow the book (overflow = reuse the top slot — a
                * full journal replaces the head entry, like a short
                * browser session limit; length semantics stay browser-
@@ -4867,7 +4890,7 @@ static void xs_history_setState_common(xsMachine *the, int mode)
     {
         /* no index/count change */
     }
-    snprintf(b->histUrl[b->histIdx], JSBRIDGE_HIST_URL_MAX, "%s", abs);
+    xs_hist_copy(b->histUrl[b->histIdx], sizeof(b->histUrl[b->histIdx]), abs);
 
     /* pin the state for the entry (replace re-pins over the old slot) */
     if (st)
@@ -4923,7 +4946,7 @@ static void xs_history_move(xsMachine *the, int delta)
         return;
     }
     char fromUrl[JSBRIDGE_HIST_URL_MAX];
-    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    xs_hist_copy(fromUrl, sizeof(fromUrl), xs_hist_current(b));
     b->histIdx = target;
     const char *to = xs_hist_current(b);
     logger_log("[js] history back/forward → j=%d url='%.80s' (popstate "
@@ -5112,7 +5135,7 @@ static void xs_el_getBoundingClientRect(xsMachine *the)
     xsResult = xsNewObject();
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
     {
-        xsDefine(xsResult, xsID(fields[i]), xsInteger(0), xsDefault);
+        xsDefine(xsResult, xsID((char *)fields[i]), xsInteger(0), xsDefault);
     }
 }
 
@@ -5230,7 +5253,7 @@ static void def_fn(xsMachine *the, xsSlot obj, const char *name,
 {
     xsResult = obj;
     xsSlot fn = xsNewHostFunction(cb, length);
-    xsDefine(xsResult, xsID(name), fn, xsDefault);
+    xsDefine(xsResult, xsID((char *)name), fn, xsDefault);
 }
 
 /* Helper: define a plain data property. Same GC contract as def_fn. */
@@ -5239,7 +5262,7 @@ static void def_val(xsMachine *the, xsSlot obj, const char *name,
 {
     (void)the;
     xsResult = obj;
-    xsDefine(xsResult, xsID(name), value, xsDefault);
+    xsDefine(xsResult, xsID((char *)name), value, xsDefault);
 }
 
 /* ── CSSOM StyleSheet shim (text-backed) ─────────────────�
@@ -5586,12 +5609,12 @@ static void xs_build_el_proto(JsBridge *b)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(proto, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(proto, xsID((char *)accs[i].name), getter, xsIsGetter);
         if (accs[i].set)
         {
             /* getter linked on the rooted proto first — see xs_push_style */
             xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-            xsDefine(proto, xsID(accs[i].name), setter, xsIsSetter);
+            xsDefine(proto, xsID((char *)accs[i].name), setter, xsIsSetter);
         }
     }
     for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
@@ -6194,7 +6217,7 @@ static void xs_build_globals(JsBridge *b)
         for (size_t lc = 0; lc < sizeof(locComps) / sizeof(locComps[0]); lc++)
         {
             xsSlot get = xsNewHostFunction(locComps[lc].get, 0);
-            xsDefine(loc, xsID(locComps[lc].name), get, xsIsGetter);
+            xsDefine(loc, xsID((char *)locComps[lc].name), get, xsIsGetter);
         }
         def_fn(the, loc, "assign", xs_location_assign, 1);
         def_fn(the, loc, "replace", xs_location_assign, 1);
@@ -6260,7 +6283,7 @@ static void xs_build_globals(JsBridge *b)
         for (size_t i = 0; i < sizeof(comps) / sizeof(comps[0]); i++)
         {
             xsSlot getter = xsNewHostFunction(comps[i].get, 0);
-            xsDefine(st->urlProto, xsID(comps[i].name), getter, xsIsGetter);
+            xsDefine(st->urlProto, xsID((char *)comps[i].name), getter, xsIsGetter);
         }
         def_fn(the, st->urlProto, "toString", xs_url_toString, 0);
         def_fn(the, st->urlProto, "toJSON", xs_url_toString, 0);
@@ -6485,7 +6508,7 @@ static void xs_drain_jobs(xsMachine *the)
 #endif
 }
 
-/* ── metering (per-script run limit) ───────────────────
+/* ── metering (per-script run limit) ─────────────────── */
 /* Per-run budget, set by each runner from the segment's admitted size.
  * Default is the flat XS_RUNLIMIT for scripts run outside the split
  * path (inline handlers, timers). The split path scales it: a 253KB
@@ -6656,10 +6679,9 @@ static void xs_render_overlay(unsigned long now)
         *r1 ^= (uint8_t)(0x80 >> ((sx + 1) & 7));
     }
     /* R26o/R30c: repaint the "Rendering page content... N%" TEXT line above
-     * the bar. Weak style_font: absent in host harness builds → skip. The
-     * SetTimestamps call above makes this frame the displayed blit target,
-     * so the fill+text below are what the user actually sees this tick. */
-    if (style_font)
+     * the bar. The SetTimestamps call above makes this frame the displayed
+     * blit target, so the fill+text below are what the user actually sees
+     * this tick. */
     {
         LCDFont *f = style_font(PLUTO_FONT_BODY);
         if (f && pd->graphics->setFont && pd->graphics->drawText &&
@@ -7434,7 +7456,8 @@ static int xs_init(JsBridge *b, const char *baseUrl)
     memset(st, 0, sizeof(*st));
     b->implState = st;
 
-    xsMachine *m = xsCreateMachine(&xs_creation, "pluto-page", (void *)b);
+    xsMachine *m = xsCreateMachine((xsCreation *)&xs_creation, "pluto-page",
+                                   (void *)b);
     if (!m)
     {
         JFree(st);
@@ -9398,7 +9421,7 @@ static int xcs_word_before(xsChunkScan *s, size_t at, const char *kw)
     size_t p = at - n;
     if (!xcs_refill(s, p))
         return 0;
-    if (s->window[at - 1 - s->wbase] >= 0x80)
+    if ((unsigned char)s->window[at - 1 - s->wbase] >= 0x80)
         return 0;
     return memcmp(s->window + p - s->wbase, kw, n) == 0;
 }
@@ -11948,7 +11971,7 @@ static void xs_xhr_send(xsMachine *the)
     int found = 0;
     for (int i = 0; i < 3 && !found; i++)
     {
-        xsSlot v = xsGet(xsThis, xsID(names[i]));
+        xsSlot v = xsGet(xsThis, xsID((char *)names[i]));
         if (fxIsCallable(the, &v))
         {
             fn = v;
@@ -12078,7 +12101,7 @@ static void xs_build_xhr_proto(JsBridge *b)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(st->xhrProto, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(st->xhrProto, xsID((char *)accs[i].name), getter, xsIsGetter);
     }
 }
 

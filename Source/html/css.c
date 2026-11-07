@@ -3943,6 +3943,7 @@ int css_pattern_matches(const char *pat, const char *val)
  * controls. Hidden/button/submit/reset/image inputs and <button> are
  * barred; disabled controls are barred; text-family readonly barred; a
  * multiple select barred. (Fieldset-inherited disabled does NOT bar
+ * candidates.) */
 
 /* ── Forms-Phase 3: the stylesheet-side constraint state ────────────────
  * :required/:optional and :valid/:invalid join the honest Phase-7
@@ -6084,7 +6085,7 @@ static int css_negative_far(const char *s)
     return v >= 200;
 }
 
-static void apply_prop(CssEngine *eng, unsigned *out, const char *prop,
+static void apply_prop(const CssEngine *eng, unsigned *out, const char *prop,
                        size_t plen, const char *val, size_t vlen)
 {
     char buf[48];

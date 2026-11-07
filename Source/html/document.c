@@ -5474,7 +5474,7 @@ static void handle_element(Walker *w, const DomNode *node)
                               * unreachable; the "" is kept. */
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host toggle dispatch + JS checked road */
+                b->srcNode = (void *)node; /* host toggle dispatch + JS checked road */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -5519,7 +5519,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = (strcmp(tbuf, "button") == 0) ? "Button" : "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 b->buttonType = doc_arena_str(w, tbuf); /* tap needs the type */
                 b->defaultValue = doc_arena_str(w, inputVal);
                 P19_COMMON(b);
@@ -5553,7 +5553,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -5570,7 +5570,7 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             return;
         }
-        b->srcNode = node; /* host input/change dispatch target */
+        b->srcNode = (void *)node; /* host input/change dispatch target */
         b->inputType = doc_arena_str(w, "textarea");
         b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
         b->placeholder = doc_arena_str(w, attr_or_d(a, "placeholder", ""));
@@ -5640,7 +5640,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->label = doc_arena_str(w, lb);
                 b->disabled = disabled;
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 b->buttonType = doc_arena_str(w, bbuf); /* tap needs the type */
                 const char *fa = attr_val(a, "formaction");
                 b->formAction = fa ? resolve_href(w, fa) : doc_arena_str(w, w->formAction ? w->formAction : "");
@@ -5687,7 +5687,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
                 b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
                 b->inert = (w->inert > 0) || attr_has(a, "disabled");
-                b->srcNode = node; /* host pick dispatch + JS picker road */
+                b->srcNode = (void *)node; /* host pick dispatch + JS picker road */
                 add_block(w, b);
             }
         }

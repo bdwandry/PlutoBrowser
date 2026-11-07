@@ -21,6 +21,16 @@
  */
 #pragma once
 
+/* Warning containment for the vendored dav1d DSP sources. This hand-written
+ * config header is ours (upstream's is Meson-generated), so the engine
+ * sources stay pristine. The .su stack-usage reports still carry the real
+ * frame sizes; only the compiler's over-8192 diagnostics are silenced. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#pragma GCC diagnostic ignored "-Wstack-usage="
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#endif
+
 #define ARCH_AARCH64 0
 #define ARCH_ARM 0
 #define ARCH_LOONGARCH 0

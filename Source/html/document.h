@@ -458,7 +458,7 @@ typedef struct
      * The decoder pointer and the browser's details-open array are stable
      * for the page's lifetime (main.c owns the array). */
     DocSvgDecoderFn svgDecoder;
-    int *detailsOpen;
+    const int *detailsOpen;
     int detailsOpenCount;
 } DocParseResult;
 

@@ -1196,10 +1196,10 @@ static void svg_collect_gradients(const char *xml, size_t len)
                     sa = 1;
                 }
                 /* premultiplied average */
-                rs += (double)c.r * sa;
-                gs += (double)c.g * sa;
-                bs += (double)c.b * sa;
-                as += sa;
+                rs += (double)c.r * (double)sa;
+                gs += (double)c.g * (double)sa;
+                bs += (double)c.b * (double)sa;
+                as += (double)sa;
                 ns++;
                 if (ns >= 64)
                 {
@@ -1281,8 +1281,8 @@ static void svg_mat_compose(SvgMat *r, const SvgMat *A, const SvgMat *B)
 
 static void svg_mat_apply(const SvgMat *m, double x, double y, double *ox, double *oy)
 {
-    *ox = m->a * x + m->c * y + m->e;
-    *oy = m->b * x + m->d * y + m->f;
+    *ox = (double)m->a * x + (double)m->c * y + (double)m->e;
+    *oy = (double)m->b * x + (double)m->d * y + (double)m->f;
 }
 
 /* Parse an SVG transform list; returns 0 if nothing parsed. */
@@ -2116,8 +2116,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                 /* shape state = copy of current group state + own attrs */
                 SvgState S = g_stk[stkN - 1];
                 svg_state_apply(&S, &attrs);
-                LCDColor col;
-                int sw = (int)(S.strokeW * scale + 0.5);
+                LCDColor col = (LCDColor)kColorBlack;
+                int sw = (int)((double)S.strokeW * scale + 0.5);
                 if (sw < 1)
                 {
                     sw = 1;
@@ -2136,10 +2136,10 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                     const char *ry = attrs_get(&attrs, "ry");
                     if (matAxis)
                     {
-                        double ux0 = S.m.a * x0 + S.m.e;
-                        double uy0 = S.m.d * y0 + S.m.f;
-                        double ux1 = S.m.a * (x0 + rw) + S.m.e;
-                        double uy1 = S.m.d * (y0 + rh) + S.m.f;
+                        double ux0 = (double)S.m.a * x0 + (double)S.m.e;
+                        double uy0 = (double)S.m.d * y0 + (double)S.m.f;
+                        double ux1 = (double)S.m.a * (x0 + rw) + (double)S.m.e;
+                        double uy1 = (double)S.m.d * (y0 + rh) + (double)S.m.f;
                         if (ux1 < ux0)
                         {
                             double t = ux0;

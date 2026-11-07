@@ -487,9 +487,12 @@ __asm__(
     "    mov r0, r6\n"
     "    pop {r4-r6, pc}\n");
 
-static void *avif_fiber_call(void *stackTop,
-                             void *(*fn)(const uint8_t *, size_t),
-                             const uint8_t *data, size_t len);
+/* Defined by the inline asm above; it must not be `static` because the
+ * compiler cannot see a C definition and would warn "used but never
+ * defined" (the symbol is global in the asm). */
+void *avif_fiber_call(void *stackTop,
+                      void *(*fn)(const uint8_t *, size_t),
+                      const uint8_t *data, size_t len);
 static uint8_t *g_fiberStack = NULL;
 #endif
 

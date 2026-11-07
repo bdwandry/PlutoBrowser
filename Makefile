@@ -390,10 +390,9 @@ endif
 endif
 
 # Duktape's stock duk_config.h probes for math functions (fmin/fmax/fmod)
-# that macOS's libSystem does not export as separate symbols — link libm
-# explicitly for the simulator dylib (the device toolchain links newlib's
-# libm by default).
-DYLIB_FLAGS += -lm
+# that macOS's libSystem does not export as separate symbols. The SDK's
+# simulator link rule already appends -lm (common.mk), so adding it here
+# again only makes ld warn about a duplicate library.
 
 # Homebrew clang ≥16 turns -Wincompatible-pointer-types into a default
 # ERROR, which breaks the sim build inside third-party C (XS-NR fork's
@@ -450,7 +449,12 @@ build/Source/js/xs_moddable_no_recursion/sources/%.o: CPFLAGS = $(XS_NR_CPFLAGS)
 # never touches. No other TU is affected, and the simulator build never
 # uses this rule (monolithic dylib keeps macOS pthreads). Dependency
 # tracking re-added so incremental builds stay correct.
-DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DEFS) -fstack-usage -D_POSIX_THREADS -DHAVE_MEMALIGN=1 -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
+# The QuickJS pthread/clock renames in $(DEFS) are filtered out: this rule
+# appends dav1d's own renames below, and passing both sets on one command
+# line makes GCC warn about redefining the same macro. dav1d uses no
+# clock_gettime, so dropping that rename here is behavior-neutral.
+DAV1D_DEFS = $(filter-out -Dpthread_% -Dclock_gettime=%,$(DEFS))
+DAV1D_CPFLAGS = $(MCFLAGS) $(OPT) -gdwarf-2 -Wall -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wstrict-prototypes -Wno-unknown-pragmas -Wdouble-promotion -mword-relocations -fno-common -Wstack-usage=8192 -Walloca-larger-than=8192 -ffunction-sections -fdata-sections $(DAV1D_DEFS) -fstack-usage -D_POSIX_THREADS -DHAVE_MEMALIGN=1 -Dpthread_once=pluto_dav1d_pthread_once -Dpthread_attr_init=pluto_dav1d_pthread_attr_init -Dpthread_attr_destroy=pluto_dav1d_pthread_attr_destroy -Dpthread_attr_setstacksize=pluto_dav1d_pthread_attr_setstacksize -Dpthread_mutex_init=pluto_dav1d_pthread_mutex_init -Dpthread_mutex_destroy=pluto_dav1d_pthread_mutex_destroy -Dpthread_mutex_lock=pluto_dav1d_pthread_mutex_lock -Dpthread_mutex_unlock=pluto_dav1d_pthread_mutex_unlock -Dpthread_cond_init=pluto_dav1d_pthread_cond_init -Dpthread_cond_destroy=pluto_dav1d_pthread_cond_destroy -Dpthread_cond_wait=pluto_dav1d_pthread_cond_wait -Dpthread_cond_signal=pluto_dav1d_pthread_cond_signal -Dpthread_cond_broadcast=pluto_dav1d_pthread_cond_broadcast -Dpthread_create=pluto_dav1d_pthread_create -Dpthread_join=pluto_dav1d_pthread_join
 build/Source/render/decoders/dav1d/src/%.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 build/Source/render/decoders/dav1d_pthread_shim.o: CPFLAGS = $(DAV1D_CPFLAGS) -MD -MP -MF $(DEPDIR)/$(@F).d
 # AV1 DSP loops are compute-bound on the M7 (a 640px still needs ~6s at
@@ -461,16 +465,14 @@ build/Source/render/decoders/dav1d/src/%.o: OPT = -O3
 
 
 # Plain `make` (and explicit `make all`) must end in the SHIPPABLE bundle —
-# device binary + simulator dylib in ONE PlutoBrowser.pdx. The goal-less
-# default pulled the SDK's `all`, which built both binaries under the
-# sim-only source list — the device link died there (undefined fxAbort)
-# before assembly could ever run. With the goal-aware SRC append above,
-# plain `make` compiles the same blessed source list `make device` uses for
-# BOTH binaries (both XS engines ride — exactly the configuration the
-# device receipted), then assembles once.
+# device binary + simulator dylib in ONE PlutoBrowser.pdx. The goal-aware
+# SRC append above makes the SDK's own `all` rule compile the same blessed
+# source list `make device` uses for BOTH binaries (both XS engines ride —
+# exactly the configuration the device receipted), then assemble once. We
+# deliberately do NOT redefine the `all` recipe here: GNU make warns about
+# overriding the SDK's commands. The target-specific OPT assignment below
+# still applies to the inherited recipe.
 .PHONY: all
-all: device_bin simulator_bin
-	@$(PDC) $(PDCFLAGS) Source $(PRODUCT)
 
 # `make device` ships a DEVICE-ONLY bundle: after device_bin stages the
 # fresh ARM binary, the recipe removes BOTH stale carriers before packing:
@@ -482,9 +484,9 @@ all: device_bin simulator_bin
 # inside the bundle (both lanes receipted 2026-10-21). Result: pdex.bin +
 # assets and NOTHING the Playdate Simulator can launch. Plain `make` /
 # `make all` still stage a fresh dylib and assemble the dual-target
-# bundle; `make simulator` keeps the sim-only lab build. Recipe override,
-# last wins — same pattern as the `all` override above (the "overriding
-# commands" warning is cosmetic).
+# bundle; `make simulator` keeps the sim-only lab build. The cleanup rides
+# a prerequisite (not a recipe override) so the SDK's `device` recipe runs
+# unchanged and GNU make has nothing to warn about.
 # R-25a: device optimization knob. The SDK's common.mk bakes OPT = -O2 …
 # for the whole tree; these target-scoped assignments override it for the
 # `device` and `all` goals and their prerequisites (same pattern as the
@@ -498,8 +500,8 @@ DEVICEOPT ?= -O3
 device: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
 all: OPT = $(DEVICEOPT) -falign-functions=16 -fomit-frame-pointer
 
-.PHONY: device
-device: device_bin
+.PHONY: device pluto_device_clean
+device: pluto_device_clean
+pluto_device_clean:
 	rm -f Source/pdex.dylib
 	rm -rf $(PRODUCT)
-	$(PDC) $(PDCFLAGS) Source $(PRODUCT)

@@ -223,7 +223,7 @@ static void ws_load_origin(WsStore *l)
      * both length and bytes keeps "@about:apiprobe2" from ever matching
      * the "about:apiprobe" origin. */
     char header[WS_ORIGIN_MAX];
-    snprintf(header, sizeof(header), "@%s", g_origin);
+    snprintf(header, sizeof(header), "@%.62s", g_origin);
     size_t hlen = strlen(header);
     const char *p = g_raw;
     while (p < g_raw + g_rawLen)

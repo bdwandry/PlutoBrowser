@@ -38,6 +38,25 @@ static void url_free(char *p)
     pluto_free(p);
 }
 
+/* Bounded append (the compartments live in one UrlParsed struct, so
+ * strncat's restrict contract makes GCC think src/dst may overlap). */
+static void url_append(char *dst, size_t cap, const char *src)
+{
+    size_t used = strlen(dst);
+    if (used >= cap - 1)
+    {
+        return;
+    }
+    size_t room = cap - 1 - used;
+    size_t n = strlen(src);
+    if (n > room)
+    {
+        n = room;
+    }
+    memcpy(dst + used, src, n);
+    dst[used + n] = '\0';
+}
+
 static int is_unreserved(unsigned char c)
 {
     /* Lua pattern [^%w %-%_%.%~]: word chars, space, '-', '_', '.', '~' are kept */
@@ -335,9 +354,9 @@ int url_parse(const char *urlString, UrlParsed *out)
         token[tokenLen] = '\0';
         snprintf(out->normalized, sizeof(out->normalized), "%s", raw);
         strcpy(out->scheme, "about");
-        snprintf(out->host, sizeof(out->host), "%s", token);
+        snprintf(out->host, sizeof(out->host), "%.127s", token);
         out->port = 0;
-        snprintf(out->path, sizeof(out->path), "/%s", token);
+        snprintf(out->path, sizeof(out->path), "/%.254s", token);
         strcpy(out->query, "");
         strcpy(out->hash, "");
         /* query compartment: after '?' up to '#'/end — only when the
@@ -362,9 +381,17 @@ int url_parse(const char *urlString, UrlParsed *out)
         /* path tail: query and/or hash re-attach for fullPath in URL
          * order ('/probe?a=2#h9'), which is exactly the raw layout once
          * the compartments' side rails ('?','%23') are re-attached */
-        snprintf(out->fullPath, sizeof(out->fullPath), "%s%s%s%s%s", out->path,
-                 out->query[0] ? "?" : "", out->query,
-                 out->hash[0] ? "#" : "", out->hash);
+        snprintf(out->fullPath, sizeof(out->fullPath), "%s", out->path);
+        if (out->query[0])
+        {
+            url_append(out->fullPath, sizeof(out->fullPath), "?");
+            url_append(out->fullPath, sizeof(out->fullPath), out->query);
+        }
+        if (out->hash[0])
+        {
+            url_append(out->fullPath, sizeof(out->fullPath), "#");
+            url_append(out->fullPath, sizeof(out->fullPath), out->hash);
+        }
         out->isSsl = 1;
         url_free(raw);
         return 0;
@@ -475,13 +502,13 @@ int url_parse(const char *urlString, UrlParsed *out)
     snprintf(out->fullPath, sizeof(out->fullPath), "%s", pathPart);
     if (query[0] != '\0')
     {
-        strncat(out->fullPath, "?", sizeof(out->fullPath) - strlen(out->fullPath) - 1);
-        strncat(out->fullPath, query, sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+        url_append(out->fullPath, sizeof(out->fullPath), "?");
+        url_append(out->fullPath, sizeof(out->fullPath), query);
     }
     if (hash[0] != '\0')
     {
-        strncat(out->fullPath, "#", sizeof(out->fullPath) - strlen(out->fullPath) - 1);
-        strncat(out->fullPath, hash, sizeof(out->fullPath) - strlen(out->fullPath) - 1);
+        url_append(out->fullPath, sizeof(out->fullPath), "#");
+        url_append(out->fullPath, sizeof(out->fullPath), hash);
     }
 
     /* normalized */

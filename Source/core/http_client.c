@@ -3468,7 +3468,7 @@ static int net_host_is_numeric(const char *h)
 
 static const char *net_err_text(PDNetErr err)
 {
-    switch (err)
+    switch ((int)err)
     {
     case NET_OK:
         return "ok";
@@ -3879,7 +3879,7 @@ static void http_cache_store(const char *url, const char *body, size_t bodyLen)
     e->body[bodyLen] = '\0';
     e->bodyLen = bodyLen;
     e->used = 1;
-    snprintf(e->url, sizeof(e->url), "%s", url);
+    snprintf(e->url, sizeof(e->url), "%.511s", url);
     const char *etag = saved_header("etag");
     const char *lastMod = saved_header("last-modified");
     const char *ctype = saved_header("content-type");
@@ -3988,7 +3988,7 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
             if (g_cb.onError)
             {
                 char msg[1100];
-                snprintf(msg, sizeof(msg), "Unknown internal page: %s", g_url);
+                snprintf(msg, sizeof(msg), "Unknown internal page: %.1076s", g_url);
                 g_cb.onError(msg);
             }
             reset_state();
@@ -4056,7 +4056,7 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
         if (g_cb.onError)
         {
             char msg[1100];
-            snprintf(msg, sizeof(msg), "Invalid URL (no hostname): %s", g_url);
+            snprintf(msg, sizeof(msg), "Invalid URL (no hostname): %.1070s", g_url);
             g_cb.onError(msg);
         }
         reset_state();

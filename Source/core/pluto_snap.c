@@ -192,10 +192,10 @@ static unsigned long snap_key(const char *url, int mode)
     {
         return 0;
     }
-    unsigned long h = 1469598103934665603UL;
-    h ^= (unsigned long)SNAP_VERSION * 0x9E3779B97F4A7C15UL;
+    unsigned long h = (unsigned long)1469598103934665603ULL;
+    h ^= (unsigned long)SNAP_VERSION * (unsigned long)0x9E3779B97F4A7C15ULL;
     h ^= (unsigned long)mode << 24;
-    h *= 1099511628211UL;
+    h *= (unsigned long)1099511628211ULL;
     for (const unsigned char *p = (const unsigned char *)url; *p; p++)
     {
         h ^= (unsigned long)*p;

@@ -2647,9 +2647,9 @@ static int mod_named_list(const char *src, size_t len, size_t p,
     }
     for (int i = 0; i < n; i++)
     {
-        snprintf(slot->named[i].in, sizeof(slot->named[i].in), "%s",
+        snprintf(slot->named[i].in, sizeof(slot->named[i].in), "%.63s",
                  out[i].in);
-        snprintf(slot->named[i].local, sizeof(slot->named[i].local), "%s",
+        snprintf(slot->named[i].local, sizeof(slot->named[i].local), "%.63s",
                  out[i].local);
     }
     slot->namedCount = n;
@@ -2973,8 +2973,8 @@ static void mod_add_export_pair(ModScan *m, const char *local,
                    JSBRIDGE_MOD_EXPORTS, name);
         return;
     }
-    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s", name);
-    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%.63s", name);
+    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%.63s",
              local);
     m->exportCount++;
 }
@@ -4899,7 +4899,7 @@ static void mod_pump_dynq(JsBridge *b)
         }
         char kesc[JSBRIDGE_MOD_KEY_MAX * 2];
         mod_jsesc(kesc, sizeof(kesc), key);
-        char eval[JSBRIDGE_MOD_KEY_MAX * 2 + 160];
+        char eval[JSBRIDGE_MOD_KEY_MAX * 2 + 200];
         char eval2[JSBRIDGE_MOD_KEY_MAX * 2 + 200];
         if (b->modOk[idx])
         {

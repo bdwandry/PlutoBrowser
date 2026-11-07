@@ -23,4 +23,9 @@
 #define js_realloc pluto_qjs_realloc
 #define js_strdup pluto_qjs_strdup
 
+/* Stock-engine format diagnostics: this TU is only an adapter. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wformat"
+#endif
+
 #include "../js/QuickJS/libunicode.c"

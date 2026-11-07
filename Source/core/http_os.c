@@ -216,7 +216,7 @@ static void deliver_with_headers(void)
     char *bodyCopy = NULL;
     int i;
 
-    snprintf(urlSnap, sizeof(urlSnap), "%s", g_req.url.normalized);
+    snprintf(urlSnap, sizeof(urlSnap), "%.127s", g_req.url.normalized);
 
     /* the spill lane: finish the file, hand the ADOPTED handle over —
      * the bulk never materialized in RAM (SW2b/R15 disk delivery) */

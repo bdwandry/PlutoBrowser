@@ -69,7 +69,9 @@
 /* Stock engine API — the exact include set of the canonical host tool
  * (xs/tools/xst.c): xsAll.h (internals, pulls xsPlatform.h → our
  * Source/html/xs_platform.h via -DINCLUDE_XSPLATFORM), then the public
- * xs.h macros. */
+ * xs.h macros. This TU is OUR bridge, not a vendored engine source, so
+ * xs_platform.h keeps its own diagnostics visible. */
+#define PLUTO_XS_BRIDGE_TU 1
 #include "../js/xs_moddable/sources/xsAll.h"
 #include "../js/xs_moddable/sources/xsScript.h"
 #include "../js/xs_moddable/includes/xs.h"
@@ -721,9 +723,9 @@ static void xs_push_style(JsBridge *b, DomNode *node)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(obj, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(obj, xsID((char *)accs[i].name), getter, xsIsGetter);
         xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-        xsDefine(obj, xsID(accs[i].name), setter, xsIsSetter);
+        xsDefine(obj, xsID((char *)accs[i].name), setter, xsIsSetter);
     }
     /* Host data = the element node: classList/style METHODS run with `this`
      * = the object itself, so this_node(the) resolves through it. */
@@ -1385,7 +1387,7 @@ static void def_fn(xsMachine *the, xsSlot obj, const char *name,
                    xsCallback cb, int length)
 {
     xsSlot fn = xsNewHostFunction(cb, length);
-    xsDefine(obj, xsID(name), fn, xsDefault);
+    xsDefine(obj, xsID((char *)name), fn, xsDefault);
 }
 
 /* Helper: define a plain data property. */
@@ -1393,7 +1395,7 @@ static void def_val(xsMachine *the, xsSlot obj, const char *name,
                     xsSlot value)
 {
     (void)the;
-    xsDefine(obj, xsID(name), value, xsDefault);
+    xsDefine(obj, xsID((char *)name), value, xsDefault);
 }
 
 /* Element prototype: a host object carrying ONE internal host slot (the
@@ -1450,12 +1452,12 @@ static void xs_build_el_proto(JsBridge *b)
         if (accs[i].set)
         {
             xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-            xsDefine(proto, xsID(accs[i].name), getter, xsIsGetter);
-            xsDefine(proto, xsID(accs[i].name), setter, xsIsSetter);
+            xsDefine(proto, xsID((char *)accs[i].name), getter, xsIsGetter);
+            xsDefine(proto, xsID((char *)accs[i].name), setter, xsIsSetter);
         }
         else
         {
-            xsDefine(proto, xsID(accs[i].name), getter, xsIsGetter);
+            xsDefine(proto, xsID((char *)accs[i].name), getter, xsIsGetter);
         }
     }
     for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
@@ -1580,7 +1582,7 @@ static void xs_build_globals(JsBridge *b)
     {
         xsSlot loc = xsNewHostObject(NULL);
         def_val(the, loc, "href",
-                xsString(b->doc->baseUrl ? b->doc->baseUrl : ""));
+                xsString(b->doc->baseUrl[0] ? b->doc->baseUrl : ""));
         def_fn(the, loc, "assign", xs_location_assign, 1);
         def_fn(the, loc, "replace", xs_location_assign, 1);
         def_val(the, glob, "location", loc);
@@ -1663,7 +1665,8 @@ static int xs_init(JsBridge *b, const char *baseUrl)
     memset(st, 0, sizeof(*st));
     b->implState = st;
 
-    xsMachine *m = xsCreateMachine(&xs_creation, "pluto-page", (void *)b);
+    xsMachine *m = xsCreateMachine((xsCreation *)&xs_creation, "pluto-page",
+                                   (void *)b);
     if (!m)
     {
         JFree(st);
@@ -2092,7 +2095,7 @@ static void xs_xhr_send(xsMachine *the)
     int found = 0;
     for (int i = 0; i < 3 && !found; i++)
     {
-        xsSlot v = xsGet(xsThis, xsID(names[i]));
+        xsSlot v = xsGet(xsThis, xsID((char *)names[i]));
         if (fxIsCallable(the, &v))
         {
             fn = v;
@@ -2172,7 +2175,7 @@ static void xs_build_xhr_proto(JsBridge *b)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(st->xhrProto, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(st->xhrProto, xsID((char *)accs[i].name), getter, xsIsGetter);
     }
     xsRemember(st->xhrProto);
 }
@@ -2280,12 +2283,14 @@ static int xs_run_xhr_ref(JsBridge *b, void *fnRef, void *objRef,
 const JsEngineImpl js_engine_xs = {
     xs_init,
     xs_run_script,
-    NULL, /* run_script_stream (R15: XS NR only) */
+    0, /* run_script_stream (R15: XS NR only) */
     xs_dispatch_click,
     xs_clear_timer_ref,
     xs_run_timer_ref,
     xs_run_xhr_ref,
     xs_clear_xhr_refs,
     xs_close,
-    NULL, /* pump (R20: time-sliced split is XS NR only) */
+    0, /* pump (R20: time-sliced split is XS NR only) */
+    0, /* eval_pending (R27: XS NR only) */
+    0, /* mount_parked (R28: XS NR only) */
     "XS (Moddable)"};

@@ -2950,7 +2950,7 @@ static int xhr_put(js_State *J, void *p, const char *name)
 /* API-P10: dynamic-import bridge native — delegates to the shared core
  * (jsbridge_dyn_request in jsbridge.c) and pushes the status STRING
  * ("k:<key>" / "p:<id>" / "x:<msg>"). Two args: spec, base. */
-static int js_dyn_request(js_State *J)
+static void js_dyn_request(js_State *J)
 {
     JsBridge *b = (JsBridge *)js_getcontext(J);
     const char *spec = js_tostring(J, 1);
@@ -2958,7 +2958,6 @@ static int js_dyn_request(js_State *J)
     char out[JSBRIDGE_MOD_KEY_MAX + 24];
     jsbridge_dyn_request(b, spec, base, out, sizeof(out));
     js_pushstring(J, out);
-    return 1;
 }
 
 static void js_xhr_open(js_State *J)

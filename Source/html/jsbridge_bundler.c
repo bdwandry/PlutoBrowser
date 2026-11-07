@@ -1004,7 +1004,7 @@ PlutoBundlerStatus jsbridge_bundler_plan(const char *src, size_t len,
 
     size_t pos = 0;
     /* Leading trivia: whitespace and block comments in ANY order and count
-     * (webpack emits `/*! license *\/` banners before the IIFE; inline
+     * (webpack emits bang-prefixed license banners before the IIFE; inline
      * wrappers and minifiers may add newlines between them). Requiring the
      * comment at byte 0 exactly made the plan depend on how the script text
      * was delivered — a general structure must not care. */

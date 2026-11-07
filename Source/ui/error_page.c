@@ -117,7 +117,7 @@ void error_page_draw(void)
     }
     else
     {
-        snprintf(msg, sizeof(msg), "%s", g_errorMsg);
+        snprintf(msg, sizeof(msg), "%.63s", g_errorMsg);
     }
     pd->graphics->drawText(msg, strlen(msg), kUTF8Encoding, 36, startY + 40);
 
@@ -129,7 +129,7 @@ void error_page_draw(void)
     }
     else
     {
-        snprintf(u, sizeof(u), "Target: %s", g_failedUrl);
+        snprintf(u, sizeof(u), "Target: %.50s", g_failedUrl);
     }
     pd->graphics->drawText(u, strlen(u), kUTF8Encoding, 36, startY + 60);
 

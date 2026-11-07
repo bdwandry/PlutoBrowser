@@ -40,6 +40,14 @@
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
 #include "jsbridge_bundler.h"
+#include <stdint.h>
+/* The Makefile defines JS_PTR64 for the 32-bit device target; quickjs.h
+ * defines it itself on 64-bit hosts. Undef only where the header will
+ * re-define it, so the device keeps the Makefile's forced portable
+ * JSValue representation. */
+#if INTPTR_MAX >= INT64_MAX
+#undef JS_PTR64
+#endif
 #include "quickjs.h"
 #include "../core/logger.h"
 #include "../util/strbuf.h"
@@ -1242,7 +1250,9 @@ static JSValue qjs_cl_item(JSContext *ctx, JSValueConst this_val, int argc,
     int idx = -1;
     if (!JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
     {
-        JS_ToInt32(ctx, &idx, argv[0]);
+        int32_t idx32 = -1;
+        JS_ToInt32(ctx, &idx32, argv[0]);
+        idx = (int)idx32;
     }
     const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
                                                     : NULL;
@@ -2098,7 +2108,9 @@ static JSValue qjs_timer_setup(JSContext *ctx, JsBridge *b, QjsState *st,
     int delay = 0;
     if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
     {
-        JS_ToInt32(ctx, &delay, argv[1]);
+        int32_t delay32 = 0;
+        JS_ToInt32(ctx, &delay32, argv[1]);
+        delay = (int)delay32;
     }
     if (delay < 0)
     {
@@ -2138,7 +2150,9 @@ static JSValue qjs_clear_common(JSContext *ctx, int argc, JSValueConst *argv)
     int id = 0;
     if (argc && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
     {
-        JS_ToInt32(ctx, &id, argv[0]);
+        int32_t id32 = 0;
+        JS_ToInt32(ctx, &id32, argv[0]);
+        id = (int)id32;
     }
     return JS_NewInt32(ctx, jsbridge_timer_clear(b, id));
 }
