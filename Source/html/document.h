@@ -438,6 +438,10 @@ typedef struct
     int readingTimeWords;
     char *readingTimeStr; /* arena string (readability arena) */
     void *_arena; /* walker string/object arena (document.c internal) */
+    /* Resumable-walk state (document.c internal, opaque): non-NULL only
+     * while a sliced walk is parked between frames. document_free aborts
+     * it; the browser's render task resumes it via document_parse_resume. */
+    void *_walkState;
 
     /* ── Phase 10: end-event queue (animation lane) ──
      * Nodes whose declared CSS animation COMPLETED during the just-run
@@ -536,6 +540,20 @@ int doc_is_empty_render(const DocParseResult *doc);
  * re-running scripts. Layout must be cleared first (it borrows strings).
  * Returns 0 ok, -1 alloc failure. */
 int document_rewalk(DocParseResult *doc);
+
+/* ── Resumable walk (device watchdog contract) ─────────────────────────────
+ * document_parse_ex_sliced / document_rewalk_sliced run the same pipeline
+ * as their synchronous twins, but the element walk is bounded by budgetMs
+ * per call. A return of 1 means "parked: call document_parse_resume next
+ * frame"; 0 means complete; -1 means failure. The parked state lives in
+ * doc->_walkState and is aborted by document_free. budgetMs 0 = run to
+ * completion (the historical synchronous behavior; the simulator path). */
+int document_parse_ex_sliced(const char *htmlString, const char *baseUrl,
+                             int mode, const DocParseOpts *opts,
+                             DocScriptPolicy scriptPolicy,
+                             DocParseResult *out, unsigned long budgetMs);
+int document_rewalk_sliced(DocParseResult *doc, unsigned long budgetMs);
+int document_parse_resume(DocParseResult *doc, unsigned long budgetMs);
 
 /* ── SW6 snapshot support: the walker's string/object arena ───────────────
  * pluto_snap allocates restored strings/blocks from a fresh arena with

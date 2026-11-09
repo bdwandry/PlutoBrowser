@@ -2010,6 +2010,18 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     {
         return NULL;
     }
+    /* Device watchdog safety valve: inline SVG is decoded synchronously
+     * inside the element walk. A pathological path (thousands of arc
+     * segments / a giant <use> expansion) could otherwise monopolize the
+     * run loop. The cap is device-only and generous (3s); the simulator
+     * remains unbounded (the reference renderer). */
+    unsigned long svgStartMs = 0;
+#if defined(TARGET_PLAYDATE)
+    if (pd->system && pd->system->getCurrentTimeMilliseconds)
+    {
+        svgStartMs = pd->system->getCurrentTimeMilliseconds();
+    }
+#endif
     logger_log("[svgd] enter %zu bytes (P22 TEMP)", len); /* TEMP R64 */
     logger_stack_touch();
     svg_build_patterns(pd);
@@ -2078,6 +2090,24 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
         {
             logger_log("[svgd] el#%d tag=%.10s peak=%u (P22 TEMP)",
                        svgdOps, tagName ? tagName : "?", logger_stack_peak());
+#if defined(TARGET_PLAYDATE)
+            if (svgStartMs && pd->system &&
+                pd->system->getCurrentTimeMilliseconds)
+            {
+                unsigned long now =
+                    pd->system->getCurrentTimeMilliseconds();
+                if (now - svgStartMs > 3000UL)
+                {
+                    logger_log("[svgd] DEVICE BUDGET 3s at ops=%d — aborting "
+                               "decode (icon skipped, page continues)",
+                               svgdOps);
+                    pd->graphics->popContext();
+                    strbuf_free(&body);
+                    pd->graphics->freeBitmap(img);
+                    return NULL;
+                }
+            }
+#endif
         }
         if (!isClose)
         {

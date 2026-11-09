@@ -77,7 +77,13 @@ static PlaydateAPI *pd = NULL;
  * rendering divergence). The device gets enough room for one stalled connect
  * attempt plus a retry; the simulator keeps its original bound. */
 #if defined(TARGET_PLAYDATE)
-#define PLUTO_CSS_EXT_BUDGET_MS 30000UL
+/* Device TLS is the cost: wikipedia's two Vector 2022 sheets receipted at
+ * 20s + 9s on hardware (the old 30s bound expired exactly as the second
+ * sheet landed, so the page rendered with no CSS after a 30s wait). 60s
+ * covers the measured handshake + body time for a normal connection; the
+ * stage still yields every frame, so this is a load-time bound, never a
+ * watchdog risk. */
+#define PLUTO_CSS_EXT_BUDGET_MS 60000UL
 #else
 #define PLUTO_CSS_EXT_BUDGET_MS 8000UL
 #endif
@@ -359,6 +365,8 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 static void http_on_error(const char *message);
 static void nav_autoretry_cb(void *ud); /* R65: one-shot transport retry */
 static int g_navAutoRetried = 0;        /* R65: one retry per navigation */
+static int g_navAutoRetrying = 0;       /* the current navigate_to IS the retry */
+static unsigned int g_navAutoRetryTimer = 0; /* pending 2s retry timer id */
 static void update_system_menu(void);
 static void settings_on_change(void);
 static void view_menu_callback(void *ud);
@@ -607,6 +615,16 @@ typedef struct RenderTask
  * every teardown path closes it BEFORE document_free frees the doc (and
  * the live DOM the engine points into). */
 static JsBridge *g_pageJs = NULL;
+
+/* The render task currently owned by tasks.c. tasks_cancel_all() (every
+ * navigation) drops a task WITHOUT calling its onError, so the task's
+ * body/doc/CSS/prefetch state — and, on a parse-in-progress, a whole
+ * half-built DOM + engine — used to leak into the next page. On device
+ * that leak became a wild free/PC at the next navigation (receipted:
+ * wikipedia timeout -> next-site jump, PC=0x69646570 = "pedi" from the
+ * URL). navigate_to now aborts this task through the SAME cleanup path
+ * render_error uses before cancelling the scheduler. */
+static RenderTask *g_activeRenderTask = NULL;
 
 /* Close the old page's bridge + doc, then adopt the new one. Callers must
  * already hold the new doc in rt->doc. */
@@ -3591,7 +3609,13 @@ static void forment_autotest_tick(void)
  * Never defined for device builds. */
 #define FIELDTEST_MAX_SITES 24
 #define FIELDTEST_EXPECTED_SITES 20 /* resume only if the list matches */
-#define FIELDTEST_FRAMES_PER_SITE 450 /* 15s @30fps */
+#define FIELDTEST_FRAMES_PER_SITE 1500 /* 30s @50fps — the old 450 was
+                                        * 9s at the simulator's real 50fps
+                                        * (15s was assumed at 30fps), which
+                                        * cut heavy pages (daringfireball,
+                                        * bbc) mid-load. The device harness
+                                        * uses a wall-clock liveness bound;
+                                        * 30s matches its normal case. */
 static char ftUrl[FIELDTEST_MAX_SITES][512];
 static int ftEngine[FIELDTEST_MAX_SITES];
 static char ftCrit[FIELDTEST_MAX_SITES][128];
@@ -3953,6 +3977,381 @@ static void fieldtest_tick(void)
     }
 }
 #endif /* PLUTO_FIELDTEST_AUTOTEST */
+
+#if defined(PLUTO_DEV_FIELDTEST)
+/* ── DEVICE 20-SITE MATRIX (PLUTO_DEV_FIELDTEST) ────────────────────────────
+ * The hardware twin of the simulator's SW0 fieldtest seam. Runs the SAME 20
+ * sites in ONE browser session, in order, with Full JS. The device is
+ * autonomous (no keyboard): it navigates, waits for the page to settle,
+ * scores the rendered DOM against the site's criterion, and appends a
+ * resumable result line to the Data dir.
+ *
+ * Crash resilience: `ftdev_next.txt` is written with the NEXT index BEFORE
+ * each navigation. A watchdog/crash therefore resumes at the next site on
+ * the following boot instead of replaying the one that died; the missing
+ * verdict line names the crash site. `ftdev_current.txt` names the site
+ * that was in flight at the moment of death.
+ *
+ * Controls (all optional, plain text in the app Data dir):
+ *   ftdev_next.txt   first site number (1-based; absent = 1)
+ *   ftdev_end.txt    last site number, inclusive (absent = 20)
+ *   ftdev_engine.txt 0 muJS / 1 Duktape / 2 QuickJS / 3 XS / 4 XS NR
+ *                     (absent = 4, the engine the device matrix receipts
+ *                     were taken on)
+ *
+ * NEVER compiled into a release build: the clean-release contract is
+ * `make device` with no DEVICEDEFS, and this guard is absent there. */
+#define FTDEV_MAX_SITES 20
+typedef struct
+{
+    const char *url;
+    const char *crit;
+} FtDevSite;
+static const FtDevSite g_ftdevSites[FTDEV_MAX_SITES] = {
+    {"https://lite.duckduckgo.com/lite/", "duckduckgo"},
+    {"https://html.duckduckgo.com/html/?q=playdate", "playdate"},
+    {"https://text.npr.org/", "npr"},
+    {"https://www.reuters.com/", "reuters"},
+    {"https://en.wikipedia.org/wiki/Playdate_(console)", "playdate"},
+    {"https://en.wikipedia.org/wiki/Special:Random", "wikipedia"},
+    {"https://news.ycombinator.com/", "hacker news"},
+    {"https://lobste.rs/", "lobsters"},
+    {"https://www.bing.com/search?q=playdate", "bing"},
+    {"https://search.marginalia.nu/search?query=playdate", "marginalia"},
+    {"https://example.com/", "documentation examples"},
+    {"https://motherfuckingwebsite.com/", "motherfucking website"},
+    {"https://bryanwandrych.com/", "bryan"},
+    {"https://daringfireball.net/", "daring fireball"},
+    {"https://old.reddit.com/", "reddit"},
+    {"https://textboard.org/", "textboard"},
+    {"https://www.gutenberg.org/browse/scores/top", "gutenberg"},
+    {"https://www.w3.org/", "w3c"},
+    {"https://lite.cnn.com/", "cnn"},
+    {"https://www.bbc.com/news", "bbc"},
+};
+static int g_ftdevPhase = 0; /* 0 boot wait, 1 running, 2 done */
+static unsigned g_ftdevFrames = 0;
+static int g_ftdevIndex = 0;
+static int g_ftdevEnd = FTDEV_MAX_SITES;
+static int g_ftdevEngine = 4;
+static int g_ftdevSiteFrames = 0;
+static int g_ftdevRetried = 0;
+static int g_ftdevSawPage = 0;
+static int g_ftdevSettleFrames = 0;
+static int g_ftdevPass = 0;
+static int g_ftdevFail = 0;
+
+static int ftdev_read_int(const char *name, int def)
+{
+    SDFile *f = pd->file->open(name, kFileReadData);
+    if (!f)
+    {
+        return def;
+    }
+    char buf[32];
+    int n = pd->file->read(f, buf, sizeof(buf) - 1);
+    pd->file->close(f);
+    if (n <= 0)
+    {
+        return def;
+    }
+    buf[n] = '\0';
+    return atoi(buf);
+}
+
+static void ftdev_write_text(const char *name, const char *text, int append)
+{
+    SDFile *f = pd->file->open(name, append ? kFileAppend : kFileWrite);
+    if (!f)
+    {
+        logger_log("[ftdev] write open failed: %s", name);
+        return;
+    }
+    pd->file->write(f, text, (unsigned int)strlen(text));
+    pd->file->close(f);
+}
+
+static void ftdev_lcase(char *s)
+{
+    for (; *s; s++)
+    {
+        if (*s >= 'A' && *s <= 'Z')
+        {
+            *s += 32;
+        }
+    }
+}
+
+static int ftdev_text_hit(const char *text, const char *needle)
+{
+    char hay[256];
+    snprintf(hay, sizeof(hay), "%s", text);
+    ftdev_lcase(hay);
+    return strstr(hay, needle) != NULL;
+}
+
+static int ftdev_dom_contains(const char *needle)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk)
+        {
+            continue;
+        }
+        if (blk->inlines)
+        {
+            for (int j = 0; j < blk->inlineCount; j++)
+            {
+                const DocInline *in = blk->inlines[j];
+                if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                    in->text[0] && ftdev_text_hit(in->text, needle))
+                {
+                    return 1;
+                }
+            }
+        }
+        if (blk->type == DOC_BLOCK_TABLE && blk->table)
+        {
+            const DocTable *t = blk->table;
+            for (int r = 0; r < t->rowCount; r++)
+            {
+                const DocRow *row = t->rows[r];
+                if (!row)
+                {
+                    continue;
+                }
+                for (int c = 0; c < row->cellCount; c++)
+                {
+                    const DocCell *cell = row->cells[c];
+                    if (!cell)
+                    {
+                        continue;
+                    }
+                    for (int k = 0; k < cell->inlineCount; k++)
+                    {
+                        const DocInline *in = cell->inlines[k];
+                        if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                            in->text[0] && ftdev_text_hit(in->text, needle))
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static void ftdev_advance(const char *verdict, const char *why)
+{
+    char line[512];
+    int blocks = currentDoc ? currentDoc->blockCount : 0;
+    snprintf(line, sizeof(line), "%s\t%d\t%d\t%s\t%s\n", verdict,
+             g_ftdevIndex + 1, blocks,
+             g_ftdevSites[g_ftdevIndex].url, why ? why : "");
+    ftdev_write_text("ftdev_results.txt", line, 1);
+    logger_log("[ftdev] RESULT: %s site=%d/%d blocks=%d why=%s url=%s",
+               verdict, g_ftdevIndex + 1, FTDEV_MAX_SITES, blocks,
+               why ? why : "", g_ftdevSites[g_ftdevIndex].url);
+    if (strcmp(verdict, "PASS") == 0)
+    {
+        g_ftdevPass++;
+    }
+    else
+    {
+        g_ftdevFail++;
+    }
+    g_ftdevIndex++;
+    if (g_ftdevIndex >= g_ftdevEnd || g_ftdevIndex >= FTDEV_MAX_SITES)
+    {
+        snprintf(line, sizeof(line),
+                 "DONE\tpass=%d\tfail=%d\tlast=%d\n", g_ftdevPass, g_ftdevFail,
+                 g_ftdevIndex);
+        ftdev_write_text("ftdev_results.txt", line, 1);
+        logger_log("[ftdev] done: PASS %d / FAIL %d (through site %d)",
+                   g_ftdevPass, g_ftdevFail, g_ftdevIndex);
+        g_ftdevPhase = 2;
+        return;
+    }
+    g_ftdevSiteFrames = 0;
+    g_ftdevRetried = 0;
+    g_ftdevSawPage = 0;
+    g_ftdevSettleFrames = 0;
+    {
+        char nbuf[24];
+        snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+        ftdev_write_text("ftdev_next.txt", nbuf, 0);
+        snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+        ftdev_write_text("ftdev_current.txt", nbuf, 0);
+    }
+    logger_log("[ftdev] === site %d/%d engine=%d %s | %s",
+               g_ftdevIndex + 1, FTDEV_MAX_SITES, g_ftdevEngine,
+               g_ftdevSites[g_ftdevIndex].url,
+               g_ftdevSites[g_ftdevIndex].crit);
+    {
+        char startLine[512];
+        snprintf(startLine, sizeof(startLine), "START\t%d\t%s\n",
+                 g_ftdevIndex + 1, g_ftdevSites[g_ftdevIndex].url);
+        ftdev_write_text("ftdev_results.txt", startLine, 1);
+    }
+    navigate_to(g_ftdevSites[g_ftdevIndex].url);
+}
+
+static void ftdev_tick(void)
+{
+    if (g_ftdevPhase == 2)
+    {
+        return;
+    }
+    g_ftdevFrames++;
+    if (g_ftdevPhase == 0)
+    {
+        if (g_ftdevFrames < 30)
+        {
+            return;
+        }
+        /* The radio associates a few seconds after boot. Starting the first
+         * site before it does burned the first two 120s timeouts on the last
+         * hardware run (wifi level 0). Wait up to 18s, then proceed anyway
+         * (a genuinely offline device should still record the failures). */
+        if (netmon_level() == 0 && g_ftdevFrames < 900)
+        {
+            if ((g_ftdevFrames % 60) == 0)
+            {
+                logger_log("[ftdev] waiting for wifi (level 0, frame %u)",
+                           g_ftdevFrames);
+            }
+            return;
+        }
+        /* ftdev_next.txt is 1-BASED (the site number to run next), matching
+         * the receipted device protocol: "17" means site 17. Internally the
+         * index is 0-based. */
+        g_ftdevIndex = ftdev_read_int("ftdev_next.txt", 1) - 1;
+        g_ftdevEnd = ftdev_read_int("ftdev_end.txt", FTDEV_MAX_SITES);
+        g_ftdevEngine = ftdev_read_int("ftdev_engine.txt", 4);
+        if (g_ftdevIndex < 0)
+        {
+            g_ftdevIndex = 0;
+        }
+        if (g_ftdevEnd > FTDEV_MAX_SITES)
+        {
+            g_ftdevEnd = FTDEV_MAX_SITES;
+        }
+        if (g_ftdevEngine < 0 || g_ftdevEngine > 4)
+        {
+            g_ftdevEngine = 4;
+        }
+        if (g_ftdevIndex >= g_ftdevEnd || g_ftdevIndex >= FTDEV_MAX_SITES)
+        {
+            logger_log("[ftdev] nothing to run (next=%d end=%d)",
+                       g_ftdevIndex, g_ftdevEnd);
+            g_ftdevPhase = 2;
+            return;
+        }
+        storage_set_setting_int("jsEnabled", 2); /* Full JS */
+        storage_set_setting_int("jsEngine", g_ftdevEngine);
+        jsbridge_set_engine(g_ftdevEngine);
+        snapBypass = 1; /* measure the live pipeline, never a snapshot */
+        logger_log("[ftdev] start (sites %d-%d, Full JS, engine=%d)",
+                   g_ftdevIndex + 1, g_ftdevEnd, g_ftdevEngine);
+        {
+            char nbuf[24];
+            /* The NEXT site number (1-based) is written BEFORE this site
+             * runs: a crash skips the dead site on the next boot and the
+             * missing verdict line names it. */
+            snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 2);
+            ftdev_write_text("ftdev_next.txt", nbuf, 0);
+            snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+            ftdev_write_text("ftdev_current.txt", nbuf, 0);
+            snprintf(nbuf, sizeof(nbuf),
+                     "START\t%d\t%s\n", g_ftdevIndex + 1,
+                     g_ftdevSites[g_ftdevIndex].url);
+            ftdev_write_text("ftdev_results.txt", nbuf, 1);
+        }
+        g_ftdevPhase = 1;
+        logger_log("[ftdev] === site %d/%d engine=%d %s | %s",
+                   g_ftdevIndex + 1, FTDEV_MAX_SITES, g_ftdevEngine,
+                   g_ftdevSites[g_ftdevIndex].url,
+                   g_ftdevSites[g_ftdevIndex].crit);
+        navigate_to(g_ftdevSites[g_ftdevIndex].url);
+        return;
+    }
+
+    /* phase 1: wait for the page, then settle before scoring. Device
+     * pages need longer than the simulator: TLS + CSS + script prefetch
+     * + JS compile. 30s hard timeout per site; 3s settle after the first
+     * PAGE state so late images/scripts land. */
+    g_ftdevSiteFrames++;
+    if (currentState == STATE_PAGE)
+    {
+        g_ftdevSawPage = 1;
+    }
+    if (currentState == STATE_ERROR && !g_ftdevRetried && g_ftdevSiteFrames < 300)
+    {
+        g_ftdevRetried = 1;
+        logger_log("[ftdev] retry (error page) site=%d %s", g_ftdevIndex + 1,
+                   g_ftdevSites[g_ftdevIndex].url);
+        navigate_to(g_ftdevSites[g_ftdevIndex].url);
+        return;
+    }
+    if (currentState == STATE_ERROR && g_ftdevRetried &&
+        g_ftdevSiteFrames > 400) /* one manual + one transport retry had
+                                  * their chance; don't burn the 120s timeout
+                                  * on a host that cannot resolve */
+    {
+        ftdev_advance("FAIL", "error-page");
+        return;
+    }
+    /* Settle = STATE_PAGE and NO render task running, continuously for 3s.
+     * A JS startup script can re-walk a heavy page (wikipedia's loader),
+     * which flips the state back to LOADING — scoring the fresh prefix
+     * would miss the article body. The counter resets whenever the page
+     * is rendering again, so scoring always sees the final walk. */
+    if (currentState == STATE_PAGE && !isRendering)
+    {
+        g_ftdevSettleFrames++;
+    }
+    else
+    {
+        g_ftdevSettleFrames = 0;
+    }
+    if (g_ftdevSettleFrames >= 150) /* 3s @ 50fps */
+    {
+        char needle[128];
+        snprintf(needle, sizeof(needle), "%s",
+                 g_ftdevSites[g_ftdevIndex].crit);
+        ftdev_lcase(needle);
+        if (ftdev_dom_contains(needle))
+        {
+            ftdev_advance("PASS", "criterion");
+        }
+        else if (currentDoc && currentDoc->blockCount > 0)
+        {
+            ftdev_advance("FAIL", "missing-criterion");
+        }
+        else
+        {
+            ftdev_advance("FAIL", "empty-render");
+        }
+        return;
+    }
+    /* 180s @ 50fps: device TLS + CSS + script prefetch + the sliced walk
+     * on a heavy article legitimately takes a minute before the final
+     * render, and the radio can drop mid-page (err=-21) while the transport
+     * auto-retry recovers. The timeout is a liveness bound, not a
+     * performance score. */
+    if (g_ftdevSiteFrames >= 9000)
+    {
+        ftdev_advance("FAIL", "timeout");
+    }
+}
+#endif /* PLUTO_DEV_FIELDTEST */
 
 #if defined(PLUTO_CSS_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic proof that the
@@ -5184,15 +5583,38 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     }
 }
 
+/* Per-frame walk slice. The element walk is the only parse stage that
+ * scales with page size (wikipedia: ~5000 nodes × ~4.5ms/node on the M7
+ * ≈ 22s). A 500ms slice keeps the loading screen animating and leaves
+ * >9s of the OS's 10s run-loop watchdog untouched; the simulator keeps
+ * the historical unlimited walk (it is the reference renderer). */
+static unsigned long render_walk_budget_ms(void)
+{
+#if defined(TARGET_PLAYDATE)
+    return 500UL;
+#else
+    return 0UL;
+#endif
+}
+
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
+    unsigned long walkBudget = render_walk_budget_ms();
 
     /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
     if (rt->rewalkDoc && !rt->parsed)
     {
-        logger_log("render: rewalk start (live DOM mutation re-render)");
-        int wrc = document_rewalk(rt->rewalkDoc);
+        int firstSlice = (rt->rewalkDoc->_walkState == NULL);
+        if (firstSlice)
+        {
+            logger_log("render: rewalk start (live DOM mutation re-render)");
+        }
+        int wrc = document_rewalk_sliced(rt->rewalkDoc, walkBudget);
+        if (wrc > 0)
+        {
+            return 1; /* parked between frames; resume next step */
+        }
         if (wrc != 0)
         {
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
@@ -5226,6 +5648,27 @@ static int render_step(TaskCtx *ctx)
             }
             memset(rt->doc, 0, sizeof(DocParseResult));
             tasks_report_progress(0.05f);
+        }
+
+        /* A sliced walk parked between frames: resume it before any other
+         * stage. The DOM/CSS/JS stages already ran; only the element walk
+         * remains. */
+        if (rt->doc->_walkState)
+        {
+            int wrc = document_parse_resume(rt->doc, walkBudget);
+            if (wrc > 0)
+            {
+                return 1;
+            }
+            if (wrc < 0)
+            {
+                snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
+                         "Parse Error: walk out of memory");
+                return -1;
+            }
+            rt->parsed = 1;
+            tasks_report_progress(0.6f);
+            return 1; /* layout next tick */
         }
 
         /* ── Stage C (Phase 1.5): external stylesheet fetch ──
@@ -5424,6 +5867,17 @@ static int render_step(TaskCtx *ctx)
                             {
                                 rt->doc->cssExtBody[w] = rt->cssBody[k];
                                 rt->doc->cssExtLen[w] = rt->cssLen[k];
+                                /* OWNERSHIP MOVED: the doc now owns this
+                                 * body. Clearing the task slot is what keeps
+                                 * render_css_free (render_done / render_error
+                                 * teardown) from freeing it a second time —
+                                 * the receipted double-free was a heap
+                                 * corruption at every page transition after
+                                 * a page with an external stylesheet
+                                 * (sim: malloc_error_break inside
+                                 * document_free; device: wild frees). */
+                                rt->cssBody[k] = NULL;
+                                rt->cssLen[k] = 0;
                                 w++;
                             }
                         }
@@ -5561,8 +6015,17 @@ static int render_step(TaskCtx *ctx)
             }
         }
 
-        int rc = document_parse_ex(rt->body, rt->url, currentBrowseMode,
-                                   &opts, jsPolicy, NULL, rt->doc);
+        int rc = document_parse_ex_sliced(rt->body, rt->url, currentBrowseMode,
+                                          &opts, jsPolicy, rt->doc,
+                                          walkBudget);
+        if (rc > 0)
+        {
+            /* The tokenize/DOM/CSS/JS stages completed; the element walk is
+             * parked with its frame stack in rt->doc->_walkState. Yield so
+             * the run loop stays alive, then resume at the top of this
+             * block next step. */
+            return 1;
+        }
         if (rc != 0 || rt->doc->parseError)
         {
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
@@ -5641,6 +6104,36 @@ static void render_css_free(RenderTask *rt)
     rt->cssPhase = 0;
 }
 
+/* Free every resource a render task owns. Shared by render_error (the
+ * visible failure path) and the navigation abort (silent: the user left the
+ * page, so no error UI). Must be called BEFORE tasks_cancel_all drops the
+ * task, otherwise its half-built doc/engine/body leak into the next page. */
+static void render_task_dispose(RenderTask *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    jsext_abort_active(); /* FULL-mode prefetch session (if any) */
+    render_css_free(rt);
+    if (rt->body)
+    {
+        pluto_free(rt->body);
+        rt->body = NULL;
+    }
+    if (rt->doc)
+    {
+        if (rt->doc->_jsbridge)
+        {
+            js_doc_close(rt->doc->_jsbridge);
+        }
+        document_free(rt->doc);
+        free(rt->doc);
+        rt->doc = NULL;
+    }
+    free(rt);
+}
+
 /* ── Phase 10: end-event drain (animation + transition lanes) ──────────────
  * Runs in render_done — after a render (fresh parse or JS-mutation
  * re-walk) completed, when the visible state IS the final state a
@@ -5712,6 +6205,10 @@ static void render_done(void *result, void *userdata)
     if (!rt)
     {
         return;
+    }
+    if (g_activeRenderTask == rt)
+    {
+        g_activeRenderTask = NULL;
     }
     isRendering = 0;
     int wasRewalk = (rt->rewalkDoc != NULL); /* read before page_swap_doc */
@@ -5812,11 +6309,12 @@ static void render_error(const char *message, void *userdata)
     (void)message;
     RenderTask *rt = (RenderTask *)userdata;
     isRendering = 0;
+    if (g_activeRenderTask == rt)
+    {
+        g_activeRenderTask = NULL;
+    }
     if (rt)
     {
-        /* FULL-mode prefetch mid-flight: abort the session (cancels any
-         * in-flight script request + frees the arena) before tearing down. */
-        jsext_abort_active();
         if (rt->isToggle)
         {
             /* Lua: undo the toggle flip on error. */
@@ -5826,22 +6324,11 @@ static void render_error(const char *message, void *userdata)
                     !detailsOpenState[detailsKeyCount - 1];
             }
         }
-        render_css_free(rt);
-        if (rt->body)
-        {
-            pluto_free(rt->body);
-        }
         if (rt->doc)
         {
-            if (rt->doc->_jsbridge)
-            {
-                js_doc_close(rt->doc->_jsbridge); /* engine dies with the doc */
-            }
             log_render_result("render-error(discarded)", rt->doc);
-            document_free(rt->doc);
-            free(rt->doc);
         }
-        free(rt);
+        render_task_dispose(rt);
     }
     error_page_show(g_renderErrMsg, currentUrlObj ? currentUrlObj->normalized : "");
     currentState = STATE_ERROR;
@@ -5869,7 +6356,13 @@ static void render_body(const char *body, const char *url, int addToHistory)
     snprintf(rt->url, sizeof(rt->url), "%s", url ? url : "");
     rt->addToHistory = addToHistory;
     rt->isToggle = 0;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
 }
 
 static void meta_refresh_cb(void *ud)
@@ -5886,7 +6379,14 @@ static void meta_refresh_cb(void *ud)
 /* SVG decoder hook for document_parse (production path). */
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap)
 {
+    unsigned long t0 = pd->system->getCurrentTimeMilliseconds();
     *outBitmap = svg_decode(xml, w, h);
+    unsigned long dt = pd->system->getCurrentTimeMilliseconds() - t0;
+    /* Device receipt: inline SVG is decoded synchronously inside the walk.
+     * A single multi-second decode is a watchdog risk; the log names the
+     * exact input size and cost so the slow class is measurable. */
+    logger_log("[svgd] hook %lums %dx%d xml=%zu ok=%d",
+               dt, w, h, xml ? strlen(xml) : 0, *outBitmap ? 1 : 0);
     return *outBitmap ? 0 : -1;
 }
 
@@ -5898,8 +6398,34 @@ static void navigate_to(const char *urlString)
         return;
     }
 
+    /* A pending transport auto-retry belongs to the navigation that armed
+     * it. Without this cancel it fires 2s later and HIJACKS whatever the
+     * user (or the device matrix) navigated to in the meantime — the
+     * receipted failure: textboard's retry pulled the browser back off
+     * gutenberg.org mid-fetch. Cancel before touching any page state. */
+    if (g_navAutoRetryTimer)
+    {
+        pdtimer_cancel(g_navAutoRetryTimer);
+        g_navAutoRetryTimer = 0;
+    }
+
     /* Any still-running parse/render of a previous page must be dropped;
-     * its onComplete would otherwise fire later and hijack the new page. */
+     * its onComplete would otherwise fire later and hijack the new page.
+     * tasks_cancel_all() alone does NOT run the task's error cleanup, so
+     * the task's body/doc/engine/CSS/prefetch state used to leak into the
+     * next page (device receipt: leaving a still-loading wikipedia article
+     * corrupted the heap and the next navigation jumped to PC=0x69646570
+     * = "pedi", text from the URL). Dispose the task through the SAME
+     * cleanup path render_error uses BEFORE the scheduler drops it. */
+    if (g_activeRenderTask)
+    {
+        RenderTask *aborting = g_activeRenderTask;
+        g_activeRenderTask = NULL;
+        isRendering = 0;
+        logger_log("[nav] aborting in-flight render task (body=%s)",
+                   aborting->url);
+        render_task_dispose(aborting);
+    }
     tasks_cancel_all();
     jsext_abort_active(); /* FULL-mode prefetch: kill any in-flight session */
     /* R65: the pre-cancel — EVERY leave-a-page route funnels through here
@@ -5974,9 +6500,14 @@ static void navigate_to(const char *urlString)
     snprintf(urlBuf, sizeof(urlBuf), "%s", trimmed ? trimmed : urlString);
     pluto_free(trimmed);
 
-    g_navAutoRetried = 0; /* R65: each manual navigation re-arms the
-                           * ONE transport auto-retry (a user re-click
-                           * after a failed retry never loops). */
+    if (!g_navAutoRetrying)
+    {
+        g_navAutoRetried = 0; /* R65: each MANUAL navigation re-arms the
+                               * ONE transport auto-retry. The retry's own
+                               * navigate_to must NOT re-arm it — otherwise
+                               * a host-not-found URL loops forever (the
+                               * receipted textboard 2s retry storm). */
+    }
 
     /* Reset per-navigation state (Lua runNavigation). The old layout items
      * (with their owned values) are freed by layout_clear during the render
@@ -6310,7 +6841,8 @@ static void http_on_error(const char *message)
         g_navAutoRetried = 1;
         logger_log("[nav] AUTO-RETRY (transport failure): %s",
                    currentUrlObj->normalized);
-        pdtimer_perform_after_delay(pd, 2000, nav_autoretry_cb, pluto_strdup(retry));
+        g_navAutoRetryTimer = pdtimer_perform_after_delay(
+            pd, 2000, nav_autoretry_cb, pluto_strdup(retry));
         currentState = STATE_LOADING;
         snprintf(pageTitle, sizeof(pageTitle), "Retrying...");
         update_system_menu();
@@ -6328,9 +6860,12 @@ static void http_on_error(const char *message)
 static void nav_autoretry_cb(void *ud)
 {
     char *url = (char *)ud;
+    g_navAutoRetryTimer = 0; /* this timer is firing now */
     if (url)
     {
+        g_navAutoRetrying = 1;
         navigate_to(url);
+        g_navAutoRetrying = 0;
         pluto_free(url);
     }
 }
@@ -6373,7 +6908,13 @@ static void page_rewalk_now(void)
     rt->isToggle = 1; /* restore scroll position */
     rt->prevScroll = prevScroll;
     rt->prevTarget = prevTarget;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
 }
 
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
@@ -6411,7 +6952,13 @@ static void toggle_details(const char *dkey)
     rt->isToggle = 1;
     rt->prevScroll = prevScroll;
     rt->prevTarget = prevTarget;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
 }
 
 /* ── Form keyboard target resolution ─────────────────────────────────────── */
@@ -9154,6 +9701,10 @@ static int updateFrame(void *userdata)
     fieldtest_tick();
 #endif
 
+#if defined(PLUTO_DEV_FIELDTEST)
+    ftdev_tick();
+#endif
+
 #if defined(PLUTO_NAV_AUTOTEST)
     nav_autotest_tick();
 #endif
@@ -10113,6 +10664,10 @@ static int updateFrame(void *userdata)
 
     /* Phase 4: pump timers each frame. */
     pdtimer_update();
+
+    /* R67: SDK connection releases are safe only when no render/walk is
+     * live. A release during the sliced walk was the bbc wild-PC window. */
+    http_set_release_gate(!isRendering && currentState != STATE_LOADING);
 
     /* Phase 24: pump the HTTP state machine each frame. */
     http_update();

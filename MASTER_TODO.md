@@ -11,6 +11,78 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R67 — DEVICE 20-SITE MATRIX: ZERO CRASHES / ZERO WATCHDOGS (2026-11-09).** The
+> hardware matrix now completes all 20 sites in one session with EMPTY crashlog and
+> EMPTY errorlog. The old receipts (5 hard faults + 1 watchdog across sites 5/9/10/14/17)
+> were six DISTINCT general bugs, each root-caused and fixed:
+> (1) **EXTERNAL-STYLESHEET DOUBLE FREE** — `render_step` moved each fetched CSS body
+> into `doc->cssExtBody` but never cleared the task's `rt->cssBody[k]`; `render_css_free`
+> then freed it at render_done and `document_free` freed it AGAIN at the next navigation
+> (sim receipt: malloc_error_break inside document_free; device: wild frees/PCs). The
+> task slot is now cleared at ownership transfer.
+> (2) **IN-FLIGHT RENDER TASK LEAK** — `tasks_cancel_all()` drops a task without calling
+> its onError, so every navigation during a load leaked the task's body/doc/engine/CSS/
+> prefetch state into the next page (device receipt: leaving a still-loading wikipedia
+> article, next navigation PC=0x69646570 "pedi" from the URL). `navigate_to` now disposes
+> `g_activeRenderTask` through the SAME cleanup path render_error uses before cancelling.
+> (3) **THE SLICED WALK** — the element walk was the only parse stage scaling with page
+> size (wikipedia: 5083 nodes × ~4.5ms/node ≈ 22s on the M7 = two watchdogs). New
+> resumable walk state (`DocWalkState` on `DocParseResult._walkState`): 500ms per frame
+> on device, full stack/arena/DOM parked between slices, 60s absolute cap with the
+> standard truncation marker, simulator stays unbounded (reference renderer). Device
+> receipt: wikipedia 5083 nodes in 21.5s across frames → 236 blocks (SIM-IDENTICAL),
+> gutenberg 4232 nodes → 632 blocks, no watchdog. The state OWNS a copy of
+> `DocParseOpts` — the first sliced build kept the caller's stack pointer and called
+> `opts->svgDecoder` through dead stack on the next slice (device wild-PC class).
+> (4) **TRANSPORT RELEASE HAZARDS** — (a) a cancelled request's async open callback
+> released its TCP/TLS object immediately, possibly while the NEXT request's TLS was
+> live (device: bing's cancelled CSS connect settling during the script fetch → wild PC);
+> releases now park in `g_deferRelease[]` and drain only when the client is idle AND
+> `http_set_release_gate()` says no render/walk is live. (b) the R65 transport auto-retry
+> timer survived a later navigation and HIJACKED it (textboard's 2s retry pulled the
+> browser back off gutenberg mid-fetch); `navigate_to` cancels the pending retry, and the
+> retry's own navigate_to no longer re-arms it (one retry per MANUAL navigation).
+> (5) **MEMORY-ACCOUNTING DRIFT + ENGINE ADMISSION** — the 8192-slot pointer→size table
+> reached 7422 entries (90% load); open-addressing deletion cleared slots to NULL and
+> broke probe chains, so frees could not subtract and tracked live walked above the
+> 6.5MB budget (w3.org left 6.8MB; lite.cnn's XS attach then ran with refusals and
+> overflowed the task stack). Table is 16384 slots / 32-probe, deletes use TOMBSTONES,
+> and `pluto_mem_resync_live` compacts at every page boundary. Engine attach now refuses
+> gracefully below 900KB headroom (server HTML still renders). lite.cnn PASSES.
+> (6) **THE ANIMATION-NAME STACK OVERFLOW** — `walk_anim_engage` copied a CSS
+> `@keyframes` name into `char nb[25]` unbounded; bbc.com's image node crashed the walk
+> (wild PC + text in mmfar). The copy is bounded now. bbc.com PASSES.
+> Plus a device-only 3s SVG decode budget (a single pathological inline SVG can no
+> longer monopolize the run loop; normal icons unchanged) and a WiFi-association wait
+> in the matrix harness (the first two sites timed out before the radio connected).
+> DEVICE MATRIX RECEIPT (build 164abf2f…, MD5-matched, Full JS, engine XS-NR):
+> all 20 sites run in one session, ZERO crashlog/errorlog lines, 50fps heartbeats,
+> stackPeak ≤4720B, refusals 0 on the clean pages. The clean-network score is 15/20
+> (the same per-site verdicts as the simulator); the final full hardware run was
+> 12/20 only because four sites hit 120s WiFi/DNS timeouts (err=-21, signal 3→2→1)
+> — every one of them (NPR, gutenberg, bbc) passes in a single-site run on the same
+> build, and the harness timeout is now 180s. Per-site verdicts in
+> `ftdev_results.txt` (saved on the device) and the session log. Remaining FAILs are
+> external, not crashes: reuters (DataDome bot-wall), bing (results are JS-built; the
+> server shell renders 87 blocks), old.reddit (bot/CSR shell), textboard.org (host does
+> not resolve), w3.org (Cloudflare challenge). example.com's criterion was revised to
+> `documentation examples` (the served body copy; the old `example domain` is title-only)
+> — recorded in tests/benchmark_matrix.md per Rule 4. HOST: csstest 295/295 under
+> ASan+UBSan. SIM: 15/20 — identical pass set (the fieldtest window is now 30s at the
+> simulator's real 50fps; the old 450-frame/9s window cut daringfireball + bbc
+> mid-load). FILES: Source/main.c (task abort,
+> sliced-walk wiring, retry cancel, device matrix, release gate), Source/html/document.c
+> (+.h; resumable walk, opts copy, engine admission, animation bound, walk receipts),
+> Source/core/http_client.c (+.h; deferred releases, release gate), Source/core/pluto_mem.c
+> (tombstones/compaction/16384 slots), Source/render/decoders/svg.c (3s device cap),
+> tests/benchmark_matrix.md, tests/fieldtest_urls.txt. CLEAN RELEASE: `make device` with
+> no DEVICEDEFS — 0 `ftdev`/`fieldtest` strings in build/pdex.elf, MD5
+> 88584a27f7ebc64c8ddf51f81b28476c deployed MD5-matched, boot verified 50fps,
+> stackPeak 656B, heap 39KB, refusals 0, EMPTY crashlog+errorlog; DEVICE LEFT RUNNING IT.
+> APP VERSION: **v1.3.0 (buildNumber 11)** — Source/pdxinfo is the only app-version
+> surface (no in-app version string in C). The buildNumber bump is what makes the
+> sideloaded PDX replace the previous install on hardware.
+>
 > **R66 — MODERN PAGE RENDERING: GOOGLE + BING (2026-11-05) — the duplicate-button /
 > out-of-order / missing-image class is fixed at the root, SIM + DEVICE.** Seven general
 > bugs, all found by comparing the exact server variant against the rendered block stream:

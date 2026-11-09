@@ -166,6 +166,58 @@ static TCPConnection *g_graveTcp = NULL;   /* closed; release after the delay */
 static int g_graveTimer = 0;
 #define GRAVE_FRAMES 120  /* ~4s at 30fps */
 
+/* Deferred SDK connection releases. A cancelled request can be still
+ * connecting; its async open callback settles SECONDS later, possibly
+ * while the NEXT request's TLS session is live. Releasing one TLS object
+ * inside another's session is the receipted hazard (device crash: bing's
+ * cancelled CSS connect settled while the next script's TLS was live;
+ * wild PC + URL text in registers). The callback now closes the settled
+ * connection and parks it here; http_update drains the list only when
+ * the client is completely idle (no request on either lane). */
+#define DEFER_RELEASE_MAX 8
+static TCPConnection *g_deferRelease[DEFER_RELEASE_MAX];
+static int g_deferReleaseN = 0;
+static int g_releaseGate = 1; /* 0 while a render/walk is live */
+
+void http_set_release_gate(int allowed)
+{
+    g_releaseGate = allowed ? 1 : 0;
+}
+
+static void defer_release_conn(TCPConnection *t)
+{
+    if (!t)
+    {
+        return;
+    }
+    if (g_deferReleaseN < DEFER_RELEASE_MAX)
+    {
+        g_deferRelease[g_deferReleaseN++] = t;
+        return;
+    }
+    /* List full: release only when safe, otherwise leave the object to
+     * the SDK (a bounded leak is strictly better than a live-session
+     * release hazard). */
+    if (g_releaseGate && !http_is_loading())
+    {
+        g_pd->network->tcp->release(t);
+    }
+}
+
+static void drain_deferred_releases(void)
+{
+    if (!g_releaseGate || http_is_loading() || g_deferReleaseN == 0)
+    {
+        return;
+    }
+    for (int i = 0; i < g_deferReleaseN; i++)
+    {
+        g_pd->network->tcp->release(g_deferRelease[i]);
+        g_deferRelease[i] = NULL;
+    }
+    g_deferReleaseN = 0;
+}
+
 /* Saved response for the done path (reset() clears live state before the
  * user callback fires — Lua saved locals for the same reason). */
 static int g_savedStatus;
@@ -3562,7 +3614,9 @@ static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
          * test (mirroring tcp_closed_cb's guard) makes any resolve that
          * is not the live attempt's connection stale BY DEFINITION. */
         g_pd->network->tcp->close(conn);
-        g_pd->network->tcp->release(conn);
+        /* NEVER release here: this callback can fire while the NEXT
+         * request's TLS session is live. Park it for the idle drain. */
+        defer_release_conn(conn);
         if (g_orphanTcp == conn)
         {
             g_orphanTcp = NULL;
@@ -4392,7 +4446,7 @@ void http_update(void)
      * remaining window — the graveyard delay alone doesn't cover it. */
     if (g_graveTcp && --g_graveTimer <= 0)
     {
-        if (http_is_loading())
+        if (http_is_loading() || !g_releaseGate)
         {
             /* An active request holds SDK TLS event-loop state; releasing
              * the grave connection now lands in hazard 2. Hold until the
@@ -4405,6 +4459,10 @@ void http_update(void)
             g_graveTcp = NULL;
         }
     }
+
+    /* Deferred releases of cancelled/connecting sockets: only when the
+     * client is completely idle (no live request on either lane). */
+    drain_deferred_releases();
 
     /* A deferred redirect (from a prior tick) opens the next connection now,
      * well after the previous connection was closed by us. All hop state

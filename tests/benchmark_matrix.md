@@ -6,7 +6,7 @@ reported as **N/20** — never as a site-specific claim.
 
 **Method (automated):** `PLUTO_FIELDTEST_AUTOTEST` sim-only seam (main.c) reads
 `tests/fieldtest_urls.txt` at boot, forces Full JS mode (`jsEnabled=2`), navigates each site
-(15s each, one retry on a transient network-error page), then scans the ENTIRE rendered
+(30s each at the simulator's real 50fps, one retry on a transient network-error page), then scans the ENTIRE rendered
 document — blocks **and** table cells — case-insensitively for the site's criterion keyword.
 No criterion = PASS if any text renders (for classes whose content changes every visit).
 
@@ -27,7 +27,7 @@ No criterion = PASS if any text renders (for classes whose content changes every
 | Forum (link list) | lobste.rs | `lobsters` | Community site, moderate markup |
 | Search (big-tech) | bing.com/search?q=playdate | `bing` | Heavy search page |
 | Search (alt) | search.marginalia.nu | `marginalia` | Independent engine, simple HTML |
-| Minimal (example) | example.com | `example domain` | Baseline sanity |
+| Minimal (example) | example.com | `documentation examples` | Baseline sanity |
 | Minimal (classic) | motherfuckingwebsite.com | `motherfucking website` | Pure HTML/CSS |
 | Personal (SPA-lite) | bryanwandrych.com | `bryan` | Client-side-rendered personal site |
 | Blog (aggregator) | daringfireball.net | `daring fireball` | Linked-list blog |
@@ -70,3 +70,35 @@ inline data: scripts is a small, general fix that no single-site test would have
 Also confirmed missing JS builtins (`Set`, `Image`) as a real category of SW5 work.
 
 Raw log: `logs/sim_matrix_baseline_20260920.log`.
+
+## Criterion revision — example.com (2026-11-09)
+
+The served copy of example.com changed: the body now reads "This domain is for
+use in documentation examples without needing permission. Avoid use in
+operations." The old criterion `example domain` exists only in the `<title>`,
+which the content scan (correctly) does not treat as rendered page text. The
+criterion is now `documentation examples` — the actual body copy. Recorded per
+Rule 4; the 10-class coverage is unchanged. Receipted on both simulator and
+physical device (device site 11 renders the documentation-examples paragraph).
+
+## Current score — 15/20 on BOTH targets (2026-11-09)
+
+Simulator (30s per site at its real 50fps): **15/20**. Physical device
+(XS-NR, Full JS, 20/20 sites run with ZERO crashes and EMPTY
+crashlog/errorlog): **15/20** on a clean network; the final all-in-one
+hardware pass hit four 120s WiFi/DNS timeouts (err=-21) on sites that pass
+individually. The remaining five FAILs are external to the browser:
+
+| Site | Verdict | Why |
+|---|---|---|
+| reuters.com | FAIL | DataDome bot-wall; the served shell has no article text |
+| bing.com/search | FAIL | results are JS-built; the server shell renders (87 blocks) |
+| old.reddit.com | FAIL | bot/CSR shell (1 block) |
+| textboard.org | FAIL | host does not resolve for this device/IP |
+| w3.org | FAIL | Cloudflare "Just a moment..." challenge (1 block) |
+
+Every other site renders its criterion on both targets, including the heavy
+class: wikipedia article (236 blocks), gutenberg top (632), daringfireball
+(555), lite.cnn (92), bbc.com (170-192). The device walk is sliced at 500ms
+per frame; the simulator keeps the synchronous reference walk. Raw receipts:
+`tests/logs/` session logs + the device's `ftdev_results.txt`.

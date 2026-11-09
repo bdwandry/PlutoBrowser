@@ -1476,6 +1476,21 @@ struct Walker
      * bridge attaches, so JS-mutation re-walks inherit the record. */
     DomResult *walkDom;
 
+    /* Device watchdog guard (general, every site): the walk is one
+     * synchronous pass inside a single update frame. On hardware a large
+     * page (gutenberg's 100-book table, wikipedia's icon-heavy article)
+     * can exceed the OS's 10s run-loop watchdog. The walk now carries its
+     * own wall-clock deadline: when it expires the walk stops at a clean
+     * block boundary, sets the existing `truncated` marker, and the page
+     * renders the blocks completed so far (the standard "Page too large"
+     * notice) instead of killing the app. Simulator builds keep the full
+     * walk (no deadline) so the sim remains the feature-complete target. */
+    unsigned long walkStartMs;
+    unsigned long walkDeadlineMs; /* soft per-slice deadline (0 = none) */
+    unsigned long walkHardDeadlineMs; /* absolute safety cap (0 = none) */
+    int walkNodes;
+    int walkPaused; /* soft deadline reached; frame stack holds the rest */
+
     int error;
 };
 
@@ -3165,7 +3180,15 @@ static void walk_anim_engage(Walker *w, DocBlock *b, const DomNode *node,
         doc->pendEnd[doc->pendEndCount].node = (void *)node;
         doc->pendEndCount++;
     }
+    /* The registry name is CSS text of arbitrary length; nb is a bounded
+     * receipt label. The old unbounded memcpy overflowed this stack buffer
+     * whenever a page declared a long @keyframes name (device receipt:
+     * bbc.com's image node 830, wild PC + text in the fault address). */
     char nb[25];
+    if (nl >= sizeof(nb))
+    {
+        nl = sizeof(nb) - 1;
+    }
     memcpy(nb, nm, nl);
     nb[nl] = '\0';
     b->animName = doc_arena_str(w, nb);
@@ -6731,6 +6754,18 @@ static void walk_node(Walker *w, const DomNode *node)
     {
         return;
     }
+#if defined(TARGET_PLAYDATE)
+    /* TEMP crash localizer (device): name the exact node around the
+     * receipted bbc wild-PC window. Remove after the root cause lands. */
+    if (w->walkNodes >= 760 && w->walkNodes <= 900)
+    {
+        logger_log("[walktag] %d %s tag=%.24s text=%.24s peak=%u",
+                   w->walkNodes,
+                   node->kind == DOM_TEXT ? "text" : "elem",
+                   node->tag ? node->tag : "",
+                   node->text ? node->text : "", logger_stack_peak());
+    }
+#endif
     if (node->kind == DOM_COMMENT)
     {
         return; /* hydration markers are not renderable content */
@@ -7071,13 +7106,28 @@ static void walk_node(Walker *w, const DomNode *node)
     }
 }
 
-static int walk_children(Walker *w, const DomNode *parent)
+static unsigned long walk_now_ms(void)
+{
+    PlaydateAPI *api = pluto_pd();
+    /* Host suites fake only system->realloc; the clock entry may be NULL.
+     * The synchronous host path uses budget 0, so a 0 clock is harmless. */
+    if (api && api->system && api->system->getCurrentTimeMilliseconds)
+    {
+        return api->system->getCurrentTimeMilliseconds();
+    }
+    return 0;
+}
+
+/* Push a node's children onto the walk frame stack. Split from the pump so
+ * a device slice can stop BETWEEN frames and resume later with the exact
+ * same stack — the resumable walk is what lets a 5000-node wikipedia
+ * article render on hardware without ever monopolizing the run loop. */
+static int walk_push_children(Walker *w, const DomNode *parent)
 {
     if (w->error)
     {
         return -1;
     }
-    int base = w->frameCount; /* re-entrant calls only unwind their own frames */
     if (parent)
     {
         /* SW8 touch point: a stub encountered during descent materializes
@@ -7102,8 +7152,60 @@ static int walk_children(Walker *w, const DomNode *parent)
             }
         }
     }
-    while (!w->error && w->frameCount > base)
+    return 0;
+}
+
+/* Drain the frame stack down to stopAt. budgetMs > 0 is a SLICE: when the
+ * wall clock reaches it the pump parks (walkPaused=1) and returns 1 with
+ * the remaining frames intact. The caller yields to the run loop and calls
+ * walk_pump again next frame. A 60s absolute cap on hardware is the final
+ * containment for a pathological page (the standard truncation marker). */
+static int walk_pump(Walker *w, int stopAt, unsigned long budgetMs)
+{
+    unsigned long now = walk_now_ms();
+    if (w->walkStartMs == 0)
     {
+        w->walkStartMs = now;
+#if defined(TARGET_PLAYDATE)
+        w->walkHardDeadlineMs = now + 60000UL;
+#else
+        w->walkHardDeadlineMs = 0;
+#endif
+    }
+    if (budgetMs > 0)
+    {
+        w->walkDeadlineMs = now + budgetMs;
+        w->walkPaused = 0;
+    }
+    while (!w->error && w->frameCount > stopAt)
+    {
+        /* Watchdog guard + device receipt: the walk's progress must be
+         * visible in pluto.log right before any stall. One line per 64
+         * nodes is cheap on hardware and names the exact node count. */
+        if ((++w->walkNodes & 63) == 0)
+        {
+            now = walk_now_ms();
+            unsigned long elapsed = now - w->walkStartMs;
+            logger_log("[walk] nodes=%d elapsed=%lums frames=%d blocks=%d "
+                       "peak=%u",
+                       w->walkNodes, elapsed, w->frameCount,
+                       w->doc ? w->doc->blockCount : -1,
+                       logger_stack_peak());
+            if (w->walkHardDeadlineMs && now >= w->walkHardDeadlineMs)
+            {
+                w->truncated = 1;
+                logger_log("[walk] HARD CAP 60s hit after %d nodes — "
+                           "truncating at a clean block boundary (page keeps "
+                           "its rendered prefix)",
+                           w->walkNodes);
+                break;
+            }
+            if (budgetMs > 0 && now >= w->walkDeadlineMs)
+            {
+                w->walkPaused = 1;
+                return 1;
+            }
+        }
         WFrame f = w->frames[--w->frameCount];
         if (f.kind == 1)
         {
@@ -7122,6 +7224,16 @@ static int walk_children(Walker *w, const DomNode *parent)
         }
     }
     return w->error ? -1 : 0;
+}
+
+static int walk_children(Walker *w, const DomNode *parent)
+{
+    int base = w->frameCount; /* re-entrant calls only unwind their own frames */
+    if (walk_push_children(w, parent) != 0)
+    {
+        return -1;
+    }
+    return walk_pump(w, base, 0);
 }
 
 /* Phase 7: :target's matcher input — the current page URL's fragment id
@@ -7627,6 +7739,273 @@ static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
     return 0;
 }
 
+/* ── Resumable walk state ───────────────────────────────────────────────────
+ * The walk is the only parse stage that scales with page size (wikipedia:
+ * ~5000 nodes × ~4.5ms/node on the M7 ≈ 22s — two watchdogs' worth). This
+ * state parks the walk between frames: the frame stack, arena, StrBufs and
+ * DOM all live here until the walk completes. Fresh parses and JS-mutation
+ * re-walks share it; document_free aborts a parked state. */
+typedef struct DocWalkState
+{
+    DocParseResult *out;
+    Walker w;
+    DomResult dom;      /* fresh parse: the walked tree (stack result) */
+    TokenizeResult tr;  /* fresh parse: freed at finish/abort */
+    int trValid;
+    int domKeptByBridge;
+    int isRewalk;
+    int mode;
+    int walkStarted;
+    int finished;
+    DocParseOpts optsCopy; /* fresh parse: OWNED copy of the caller's opts.
+                            * The caller's DocParseOpts lives on the render
+                            * task's stack and dies when a slice returns; a
+                            * parked walk that kept the pointer called
+                            * opts->svgDecoder through stack garbage on the
+                            * next slice (device wild-PC receipts). */
+    DocParseOpts rewalkOpts;
+    unsigned long tStart, tTok, tDom, tCss, tJs, tWalk;
+} DocWalkState;
+
+static void walk_state_free_buffers(DocWalkState *st)
+{
+    if (!st)
+    {
+        return;
+    }
+    strbuf_free(&st->w.linkText);
+    strbuf_free(&st->w.preBuf);
+    strbuf_free(&st->w.textareaBuf);
+    strbuf_free(&st->w.mathBuf);
+    for (int i = 0; i < st->w.heapBufCount; i++)
+    {
+        if (st->w.heapBufs[i])
+        {
+            strbuf_free(st->w.heapBufs[i]);
+            PLUTO_FREE(st->w.heapBufs[i]);
+        }
+    }
+    if (st->w.heapBufs)
+    {
+        PLUTO_FREE(st->w.heapBufs);
+    }
+    if (st->w.frames)
+    {
+        PLUTO_FREE(st->w.frames);
+    }
+    if (!st->isRewalk)
+    {
+        if (!st->domKeptByBridge)
+        {
+            dom_free_result(&st->dom);
+        }
+        if (st->trValid)
+        {
+            tokenizer_free_result(&st->tr);
+            st->trValid = 0;
+        }
+    }
+}
+
+/* Abort a parked/partial walk without producing output (navigation). */
+static void walk_state_abort(DocWalkState *st)
+{
+    if (!st)
+    {
+        return;
+    }
+    walk_state_free_buffers(st);
+    doc_arena_free_all(&st->w.arena);
+    PLUTO_FREE(st);
+}
+
+static void walk_state_log_phase(DocWalkState *st, int werr)
+{
+    if (!st)
+    {
+        return;
+    }
+    unsigned long tEnd = walk_now_ms();
+    logger_log("[phase] parse tok=%lums dom=%lums css=%lums js=%lums "
+               "walk=%lums total=%lums nodes=%d blocks=%d trunc=%d err=%d",
+               st->tTok - st->tStart, st->tDom - st->tTok,
+               st->tCss - st->tDom, st->tJs - st->tCss,
+               tEnd - st->tWalk, tEnd - st->tStart, st->w.walkNodes,
+               st->out->blockCount, st->w.truncated, werr);
+}
+
+/* Common finalization after the pump reports completion. Returns the public
+ * parse result code (fresh: 0 even on a contained parse error; rewalk: -1
+ * on failure, matching document_rewalk's contract). */
+static int walk_state_finish(DocWalkState *st)
+{
+    if (!st)
+    {
+        return -1;
+    }
+    DocParseResult *out = st->out;
+    int isRewalk = st->isRewalk;
+    int werr = st->w.error;
+    walk_state_log_phase(st, werr);
+    walk_state_free_buffers(st);
+
+    if (werr || (!isRewalk && !out->rawHtml))
+    {
+        doc_free_walk_output(out);
+        out->parseError = 1;
+        doc_arena_free_all(&st->w.arena);
+        PLUTO_FREE(st);
+        return isRewalk ? -1 : 0;
+    }
+
+    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+    if (!keep)
+    {
+        doc_arena_free_all(&st->w.arena);
+        PLUTO_FREE(st);
+        return -1;
+    }
+    *keep = st->w.arena;
+    st->w.arena.head = NULL;
+    out->_arena = keep;
+    if (!isRewalk)
+    {
+        out->mode = st->mode;
+        out->isReaderMode = 0;
+    }
+    PLUTO_FREE(st);
+    return 0;
+}
+
+/* Pump one slice. Returns 1 = parked (more work), 0 = complete, -1 = error. */
+static int walk_state_pump(DocWalkState *st, unsigned long budgetMs)
+{
+    if (!st)
+    {
+        return -1;
+    }
+    if (!st->walkStarted)
+    {
+        const DomNode *root = st->isRewalk
+                                  ? ((DomResult *)st->out->_dom)->root
+                                  : st->dom.root;
+        if (walk_push_children(&st->w, root) != 0)
+        {
+            return -1;
+        }
+        st->walkStarted = 1;
+    }
+    int rc = walk_pump(&st->w, 0, budgetMs);
+    if (rc > 0)
+    {
+        return 1;
+    }
+    if (rc < 0)
+    {
+        return -1;
+    }
+    if (!st->finished)
+    {
+        walker_finish(&st->w);
+        st->finished = 1;
+        if (st->w.error)
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static DocWalkState *walk_state_begin_fresh(DocParseResult *out, int mode,
+                                            const DocParseOpts *opts,
+                                            const DomResult *dom,
+                                            int domKeptByBridge,
+                                            const TokenizeResult *tr,
+                                            unsigned long tStart,
+                                            unsigned long tTok,
+                                            unsigned long tDom,
+                                            unsigned long tCss,
+                                            unsigned long tJs,
+                                            unsigned long tWalk)
+{
+    DocWalkState *st = (DocWalkState *)PLUTO_MALLOC(sizeof(DocWalkState));
+    if (!st)
+    {
+        return NULL;
+    }
+    memset(st, 0, sizeof(*st));
+    st->out = out;
+    st->mode = mode;
+    st->domKeptByBridge = domKeptByBridge;
+    st->dom = *dom;
+    st->tr = *tr;
+    st->trValid = 1;
+    st->tStart = tStart;
+    st->tTok = tTok;
+    st->tDom = tDom;
+    st->tCss = tCss;
+    st->tJs = tJs;
+    st->tWalk = tWalk;
+
+    if (opts)
+    {
+        st->optsCopy = *opts;
+    }
+    else
+    {
+        memset(&st->optsCopy, 0, sizeof(st->optsCopy));
+    }
+
+    Walker *w = &st->w;
+    w->doc = out;
+    w->opts = &st->optsCopy;
+    w->formAction = NULL;
+    w->walkDom = out->_dom ? (DomResult *)out->_dom : &st->dom;
+    w->formMethod = doc_arena_str_lower(w, "get");
+    w->suppressNoscript = out->suppressNoscript;
+    if (strbuf_init(&w->linkText) || strbuf_init(&w->preBuf) ||
+        strbuf_init(&w->textareaBuf) || strbuf_init(&w->mathBuf))
+    {
+        st->w.error = 1;
+    }
+    css_match_cache_bump();
+    walk_set_target(out);
+    return st;
+}
+
+static DocWalkState *walk_state_begin_rewalk(DocParseResult *doc)
+{
+    DocWalkState *st = (DocWalkState *)PLUTO_MALLOC(sizeof(DocWalkState));
+    if (!st)
+    {
+        return NULL;
+    }
+    memset(st, 0, sizeof(*st));
+    st->out = doc;
+    st->isRewalk = 1;
+    st->tStart = st->tTok = st->tDom = st->tCss = st->tJs = st->tWalk =
+        walk_now_ms();
+    st->rewalkOpts.svgDecoder = doc->svgDecoder;
+    st->rewalkOpts.detailsOpen = doc->detailsOpen;
+    st->rewalkOpts.detailsOpenCount = doc->detailsOpenCount;
+
+    Walker *w = &st->w;
+    w->doc = doc;
+    w->opts = &st->rewalkOpts;
+    w->formAction = NULL;
+    w->walkDom = (DomResult *)doc->_dom;
+    w->formMethod = doc_arena_str_lower(w, "get");
+    w->suppressNoscript = doc->suppressNoscript;
+    if (strbuf_init(&w->linkText) || strbuf_init(&w->preBuf) ||
+        strbuf_init(&w->textareaBuf) || strbuf_init(&w->mathBuf))
+    {
+        st->w.error = 1;
+    }
+    css_match_cache_bump();
+    walk_set_target(doc);
+    return st;
+}
+
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out)
 {
@@ -7634,11 +8013,20 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
                              NULL, out);
 }
 
-int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
-                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
-                      struct JsBridge **outBridge, DocParseResult *out)
+static int document_parse_ex_budget(const char *htmlString,
+                                    const char *baseUrl, int mode,
+                                    const DocParseOpts *opts,
+                                    DocScriptPolicy scriptPolicy,
+                                    struct JsBridge **outBridge,
+                                    DocParseResult *out,
+                                    unsigned long budgetMs)
 {
     logger_stack_touch();
+    /* Phase receipts: one line per page names the stage that costs the
+     * device its watchdog margin (fetch is outside this call). */
+    unsigned long tStart = walk_now_ms();
+    unsigned long tTok = tStart, tDom = tStart, tCss = tStart;
+    unsigned long tJs = tStart, tWalk = tStart;
     /* Caller-provided Full-mode ext table (html/jsext results, attached by
      * main.c's render task BEFORE this call) must survive the zeroing below
      * — js_doc_attach executes doc->extScripts at their page positions, and
@@ -7687,6 +8075,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     {
         return -1;
     }
+    tTok = walk_now_ms();
     snprintf(out->title, sizeof(out->title), "%s",
              tr.pageTitle[0] ? tr.pageTitle : "Web Page");
 
@@ -7784,6 +8173,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         tokenizer_free_result(&tr);
         return -1;
     }
+    tDom = walk_now_ms();
 
     /* 4b. Inline <script> execution (jsbridge / muJS). DOC_SCRIPT_OFF is the
      * historical path: scripts stay skipped by the tokenizer and no engine is
@@ -7836,12 +8226,29 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
             /* engine alloc failure: page renders without CSS (graceful) */
         }
     }
+    tCss = walk_now_ms();
     /* <noscript> policy follows the script policy (browser "scripting flag"):
      * any mode that runs an engine hides noscript fallback content; Off and
      * reader mode keep rendering it. document_rewalk reads the same flag so
      * JS-mutation re-renders stay consistent. */
     out->suppressNoscript = (scriptPolicy != DOC_SCRIPT_OFF) ? 1 : 0;
-    if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
+    /* Device engine admission (general, every site): the JS machines need
+     * roughly a megabyte of working heap. Under budget pressure the attach
+     * path can be handed refused allocations and fault (device receipt:
+     * w3.org's Cloudflare page left the tracked live near the budget, then
+     * lite.cnn's engine attach overflowed the task stack). Render the
+     * server HTML without JS instead of crashing. Simulator builds have no
+     * budget gate, so headroom is effectively unlimited there. */
+    if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml &&
+        pluto_mem_headroom_bytes() < 900UL * 1024UL)
+    {
+        out->jsErrors = 1;
+        snprintf(out->jsLastError, sizeof(out->jsLastError),
+                 "engine skipped: low memory");
+        logger_log("[js] engine skipped: headroom %luKB < 900KB",
+                   pluto_mem_headroom_bytes() / 1024);
+    }
+    else if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
     {
         /* Promote the stack DomResult to the heap so it can outlive this
          * function (the bridge and click dispatch need the live tree). */
@@ -7898,93 +8305,72 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         }
     }
 
-    Walker w;
-    memset(&w, 0, sizeof(w));
-    w.doc = out;
-    w.opts = opts;
-    w.formAction = NULL;
-    /* Phase 10: the walk's DomResult instance — the promoted heap copy
-     * when a bridge attached (so the completion map lands where the
-     * re-walks consult it), the stack result otherwise. */
-    w.walkDom = out->_dom ? (DomResult *)out->_dom : &dom;
-    w.formMethod = doc_arena_str_lower(&w, "get");
-    /* Browser parity: a page whose engine attached (or that the tokenizer
-     * treated as scripting) hides its <noscript> fallback content. DOC_SCRIPT_OFF
-     * keeps the historical render-it behavior (JavaScript setting Off — the
-     * warning is genuinely useful there). */
-    w.suppressNoscript = out->suppressNoscript;
-    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
-                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
-    int werr = sbFail;
-
-    /* formMethod default: "get" (reference state.formMethod = "get"). */
-    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
-    walk_set_target(out); /* Phase 7: :target fragment per walk */
-    if (!werr && walk_children(&w, dom.root) != 0)
+    tJs = walk_now_ms();
+    tWalk = walk_now_ms();
+    DocWalkState *st = walk_state_begin_fresh(
+        out, mode, opts, &dom, domKeptByBridge, &tr, tStart, tTok, tDom, tCss,
+        tJs, tWalk);
+    if (!st)
     {
-        werr = 1;
-    }
-    if (!werr)
-    {
-        walker_finish(&w);
-        werr = w.error;
-    }
-
-    /* Walker teardown (buffers + frames; arena kept on success). */
-    strbuf_free(&w.linkText);
-    strbuf_free(&w.preBuf);
-    strbuf_free(&w.textareaBuf);
-    strbuf_free(&w.mathBuf);
-    for (int i = 0; i < w.heapBufCount; i++)
-    {
-        if (w.heapBufs[i])
+        if (!domKeptByBridge)
         {
-            strbuf_free(w.heapBufs[i]);
-            PLUTO_FREE(w.heapBufs[i]);
+            dom_free_result(&dom);
         }
-    }
-    if (w.heapBufs)
-    {
-        PLUTO_FREE(w.heapBufs);
-    }
-    if (w.frames)
-    {
-        PLUTO_FREE(w.frames);
-    }
-    /* The heap DomResult is owned by out->_dom (freed via document_free);
-     * only the plain parse path frees the stack copy here. */
-    if (!domKeptByBridge)
-    {
-        dom_free_result(&dom);
-    }
-    tokenizer_free_result(&tr);
-
-    out->mode = mode;
-    out->isReaderMode = 0;
-
-    if (werr || !out->rawHtml)
-    {
-        /* The reference throws out of Document.parse (bare <li> etc); the
-         * caller gets no doc. Mirror with parseError + an emptied result. */
-        doc_free_walk_output(out);
-        out->parseError = 1;
-        /* arena still holds objects; free it now */
-        doc_arena_free_all(&w.arena);
-        return 0;
-    }
-
-    /* Keep the arena (blocks/links/strings live in it). */
-    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
-    if (!keep)
-    {
-        doc_free_walk_output(out);
-        doc_arena_free_all(&w.arena);
+        tokenizer_free_result(&tr);
         return -1;
     }
-    *keep = w.arena;
-    w.arena.head = NULL;
-    out->_arena = keep;
-    return 0;
+    int walkRc = walk_state_pump(st, budgetMs);
+    if (walkRc > 0)
+    {
+        /* Parked: the frame stack + arena + DOM live in the state; the
+         * caller (render task) yields and resumes next frame. */
+        out->_walkState = st;
+        return 1;
+    }
+    if (walkRc < 0)
+    {
+        walk_state_abort(st);
+        return -1;
+    }
+    return walk_state_finish(st);
+}
+
+int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
+                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
+                      struct JsBridge **outBridge, DocParseResult *out)
+{
+    return document_parse_ex_budget(htmlString, baseUrl, mode, opts,
+                                    scriptPolicy, outBridge, out, 0);
+}
+
+int document_parse_ex_sliced(const char *htmlString, const char *baseUrl,
+                             int mode, const DocParseOpts *opts,
+                             DocScriptPolicy scriptPolicy, DocParseResult *out,
+                             unsigned long budgetMs)
+{
+    return document_parse_ex_budget(htmlString, baseUrl, mode, opts,
+                                    scriptPolicy, NULL, out, budgetMs);
+}
+
+int document_parse_resume(DocParseResult *doc, unsigned long budgetMs)
+{
+    if (!doc || !doc->_walkState)
+    {
+        return 0;
+    }
+    DocWalkState *st = (DocWalkState *)doc->_walkState;
+    int rc = walk_state_pump(st, budgetMs);
+    if (rc > 0)
+    {
+        return 1;
+    }
+    doc->_walkState = NULL;
+    if (rc < 0)
+    {
+        walk_state_abort(st);
+        return -1;
+    }
+    return walk_state_finish(st);
 }
 
 /* Re-run ONLY the element walker over a (possibly JS-mutated) live DOM.
@@ -7998,13 +8384,17 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
  * set in play. */
 int g_rewalkTestForceWalkError = 0;
 #endif
-int document_rewalk(DocParseResult *doc)
+int document_rewalk_sliced(DocParseResult *doc, unsigned long budgetMs)
 {
     if (!doc || !doc->_dom)
     {
         return -1;
     }
-    DomResult *dom = (DomResult *)doc->_dom;
+    if (doc->_walkState)
+    {
+        /* Resume a previously parked re-walk. */
+        return document_parse_resume(doc, budgetMs);
+    }
 
     /* Drop the previous walk output + its arena. Layout must not hold
      * borrowed strings across this call (browser clears it first). */
@@ -8022,91 +8412,38 @@ int document_rewalk(DocParseResult *doc)
      * about to run (per-(node,name) dedupe persists on the DOM). */
     doc->pendEndCount = 0;
 
-    Walker w;
-    memset(&w, 0, sizeof(w));
-    w.doc = doc;
-    DocParseOpts rewalkOpts;
-    memset(&rewalkOpts, 0, sizeof(rewalkOpts));
-    rewalkOpts.svgDecoder = doc->svgDecoder;
-    rewalkOpts.detailsOpen = doc->detailsOpen;
-    rewalkOpts.detailsOpenCount = doc->detailsOpenCount;
-    w.opts = &rewalkOpts;
-    w.walkDom = dom; /* Phase 10: the live heap DomResult */
-    w.formAction = NULL;
-    w.formMethod = doc_arena_str_lower(&w, "get");
-    w.suppressNoscript = doc->suppressNoscript; /* keep the parse policy */
-    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
-                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
-    int werr = sbFail;
-    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
-    walk_set_target(doc); /* Phase 7: :target fragment per walk */
-    if (!werr && walk_children(&w, dom->root) != 0)
+    DocWalkState *st = walk_state_begin_rewalk(doc);
+    if (!st)
     {
-        werr = 1;
+        doc->parseError = 1;
+        return -1;
     }
-    if (!werr)
+    int rc = walk_state_pump(st, budgetMs);
+    if (rc > 0)
     {
-        walker_finish(&w);
-        werr = w.error;
+        doc->_walkState = st;
+        return 1;
     }
-
-    strbuf_free(&w.linkText);
-    strbuf_free(&w.preBuf);
-    strbuf_free(&w.textareaBuf);
-    strbuf_free(&w.mathBuf);
-    for (int i = 0; i < w.heapBufCount; i++)
+    if (rc < 0)
     {
-        if (w.heapBufs[i])
-        {
-            strbuf_free(w.heapBufs[i]);
-            PLUTO_FREE(w.heapBufs[i]);
-        }
+        walk_state_abort(st);
+        doc->parseError = 1;
+        return -1;
     }
-    if (w.heapBufs)
-    {
-        PLUTO_FREE(w.heapBufs);
-    }
-    if (w.frames)
-    {
-        PLUTO_FREE(w.frames);
-    }
-
 #if defined(PLUTO_REWALK_OOM_AUTOTEST)
     if (g_rewalkTestForceWalkError)
     {
         /* Test seam engagement point: the walk above may have built
          * partial blocks — exactly the production mid-refusal shape. */
-        werr = 1;
+        st->w.error = 1;
     }
 #endif
-    if (werr)
-    {
-        /* R59 (Wikipedia device crash, 2026-10-18): this branch used to
-         * return 0 with doc->blocks still holding the PARTIAL walk output
-         * whose strings die with the arena freed right below — the
-         * renderer then went on to LAYOUT over that half-freed state and
-         * break_lines dereferenced reused arena memory as a block's inline
-         * array (pc=break_lines+0x4e, mmfar=0x0C00, heap in a denied
-         * strait at 13.4MB on device). Free the partial HEAP walk output
-         * via doc_free_walk_output (the arrays own no arena data), free
-         * the arena, and REPORT the failure so render_step routes to the
-         * error screen instead of layout. */
-        doc_free_walk_output(doc);
-        doc->parseError = 1;
-        doc_arena_free_all(&w.arena);
-        return -1;
-    }
+    return walk_state_finish(st);
+}
 
-    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
-    if (!keep)
-    {
-        doc_arena_free_all(&w.arena);
-        return -1;
-    }
-    *keep = w.arena;
-    w.arena.head = NULL;
-    doc->_arena = keep;
-    return 0;
+int document_rewalk(DocParseResult *doc)
+{
+    return document_rewalk_sliced(doc, 0);
 }
 
 /* ── Phase 10: transition lane — transition-arm consult for a live node ───
@@ -8170,6 +8507,13 @@ void document_free(DocParseResult *doc)
     if (!doc)
     {
         return;
+    }
+    if (doc->_walkState)
+    {
+        /* A parked sliced walk (navigation/teardown mid-render): its
+         * frame stack, arena and partial output die here. */
+        walk_state_abort((DocWalkState *)doc->_walkState);
+        doc->_walkState = NULL;
     }
     doc_free_walk_output(doc);
     if (doc->rawHtml)

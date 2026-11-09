@@ -15,7 +15,7 @@
 0 https://lobste.rs/ | lobsters
 0 https://www.bing.com/search?q=playdate | bing
 0 https://search.marginalia.nu/search?query=playdate | marginalia
-0 https://example.com/ | example domain
+0 https://example.com/ | documentation examples
 0 https://motherfuckingwebsite.com/ | motherfucking website
 0 https://bryanwandrych.com/ | bryan
 0 https://daringfireball.net/ | daring fireball

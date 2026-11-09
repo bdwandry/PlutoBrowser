@@ -500,6 +500,41 @@ int main(void)
         free_doc(d);
     }
 
+    /* 100. Optional live-page regression (diagnostic): parse a saved HTML
+     * file under ASan. Set PLUTO_HTML_FILE=/path/page.html. The walk runs
+     * synchronously (host budget 0); any stack/heap overflow is reported
+     * with a precise frame instead of a device wild-PC. */
+    {
+        const char *path = getenv("PLUTO_HTML_FILE");
+        if (path && path[0])
+        {
+            FILE *f = fopen(path, "rb");
+            if (f)
+            {
+                fseek(f, 0, SEEK_END);
+                long n = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                char *buf = (char *)malloc((size_t)n + 1);
+                if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n)
+                {
+                    buf[n] = '\0';
+                    DocParseResult *d = calloc(1, sizeof(DocParseResult));
+                    if (d)
+                    {
+                        document_parse(buf, "https://www.bbc.com/news",
+                                       MODE_RAW_HTML, NULL, d);
+                        printf("live-file parse: blocks=%d links=%d title='%s'\n",
+                               d->blockCount, d->linkCount, d->title);
+                        document_free(d);
+                        free(d);
+                    }
+                }
+                free(buf);
+                fclose(f);
+            }
+        }
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -168,6 +168,12 @@ void http_set_identity_encoding(int on);
 /* Cancel any in-flight request (safe when idle). */
 void http_cancel(void);
 
+/* R67: gate SDK connection releases while a page is still rendering.
+ * Releasing a TLS object during the sliced walk was the receipted bbc
+ * wild-PC window (the connection's SDK event-loop state outlives the
+ * open callback). main.c sets this 1 only when no render task is live. */
+void http_set_release_gate(int allowed);
+
 /* 1 while a request is connecting/reading. */
 int http_is_loading(void);
 

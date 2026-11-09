@@ -8,6 +8,7 @@
  */
 #include "pluto_mem.h"
 #include <string.h>
+#include <stdint.h>
 #include "logger.h"
 
 /* Call the SDK allocator DIRECTLY — never via main.c's pluto_realloc (which
@@ -34,12 +35,15 @@ static unsigned long mem_budget = 0; /* 0 = telemetry only */
  * delta (n - old_n); free(ptr, 0) subtracts the pointer's tracked size.
  * A tiny open-addressing table keyed by pointer holds tracked sizes.
  * Overhead: 24B entry per live allocation, table sized for our scale. */
-#define MEMTRACK_SLOTS 8192 /* R64: 2048 saturated on long-lived page churn
-                             * (wikipedia receipted: track table full + the
-                             * untracked-alloc drift walked the counter to the
-                             * 8MB budget with frees unable to subtract — the
-                             * gate then refused everything, incl. the image
-                             * lane's own URL mallocs). 96KB BSS. */
+#define MEMTRACK_SLOTS 16384 /* R67: 8192 reached 7422 live entries (90%
+                              * load) on the 20-site device matrix; linear
+                              * probing with an 8-probe window then missed
+                              * entries, frees could not subtract, and the
+                              * budget drifted above 6.5MB. 16384 slots keeps
+                              * the worst receipted page at ~45% load; the
+                              * probe window is 32 and page boundaries
+                              * compact tombstones. 128KB BSS. */
+#define MEMTRACK_PROBE 32
 
 typedef struct
 {
@@ -47,7 +51,18 @@ typedef struct
     size_t size;
 } MemTrack;
 
+/* Open-addressing deletion tombstone. Clearing a slot to NULL broke the
+ * probe chain for every entry inserted after it: those pointers became
+ * unfindable, their frees could not subtract, and the live counter walked
+ * above the 6.5MB budget — the receipted device endgame (w3.org leaves
+ * 6.8MB tracked, lite.cnn's engine attach then runs with refusals and
+ * overflows the task stack). Tombstones keep the chain intact;
+ * pluto_mem_resync_live compacts them away at every page boundary. */
+#define MEMTRACK_TOMBSTONE ((void *)(uintptr_t)-1)
+
 static MemTrack track[MEMTRACK_SLOTS];
+/* Compaction scratch (BSS, page-boundary only — never on a task stack). */
+static MemTrack trackCompact[MEMTRACK_SLOTS];
 
 static unsigned track_slot(const void *p)
 {
@@ -58,7 +73,7 @@ static unsigned track_slot(const void *p)
 static MemTrack *track_find(const void *p)
 {
     unsigned i = track_slot(p);
-    for (int probe = 0; probe < 8; probe++)
+    for (int probe = 0; probe < MEMTRACK_PROBE; probe++)
     {
         MemTrack *e = &track[(i + probe) & (MEMTRACK_SLOTS - 1)];
         if (e->ptr == p)
@@ -69,6 +84,7 @@ static MemTrack *track_find(const void *p)
         {
             return NULL; /* empty slot stops the probe chain */
         }
+        /* Tombstone: the chain continues past it. */
     }
     return NULL; /* not found (foreign pointer: host tests, stack, etc.) */
 }
@@ -76,15 +92,30 @@ static MemTrack *track_find(const void *p)
 static MemTrack *track_insert(void *p, size_t size)
 {
     unsigned i = track_slot(p);
-    for (int probe = 0; probe < 8; probe++)
+    MemTrack *tomb = NULL;
+    for (int probe = 0; probe < MEMTRACK_PROBE; probe++)
     {
         MemTrack *e = &track[(i + probe) & (MEMTRACK_SLOTS - 1)];
         if (e->ptr == NULL)
         {
+            if (tomb)
+            {
+                e = tomb; /* reuse the first deleted slot on this chain */
+            }
             e->ptr = p;
             e->size = size;
             return e;
         }
+        if (e->ptr == MEMTRACK_TOMBSTONE && !tomb)
+        {
+            tomb = e;
+        }
+    }
+    if (tomb)
+    {
+        tomb->ptr = p;
+        tomb->size = size;
+        return tomb;
     }
     return NULL; /* table pressure: skip tracking this block (still counted) */
 }
@@ -94,7 +125,7 @@ static void track_remove(const void *p)
     MemTrack *e = track_find(p);
     if (e)
     {
-        e->ptr = NULL;
+        e->ptr = MEMTRACK_TOMBSTONE;
         e->size = 0;
     }
 }
@@ -231,12 +262,50 @@ void *pluto_mem_calloc(size_t n, size_t sz)
  * after an engine flip (device: "alloc failed" -> DoubleError -> stack
  * overflow in task gameTask -> watchdog). Direct boot never crossed a page
  * boundary with big drift, which is why it always survived. */
+/* Rebuild the track table without tombstones. Full-table probing (not the
+ * hot-path 32-probe window) so every live entry survives the rebuild even
+ * at high load. Called only at page boundaries. */
+static void track_compact(void)
+{
+    memset(trackCompact, 0, sizeof(trackCompact));
+    for (int i = 0; i < MEMTRACK_SLOTS; i++)
+    {
+        MemTrack *e = &track[i];
+        if (!e->ptr || e->ptr == MEMTRACK_TOMBSTONE)
+        {
+            continue;
+        }
+        unsigned h = track_slot(e->ptr);
+        int placed = 0;
+        for (int probe = 0; probe < MEMTRACK_SLOTS; probe++)
+        {
+            MemTrack *d = &trackCompact[(h + (unsigned)probe) &
+                                        (MEMTRACK_SLOTS - 1)];
+            if (d->ptr == NULL)
+            {
+                d->ptr = e->ptr;
+                d->size = e->size;
+                placed = 1;
+                break;
+            }
+        }
+        if (!placed)
+        {
+            /* Impossible unless the table is genuinely full; keep the
+             * original entry rather than silently losing it. */
+            trackCompact[i] = *e;
+        }
+    }
+    memcpy(track, trackCompact, sizeof(track));
+}
+
 void pluto_mem_resync_live(void)
 {
+    track_compact(); /* page boundary: drop tombstones, restore probes */
     unsigned long sum = 0;
     for (int i = 0; i < MEMTRACK_SLOTS; i++)
     {
-        if (track[i].ptr)
+        if (track[i].ptr && track[i].ptr != MEMTRACK_TOMBSTONE)
         {
             sum += track[i].size;
         }
@@ -304,7 +373,7 @@ void pluto_mem_dump_live(void (*logfn)(const char *fmt, ...))
     }
     for (int i = 0; i < MEMTRACK_SLOTS; i++)
     {
-        if (!track[i].ptr)
+        if (!track[i].ptr || track[i].ptr == MEMTRACK_TOMBSTONE)
         {
             continue;
         }
