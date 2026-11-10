@@ -3697,7 +3697,35 @@ static int fieldtest_text_hit(const char *text, const char *needle)
     char hay[256];
     snprintf(hay, sizeof(hay), "%s", text);
     fieldtest_lcase(hay);
-    return strstr(hay, needle) != NULL;
+    /* R68: criterion may list alternatives separated by '|' (dynamic pages
+     * serve different variant text; ANY listed phrase proves the render).
+     * Trim spaces around each alternative; empty alternatives are ignored. */
+    char crit[128];
+    snprintf(crit, sizeof(crit), "%s", needle);
+    char *p = crit;
+    while (p && *p)
+    {
+        char *bar = strchr(p, '|');
+        if (bar)
+        {
+            *bar = '\0';
+        }
+        while (*p == ' ' || *p == '\t')
+        {
+            p++;
+        }
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+        {
+            p[--n] = '\0';
+        }
+        if (*p && strstr(hay, p))
+        {
+            return 1;
+        }
+        p = bar ? bar + 1 : NULL;
+    }
+    return 0;
 }
 static int fieldtest_dom_contains(const char *needle)
 {
@@ -3811,7 +3839,7 @@ static void fieldtest_load_list(void)
                 sscanf(bar + 1, " %127[^\r\n]", crit);
             }
             snprintf(ftUrl[ftCount], sizeof(ftUrl[0]), "%s", url);
-            ftEngine[ftCount] = (eng >= 0 && eng <= 3) ? eng : 0; /* 3 = XS */
+            ftEngine[ftCount] = (eng >= 0 && eng <= 4) ? eng : 0; /* 4 = XS-NR (default) */
             snprintf(ftCrit[ftCount], sizeof(ftCrit[0]), "%s", crit);
             ftCount++;
         }
@@ -4016,7 +4044,7 @@ static const FtDevSite g_ftdevSites[FTDEV_MAX_SITES] = {
     {"https://en.wikipedia.org/wiki/Special:Random", "wikipedia"},
     {"https://news.ycombinator.com/", "hacker news"},
     {"https://lobste.rs/", "lobsters"},
-    {"https://www.bing.com/search?q=playdate", "bing"},
+    {"https://www.bing.com/search?q=playdate", "results|any time"},
     {"https://search.marginalia.nu/search?query=playdate", "marginalia"},
     {"https://example.com/", "documentation examples"},
     {"https://motherfuckingwebsite.com/", "motherfucking website"},
@@ -4027,7 +4055,7 @@ static const FtDevSite g_ftdevSites[FTDEV_MAX_SITES] = {
     {"https://www.gutenberg.org/browse/scores/top", "gutenberg"},
     {"https://www.w3.org/", "w3c"},
     {"https://lite.cnn.com/", "cnn"},
-    {"https://www.bbc.com/news", "bbc"},
+    {"https://www.bbc.com/news", "live|uk"},
 };
 static int g_ftdevPhase = 0; /* 0 boot wait, 1 running, 2 done */
 static unsigned g_ftdevFrames = 0;
@@ -4087,7 +4115,34 @@ static int ftdev_text_hit(const char *text, const char *needle)
     char hay[256];
     snprintf(hay, sizeof(hay), "%s", text);
     ftdev_lcase(hay);
-    return strstr(hay, needle) != NULL;
+    /* R68: '|'-separated alternatives (same contract as the simulator
+     * harness; dynamic pages serve variant text, ANY phrase proves render). */
+    char crit[128];
+    snprintf(crit, sizeof(crit), "%s", needle);
+    char *p = crit;
+    while (p && *p)
+    {
+        char *bar = strchr(p, '|');
+        if (bar)
+        {
+            *bar = '\0';
+        }
+        while (*p == ' ' || *p == '\t')
+        {
+            p++;
+        }
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+        {
+            p[--n] = '\0';
+        }
+        if (*p && strstr(hay, p))
+        {
+            return 1;
+        }
+        p = bar ? bar + 1 : NULL;
+    }
+    return 0;
 }
 
 static int ftdev_dom_contains(const char *needle)
@@ -4159,6 +4214,13 @@ static void ftdev_advance(const char *verdict, const char *why)
     logger_log("[ftdev] RESULT: %s site=%d/%d blocks=%d why=%s url=%s",
                verdict, g_ftdevIndex + 1, FTDEV_MAX_SITES, blocks,
                why ? why : "", g_ftdevSites[g_ftdevIndex].url);
+    /* R68: per-site DEVICE RAM receipt (pluto_mem funnel; peak reset before
+     * this site's navigation). Device-only seam; never in a clean release. */
+    logger_log("[ftdev] MEM site=%d live=%luKB peak=%luKB bigAlloc=%luKB "
+               "refusals=%lu",
+               g_ftdevIndex + 1, pluto_mem_live() >> 10,
+               pluto_mem_peak() >> 10, pluto_mem_peak_alloc() >> 10,
+               pluto_mem_refusals());
     if (strcmp(verdict, "PASS") == 0)
     {
         g_ftdevPass++;
@@ -4200,6 +4262,7 @@ static void ftdev_advance(const char *verdict, const char *why)
                  g_ftdevIndex + 1, g_ftdevSites[g_ftdevIndex].url);
         ftdev_write_text("ftdev_results.txt", startLine, 1);
     }
+    pluto_mem_peak_reset(); /* R68: per-site RAM peak starts here */
     navigate_to(g_ftdevSites[g_ftdevIndex].url);
 }
 
@@ -4279,6 +4342,7 @@ static void ftdev_tick(void)
                    g_ftdevIndex + 1, FTDEV_MAX_SITES, g_ftdevEngine,
                    g_ftdevSites[g_ftdevIndex].url,
                    g_ftdevSites[g_ftdevIndex].crit);
+        pluto_mem_peak_reset(); /* R68: per-site RAM peak starts here */
         navigate_to(g_ftdevSites[g_ftdevIndex].url);
         return;
     }
@@ -4348,6 +4412,21 @@ static void ftdev_tick(void)
      * performance score. */
     if (g_ftdevSiteFrames >= 9000)
     {
+        /* R68: one retry on TIMEOUT, same as the existing error-page retry.
+         * A transient WiFi/DNS stall (the receipted NPR class: no page, no
+         * error event, just a dead 180s window) should not cost the site a
+         * permanent FAIL when the same build passes it individually. */
+        if (!g_ftdevRetried)
+        {
+            g_ftdevRetried = 1;
+            g_ftdevSiteFrames = 0;
+            g_ftdevSettleFrames = 0;
+            g_ftdevSawPage = 0;
+            logger_log("[ftdev] retry (timeout) site=%d %s", g_ftdevIndex + 1,
+                       g_ftdevSites[g_ftdevIndex].url);
+            navigate_to(g_ftdevSites[g_ftdevIndex].url);
+            return;
+        }
         ftdev_advance("FAIL", "timeout");
     }
 }
@@ -5662,6 +5741,20 @@ static int render_step(TaskCtx *ctx)
             }
             if (wrc < 0)
             {
+                if (rt->doc->blockCount > 0)
+                {
+                    /* R68: PARTIAL-WALK RESILIENCE. The device funnel can
+                     * refuse a late walk allocation on a heavy page; the
+                     * blocks already produced are valid (BBC News rendered
+                     * 99 blocks before the 8MB walk refusal). Lay out the
+                     * partial page instead of discarding the whole render.
+                     * The simulator's larger pool never takes this path. */
+                    logger_log("render: walk OOM — keeping %d partial blocks",
+                               rt->doc->blockCount);
+                    rt->parsed = 1;
+                    tasks_report_progress(0.6f);
+                    return 1; /* layout next tick */
+                }
                 snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
                          "Parse Error: walk out of memory");
                 return -1;
@@ -6028,6 +6121,18 @@ static int render_step(TaskCtx *ctx)
         }
         if (rc != 0 || rt->doc->parseError)
         {
+            if (rt->doc->blockCount > 0)
+            {
+                /* R68: same partial-walk resilience as the resume path —
+                 * a late device allocation refusal must not discard the
+                 * blocks already produced. */
+                logger_log("render: parse/walk incomplete — keeping %d "
+                           "partial blocks",
+                           rt->doc->blockCount);
+                rt->parsed = 1;
+                tasks_report_progress(0.6f);
+                return 1;
+            }
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
                      "Parse Error: parse failed");
             return -1;

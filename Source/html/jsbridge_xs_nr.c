@@ -823,6 +823,11 @@ static void xs_worker_terminate(xsMachine *the);
  * (see jsbridge_internal.h); delegates to the shared core in jsbridge.c. */
 static void xs_dyn_request(xsMachine *the);
 
+/* C4: engine-owned fetch shim — installed at ENGINE INIT (see xs_init).
+ * The source and runner live with the shim implementation below; the
+ * forward declaration lets init install it before the page render. */
+static void xs_run_fetch_shim(JsBridge *b, XsState *st, int index);
+
 /* ── accessors (this = element wrapper) ────────────────── */
 
 static void xs_el_get_tagName(xsMachine *the)
@@ -6880,6 +6885,19 @@ void xs_ladder_report(unsigned long wantBytes, int accepted)
 static unsigned long xs_mount_now_ms(void); /* defined below the callback */
 #endif
 
+/* R68: wall-clock budget for ONE script's parse+codegen+run. The SDK
+ * run-loop watchdog hard-resets the app after 10s without an update()
+ * return; the engine's op meter alone is not a wall-clock bound (Bing's
+ * 35KB shared module ran 530K metered ops and still exceeded 10s on the
+ * M7 — errorlog 2026-11-10 02:18, "Run loop stalled"). The meter callback
+ * runs every XS_METER_STEP ops, so sampling the SDK clock there bounds
+ * the whole bracket. An abort is contained by xs_parse_and_run's
+ * HostExit bracket (engine reset, page keeps its server shell). Mounts
+ * are exempt: their own resumable burst budget owns the clock. */
+#define XS_SCRIPT_WALL_BUDGET_MS 5000UL
+static unsigned long g_scriptRunStartMs = 0;
+static volatile int g_scriptRunActive = 0;
+
 static txBoolean xs_meter_callback(txMachine *the, txU8 count)
 {
 #if defined(TARGET_PLAYDATE) || defined(TARGET_SIMULATOR)
@@ -6904,6 +6922,31 @@ static txBoolean xs_meter_callback(txMachine *the, txU8 count)
                                   : NULL)
                                   ? (int)(((XsState *)((JsBridge *)xsGetContext(the))->implState)->mount.parked)
                                   : -1));
+    }
+    /* R68: one-script wall-clock bound (see g_scriptRunActive). Sampled
+     * every 64 callbacks (≈32K ops) — the SDK ms clock is not free, and
+     * 32K ops is far finer than the 3s budget needs. Mount bursts are
+     * exempt (their own budget below owns the clock). */
+    if (g_scriptRunActive)
+    {
+        static unsigned scriptClockDiv;
+        JsBridge *sb = (JsBridge *)xsGetContext(the);
+        XsState *sst = sb ? (XsState *)sb->implState : NULL;
+        if (!sst || !sst->mount.active)
+        {
+            if ((++scriptClockDiv & 63) == 0)
+            {
+                unsigned long now = xs_mount_now_ms();
+                if (now - g_scriptRunStartMs > XS_SCRIPT_WALL_BUDGET_MS)
+                {
+                    g_scriptRunActive = 0;
+                    logger_log("[js] script wall budget exceeded "
+                               "(%lums) — aborting containedly",
+                               now - g_scriptRunStartMs);
+                    fxAbort(the, XS_TOO_MUCH_COMPUTATION_EXIT);
+                }
+            }
+        }
     }
 #endif
 #ifdef PLUTO_NR_MOUNT_PAUSE
@@ -7540,6 +7583,28 @@ static int xs_init(JsBridge *b, const char *baseUrl)
         JFree(st);
         b->implState = NULL;
         return -1;
+    }
+    /* C4: install the engine-owned fetch/AbortSignal shim HERE, at engine
+     * init, while the heap is clean. It used to run lazily before the
+     * page's first <script>, i.e. AFTER a heavy page had rendered and the
+     * SDK pool was at 9MB+ — on bing.com's 98-block result page the
+     * shim's first parser chunk landed on a corrupted/starved pool and
+     * hard-faulted (device crashlog 2026-11-09 22:56, pc=0x901f77b0,
+     * mmfar=0x4000). The shim is page-independent (it only defines
+     * fetch/AbortSignal on the engine globals), so running it at init is
+     * both safer and browser-faithful: every page sees it before any
+     * script. The lazy call in xs_run_script stays as a latch no-op. */
+    if (!st->fetchShimDone)
+    {
+        xs_run_fetch_shim(b, st, -1);
+        if (!st->machine)
+        {
+            logger_log("[xs] init aborted (fetch shim reset)");
+            pluto_mem_resync_live();
+            JFree(st);
+            b->implState = NULL;
+            return -1;
+        }
     }
     return 0;
 }
@@ -8499,6 +8564,12 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
      * 2M-op budget; admission already bounded the segment). */
     xs_run_limit = (txU8)XS_RUNLIMIT + (txU8)len * 256u;
 #ifdef TARGET_PLAYDATE
+    /* R68: arm the wall-clock budget for this whole bracket. Cleared at
+     * the tail; a timeout aborts through the HostExit bracket. */
+    g_scriptRunStartMs = xs_mount_now_ms();
+    g_scriptRunActive = 1;
+#endif
+#ifdef TARGET_PLAYDATE
     /* R-kf bisect stage 3: one row per bracket step. The fork entry's
      * [nrp] probe is the first instruction of fxParseScript_nr and never
      * prints, so the blocking call is one of these five — this pins it. */
@@ -8596,6 +8667,9 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
     /* Per-script meter budget, like the other bridges' run limits. */
     xsEndMetering(m);
     xsEndHostExit(m);
+#ifdef TARGET_PLAYDATE
+    g_scriptRunActive = 0;
+#endif
     xs_run_limit = (txU8)XS_RUNLIMIT; /* restore default for other runners */
     xs_exec_finish(b, st, m, index);
 }

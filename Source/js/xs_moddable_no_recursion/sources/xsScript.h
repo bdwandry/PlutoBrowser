@@ -698,6 +698,12 @@ struct sxParser {
 	txUnsigned pumpBudget;
 	txUnsigned pumpSteps;
 	int pumpPaused;
+	/* Monotonic logical-token counter (fxGetNextToken). The program-level
+	   anti-stall check uses this as the progress signal: a valid empty
+	   statement (`;`) consumes a token but produces no AST node and does
+	   not advance the line, so nodeCount/line alone falsely flagged
+	   minified `function f(){};nextStatement` code as "parser stuck". */
+	txUnsigned tokenCount;
 	
 	/* xs_no_recursion: explicit work stack for the FromExpression family
 	   (fxBindingFromExpression and friends in xsSyntaxical.c), which runs

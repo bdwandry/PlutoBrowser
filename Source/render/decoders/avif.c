@@ -20,6 +20,7 @@
 #include "dither.h"
 #include "dav1d/include/dav1d/dav1d.h"
 #include "../../core/logger.h"
+#include "../../core/pluto_mem.h"
 
 /* Decoded frames are capped here (pixels): 1600x1600 YUV420 peaks around
  * 4MB transient inside dav1d — the most a single-flight decode may claim
@@ -316,9 +317,69 @@ static void avif_noop_free(const uint8_t *data, void *cookie)
  * noop; the arena resets at each decode start. malloc failure (or an
  * oversize picture) returns ENOMEM: clean failure → placeholder card,
  * never a stall. Upstream dav1d untouched. */
+/* R68: the picture arena is a raw 4MB malloc held for the process lifetime.
+ * It was sized for the 1600x1600 host ceiling, but the DEVICE decode cap is
+ * 700K px (AVIF_DEVICE_DECODE_MAX_PIXELS): a 700K-px YUV420 picture is
+ * ~1.05MB, so 1.5MB covers it with alignment slack. The 4MB block on the
+ * device's ~10MB pool left dav1d's internal tile/context mallocs no room —
+ * a failed BlockContext allocation reached reset_context() with ctx=NULL
+ * and hard-faulted (device crashlog 2026-11-10 09:16, pc=0x24056c10,
+ * mmfar=0x24). Simulator keeps the full 4MB (host pool, no watchdog). */
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+#define AVIF_ARENA_SIZE (1536 * 1024)
+#else
 #define AVIF_ARENA_SIZE (4 * 1024 * 1024)
+#endif
 static uint8_t *g_picArena = NULL;
 static size_t g_picArenaOff = 0;
+
+/* R68: drop the persistent picture arena at page navigation. Holding it
+ * across a page change pinned ~1.5MB of the device pool while the next
+ * page's JS engine/DOM loaded (the Marginalia rewalk dav1d NULL-context
+ * crash). No decode can be in flight here: imgdec_clear_cache cancels the
+ * decode task before calling. */
+void avif_release_arena(void)
+{
+    if (g_picArena)
+    {
+        free(g_picArena);
+        g_picArena = NULL;
+        g_picArenaOff = 0;
+    }
+}
+
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+/* R68: dav1d's internal block-context/CDF allocations are RAW mallocs. A
+ * progressive single-block probe can pass while the exact simultaneous
+ * mix fails under fragmentation (Marginalia rewalk, heap 11.7MB). Reserve
+ * the decode's transient mix SIMULTANEOUSLY, then release it. Sizes
+ * approximate dav1d's context/CDF/tile arrays for the 700K-px device cap. */
+static int avif_heap_ok(void)
+{
+    static const size_t sizes[] = {
+        512 * 1024, 256 * 1024, 256 * 1024, 128 * 1024, 128 * 1024,
+        64 * 1024, 64 * 1024, 32 * 1024, 32 * 1024, 16 * 1024,
+        16 * 1024, 8 * 1024
+    };
+    enum { AVIF_PROBE_BLOCKS = (int)(sizeof(sizes) / sizeof(sizes[0])) };
+    void *blocks[AVIF_PROBE_BLOCKS];
+    int n = 0;
+    for (int i = 0; i < AVIF_PROBE_BLOCKS; i++)
+    {
+        blocks[i] = pluto_mem_realloc(NULL, sizes[i]);
+        if (!blocks[i])
+        {
+            break;
+        }
+        n++;
+    }
+    for (int i = 0; i < n; i++)
+    {
+        pluto_mem_realloc(blocks[i], 0);
+    }
+    return n == AVIF_PROBE_BLOCKS;
+}
+#endif
 
 static int avif_pic_alloc(Dav1dPicture *pic, void *cookie)
 {
@@ -512,6 +573,22 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
     logger_stack_touch();
     if (!data || len < 16)
         return NULL;
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    /* R68 HARD device guard: the SDK pool's UNTRACKED allocations
+     * (TLS/network/CSS/file) can put the OS heap at its wall while the
+     * pluto_mem funnel still reports ~4MB live and its budget headroom
+     * looks fine. At 11.48MB OS heap dav1d's raw BlockContext malloc
+     * failed and reset_context() faulted (device crashlog 2026-11-10
+     * 13:30, pc=0x24056c10, mmfar=0x10) even with the simultaneous probe.
+     * Heavy-page band: skip AVIF entirely (clean placeholder). The
+     * simulator/host has no such pool and decodes normally. */
+    if (pluto_mem_live() >= 3UL * 1024UL * 1024UL)
+    {
+        logger_log("[avif] skip: heavy page (live=%luKB, os-pool guard)",
+                   pluto_mem_live() >> 10);
+        return NULL;
+    }
+#endif
     logger_log("[avif] enter %zu bytes (peak=%u)", len, logger_stack_peak());
     /* ftyp box branded avif/avis (mif1 alone may be HEIC: not ours). */
     if (memcmp(data + 4, "ftyp", 4) != 0 ||
@@ -565,6 +642,30 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
                        (unsigned long long)px,
                        (unsigned)AVIF_DEVICE_DECODE_MAX_PIXELS);
             goto done; /* c NULL, have_pic 0 — frees obu, returns NULL */
+        }
+    }
+#endif
+
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    /* R68: dav1d's internal block-context/CDF allocations are RAW SDK
+     * mallocs (the picture allocator hook only covers pictures). When the
+     * game heap is at its wall a failed context allocation reaches
+     * reset_context() with ctx=NULL and memset faults at ctx->intra
+     * (device crashlog 2026-11-10 04:20, pc=0x24056c10, mmfar=0x6; the
+     * page had already rendered and the JS engine + DOM were live).
+     * Probe for the decode's transient need BEFORE entering the library;
+     * a refusal is the normal clean placeholder path, never a crash.
+     * Progressive probe: no single huge block, no fragmentation blind
+     * spot. Simulator/host stay unlimited (no watchdog, big pool). */
+    {
+        const unsigned long avifNeed = 1536UL * 1024UL;
+        unsigned long avifGot = pluto_mem_probe_grantable(avifNeed);
+        if (avifGot < avifNeed)
+        {
+            logger_log("[avif] budget: skip %ux%u — heap probe %luKB < %luKB",
+                       (unsigned)m.ispe_w, (unsigned)m.ispe_h,
+                       avifGot >> 10, avifNeed >> 10);
+            goto done;
         }
     }
 #endif

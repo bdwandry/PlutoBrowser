@@ -6231,12 +6231,19 @@ static void fxProgramStep(txParser* parser)
 		}
 		f->i2 = parser->nodeCount;
 		f->i3 = (txInteger)parser->states[0].line;
+		f->i4 = (txInteger)parser->tokenCount;
 		fxStatement(parser, -1);
 		P_RESUME(5);
 	case 5:
+		/* Progress = a new AST node, a line advance, OR at least one
+		   logical token consumed. The third signal is what keeps a valid
+		   empty statement (`;`, e.g. minified `function f(){};next`)
+		   from tripping the anti-stall guard: it consumes a token but
+		   deliberately pushes no node. */
 		if (((txInteger)parser->nodeCount == f->i2) &&
-			((txInteger)parser->states[0].line == f->i3)) {
-			fxReportParserError(parser, parser->states[0].line, "parser stuck");
+			((txInteger)parser->states[0].line == f->i3) &&
+			((txInteger)parser->tokenCount == f->i4)) {
+			fxReportParserError(parser, parser->states[0].line, "parser stuck at %s (line %d)", gxTokenNames[parser->states[0].token], (int)parser->states[0].line);
 			f->pc = 4;
 			return;
 		}

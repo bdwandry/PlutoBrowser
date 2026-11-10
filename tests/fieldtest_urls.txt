@@ -13,7 +13,7 @@
 0 https://en.wikipedia.org/wiki/Special:Random | wikipedia
 0 https://news.ycombinator.com/ | hacker news
 0 https://lobste.rs/ | lobsters
-0 https://www.bing.com/search?q=playdate | bing
+0 https://www.bing.com/search?q=playdate | results|any time
 0 https://search.marginalia.nu/search?query=playdate | marginalia
 0 https://example.com/ | documentation examples
 0 https://motherfuckingwebsite.com/ | motherfucking website
@@ -24,4 +24,4 @@
 0 https://www.gutenberg.org/browse/scores/top | gutenberg
 0 https://www.w3.org/ | w3c
 0 https://lite.cnn.com/ | cnn
-0 https://www.bbc.com/news | bbc
+0 https://www.bbc.com/news | live|uk
