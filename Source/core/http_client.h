@@ -168,6 +168,12 @@ void http_set_identity_encoding(int on);
 /* Cancel any in-flight request (safe when idle). */
 void http_cancel(void);
 
+/* Navigation hard reset: call AFTER http_cancel, while the client is idle
+ * and before the next request starts. Releases every closed connection
+ * object and closes anything still pooled, so the new page starts with
+ * the SDK's full connection pool. Safe when idle. */
+void http_navigation_reset(void);
+
 /* R67: gate SDK connection releases while a page is still rendering.
  * Releasing a TLS object during the sliced walk was the receipted bbc
  * wild-PC window (the connection's SDK event-loop state outlives the

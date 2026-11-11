@@ -124,13 +124,43 @@ static PlaydateAPI *g_pd;
 static unsigned g_reqIdStamp;
 static char g_osReadChunk[OS_HTTP_READ_CHUNK]; /* P19: static, not stack */
 
-/* ── the connection lifecycle (keep-alive + retire-until-notified) ────── */
-static HTTPConnection *g_liveConn;     /* the reusable keep-alive connection */
+/* ── the connection lifecycle (retire-until-notified) ────────────────────
+ * The SDK fires request-complete from a QUEUED notification: a close()/
+ * release() before that notification has been observed crashes the stack
+ * (the notification then derefs a nulled connection slot). The original
+ * single-slot design retired ONE connection and dropped it at the next
+ * request if the notification had not landed yet. That is a race: the
+ * notification is delivered by the event loop, which can run AFTER the
+ * next request's connect pump. The dropped connection was then never
+ * released, and — worse — it stayed OPEN. The device allows at most four
+ * simultaneous connections; an image-heavy page leaked six, exhausting
+ * the pool for every later navigation ("buffer too small (err=-14)").
+ *
+ * The fix is a small retire LIST. Every connection that is not yet safe
+ * to release waits here until its notification is observed. At
+ * navigation we close every retired connection (the object stays alive,
+ * so the queued notification can still fire safely) to free its slot
+ * immediately; the object is released when the notification lands, or
+ * after a long idle grace period if the notification never comes. */
+#define OS_HTTP_RETIRED_MAX 8
+#define OS_HTTP_RETIRE_GRACE_MS 30000
+#define OS_HTTP_AUTOCLOSE_MS 2000
+
+typedef struct
+{
+    HTTPConnection *conn;
+    int notifyDone; /* request-complete / connection-closed observed */
+    int closed;     /* close() already called at navigation */
+    unsigned addedMs;
+    unsigned closeMs;
+} OsHttpRetired;
+
+static HTTPConnection *g_liveConn;     /* the request's live connection */
 static char g_liveHost[128];
 static int g_livePort;
 static int g_liveSsl;
-static HTTPConnection *g_retiredConn;  /* delivered; awaiting its notification */
-static int g_retiredNotifyDone;        /* the notification was observed */
+static OsHttpRetired g_retired[OS_HTTP_RETIRED_MAX];
+static int g_retiredN;
 
 void oshttp_init(PlaydateAPI *pd)
 {
@@ -138,22 +168,138 @@ void oshttp_init(PlaydateAPI *pd)
     memset(&g_req, 0, sizeof(g_req));
     g_req.spill = PLUTO_SPILL_INVALID;
     g_req.contentLength = -1;
+    g_retiredN = 0;
     logger_log("[oshttp] backend ready (OS network.http stack)");
 }
 
 /* ── teardown helpers ──────────────────────────────────────────────────── */
 
-/* The ONLY place a connection is ever closed: the notification was
- * observed (or the slot is being reclaimed as a bounded, logged leak —
- * an un-notified close is the documented simulator/device crash). */
+/* Close+release is legal only once the queued notification was observed.
+ * close() alone is safe at any time: the object stays allocated, so a
+ * late notification still has a live slot to dereference. */
+static void conn_close(HTTPConnection *conn)
+{
+    if (conn)
+    {
+        g_pd->network->http->close(conn);
+    }
+}
+
+static void conn_release(HTTPConnection *conn)
+{
+    if (conn)
+    {
+        g_pd->network->http->release(conn);
+    }
+}
+
 static void conn_destroy(HTTPConnection *conn)
+{
+    conn_close(conn);
+    conn_release(conn);
+}
+
+static int retired_index(HTTPConnection *conn)
 {
     if (!conn)
     {
+        return -1;
+    }
+    for (int i = 0; i < g_retiredN; i++)
+    {
+        if (g_retired[i].conn == conn)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Park a connection until its queued notification is observed. */
+static void retired_add(HTTPConnection *conn, int notified)
+{
+    if (!conn || retired_index(conn) >= 0)
+    {
         return;
     }
-    g_pd->network->http->close(conn);
-    g_pd->network->http->release(conn);
+    if (notified)
+    {
+        conn_destroy(conn);
+        return;
+    }
+    if (g_retiredN >= OS_HTTP_RETIRED_MAX)
+    {
+        /* Bounded overflow: close to free the slot, leave the object to
+         * the SDK. Never release an un-notified object (the crash). */
+        logger_log("[oshttp] retired list full — closing object, left to SDK");
+        conn_close(conn);
+        return;
+    }
+    OsHttpRetired *r = &g_retired[g_retiredN++];
+    r->conn = conn;
+    r->notifyDone = 0;
+    r->closed = 0;
+    r->addedMs = g_pd->system->getCurrentTimeMilliseconds();
+    r->closeMs = 0;
+}
+
+/* Reap connections whose notification landed. A connection closed at
+ * navigation whose notification never arrives is released after a long
+ * idle grace period — the queued notification would have fired by then,
+ * and keeping the object forever exhausts the SDK's connection pool. */
+static void retired_reap(void)
+{
+    unsigned now = g_pd->system->getCurrentTimeMilliseconds();
+    for (int i = 0; i < g_retiredN;)
+    {
+        OsHttpRetired *r = &g_retired[i];
+        if (r->notifyDone)
+        {
+            conn_destroy(r->conn);
+            g_retired[i] = g_retired[--g_retiredN];
+            continue;
+        }
+        if (r->closed && !g_req.active &&
+            (now - r->closeMs) > OS_HTTP_RETIRE_GRACE_MS)
+        {
+            logger_log("[oshttp] releasing un-notified retired connection "
+                       "after grace");
+            conn_release(r->conn);
+            g_retired[i] = g_retired[--g_retiredN];
+            continue;
+        }
+        /* The notification normally lands within a frame or two. If it
+         * is slow, close the connection (safe: the object stays alive)
+         * so its simultaneous-connection slot is free for the next
+         * fetch; the notification can still settle it later. */
+        if (!r->closed && (now - r->addedMs) > OS_HTTP_AUTOCLOSE_MS)
+        {
+            conn_close(r->conn);
+            r->closed = 1;
+            r->closeMs = now;
+            logger_log("[oshttp] auto-closed retired connection after 2s");
+        }
+        i++;
+    }
+}
+
+/* Navigation: stop every old connection NOW. Closing frees the SDK's
+ * simultaneous-connection slot; the object lives until its notification
+ * (or the grace release) so the queued callback can never deref freed
+ * memory. */
+static void retired_close_all(void)
+{
+    unsigned now = g_pd->system->getCurrentTimeMilliseconds();
+    for (int i = 0; i < g_retiredN; i++)
+    {
+        if (!g_retired[i].closed)
+        {
+            conn_close(g_retired[i].conn);
+            g_retired[i].closed = 1;
+            g_retired[i].closeMs = now;
+        }
+    }
+    retired_reap();
 }
 
 static void req_reset(void)
@@ -180,17 +326,20 @@ static void req_fail(const char *message)
 {
     char errSnapshot[256];
     HttpCallbacks cb = g_req.cb;
+    int notified = g_req.sawComplete || g_req.sawConnClosed;
     logger_log("[oshttp] FAIL %.90s", message ? message : "?");
     g_reqIdStamp++; /* stale-callback guard: bump before the fire */
     g_req.active = 0;
-    /* the connection RETIRES (still open) — never closed here: its
-     * notification is pending and an early close is the crash */
-    g_retiredConn = g_liveConn;
-    g_liveConn = NULL;
-    g_retiredNotifyDone = 0;
+    /* Retire (or destroy if the notification was already observed). */
+    if (g_liveConn)
+    {
+        retired_add(g_liveConn, notified);
+        g_liveConn = NULL;
+    }
     snprintf(errSnapshot, sizeof(errSnapshot), "%s",
              message ? message : "OS-HTTP request failed.");
     req_reset();
+    retired_reap();
     if (cb.onError)
     {
         cb.onError(errSnapshot);
@@ -225,16 +374,20 @@ static void deliver_with_headers(void)
     {
         long total = pluto_spill_finish(g_req.spill);
         SpillFile sp = g_req.spill;
+        int notified = g_req.sawComplete || g_req.sawConnClosed;
         g_req.spill = PLUTO_SPILL_INVALID;
         g_req.spillMode = 0;
         logger_log("[oshttp] done status=%d spilled=%ld (disk delivery)",
                    status, total);
         g_reqIdStamp++;
         g_req.active = 0;
-        g_retiredConn = g_liveConn; /* retire: open, notification pending */
-        g_liveConn = NULL;
-        g_retiredNotifyDone = 0;
+        if (g_liveConn)
+        {
+            retired_add(g_liveConn, notified);
+            g_liveConn = NULL;
+        }
         req_reset();
+        retired_reap();
         if (cb.onSuccessSpill && total > 0)
         {
             cb.onSuccessSpill(status, sp, (size_t)total, urlSnap);
@@ -269,24 +422,31 @@ static void deliver_with_headers(void)
     }
     logger_log("[oshttp] done status=%d hdrs=%d ram=%zu (RAM delivery)",
                status, g_req.hdrCount, bodyLen);
-    g_reqIdStamp++;
-    g_req.active = 0;
-    g_retiredConn = g_liveConn; /* retire: open, notification pending */
-    g_liveConn = NULL;
-    g_retiredNotifyDone = 0;
-    req_reset();
-    if (bodyLen > 0 && !bodyCopy)
     {
-        if (cb.onError)
+        int notified = g_req.sawComplete || g_req.sawConnClosed;
+        int hdrCount = g_req.hdrCount;
+        g_reqIdStamp++;
+        g_req.active = 0;
+        if (g_liveConn)
         {
-            cb.onError("OS-HTTP body copy OOM.");
+            retired_add(g_liveConn, notified);
+            g_liveConn = NULL;
         }
-        return;
-    }
-    if (cb.onSuccess)
-    {
-        cb.onSuccess(status, g_deliverKeys, g_deliverVals, g_req.hdrCount,
-                     bodyCopy ? bodyCopy : "", bodyLen, urlSnap);
+        req_reset();
+        retired_reap();
+        if (bodyLen > 0 && !bodyCopy)
+        {
+            if (cb.onError)
+            {
+                cb.onError("OS-HTTP body copy OOM.");
+            }
+            return;
+        }
+        if (cb.onSuccess)
+        {
+            cb.onSuccess(status, g_deliverKeys, g_deliverVals, hdrCount,
+                         bodyCopy ? bodyCopy : "", bodyLen, urlSnap);
+        }
     }
     if (bodyCopy)
     {
@@ -295,13 +455,12 @@ static void deliver_with_headers(void)
 }
 
 /* ── OS callbacks (tiny: stamp-guard + record; work happens in the pump) ──
- * The retired connection's late notifications land here too: observed,
- * flagged, never acted on (its teardown happens at the next pump).
- * Pointer compare only — the retired object is alive (never released
- * before its notification). */
+ * A retired connection's late notifications land here too: mark the
+ * entry so the reaper can close+release it. Pointer lookup only — the
+ * retired object is alive (never released before its notification). */
 static int cb_is_retired(HTTPConnection *conn)
 {
-    return conn != NULL && conn == g_retiredConn;
+    return retired_index(conn) >= 0;
 }
 
 static int cb_generation_is_current(HTTPConnection *conn)
@@ -391,11 +550,12 @@ static void oshttp_headers_read_cb(HTTPConnection *conn)
 
 static void oshttp_complete_cb(HTTPConnection *conn)
 {
-    if (cb_is_retired(conn))
+    int idx = retired_index(conn);
+    if (idx >= 0)
     {
         /* the delivered connection's notification JUST fired — its
-         * close()+release() is now safe (the pump reaps it) */
-        g_retiredNotifyDone = 1;
+         * close()+release() is now safe (the reaper takes it) */
+        g_retired[idx].notifyDone = 1;
         return;
     }
     if (!cb_generation_is_current(conn))
@@ -407,11 +567,12 @@ static void oshttp_complete_cb(HTTPConnection *conn)
 
 static void oshttp_closed_cb(HTTPConnection *conn)
 {
-    if (cb_is_retired(conn))
+    int idx = retired_index(conn);
+    if (idx >= 0)
     {
         /* the server closed a retired connection: either notification
-         * settles it (the request-complete one will never come) */
-        g_retiredNotifyDone = 1;
+         * settles it (the request-complete one may never come) */
+        g_retired[idx].notifyDone = 1;
         return;
     }
     if (!cb_generation_is_current(conn))
@@ -427,14 +588,21 @@ void oshttp_cancel(void)
 {
     if (g_req.active)
     {
+        int notified = g_req.sawComplete || g_req.sawConnClosed;
         logger_log("[oshttp] cancel");
         g_reqIdStamp++; /* stale-callback guard: bump before the reset */
         g_req.active = 0;
-        g_retiredConn = g_liveConn; /* the in-flight conn retires too */
-        g_liveConn = NULL;
-        g_retiredNotifyDone = 0;
+        if (g_liveConn)
+        {
+            retired_add(g_liveConn, notified);
+            g_liveConn = NULL;
+        }
         req_reset();
     }
+    /* Navigation / abort: close every retired connection so its SDK
+     * simultaneous-connection slot is free for the next page. The object
+     * stays alive until its notification (or the idle grace release). */
+    retired_close_all();
 }
 
 int oshttp_is_loading(void)
@@ -540,38 +708,24 @@ int oshttp_request_h(const char *method, const char *urlString,
 
 static void pump_connect(void)
 {
-    /* Reap the retired connection FIRST — and only when its completion
-     * notification was observed (the close-before-notify is the receipted
-     * notifyRequestComplete crash). An un-notified connection is leaked
-     * (bounded, logged) rather than risked. */
-    if (g_retiredConn)
-    {
-        if (g_retiredNotifyDone)
-        {
-            conn_destroy(g_retiredConn);
-        }
-        else
-        {
-            logger_log("[oshttp] retiring UN-NOTIFIED connection (kept "
-                       "open, leak-1)");
-        }
-        g_retiredConn = NULL;
-        g_retiredNotifyDone = 0;
-    }
+    /* Reap every retired connection whose notification landed. */
+    retired_reap();
 
     /* v1: NO connection reuse — each request gets a fresh connection
      * (without keep-alive the server closes it after one response
-     * anyway). The retire policy above makes every teardown safe. */
+     * anyway). Any live connection still here is retired, never
+     * close+released before its notification. */
     if (g_liveConn)
     {
-        g_retiredConn = g_liveConn;
-        g_retiredNotifyDone = 0;
+        retired_add(g_liveConn, 0);
         g_liveConn = NULL;
     }
     g_liveConn = g_pd->network->http->newConnection(
         g_req.url.host, g_req.url.port, g_req.url.isSsl);
     if (!g_liveConn)
     {
+        logger_log("[oshttp] newConnection NULL (retired=%d) host=%.80s",
+                   g_retiredN, g_req.url.host);
         req_fail("connection object failed");
         return;
     }
@@ -709,10 +863,13 @@ static void pump_read(void)
                 logger_log("[oshttp] pre-headers close — retry %d",
                            g_req.retries);
                 /* the conn RETIRES (notification pending) — the retry's
-                 * connect phase reaps it and makes a fresh one */
-                g_retiredConn = g_liveConn;
-                g_liveConn = NULL;
-                g_retiredNotifyDone = 0;
+                 * connect phase makes a fresh one */
+                if (g_liveConn)
+                {
+                    retired_add(g_liveConn,
+                                g_req.sawComplete || g_req.sawConnClosed);
+                    g_liveConn = NULL;
+                }
                 g_req.phase = OS_PHASE_CONNECT;
                 g_req.sawConnClosed = 0;
                 g_req.sawComplete = 0;
@@ -746,6 +903,9 @@ static void pump_read(void)
 
 void oshttp_update(void)
 {
+    /* Retired connections settle here even when no request is active —
+     * the queued notification often lands after the request finished. */
+    retired_reap();
     if (!g_req.active)
     {
         return;

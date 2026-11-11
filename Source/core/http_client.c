@@ -154,17 +154,32 @@ static unsigned int g_accessRequestId = 0; /* generation owning the pending acce
  *     skipping the TLS handshake for same-host image fetches entirely.
  *   - g_orphanTcp: a still-connecting connection handed off at cancel/reset.
  *     Its (stale) open callback closes and releases it — never us.
- *   - g_graveTcp: a pooled connection dropped on host switch — closed now,
- *     RELEASED only after GRAVE_FRAMES frames (http_update tick), long after
- *     the SDK's event loop has drained any pending state for it. */
+ *   - g_grave[]: closed connections waiting for the SDK event loop to drain
+ *     (a ring, not one slot — every overwrite used to leak an object).
+ *     Released after GRAVE_FRAMES when the client is idle, or immediately
+ *     at navigation (no live session). */
 static TCPConnection *g_pooledTcp = NULL;
 static char g_pooledHost[256];
 static int g_pooledPort = 0;
 static int g_pooledSsl = 0;
 static TCPConnection *g_orphanTcp = NULL;  /* open callback owns close+release */
-static TCPConnection *g_graveTcp = NULL;   /* closed; release after the delay */
-static int g_graveTimer = 0;
+
+/* Graveyard: closed connections waiting for the SDK event loop to drain.
+ * A SINGLE slot used to hold this: every new fetch overwrote it, so all
+ * but the last closed object leaked. A page with many fetches (Google's
+ * CSS + scripts + images) could exhaust the SDK's connection objects and
+ * every later open failed with "buffer too small (err=-14)" until the app
+ * restarted. A small ring tracks every closed object until it is safe to
+ * release (idle + release gate) — see the lifecycle comment above. */
+#define GRAVE_MAX 16
 #define GRAVE_FRAMES 120  /* ~4s at 30fps */
+typedef struct
+{
+    TCPConnection *conn;
+    int frames;
+} TcpGrave;
+static TcpGrave g_grave[GRAVE_MAX];
+static int g_graveN = 0;
 
 /* Deferred SDK connection releases. A cancelled request can be still
  * connecting; its async open callback settles SECONDS later, possibly
@@ -174,7 +189,7 @@ static int g_graveTimer = 0;
  * wild PC + URL text in registers). The callback now closes the settled
  * connection and parks it here; http_update drains the list only when
  * the client is completely idle (no request on either lane). */
-#define DEFER_RELEASE_MAX 8
+#define DEFER_RELEASE_MAX 16
 static TCPConnection *g_deferRelease[DEFER_RELEASE_MAX];
 static int g_deferReleaseN = 0;
 static int g_releaseGate = 1; /* 0 while a render/walk is live */
@@ -216,6 +231,97 @@ static void drain_deferred_releases(void)
         g_deferRelease[i] = NULL;
     }
     g_deferReleaseN = 0;
+}
+
+/* Park a closed connection until the SDK event loop has drained. */
+static void grave_add(TCPConnection *t)
+{
+    if (!t)
+    {
+        return;
+    }
+    if (g_graveN < GRAVE_MAX)
+    {
+        g_grave[g_graveN].conn = t;
+        g_grave[g_graveN].frames = GRAVE_FRAMES;
+        g_graveN++;
+        return;
+    }
+    /* Ring full: release the oldest only when no session is live; else
+     * leave the object to the SDK (closed, so it holds no connection
+     * slot — a bounded object leak, logged). */
+    if (g_releaseGate && !http_is_loading())
+    {
+        g_pd->network->tcp->release(g_grave[0].conn);
+        memmove(&g_grave[0], &g_grave[1],
+                sizeof(g_grave[0]) * (GRAVE_MAX - 1));
+        g_grave[GRAVE_MAX - 1].conn = t;
+        g_grave[GRAVE_MAX - 1].frames = GRAVE_FRAMES;
+    }
+    else
+    {
+        logger_log("[http] grave ring full — closed connection left to SDK");
+    }
+}
+
+/* Release graveyard entries whose cooling-off expired AND no session is
+ * live. Called once per frame. */
+static void grave_tick(void)
+{
+    for (int i = 0; i < g_graveN;)
+    {
+        if (g_grave[i].frames > 0)
+        {
+            g_grave[i].frames--;
+        }
+        if (g_grave[i].frames <= 0 && g_releaseGate && !http_is_loading())
+        {
+            g_pd->network->tcp->release(g_grave[i].conn);
+            g_grave[i] = g_grave[--g_graveN];
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Navigation: the client is idle, so release every entry whose timer
+ * already expired. Entries closed during THIS navigation keep their
+ * fresh timer (an immediate close+release is the receipted SDK trap). */
+static void grave_release_expired(void)
+{
+    for (int i = 0; i < g_graveN;)
+    {
+        if (g_grave[i].frames <= 0)
+        {
+            g_pd->network->tcp->release(g_grave[i].conn);
+            g_grave[i] = g_grave[--g_graveN];
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Navigation hard reset (called after http_cancel, while the client is
+ * idle): close anything still open and release every closed object so
+ * the next page starts with the SDK's full connection pool. */
+void http_navigation_reset(void)
+{
+    if (g_pooledTcp)
+    {
+        g_pd->network->tcp->close(g_pooledTcp);
+        grave_add(g_pooledTcp);
+        g_pooledTcp = NULL;
+    }
+    grave_release_expired();
+    if (g_releaseGate)
+    {
+        for (int i = 0; i < g_deferReleaseN; i++)
+        {
+            g_pd->network->tcp->release(g_deferRelease[i]);
+            g_deferRelease[i] = NULL;
+        }
+        g_deferReleaseN = 0;
+    }
 }
 
 /* Saved response for the done path (reset() clears live state before the
@@ -2707,9 +2813,10 @@ static void close_tcp(void)
         if (g_connOpen || g_openFailed)
         {
             /* Open RESOLVED (success or failure): safe to close. Keep the
-             * object pooled — never release a TLS connection the SDK may
-             * still have event-loop state for (hazard 2). */
+             * object in the graveyard — never release a TLS connection the
+             * SDK may still have event-loop state for (hazard 2). */
             g_pd->network->tcp->close(t);
+            grave_add(t);
         }
         else
         {
@@ -2717,10 +2824,10 @@ static void close_tcp(void)
              * Hand it to the orphan slot — its (stale) open callback will
              * close AND release it when the async open settles (hazard 1). */
             g_orphanTcp = t;
-            if (g_pooledTcp == t)
-            {
-                g_pooledTcp = NULL; /* pool entry now owned by the orphan */
-            }
+        }
+        if (g_pooledTcp == t)
+        {
+            g_pooledTcp = NULL; /* pool entry now owned by the graveyard */
         }
     }
 }
@@ -4191,13 +4298,12 @@ static void open_connection(void)
     {
         if (g_pooledTcp)
         {
-            /* Close the old connection now, DEFER the release to the
-             * graveyard tick (GRAVE_FRAMES later) — never touch the object
-             * again while the SDK event loop may still have state for it
+            /* Defensive: close the old connection now, park it in the
+             * graveyard (release later) — never touch the object again
+             * while the SDK event loop may still have state for it
              * (hazards 1+2), and NEVER re-open it. */
             g_pd->network->tcp->close(g_pooledTcp);
-            g_graveTcp = g_pooledTcp;
-            g_graveTimer = GRAVE_FRAMES;
+            grave_add(g_pooledTcp);
             g_pooledTcp = NULL;
         }
         tcp = g_pd->network->tcp->newConnection(
@@ -4443,22 +4549,9 @@ void http_update(void)
      * response read crashed 4s later with pc inside the SDK heap executing
      * the URL string ('yanw' = bytes 9-12 of http://bryanwandrych.com/).
      * Releasing one TLS object while another is mid-session is hazard 2's
-     * remaining window — the graveyard delay alone doesn't cover it. */
-    if (g_graveTcp && --g_graveTimer <= 0)
-    {
-        if (http_is_loading() || !g_releaseGate)
-        {
-            /* An active request holds SDK TLS event-loop state; releasing
-             * the grave connection now lands in hazard 2. Hold until the
-             * next idle tick (graveTimer stays 0 → release on that tick). */
-            ;
-        }
-        else
-        {
-            g_pd->network->tcp->release(g_graveTcp);
-            g_graveTcp = NULL;
-        }
-    }
+     * remaining window — the graveyard delay alone doesn't cover it.
+     * grave_tick() enforces both: timer expired AND client idle. */
+    grave_tick();
 
     /* Deferred releases of cancelled/connecting sockets: only when the
      * client is completely idle (no live request on either lane). */
@@ -4737,8 +4830,7 @@ void http_update(void)
         }
         /* Release the closed connection long after the SDK event loop has
          * drained it (same deferred-release pattern as host switches). */
-        g_graveTcp = dead;
-        g_graveTimer = GRAVE_FRAMES;
+        grave_add(dead);
         if (g_connectAttempts < HTTP_CONNECT_ATTEMPTS)
         {
             logger_log("[http] no response in %d s (attempt %d); retrying",

@@ -31,6 +31,7 @@ int http_tcp_request_h(const char *method, const char *urlString,
                        const HttpCallbacks *callbacks);
 void http_tcp_set_identity_encoding(int on);
 void http_tcp_cancel(void);
+void http_tcp_navigation_reset(void);
 int http_tcp_is_loading(void);
 void http_tcp_update(void);
 

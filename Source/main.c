@@ -6543,6 +6543,14 @@ static void navigate_to(const char *urlString)
      * before go_back/go_home). http_cancel() takes BOTH lanes and is
      * safe when idle. */
     http_cancel();
+    /* R69: hard-reset the old page's network state before the new request
+     * starts. The device allows four simultaneous connections; leaked
+     * closed objects and retired OS-HTTP connections used to exhaust the
+     * pool after two pages ("Connection failed: buffer too small
+     * (err=-14)") until the app restarted. This runs while the client is
+     * idle, so every closed object is safe to release and the new page
+     * gets the full pool. */
+    http_navigation_reset();
     pluto_spill_reset(); /* SW2b page-close contract: the old page's
                           * session stream files die HERE (abort receipts
                           * already did this pair); snapshots + the SW4

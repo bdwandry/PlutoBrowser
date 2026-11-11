@@ -167,6 +167,47 @@ max render_done live 5148KB, largest single alloc 535KB, refusals 0 on the
 simulator keeps the synchronous reference walk. Raw receipts:
 `tests/logs/` session logs + the device's `ftdev_results.txt`.
 
+## Connection-pool exhaustion — "buffer too small (err=-14)" (2026-11-10)
+
+The device allows **four simultaneous connections** (SDK docs). After two
+pages of manual testing every navigation failed with
+`Connection failed: buffer too small (err=-14)` until the app restarted.
+The device log showed the cause on the first (image-heavy) page: six
+`[oshttp] retiring UN-NOTIFIED connection (kept open, leak-1)` rows. The
+OS-HTTP backend retired every delivered connection and waited for a
+second request-complete notification that never comes; its single retire
+slot was then dropped at the next connect before the queued notification
+landed, leaving the connection open forever. Six leaked open connections
+exhausted the four-connection pool, so the next page's TCP opens failed.
+The TCP lane had the same class of bug: one `g_graveTcp` slot was
+overwritten by every fetch, leaking the previous closed object.
+
+General fixes:
+
+1. **OS-HTTP retire list** (`http_os.c`) — up to 8 retired connections,
+   closed only after their queued notification is observed (the R62
+   crash rule). A slow notification auto-closes the connection after 2s
+   (close is safe; the object stays alive), and an un-notified object is
+   released after a 30s idle grace period. Delivered connections whose
+   notification already fired are destroyed immediately.
+2. **TCP grave ring** (`http_client.c`) — 16 closed connections with
+   per-entry cooling-off timers instead of one overwritten slot.
+   Releases happen only when the timer expired AND the client is idle
+   (the R53 hazard rule).
+3. **Navigation hard reset** — `http_navigation_reset()` runs in
+   `navigate_to()` right after `http_cancel()`: while the client is idle
+   it closes any pooled connection and releases every closed object
+   whose cooling-off expired, so the new page starts with the SDK's full
+   four-connection pool. The OS lane's cancel closes every retired
+   connection immediately (objects stay alive for their notifications).
+
+Simulator receipt (engine 4 XS-NR, fieldtest seam): exact repro sequence
+wiesmann bitmaps → google.com → bryanwandrych.com → **PASS 3/3**, ZERO
+`UN-NOTIFIED`, ZERO `err=-14`, ZERO `buffer too small` rows. Device
+v1.3.1 build 13 deployed MD5 `532fef66d3d0b322bb5e81dfe543a0f0`,
+boot 50fps / stackPeak 656B / heap 16KB / refusals 0, empty
+crashlog+errorlog.
+
 ## Device hardening learned from the 20-site proof (2026-11-10)
 
 Device-only safety fixes, all general (no site rules):

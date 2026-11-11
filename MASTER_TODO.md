@@ -11,6 +11,43 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R69 — CONNECTION-POOL EXHAUSTION FIXED: "buffer too small (err=-14)" AFTER TWO PAGES (2026-11-10).**
+> User report: after two sites, every navigation showed "Connection failed: buffer too small
+> (err=-14)" and only an app restart recovered; the WiFi bar dropped to 1 bar at the same time.
+> DEVICE LOG ROOT CAUSE: the image-heavy first page (wiesmann.codiferes.net bitmaps, 25 image
+> fetches on the Hybrid OS-HTTP lane) logged six `[oshttp] retiring UN-NOTIFIED connection
+> (kept open, leak-1)` rows. The OS-HTTP backend retired EVERY delivered connection and waited
+> for a second request-complete notification that never comes; its single retire slot was then
+> dropped at the next connect before the queued notification landed, so the connection stayed
+> OPEN forever. The device allows FOUR simultaneous connections (SDK docs); six leaked open
+> connections exhausted the pool, and the next page's TCP opens failed with -14. The TCP lane
+> had the same class of bug in miniature: one `g_graveTcp` slot was overwritten by every fetch,
+> leaking the previous closed object.
+> FIX (general, no site rules):
+> (1) **OS-HTTP RETIRE LIST** — `http_os.c` now tracks up to 8 retired connections, closes them
+>     only when their queued notification was observed (the R62 crash rule), auto-closes a
+>     connection after 2s if the notification is slow (close is safe; the object stays alive),
+>     and releases an un-notified object after a 30s idle grace period. Delivered connections
+>     whose notification already fired are destroyed immediately.
+> (2) **TCP GRAVE RING** — `http_client.c` keeps 16 closed connections with their cooling-off
+>     timers instead of one overwritten slot; releases happen only when the timer expired AND
+>     the client is idle (the R53 hazard rule).
+> (3) **NAVIGATION HARD RESET** — new `http_navigation_reset()` (front + both backends), called
+>     from `navigate_to()` right after `http_cancel()`: while the client is idle it closes any
+>     pooled connection and releases every closed object whose cooling-off expired, so the new
+>     page starts with the SDK's full four-connection pool. The OS lane's cancel closes every
+>     retired connection immediately (objects stay alive for their notifications).
+> SIMULATOR RECEIPT (engine 4 XS-NR, fieldtest seam): exact repro sequence
+> wiesmann bitmaps → google.com → bryanwandrych.com → **PASS 3/3**, ZERO `UN-NOTIFIED`,
+> ZERO `err=-14`, ZERO `buffer too small` rows. Log archived
+> `/private/var/folders/65/xyhbx3_n6nd_hs7j3p9nfwv80000gn/T/opencode/sim_repro_fixed.log`.
+> DEVICE: v1.3.1 buildNumber 13 deployed MD5 `532fef66d3d0b322bb5e81dfe543a0f0` (SRC=DST),
+> boot verified 50fps, stackPeak 656B, heap 16KB, refusals 0, EMPTY crashlog+errorlog; left
+> running for the user's manual retry. FILES: Source/core/http_os.c (retire list, auto-close,
+> grace release), Source/core/http_client.c (grave ring, navigation reset), Source/core/
+> http_front.c + http_client.h + http_tcp_impl.h + http_tcp_rename.h (public reset),
+> Source/main.c (navigate_to reset call), Source/pdxinfo (1.3.1/13).
+>
 > **R68 — FULL 20-SITE DEVICE MATRIX: 16/20, SAME PASS SET AS THE SIMULATOR (2026-11-10).**
 > The physical console ran all 20 sites in one session. Device PASS (16): DDG lite, DDG html,
 > text.npr.org, Wikipedia article, Wikipedia random, Hacker News, lobste.rs, Bing, Marginalia,
