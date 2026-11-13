@@ -176,6 +176,26 @@
 > `build/pdex.elf`, MD5 `a547fcebd94e9f913ae8ab0a61b5d45c` deployed MD5-matched; boot
 > verified 50fps, stackPeak 664B, heap 34KB, refusals 0, EMPTY crashlog+errorlog; DEVICE
 > LEFT RUNNING IT.
+>
+> **R70c — DEVICE WATCHDOG ON play.date/dev: OVERSIZED PNG INFLATE (2026-11-13).**
+> User-reported device "crash" was a run-loop watchdog reset (errorlog "Run loop stalled
+> for more than 10 seconds pc=0x900277C2"), not a hard fault. Symbolized PC: `st_emit` in
+> `render/decoders/inflate.c` — the PNG decoder. The page is `https://play.date/dev`; its
+> two hero images are 1368x1279 and 1220x702 8-bit RGBA PNGs (224KB/349KB compressed,
+> ~3.4-7MB raw). `png_decode` inflates the whole image inside ONE task step (the
+> `Tasks.yieldCheck()` sites were comments only), so the M7 blew past the 10s watchdog.
+> FIX: a 4s wall-clock budget inside the PNG row loop (`pluto_pd()->system->
+> getCurrentTimeMilliseconds`, checked every 16 rows). An over-budget decode logs
+> `PNG decode: wall budget exceeded (WxH at row N/H)`, frees rows/accum/inflate, returns
+> NULL; the image lane paints its normal placeholder. The page keeps rendering. DEVICE
+> RECEIPT (seam, same URL): `PNG decode: wall budget exceeded (1368x1279 at row 1008/1279)`
+> and `(1220x702 at row 304/702)` → `IMGDEC FAIL` for both, 86 blocks rendered, EMPTY
+> crashlog/errorlog, no watchdog. JPEG already has its >200K-px dcOnly path; WebP has
+> WEBP_MAX_PIXELS; PNG was the uncovered decoder. CLEAN RELEASE: **v1.3.2 (buildNumber 19)**,
+> no DEVICEDEFS, 0 `nr-autotest`/`ftdev` strings, MD5
+> `2fe6244843e10ac22c9f4d3be85b160b` deployed MD5-matched; boot verified 50fps,
+> stackPeak 664B, heap 37KB, refusals 0, EMPTY crashlog+errorlog; DEVICE LEFT RUNNING IT.
+> FILES: Source/render/decoders/png.c, Source/pdxinfo.
 
 > **R69 — CONNECTION-POOL EXHAUSTION FIXED: "buffer too small (err=-14)" AFTER TWO PAGES (2026-11-10).**
 > User report: after two sites, every navigation showed "Connection failed: buffer too small

@@ -283,8 +283,29 @@ LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH)
     const int perByte = depth < 8 ? 8 / depth : 1;
 
     int done = 0;
+    int aborted = 0;
+    /* Device watchdog valve: this decoder runs inside ONE task step, and a
+     * large RGBA PNG can inflate for >10s on the M7 (device receipt
+     * 2026-11-13: play.date/dev's 1220x702 RGBA hero, 349KB compressed ->
+     * ~3.4MB raw, watchdog PC in inflate.c st_emit). 4s is well inside the
+     * 10s run-loop watchdog; an over-budget image returns NULL and the
+     * image lane paints its placeholder. */
+    PlaydateAPI *pdp = pluto_pd();
+    unsigned long t0 = (pdp && pdp->system &&
+                        pdp->system->getCurrentTimeMilliseconds)
+                           ? pdp->system->getCurrentTimeMilliseconds()
+                           : 0;
     for (int y = 0; y < srcH && !done; y++)
     {
+        if (t0 && (y & 15) == 0 &&
+            pdp->system->getCurrentTimeMilliseconds() - t0 > 4000UL)
+        {
+            logger_log("PNG decode: wall budget exceeded (%dx%d at row %d/%d)",
+                       srcW, srcH, y, srcH);
+            aborted = 1;
+            done = 1;
+            break;
+        }
         /* Tasks.yieldCheck() site (parity comment; budgeted at task layer). */
         size_t got1 = 0;
         const uint8_t *h = inflate_stream_read(inf, 1, &got1);
@@ -432,6 +453,17 @@ LCDBitmap *png_decode(const uint8_t *data, size_t len, int maxW, int maxH)
         uint8_t *tmp = prevRow;
         prevRow = curRow;
         curRow = tmp;
+    }
+
+    if (aborted)
+    {
+        free(prevRow);
+        free(curRow);
+        free(grayRow);
+        scale_accum_free(acc);
+        inflate_stream_free(inf);
+        free(compressed);
+        return NULL;
     }
 
     int outCount = 0, outWidth = 0;
