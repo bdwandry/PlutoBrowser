@@ -156,6 +156,15 @@ static char g_stPath[256];
 
 static void escape_to(const char *in, char *out, size_t cap)
 {
+    if (!out || cap == 0)
+    {
+        return;
+    }
+    if (!in)
+    {
+        out[0] = '\0'; /* OOM-produced history entry: serialize empty */
+        return;
+    }
     size_t o = 0;
     for (const char *p = in; *p && o + 5 < cap; p++)
     {
@@ -877,6 +886,30 @@ void storage_add_history(const char *title, const char *url)
                  hour24 < 12 ? "AM" : "PM");
     }
 
+    /* Allocate + validate BEFORE touching the array: under the device's
+     * memory pressure dup_str can return NULL, and the old order shifted
+     * the list first and inserted a half-built entry — storage_save then
+     * dereferenced title=NULL (device crash 2026-11-13, site 6 Wikipedia
+     * Random, heap 12.7MB, pc in escape_to). A failed insert now leaves
+     * the history untouched. */
+    StoredHistoryItem *h = (StoredHistoryItem *)PLUTO_MALLOC(sizeof(StoredHistoryItem));
+    if (!h)
+    {
+        return;
+    }
+    h->title = dup_str(title);
+    h->url = dup_str(url);
+    h->time = dup_str(timeFormatted);
+    if (!h->title || !h->url || !h->time)
+    {
+        PLUTO_FREE(h->title);
+        PLUTO_FREE(h->url);
+        PLUTO_FREE(h->time);
+        PLUTO_FREE(h);
+        logger_log("STORAGE: history insert skipped (OOM)");
+        return;
+    }
+
     /* shift down and insert at top (Lua table.insert(history, 1, …)) */
     if (g_historyCount < HISTORY_MAX)
     {
@@ -898,14 +931,6 @@ void storage_add_history(const char *title, const char *url)
             g_history[i] = g_history[i - 1];
         }
     }
-    StoredHistoryItem *h = (StoredHistoryItem *)PLUTO_MALLOC(sizeof(StoredHistoryItem));
-    if (!h)
-    {
-        return;
-    }
-    h->title = dup_str(title);
-    h->url = dup_str(url);
-    h->time = dup_str(timeFormatted);
     g_history[0] = h;
 
     storage_save();

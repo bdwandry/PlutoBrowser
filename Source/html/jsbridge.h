@@ -26,6 +26,7 @@
 
 /* ── Resource limits (Playdate-sized) ────────────────────────────────────── */
 #define JSBRIDGE_MAX_SCRIPTS 48          /* <script> elements per page (all kinds) */
+#define JSBRIDGE_DYN_SCRIPTS_MAX 8       /* runtime-inserted <script src> per page */
 /* Historical per-script source cap. SW2b: downloads are uncapped, so this
  * now only bounds (a) the RAM-residency threshold above which a fetched
  * source is re-spilled to disk (jsext) and (b) the http RAM-fallback cap.
@@ -257,6 +258,14 @@ int jsbridge_dispatch_element_event(JsBridge *bridge, const void *node,
  * host tests and diagnostics; returns 0 dispatched, -1 rejected. */
 int jsbridge_page_script(JsBridge *bridge, const char *src, size_t len);
 
+/* Runtime-inserted <script src> lane (document.createElement('script') +
+ * appendChild / insertBefore / prepend / append / script.src assignment).
+ * Call after the mutation; the pump fetches ONE script when the HTTP client
+ * is idle, runs the body in the page engine, and fires load/error on the
+ * element. Static HTML scripts still ride the jsext/scriptQueue lane. */
+void jsbridge_note_dynamic_script(JsBridge *bridge, void *node);
+void jsbridge_dyn_scripts_pump(JsBridge *bridge);
+
 /* ── SW5: engine-agnostic DOM API surface (all four engines bind these) ────
  * Router-owned so every engine gets IDENTICAL semantics and caps:
  * innerHTML assignment parses real markup (16KB source cap, budgeted per
@@ -351,6 +360,12 @@ void jsbridge_engine_pump(JsBridge *bridge, unsigned nowMs, int *mutationsOut);
  * same way the timer/deferred pumps' mutationsOut does, so layout and
  * the tap-target stamps re-anchor to the fresh subtree. */
 int jsbridge_take_dom_dirty(JsBridge *bridge);
+
+/* Scripted-navigation latch (location.assign/replace): returns 1 and
+ * copies the RESOLVED URL when a request is pending, then clears it. The
+ * frame loop calls this after the JS pump bracket and routes the URL
+ * through the normal pendingNavUrl path (never from inside the engine). */
+int jsbridge_take_nav_request(JsBridge *bridge, char *out, size_t cap);
 
 /* ── Phase 10: DOM-mutation notes for the transition lane ─────────────────
  * JS mutations that can CHANGE an element's computed style (attribute

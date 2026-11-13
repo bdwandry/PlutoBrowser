@@ -199,6 +199,14 @@ void fxInitializeParser(txParser* parser, void* console, txSize bufferSize, txSi
    allocator. Device bridge sets 768KB (observed collapse onset: 0.99–1.3MB). */
 unsigned long fxNRParserTotalCap = 0;
 
+#ifdef TARGET_PLAYDATE
+/* Device cap receipt: names the phase (parse vs codegen) and the live
+ * parser total when the ceiling fires. The bridge raises the cap to the
+ * admitted compile estimate; this row proves whether the estimate or the
+ * phase exemption was wrong. */
+extern void logger_log(const char *fmt, ...);
+#endif
+
 #if !defined(TARGET_PLAYDATE) && defined(PLUTO_NR_CAP_DIAG)
 /* Temporary R26g parse-memory forensics: per-parser allocation histogram. */
 txSize diagAllocs[10]; txSize diagBytes[10]; txSize diagTotal; txSize diagCount;
@@ -254,6 +262,15 @@ void* fxNewParserChunk(txParser* parser, txSize size)
 				(unsigned long)(fxNRParserTotalCap >> 10),
 				(unsigned long)(parser->total >> 10), size,
 				(int)parser->states[2].line);
+#endif
+#ifdef TARGET_PLAYDATE
+			logger_log("[nrp] cap fire cap=%luKB total=%luKB (+%luB) "
+			           "codegen=%d capped=%d line=%d",
+			           (unsigned long)(fxNRParserTotalCap >> 10),
+			           (unsigned long)(parser->total >> 10),
+			           (unsigned long)size,
+			           fxNRParserCodegen, fxNRParserCodegenCapped,
+			           (int)parser->states[2].line);
 #endif
 			fxReportMemoryError(parser, parser->states[2].line, "script too large (parser memory cap)");
 		}

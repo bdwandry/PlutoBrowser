@@ -1957,6 +1957,40 @@ static void test_e2e(void)
         CHECK(ovtop == 10, "e2e12: stylesheet beats inline hint");
     }
     free_page(d);
+
+    /* 13. R69: <noscript> meta refresh is invisible while scripting is on.
+     * Google's search shell ships /httpservice/retry/enablejs there; a
+     * browser with an engine must not follow it (it lands on the "Turn on
+     * JavaScript to keep searching" page even though JS is enabled). */
+    d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+    {
+        struct JsBridge *bridge = NULL;
+        int rc = document_parse_ex(
+            "<html><head><noscript><meta http-equiv=\"refresh\" "
+            "content=\"0;url=/httpservice/retry/enablejs\"></noscript>"
+            "</head><body><p>SearchShell</p></body></html>",
+            "https://www.google.com/search?q=playdate", MODE_RAW_HTML, NULL,
+            DOC_SCRIPT_RUN_KEEP, &bridge, d);
+        CHECK(rc == 0, "e2e13: scripting-on page parses");
+        CHECK(d->suppressNoscript == 1, "e2e13: scripting flag on");
+        CHECK(d->metaRefresh.present == 0,
+              "e2e13: noscript meta refresh ignored with scripting on");
+        if (bridge)
+        {
+            js_doc_close(bridge);
+        }
+    }
+    free_page(d);
+
+    /* 14. No-JS mode still honours the same noscript fallback. */
+    d = parse_page(
+        "<html><head><noscript><meta http-equiv=\"refresh\" "
+        "content=\"0;url=/httpservice/retry/enablejs\"></noscript></head>"
+        "<body><p>NoJsShell</p></body></html>");
+    CHECK(d && d->suppressNoscript == 0, "e2e14: scripting flag off");
+    CHECK(d && d->metaRefresh.present == 1,
+          "e2e14: noscript meta refresh honoured with scripting off");
+    free_page(d);
 }
 
 /* js_doc_close comes from jsbridge.c (linked). */

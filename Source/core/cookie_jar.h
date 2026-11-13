@@ -80,6 +80,11 @@ void cookie_jar_process_set_cookies(const char *host, char **list, int count);
 char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
                             char *buf, size_t cap);
 
+/* JS document.cookie view: same host/path/secure matching, but HttpOnly
+ * cookies are hidden (RFC 6265 §7.1 — script must never see them). */
+char *cookie_jar_get_js_header(const char *host, const char *path, int isSsl,
+                               char *buf, size_t cap);
+
 /* Drop expired/malformed cookies (called once at startup in the Lua ref). */
 void cookie_jar_prune(void);
 

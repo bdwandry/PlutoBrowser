@@ -99,6 +99,19 @@ void http_client_init(PlaydateAPI *pd);
  * immediate failure (onError already fired). */
 int http_get(const char *urlString, const HttpCallbacks *callbacks);
 
+/* Top-level document navigation GET: same wire contract as http_get, but
+ * the request carries the full browser navigation header signature
+ * (Chrome Accept, Sec-Fetch-*, Upgrade-Insecure-Requests, client hints).
+ * Google's SearchGuard judges the whole session; the plain minimal header
+ * set is treated as a bot even after the SG_SS challenge passes. The flag
+ * rides the redirect chain and is cleared by the next non-navigation call. */
+int http_get_navigation(const char *urlString, const HttpCallbacks *callbacks);
+
+/* Set the Referer for the NEXT navigation request (scripted location
+ * changes send the current document URL; manual address-bar navigations
+ * send none). One-shot: consumed by the next http_call_ex. */
+void http_set_navigation_referer(const char *url);
+
 /* C4 (fetch/POST): start a request with an explicit METHOD and optional
  * REQUEST body. The body bytes are copied (caller keeps ownership);
  * method defaults to GET when NULL/empty. Same cancel-first contract

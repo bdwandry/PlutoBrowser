@@ -197,6 +197,11 @@ static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
 static int pendingFlipUnload = 0;             /* settings flip: unload old page
                                                * before the deferred reload */
 static char pendingNavUrl[640] = "";
+/* Scripted-navigation Referer (location.assign/replace/href): the page
+ * that requested the navigation. Manual address-bar/bookmark navigations
+ * leave this empty (browser-true: no Referer). Consumed by navigate_to. */
+static char pendingNavReferer[640] = "";
+static int pendingNavRefererSet = 0;
 static int navigatingHistory = 0;             /* Lua navigatingHistory */
 static int mouseX = 200, mouseY = 100;        /* HTML-mode virtual cursor */
 #define MOUSE_SPEED 4                          /* Lua mouseSpeed */
@@ -855,6 +860,11 @@ static void js_timers_update(void)
      * this frame by http_update; completions it settled are pending here). */
     int xhrMutations = 0;
     (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    /* Runtime <script src> lane: a page-inserted classic script is fetched
+     * (idle-gated on the shared HTTP client) and run in the page engine,
+     * then load/error fires on the element. Static HTML scripts still ride
+     * jsext/scriptQueue. */
+    jsbridge_dyn_scripts_pump(g_pageJs);
     /* API-P10: the async module lane — deliveries (already settled this
      * frame by http_update) drain through the standing module bracket,
      * the transport head starts the next wire fetch while the client is
@@ -872,6 +882,30 @@ static void js_timers_update(void)
     if (jsbridge_take_dom_dirty(g_pageJs))
     {
         xhrMutations = 1;
+    }
+    /* Scripted navigation (location.assign/replace/href): the bridge
+     * records the resolved URL during the pump above; route it through
+     * the SAME pendingNavUrl path as a real link/tap. The actual teardown
+     * runs at the top of the next frame, after this engine bracket has
+     * returned (never inside a live JS callback). */
+    {
+        char scriptedNav[640];
+        if (jsbridge_take_nav_request(g_pageJs, scriptedNav,
+                                      sizeof(scriptedNav)))
+        {
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", scriptedNav);
+            /* Browser-true Referer: a scripted location change is
+             * referred by the document that requested it. */
+            snprintf(pendingNavReferer, sizeof(pendingNavReferer), "%s",
+                     (currentDoc && currentDoc->baseUrl[0])
+                         ? currentDoc->baseUrl
+                         : (currentUrlObj ? currentUrlObj->normalized : ""));
+            pendingNavRefererSet = 1;
+            logger_log("[js] scripted navigation queued: %s (referer %s)",
+                       scriptedNav,
+                       pendingNavReferer[0] ? pendingNavReferer : "(none)");
+        }
     }
     if (mutations || xhrMutations)
     {
@@ -6042,6 +6076,10 @@ static int render_step(TaskCtx *ctx)
             opts.detailsOpenCount = detailsKeyCount;
         }
         opts.svgDecoder = app_svg_decoder;
+        /* The render task's body becomes the document's rawHtml (one
+         * allocation for the page lifetime instead of a full second copy).
+         * The task slot is cleared after the parse adopts it. */
+        opts.adoptHtml = 1;
 
         /* JavaScript execution policy: Off → DOC_SCRIPT_OFF (no engine ever
          * created); Inline → RUN_KEEP (inline scripts only, files skipped —
@@ -6111,6 +6149,14 @@ static int render_step(TaskCtx *ctx)
         int rc = document_parse_ex_sliced(rt->body, rt->url, currentBrowseMode,
                                           &opts, jsPolicy, rt->doc,
                                           walkBudget);
+        /* Ownership hand-off: the doc's rawHtml IS the task's body buffer.
+         * Clearing the task slot prevents a double free at render_done;
+         * document_free owns the bytes for the page lifetime. */
+        if (rt->body && rt->doc && rt->doc->rawHtml == rt->body)
+        {
+            rt->body = NULL;
+            logger_log("[mem] html adopted by doc (no second copy)");
+        }
         if (rc > 0)
         {
             /* The tokenize/DOM/CSS/JS stages completed; the element walk is
@@ -6403,6 +6449,10 @@ static void render_done(void *result, void *userdata)
     }
 
     render_css_free(rt);
+    if (rt->body)
+    {
+        logger_log("[mem] render body free ptr=%p", (void *)rt->body);
+    }
     pluto_free(rt->body);
     free(rt);
 }
@@ -6441,7 +6491,13 @@ static void render_error(const char *message, void *userdata)
     update_system_menu();
 }
 
-static void render_body(const char *body, const char *url, int addToHistory)
+/* Ownership-taking render entry: `body` is a heap buffer the task ADOPTS
+ * (freed by render_task_dispose). The old path copied the body twice —
+ * HTTP client buffer → encoding_to_utf8 → pluto_strdup — so a 1.2MB
+ * Reuters body peaked at ~3.6MB before the parse even started (device
+ * receipt 2026-11-13: walk OOM at 7798KB). Callers that already own a
+ * UTF-8 conversion hand it straight in. */
+static void render_body_owned(char *body, const char *url, int addToHistory)
 {
     isRendering = 1;
     progressCurrent = 0;
@@ -6454,10 +6510,14 @@ static void render_body(const char *body, const char *url, int addToHistory)
     RenderTask *rt = (RenderTask *)calloc(1, sizeof(RenderTask));
     if (!rt)
     {
+        if (body)
+        {
+            pluto_free(body);
+        }
         isRendering = 0;
         return;
     }
-    rt->body = pluto_strdup(body ? body : "");
+    rt->body = body ? body : pluto_strdup("");
     snprintf(rt->url, sizeof(rt->url), "%s", url ? url : "");
     rt->addToHistory = addToHistory;
     rt->isToggle = 0;
@@ -6468,6 +6528,11 @@ static void render_body(const char *body, const char *url, int addToHistory)
         render_task_dispose(rt);
         isRendering = 0;
     }
+}
+
+static void render_body(const char *body, const char *url, int addToHistory)
+{
+    render_body_owned(pluto_strdup(body ? body : ""), url, addToHistory);
 }
 
 static void meta_refresh_cb(void *ud)
@@ -6786,7 +6851,18 @@ static void navigate_to(const char *urlString)
     cbs.onProgress = http_on_progress;
     cbs.onSuccess = http_on_success;
     cbs.onError = http_on_error;
-    http_get(urlBuf, &cbs);
+    /* Scripted navigations carry the requesting document as Referer;
+     * manual navigations carry none. One-shot, consumed here. */
+    if (pendingNavRefererSet)
+    {
+        http_set_navigation_referer(pendingNavReferer);
+        pendingNavRefererSet = 0;
+        pendingNavReferer[0] = '\0';
+    }
+    /* Top-level document navigation: full browser header signature
+     * (Sec-Fetch-*, Upgrade-Insecure-Requests, Chrome Accept). Google's
+     * SearchGuard judges the session, not just the SG_SS cookie. */
+    http_get_navigation(urlBuf, &cbs);
 }
 
 /* ── HTTP callbacks (port of the HttpClient.get handler table) ──────────── */
@@ -6918,13 +6994,23 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
             break;
         }
     }
-    /* Lua: body = Encoding.toUtf8(body, headers["content-type"]). */
+    /* Lua: body = Encoding.toUtf8(body, headers["content-type"]).
+     * bodyLen (not strlen) so embedded NULs never truncate the payload.
+     * The UTF-8 buffer is handed to the render task with OWNERSHIP — the
+     * old path freed it and immediately made a third full copy. */
+    logger_log("[mem] http body ptr=%p len=%luKB", (const void *)body,
+               (unsigned long)((body ? bodyLen : 0) / 1024));
     char *utf8 = encoding_to_utf8((const unsigned char *)body,
-                                  body ? strlen(body) : 0, contentType);
-    render_body(utf8 ? utf8 : (body ? body : ""), url, 1);
+                                  body ? bodyLen : 0, contentType);
     if (utf8)
     {
-        pluto_free(utf8);
+        logger_log("[mem] utf8 body ptr=%p len=%luKB", (void *)utf8,
+                   (unsigned long)(bodyLen / 1024));
+        render_body_owned(utf8, url, 1);
+    }
+    else
+    {
+        render_body(body ? body : "", url, 1);
     }
 }
 

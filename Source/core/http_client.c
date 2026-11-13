@@ -63,6 +63,14 @@ static char g_reqAcceptLang[64];
 static HttpHeaderPair g_extraHeaders[HTTP_EXTRA_HEADERS_MAX];
 static int g_extraHeaderCount = 0;
 
+/* Top-level document navigation signature (see http_get_navigation).
+ * g_nextIsNavigation is the one-shot seed the front door consumes into
+ * g_reqIsNavigation; the redirect chain reuses the same flight state. */
+static int g_reqIsNavigation = 0;
+static int g_nextIsNavigation = 0;
+static char g_reqReferer[640];
+static char g_nextReferer[640];
+
 extern PlaydateAPI *pluto_pd(void);
 extern void pluto_free(void *p);
 
@@ -755,7 +763,7 @@ static const char JSTEST_HTML[] =
     "  T(dom, 'parentNode', function(){ var li = document.getElementById('demoList').children[0]; return li.parentNode.tagName === 'UL'; });\n"
     "  T(dom, 'childElementCount/children', function(){ return document.getElementById('demoList').childElementCount === 3; });\n"
     "  T(dom, 'location.href (read)', function(){ return typeof location.href === 'string' && location.href.length > 0; });\n"
-    "  T(dom, 'navigator.userAgent', function(){ return navigator.userAgent.indexOf('muJS') > 0 || navigator.userAgent.indexOf('Duktape') > 0 || navigator.userAgent.indexOf('QuickJS') > 0 || navigator.userAgent.indexOf('XS/Moddable') > 0; });\n"
+    "  T(dom, 'navigator.userAgent', function(){ return navigator.userAgent.indexOf('Chrome') > 0 || navigator.userAgent.indexOf('muJS') > 0 || navigator.userAgent.indexOf('Duktape') > 0 || navigator.userAgent.indexOf('QuickJS') > 0 || navigator.userAgent.indexOf('XS/Moddable') > 0; });\n"
     "  T(dom, 'document.title', function(){ return document.title === 'JavaScript Test Suite'; });\n"
     "  T(timers, 'setTimeout returns an id', function(){ var id = setTimeout(function(){}, 50); clearTimeout(id); return typeof id === 'number' && id > 0; });\n"
     "  T(timers, 'clearTimeout(null-ish) is safe', function(){ clearTimeout(0); clearTimeout(undefined); return true; });\n"
@@ -3067,6 +3075,33 @@ static void extra_seed(const HttpHeaderPair *extra, int nExtra)
     }
 }
 
+/* Same-site heuristic for the Fetch metadata header: equal hosts or one
+ * host being a dot-boundary suffix of the other (www.google.com ↔
+ * google.com). Public-suffix edges (co.uk) are the documented residual,
+ * same as the cookie jar's domain policy. */
+static int host_same_site(const char *a, const char *b)
+{
+    if (!a || !b || !a[0] || !b[0])
+    {
+        return 0;
+    }
+    if (strcmp(a, b) == 0)
+    {
+        return 1;
+    }
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    if (la > lb && a[la - lb - 1] == '.' && strcmp(a + la - lb, b) == 0)
+    {
+        return 1;
+    }
+    if (lb > la && b[lb - la - 1] == '.' && strcmp(b + lb - la, a) == 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
 /* Build a minimal HTTP request (reference buildRequest). GET carried the
  * engine for its whole life; C4 adds the POST variant the JS fetch shim
  * needs — same header set, plus Content-Type/Length for body requests. */
@@ -3094,9 +3129,66 @@ static void build_request(StrBuf *out)
     strbuf_appendf(out, "User-Agent: %s\r\n",
                    g_reqUserAgent[0] ? g_reqUserAgent : USER_AGENT);
     strbuf_appendf(out, "Accept: %s\r\n",
-                   g_reqAccept[0] ? g_reqAccept : "text/html,text/plain;q=0.8");
+                   g_reqAccept[0]
+                       ? g_reqAccept
+                       : (g_reqIsNavigation
+                              ? "text/html,application/xhtml+xml,application/xml;"
+                                "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,"
+                                "application/signed-exchange;v=b3;q=0.7"
+                              : "text/html,text/plain;q=0.8"));
     strbuf_appendf(out, "Accept-Language: %s\r\n",
                    g_reqAcceptLang[0] ? g_reqAcceptLang : "en-US,en;q=0.9");
+    /* Top-level document navigation signature. Bot walls that judge the
+     * whole session (Google SearchGuard layer 2, Baidu, Yandex) expect
+     * the modern Chrome set; the minimal Accept alone is treated as a
+     * scripted client even after the JS challenge passes. */
+    if (g_reqIsNavigation)
+    {
+        /* Fetch metadata is derived, not constant: a manual navigation has
+         * no Referer and is user-initiated (`none` + `?1`); a scripted
+         * location change carries the requesting document as Referer and
+         * is same-origin/same-site/cross-site accordingly (and omits
+         * Sec-Fetch-User — no user activation). General browser behavior,
+         * not a site rule. */
+        const char *fetchSite = "none";
+        int scripted = 0;
+        if (g_reqReferer[0])
+        {
+            UrlParsed ref;
+            if (url_parse(g_reqReferer, &ref) == 0 && ref.host[0])
+            {
+                scripted = 1;
+                if (strcmp(ref.host, g_parsed->host) == 0)
+                {
+                    fetchSite = "same-origin";
+                }
+                else if (host_same_site(ref.host, g_parsed->host))
+                {
+                    fetchSite = "same-site";
+                }
+                else
+                {
+                    fetchSite = "cross-site";
+                }
+            }
+        }
+        strbuf_appendf(out, "Sec-Fetch-Site: %s\r\n", fetchSite);
+        strbuf_appendf(out, "Sec-Fetch-Mode: navigate\r\n");
+        if (!scripted)
+        {
+            strbuf_appendf(out, "Sec-Fetch-User: ?1\r\n");
+        }
+        strbuf_appendf(out, "Sec-Fetch-Dest: document\r\n");
+        strbuf_appendf(out, "Upgrade-Insecure-Requests: 1\r\n");
+        strbuf_appendf(out, "sec-ch-ua: \"Chromium\";v=\"126\", "
+                            "\"Not-A.Brand\";v=\"24\", \"Google Chrome\";v=\"126\"\r\n");
+        strbuf_appendf(out, "sec-ch-ua-mobile: ?0\r\n");
+        strbuf_appendf(out, "sec-ch-ua-platform: \"macOS\"\r\n");
+        if (g_reqReferer[0])
+        {
+            strbuf_appendf(out, "Referer: %s\r\n", g_reqReferer);
+        }
+    }
     /* Compression setting (user decision, default Off): Off sends
      * Accept-Encoding: identity (raw bytes — reliable on weak radio);
      * Gzip opts back into gzip (smaller transfers on good WiFi).
@@ -3106,7 +3198,15 @@ static void build_request(StrBuf *out)
      * API compatibility with jsext); the gzip RESPONSE decode path
      * below stays intact as a fallback for servers/proxies that send
      * gzip unasked. */
-    if (storage_setting_int("encodingMode") == 1)
+    if (g_reqIsNavigation)
+    {
+        /* A Chrome-UA navigation that advertises `identity` is a bot
+         * signal; the gzip decoder is always linked, so navigation pages
+         * ride the normal browser compression set regardless of the
+         * weak-radio setting (subresources keep the user's choice). */
+        strbuf_appendf(out, "Accept-Encoding: gzip, deflate\r\n");
+    }
+    else if (storage_setting_int("encodingMode") == 1)
     {
         strbuf_appendf(out, "Accept-Encoding: gzip\r\n");
     }
@@ -4402,6 +4502,10 @@ static int http_call_ex(const char *method, const char *urlString,
                         const HttpCallbacks *callbacks)
 {
     reset_state();
+    g_reqIsNavigation = g_nextIsNavigation;
+    g_nextIsNavigation = 0;
+    snprintf(g_reqReferer, sizeof(g_reqReferer), "%s", g_nextReferer);
+    g_nextReferer[0] = '\0';
     g_hasPendingRedirect = 0;
     g_redirectDepth = 0;
     /* NetP3: a brand-new request supersedes any pending redirect hop —
@@ -4470,6 +4574,19 @@ static int http_call(const char *method, const char *urlString,
 int http_get(const char *urlString, const HttpCallbacks *callbacks)
 {
     return http_call("GET", urlString, NULL, 0, callbacks);
+}
+
+int http_get_navigation(const char *urlString, const HttpCallbacks *callbacks)
+{
+    /* One-shot seed consumed by http_call_ex after its own reset (the
+     * same alive-after-reset pattern the content type uses). */
+    g_nextIsNavigation = 1;
+    return http_call("GET", urlString, NULL, 0, callbacks);
+}
+
+void http_set_navigation_referer(const char *url)
+{
+    snprintf(g_nextReferer, sizeof(g_nextReferer), "%s", url ? url : "");
 }
 
 /* C4 (fetch/POST): explicit METHOD + optional REQUEST body. Mirrors

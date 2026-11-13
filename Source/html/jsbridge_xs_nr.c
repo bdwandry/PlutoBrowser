@@ -75,6 +75,9 @@
 #include "../render/style.h"
 #include "../core/tasks.h"
 #include "../core/url.h"
+#include "../core/cookie_jar.h"
+#include "../core/constants.h" /* USER_AGENT: navigator.userAgent must match the wire UA */
+#include "../core/http_client.h" /* runtime <script src> fetch lane */
 extern void pluto_free(void *p);
 #include "../util/strbuf.h"
 #include "../html/dom.h"
@@ -176,7 +179,13 @@ static int xs_flush_microtasks(JsBridge *b);
 #define XS_INC_KEYS 256u
 #define XS_NAME_MOD 127u
 #define XS_SYMBOL_MOD 127u
-#define XS_PARSER_BUF (16u * 1024u)
+/* Modern minified bundles carry single string literals far past 16KB:
+ * Google's search shell embeds a 62,699-byte eval payload and a
+ * 16,885-byte cookie blob, so both challenge scripts died at parse with
+ * "buffer overflow" and the page never left its Loading shell. 128KB
+ * covers that class with margin; the buffer is per-parse (freed with the
+ * parser), so the cost is transient, not resident. */
+#define XS_PARSER_BUF (128u * 1024u)
 #define XS_PARSER_TBL 127u
 
 /* ── R20: time-sliced split execution (watchdog-safe) ─────────────�
@@ -248,7 +257,13 @@ static unsigned long g_splitMaxRunMs = 0;
  * units) and returns 0 once it crosses XS_RUNLIMIT — same scale as the
  * muJS JSBRIDGE_RUNLIMIT statement counter (2,000,000). */
 #ifndef XS_RUNLIMIT
-#define XS_RUNLIMIT 2000000u
+/* Runaway guard base. The old 2M-op base was tuned for small inline
+ * scripts; Google's search challenge legitimately executes ~11.4M metered
+ * ops before it sets its SG_SS cookie (the per-script budget adds
+ * len*256 on top, which was still short). 32M keeps the guard meaningful
+ * for a spin while letting a real challenge finish; the device's 5s
+ * wall-clock bracket remains the watchdog bound. */
+#define XS_RUNLIMIT 32000000u
 #endif
 
 /* C-stack budget handed to the engine's stock fxCheckCStack + parser
@@ -1160,6 +1175,8 @@ static void xs_el_set_src(xsMachine *the)
     int rc = n ? dom_set_attr(b->dom, n, "src", value) : -1;
     JFree(value);
     if (rc) xsTypeError("src assignment failed");
+    /* script.src = "..." while connected starts a runtime load. */
+    jsbridge_note_dynamic_script(b, n);
 }
 
 static void xs_el_get_textContent(xsMachine *the)
@@ -2231,6 +2248,9 @@ static void xs_el_setAttribute(xsMachine *the)
          * value lanes ride the same store). Text-free writes only —
          * see jsbridge.h's note contract. */
         jsbridge_note_dom_mutation(b, n);
+        /* setAttribute('src', ...) on a connected <script> is a runtime
+         * load (the helper tag/src/connectedness-gates). */
+        jsbridge_note_dynamic_script(b, n);
     }
 }
 
@@ -2473,6 +2493,62 @@ static void xs_maybe_queue_asset_load(JsBridge *b, DomNode *c)
     xs_queue_resource_fire(b, c);
 }
 
+/* Element.prepend()/append() (DOM §4.8): variadic node-or-string
+ * insertion. The reCAPTCHA loader calls document.head.prepend(meta) before
+ * it inserts its client script; without these methods the loader throws
+ * "call: not a function" and the widget never appears. */
+static void xs_el_prepend_append(xsMachine *the, int atEnd)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        xsTypeError("append/prepend: no element");
+    }
+    DomNode *first = (!atEnd && n->childCount > 0) ? n->children[0] : NULL;
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c)
+        {
+            continue;
+        }
+        if (dom_insert_before(b->dom, n, c, first) != 0)
+        {
+            xsTypeError("append/prepend failed");
+        }
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+    xsResult = xsUndefined;
+}
+
+static void xs_el_prepend(xsMachine *the)
+{
+    xs_el_prepend_append(the, 0);
+}
+
+static void xs_el_append(xsMachine *the)
+{
+    xs_el_prepend_append(the, 1);
+}
+
 static void xs_el_appendChild(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -2503,6 +2579,7 @@ static void xs_el_appendChild(xsMachine *the)
     b->domDirty = 1;
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree swap = style change */
     xs_maybe_queue_asset_load(b, c); /* react stylesheets enter via append */
+    jsbridge_note_dynamic_script(b, c); /* runtime <script src> execution */
     /* API-P6: browsers return the appended child — the falsy-return the
      * probe recorded is fixed here (chained mounts like react's
      * a.appendChild(b).appendChild(c) now behave like the browser). */
@@ -2909,6 +2986,7 @@ static void xs_el_insertBefore(xsMachine *the)
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree moved */
     xs_maybe_queue_asset_load(b, c); /* react stylesheet hoisting path */
+    jsbridge_note_dynamic_script(b, c); /* runtime <script src> execution */
     /* API-P6: browsers return the inserted child. */
     xsResult = xs_push_element(b, c);
 }
@@ -4355,6 +4433,192 @@ static void xs_fonts_load(xsMachine *the)
     xsResult = p;
 }
 
+/* ── atob / btoa (HTML §8.3) ────────────────────────────────────────────────
+ * Modern bundles use these for binary blobs (Google's search challenge
+ * decodes its proof-of-work payload with atob and re-encodes the result
+ * with btoa). XS strings are UTF-8, so atob builds a string whose CODE
+ * POINTS are the decoded bytes (0-255); charCodeAt then returns the byte
+ * value exactly as a browser's UTF-16 binary string does. btoa walks the
+ * input's UTF-8 code points and encodes the low byte. */
+static int xs_b64_value(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static void xs_atob(xsMachine *the)
+{
+    const char *src = xsToString(xsArg(0));
+    size_t n = src ? strlen(src) : 0;
+    unsigned char *out = (unsigned char *)malloc((n / 4) * 3 + 4);
+    if (!out)
+    {
+        xsTypeError("atob: out of memory");
+        return;
+    }
+    size_t o = 0;
+    int quad[4];
+    int qn = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        int c = (unsigned char)src[i];
+        if (c == '=')
+        {
+            break;
+        }
+        int v = xs_b64_value(c);
+        if (v < 0)
+        {
+            continue; /* whitespace / non-alphabet bytes are ignored */
+        }
+        quad[qn++] = v;
+        if (qn == 4)
+        {
+            out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+            out[o++] = (unsigned char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+            out[o++] = (unsigned char)(((quad[2] & 3) << 6) | quad[3]);
+            qn = 0;
+        }
+    }
+    if (qn == 2)
+    {
+        out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+    }
+    else if (qn == 3)
+    {
+        out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+        out[o++] = (unsigned char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+    }
+    char *utf = (char *)malloc(o * 2 + 1);
+    if (!utf)
+    {
+        free(out);
+        xsTypeError("atob: out of memory");
+        return;
+    }
+    size_t u = 0;
+    for (size_t i = 0; i < o; i++)
+    {
+        unsigned char c = out[i];
+        if (c < 0x80)
+        {
+            utf[u++] = (char)c;
+        }
+        else
+        {
+            utf[u++] = (char)(0xC0 | (c >> 6));
+            utf[u++] = (char)(0x80 | (c & 0x3F));
+        }
+    }
+    utf[u] = '\0';
+    xsResult = xsStringBuffer(utf, (txSize)u);
+    free(utf);
+    free(out);
+}
+
+static void xs_btoa(xsMachine *the)
+{
+    const char *src = xsToString(xsArg(0));
+    size_t n = src ? strlen(src) : 0;
+    unsigned char *bytes = (unsigned char *)malloc(n + 1);
+    if (!bytes)
+    {
+        xsTypeError("btoa: out of memory");
+        return;
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < n;)
+    {
+        unsigned char c = (unsigned char)src[i];
+        unsigned int cp;
+        if (c < 0x80)
+        {
+            cp = c;
+            i += 1;
+        }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < n)
+        {
+            cp = ((unsigned int)(c & 0x1F) << 6) |
+                 ((unsigned int)((unsigned char)src[i + 1] & 0x3F));
+            i += 2;
+        }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < n)
+        {
+            cp = ((unsigned int)(c & 0x0F) << 12) |
+                 ((unsigned int)((unsigned char)src[i + 1] & 0x3F) << 6) |
+                 ((unsigned int)((unsigned char)src[i + 2] & 0x3F));
+            i += 3;
+        }
+        else
+        {
+            cp = c;
+            i += 1;
+        }
+        if (cp > 0xFF)
+        {
+            free(bytes);
+            xsTypeError("btoa: character out of range");
+            return;
+        }
+        bytes[o++] = (unsigned char)cp;
+    }
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t outLen = ((o + 2) / 3) * 4;
+    char *out = (char *)malloc(outLen + 1);
+    if (!out)
+    {
+        free(bytes);
+        xsTypeError("btoa: out of memory");
+        return;
+    }
+    size_t p = 0;
+    for (size_t i = 0; i < o; i += 3)
+    {
+        unsigned int v = (unsigned int)bytes[i] << 16;
+        int have = 1;
+        if (i + 1 < o)
+        {
+            v |= (unsigned int)bytes[i + 1] << 8;
+            have = 2;
+        }
+        if (i + 2 < o)
+        {
+            v |= (unsigned int)bytes[i + 2];
+            have = 3;
+        }
+        out[p++] = alphabet[(v >> 18) & 0x3F];
+        out[p++] = alphabet[(v >> 12) & 0x3F];
+        out[p++] = have >= 2 ? alphabet[(v >> 6) & 0x3F] : '=';
+        out[p++] = have >= 3 ? alphabet[v & 0x3F] : '=';
+    }
+    out[p] = '\0';
+    xsResult = xsString(out);
+    free(out);
+    free(bytes);
+}
+
+/* navigator.sendBeacon — fire-and-forget telemetry. The browser has no
+ * script-driven background POST lane; the spec's contract is "queued"
+ * (true), so callers (Google's challenge, analytics) keep their flow. */
+static void xs_navigator_sendBeacon(xsMachine *the)
+{
+    /* Fire-and-forget telemetry. The browser has no background POST lane;
+     * log the target so challenge error beacons (window.onerror →
+     * /httpservice/retry/jserror?emsg=…) are visible in pluto.log. */
+    char *url = to_cstring(the, xsArg(0));
+    logger_log("[js] sendBeacon: %s", url ? url : "");
+    if (url)
+    {
+        JFree(url);
+    }
+    xsResult = xsBoolean(1);
+}
+
 static void xs_document_getTitle(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -4416,6 +4680,7 @@ static void xs_document_appendChild(xsMachine *the)
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree grew */
+    jsbridge_note_dynamic_script(b, child); /* runtime <script src> */
     xsResult = xsArg(0);
 }
 
@@ -4438,6 +4703,7 @@ static void xs_document_insertBefore(xsMachine *the)
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree moved */
+    jsbridge_note_dynamic_script(b, child); /* runtime <script src> */
     xsResult = xsArg(0);
 }
 
@@ -4646,12 +4912,29 @@ static void xs_doc_addEventListener(xsMachine *the)
 
 static void xs_location_assign(xsMachine *the)
 {
+    JsBridge *b = bridge_of(the);
     char *u = to_cstring(the, xsArg(0));
-    logger_log("[js] location.assign/replace ignored: %s", u ? u : "");
-    if (u)
+    if (!u || !u[0] || !b)
     {
-        JFree(u);
+        if (u)
+        {
+            JFree(u);
+        }
+        return;
     }
+    /* Resolve against the live document, exactly like a browser's
+     * location.assign/replace. The actual navigate_to runs from the frame
+     * loop AFTER this engine bracket returns (jsbridge_take_nav_request) —
+     * tearing the bridge down inside its own callback is the R67 hazard. */
+    char *abs = url_resolve(b->doc ? b->doc->baseUrl : "", u);
+    if (abs)
+    {
+        snprintf(b->navRequest, sizeof(b->navRequest), "%s", abs);
+        b->navRequestSet = 1;
+        logger_log("[js] location.assign/replace -> %s", abs);
+        JFree(abs);
+    }
+    JFree(u);
 }
 
 static void xs_alert(xsMachine *the)
@@ -4677,18 +4960,22 @@ static void xs_noop(xsMachine *the)
  * macro-redefined by the QuickJS shim there — see the sim-frame probe in
  * the split path) so it reads the SDK's monotonic ms clock (integer ms:
  * sub-ms lane scheduling degrades gracefully). */
+/* Navigation origin for performance.now(): a real browser returns ms
+ * SINCE navigation (small, 0 at load), not the raw monotonic clock
+ * (1.4e15 on the host — a glaring fingerprint mismatch). The epoch
+ * origin is what performance.timeOrigin/timing.navigationStart expose. */
+static double g_perfOriginMs = 0.0;
+static double g_perfEpochStartMs = 0.0;
+
 static void xs_performance_now(xsMachine *the)
 {
-    double ms = 0.0;
-#if defined(TARGET_PLAYDATE)
+    /* SDK monotonic ms on BOTH targets: the sim's clock_gettime is
+     * macro-renamed to the QuickJS stub (returns -1, leaves the struct
+     * untouched), which read garbage. getCurrentTimeMilliseconds is the
+     * simulator's real monotonic clock. */
     PlaydateAPI *pdp = pluto_pd();
-    ms = pdp ? (double)pdp->system->getCurrentTimeMilliseconds() : 0.0;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
-#endif
-    xsResult = xsNumber(ms);
+    double ms = pdp ? (double)pdp->system->getCurrentTimeMilliseconds() : 0.0;
+    xsResult = xsNumber(ms - g_perfOriginMs);
 }
 
 /* performance.getEntriesByType/getEntries — React 19's commit-suspend
@@ -5020,11 +5307,51 @@ static int xs_location_parse_current(JsBridge *b, UrlParsed *parsed)
     return url_parse(xs_hist_current(b), parsed) == 0;
 }
 
+/* ── document.cookie (RFC 6265 §7.1 script API) ─────────────────────────────
+ * The getter exposes only non-HttpOnly cookies for the live document URL;
+ * the setter feeds one JS cookie assignment through the SAME jar/parser the
+ * network lane uses (JS cookie syntax is a subset of Set-Cookie). Google's
+ * search challenge sets SG_SS here and then re-checks it — without this
+ * surface the challenge can never complete. */
+static void xs_document_getCookie(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char buf[768];
+    buf[0] = '\0';
+    if (b && b->doc && xs_location_parse_current(b, &parsed))
+    {
+        cookie_jar_get_js_header(parsed.host, parsed.path, parsed.isSsl,
+                                 buf, sizeof(buf));
+    }
+    xsResult = xsString(buf);
+}
+
+static void xs_document_setCookie(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    const char *raw = xsToString(xsArg(0));
+    if (b && b->doc && raw && raw[0] && xs_location_parse_current(b, &parsed))
+    {
+        logger_log("[js] document.cookie set: len=%zu %.96s",
+                   strlen(raw), raw);
+        cookie_jar_store_ex(parsed.host, parsed.path, raw);
+    }
+}
+
 static void xs_location_get_href(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
     xs_hist_seed(b);
     xsResult = xsString(xs_hist_current(b));
+}
+
+static void xs_location_set_href(xsMachine *the)
+{
+    /* location.href = "..." is an assignment-navigation, same contract as
+     * assign/replace: resolve now, navigate from the frame loop. */
+    xs_location_assign(the);
 }
 
 static void xs_location_get_origin(xsMachine *the)
@@ -5588,6 +5915,8 @@ static void xs_build_el_proto(JsBridge *b)
         {"appendChild", xs_el_appendChild, 1},
         {"removeChild", xs_el_removeChild, 1},
         {"insertBefore", xs_el_insertBefore, 2},
+        {"prepend", xs_el_prepend, 0},
+        {"append", xs_el_append, 0},
         {"querySelector", xs_el_querySelector, 1},
         {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"closest", xs_el_closest, 1},
@@ -6166,19 +6495,35 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, perf, "clearMeasures", xs_noop, 0);
         def_fn(the, perf, "clearMarks", xs_noop, 0);
         {
-            /* Device: no CLOCK_MONOTONIC in the toolchain — SDK ms clock. */
+            /* Device: no CLOCK_MONOTONIC in the toolchain — SDK ms clock.
+             * Epoch origin: Unix ms at navigation, the value a real
+             * browser exposes via performance.timeOrigin and
+             * timing.navigationStart (performance.now() is relative to
+             * it — see xs_performance_now). */
             double origin = 0.0;
-#if defined(TARGET_PLAYDATE)
+            double epochNow = 0.0;
             PlaydateAPI *pdp = pluto_pd();
             origin = pdp ? (double)pdp->system->getCurrentTimeMilliseconds()
                          : 0.0;
-#else
-            struct timespec tso;
-            clock_gettime(CLOCK_MONOTONIC, &tso);
-            origin = (double)tso.tv_sec * 1000.0 +
-                     (double)tso.tv_nsec / 1000000.0;
-#endif
-            def_val(the, perf, "timeOrigin", xsNumber(origin));
+            if (pdp)
+            {
+                unsigned int ms = 0;
+                uint32_t sec = pdp->system->getSecondsSinceEpoch(&ms);
+                epochNow = ((double)sec + 946684800.0) * 1000.0 + (double)ms;
+            }
+            g_perfOriginMs = origin;
+            g_perfEpochStartMs = epochNow;
+            def_val(the, perf, "timeOrigin", xsNumber(epochNow));
+            /* performance.timing — challenge/fingerprint code compares
+             * these epoch values with Date.now(); both fields exist and
+             * are browser-shaped. */
+            {
+                xsSlot timing = xsNewHostObject(NULL);
+                xsResult = timing; /* GC anchor */
+                def_val(the, timing, "navigationStart", xsNumber(epochNow));
+                def_val(the, timing, "responseStart", xsNumber(epochNow));
+                def_val(the, perf, "timing", timing);
+            }
         }
         def_val(the, glob, "performance", perf);
     }
@@ -6187,11 +6532,47 @@ static void xs_build_globals(JsBridge *b)
     {
         xsSlot nav = xsNewHostObject(NULL);
         xsResult = nav; /* GC anchor */
-        def_val(the, nav, "userAgent",
-                xsString("PlutoBrowser/1.0 (Playdate; XS/Moddable 9.5.0)"));
-        def_val(the, nav, "appCodeName", xsString("PlutoBrowser"));
-        def_val(the, nav, "appVersion", xsString("1.0"));
+        /* navigator.userAgent MUST match the wire UA (constants.h
+         * USER_AGENT). The old Playdate string disagreed with the Chrome
+         * HTTP header — a first-class bot signal for any challenge that
+         * compares the two. The other navigator fields are the standard
+         * web-platform surface challenge/fingerprint code reads. */
+        def_val(the, nav, "userAgent", xsString(USER_AGENT));
+        def_val(the, nav, "appCodeName", xsString("Mozilla"));
+        def_val(the, nav, "appVersion",
+                xsString("5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/126.0.0.0 Safari/537.36"));
+        def_val(the, nav, "platform", xsString("MacIntel"));
+        def_val(the, nav, "language", xsString("en-US"));
+        def_val(the, nav, "cookieEnabled", xsTrue);
+        def_val(the, nav, "onLine", xsTrue);
+        def_val(the, nav, "webdriver", xsFalse);
+        def_val(the, nav, "hardwareConcurrency", xsInteger(1));
+        def_val(the, nav, "maxTouchPoints", xsInteger(0));
+        def_val(the, nav, "deviceMemory", xsNumber(0.25));
+        {
+            xsSlot langs = xsNewArray(2);
+            xsResult = langs; /* GC anchor */
+            xsSetIndex(langs, 0, xsString("en-US"));
+            xsSetIndex(langs, 1, xsString("en"));
+            def_val(the, nav, "languages", langs);
+        }
+        def_val(the, nav, "plugins", xsNewArray(0));
+        def_val(the, nav, "mimeTypes", xsNewArray(0));
+        def_fn(the, nav, "sendBeacon", xs_navigator_sendBeacon, 2);
         def_val(the, glob, "navigator", nav);
+    }
+
+    /* window.chrome — the minimal shape a Chrome-UA client exposes.
+     * Fingerprint code checks it; a Chrome UA without it is a bot signal. */
+    {
+        xsSlot chr = xsNewHostObject(NULL);
+        xsResult = chr; /* GC anchor */
+        def_val(the, chr, "runtime", xsNewHostObject(NULL));
+        def_fn(the, chr, "loadTimes", xs_noop, 0);
+        def_fn(the, chr, "csi", xs_noop, 0);
+        def_val(the, glob, "chrome", chr);
     }
 
     /* API-P3: location is LIVE over the address journal — every
@@ -6223,6 +6604,11 @@ static void xs_build_globals(JsBridge *b)
         {
             xsSlot get = xsNewHostFunction(locComps[lc].get, 0);
             xsDefine(loc, xsID((char *)locComps[lc].name), get, xsIsGetter);
+            if (strcmp(locComps[lc].name, "href") == 0)
+            {
+                xsSlot set = xsNewHostFunction(xs_location_set_href, 1);
+                xsDefine(loc, xsID("href"), set, xsIsSetter);
+            }
         }
         def_fn(the, loc, "assign", xs_location_assign, 1);
         def_fn(the, loc, "replace", xs_location_assign, 1);
@@ -6341,6 +6727,11 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, doc, "removeEventListener", xs_noop, 2);
         def_val(the, doc, "defaultView", glob);
         def_val(the, doc, "nodeType", xsInteger(9));
+        /* Page Visibility (HTML §7.1): the browser is always visible on
+         * the Playdate (one foreground page). Challenge/fingerprint code
+         * reads both; undefined is a bot signal. */
+        def_val(the, doc, "hidden", xsFalse);
+        def_val(the, doc, "visibilityState", xsString("visible"));
         /* C4 (input fidelity): react's ChangeEventPlugin capability-probes
          * `"oninput" in document` (browser truth) to pick the modern
          * TrackerEventPlugin path for text-input onChange dispatch.
@@ -6357,6 +6748,13 @@ static void xs_build_globals(JsBridge *b)
             xsDefine(doc, xsID("title"), getter, xsIsGetter);
             xsSlot titleSetter = xsNewHostFunction(xs_document_setTitle, 1);
             xsDefine(doc, xsID("title"), titleSetter, xsIsSetter);
+        }
+        /* document.cookie (RFC 6265 §7.1): live getter + jar-backed setter. */
+        {
+            xsSlot getter = xsNewHostFunction(xs_document_getCookie, 0);
+            xsDefine(doc, xsID("cookie"), getter, xsIsGetter);
+            xsSlot setter = xsNewHostFunction(xs_document_setCookie, 1);
+            xsDefine(doc, xsID("cookie"), setter, xsIsSetter);
         }
         /* A2: currentScript as a live getter — the router stamps each
          * running script's tag span (jsbridge_cur_script_stamp) and this
@@ -6399,6 +6797,43 @@ static void xs_build_globals(JsBridge *b)
         }
         def_val(the, glob, "document", doc);
     }
+
+    /* Window geometry + screen (CSSOM View / HTML §7.2-7.3). Browser
+     * challenges and fingerprinting code read these unconditionally; a
+     * missing `screen` is a ReferenceError, which SearchGuard catches and
+     * degrades its token over (the 54-char fail token receipt). The values
+     * are the Playdate's real 400x240 panel; the content viewport is
+     * 400x216 under the 24px chrome bar. colorDepth is the web-platform
+     * convention (24) rather than the 1-bit panel. */
+    def_val(the, glob, "innerWidth", xsInteger(400));
+    def_val(the, glob, "innerHeight", xsInteger(216));
+    def_val(the, glob, "outerWidth", xsInteger(400));
+    def_val(the, glob, "outerHeight", xsInteger(240));
+    def_val(the, glob, "devicePixelRatio", xsNumber(1));
+    def_val(the, glob, "screenX", xsInteger(0));
+    def_val(the, glob, "screenY", xsInteger(0));
+    def_val(the, glob, "pageXOffset", xsInteger(0));
+    def_val(the, glob, "pageYOffset", xsInteger(0));
+    def_val(the, glob, "opener", xsNull);
+    {
+        xsSlot scr = xsNewHostObject(NULL);
+        xsResult = scr; /* GC anchor */
+        def_val(the, scr, "width", xsInteger(400));
+        def_val(the, scr, "height", xsInteger(240));
+        def_val(the, scr, "availWidth", xsInteger(400));
+        def_val(the, scr, "availHeight", xsInteger(240));
+        def_val(the, scr, "availLeft", xsInteger(0));
+        def_val(the, scr, "availTop", xsInteger(0));
+        def_val(the, scr, "colorDepth", xsInteger(24));
+        def_val(the, scr, "pixelDepth", xsInteger(24));
+        def_val(the, glob, "screen", scr);
+    }
+
+    /* Browser globals: atob/btoa (HTML §8.3) — binary blobs in modern
+     * bundles (Google's search challenge decodes its proof-of-work with
+     * atob and re-encodes the result with btoa). */
+    def_fn(the, glob, "atob", xs_atob, 1);
+    def_fn(the, glob, "btoa", xs_btoa, 1);
 
     /* alert/confirm/prompt + no-op timers (UNSUPPORTED — parity) */
     def_fn(the, glob, "alert", xs_alert, 0);
@@ -6894,7 +7329,10 @@ static unsigned long xs_mount_now_ms(void); /* defined below the callback */
  * the whole bracket. An abort is contained by xs_parse_and_run's
  * HostExit bracket (engine reset, page keeps its server shell). Mounts
  * are exempt: their own resumable burst budget owns the clock. */
-#define XS_SCRIPT_WALL_BUDGET_MS 5000UL
+/* 8s: Google's 63KB search challenge parses its eval payload for ~6s on
+ * the M7 (device receipt 2026-11-12: cap error at 6s, no watchdog). 5s
+ * cut it off mid-parse; 8s leaves 2s of watchdog margin. */
+#define XS_SCRIPT_WALL_BUDGET_MS 8000UL
 static unsigned long g_scriptRunStartMs = 0;
 static volatile int g_scriptRunActive = 0;
 
@@ -8559,6 +8997,24 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
 #else
     (void)execPeak;
 #endif
+    /* The boot parser cap (1536KB) is a fixed estimate; a script that
+     * ADMITTED at execPeak must be allowed to use that grant or the fork
+     * aborts mid-parse with "script too large (parser memory cap)".
+     * Google's 63KB challenge script admitted at ~1694KB and then died at
+     * the 1536KB cap on device (sim: no cap). Scope the raise to THIS
+     * parse and restore it after the bracket. */
+    unsigned long savedParserCap = fxNRParserTotalCap;
+    if (execPeak && execPeak > savedParserCap)
+    {
+        /* The 19B/B estimate covers the outer parse; Google's challenge
+         * eval'd payload parses with its own parser and lands past the
+         * estimate (device receipts: cap 1694KB -> 1792KB actual; cap
+         * 1950KB -> 2048KB actual; codegen=0 both times). The payload is
+         * heavily obfuscated (~32B/source byte of parser memory), so give
+         * the cap a 1MB margin — the device budget still has room at
+         * ~3.7MB live + ~2.7MB parser. */
+        fxNRParserTotalCap = (unsigned long)execPeak + (1024UL * 1024UL);
+    }
     /* Scale the runaway guard with the admitted source size (R22: the
      * 253KB bootstrap tail legitimately executes far more than the flat
      * 2M-op budget; admission already bounded the segment). */
@@ -8670,6 +9126,7 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
 #ifdef TARGET_PLAYDATE
     g_scriptRunActive = 0;
 #endif
+    fxNRParserTotalCap = savedParserCap; /* restore the boot cap */
     xs_run_limit = (txU8)XS_RUNLIMIT; /* restore default for other runners */
     xs_exec_finish(b, st, m, index);
 }

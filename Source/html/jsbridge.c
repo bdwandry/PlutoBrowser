@@ -1586,6 +1586,206 @@ int jsbridge_page_script(JsBridge *b, const char *src, size_t len)
     return 0;
 }
 
+/* ── Runtime-inserted <script src> lane ────────────────────────────────────
+ * Browsers execute a classic script when it is inserted into the document
+ * (or its src is set while connected): fetch asynchronously, run in the
+ * page realm, fire load/error. The static HTML lane (jsext/scriptQueue)
+ * cannot see these; without this lane, runtime loaders (bundlers, analytics,
+ * Google's BotGuard loader) silently never run and their caller falls into a
+ * degraded path. ONE fetch at a time through the shared single-flight HTTP
+ * client, gated on http_is_loading() so XHR/fetch keeps priority. */
+static JsBridge *g_dynFetchBridge = NULL;
+static int g_dynFetchIndex = -1;
+
+static int dyn_node_connected(JsBridge *b, DomNode *n)
+{
+    DomNode *root = b->dom ? b->dom->root : NULL;
+    for (DomNode *p = n; p; p = p->parent)
+    {
+        if (p == root)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int dyn_type_is_js(const char *type)
+{
+    while (*type == ' ' || *type == '\t')
+    {
+        type++;
+    }
+    if (!*type)
+    {
+        return 1;
+    }
+    char low[32];
+    size_t i = 0;
+    for (; type[i] && i + 1 < sizeof(low); i++)
+    {
+        char c = type[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[i] = '\0';
+    return strstr(low, "javascript") != NULL ||
+           strstr(low, "ecmascript") != NULL;
+}
+
+void jsbridge_note_dynamic_script(JsBridge *b, void *nodeV)
+{
+    DomNode *n = (DomNode *)nodeV;
+    if (!b || !b->doc || !n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "script") != 0)
+    {
+        return;
+    }
+    if (!dyn_node_connected(b, n))
+    {
+        return; /* detached: starts when it is inserted */
+    }
+    const char *src = dom_get_attr(n, "src");
+    if (!src || !src[0])
+    {
+        return;
+    }
+    const char *type = dom_get_attr(n, "type");
+    if (type && type[0] && !dyn_type_is_js(type))
+    {
+        logger_log("[js] dynamic script skipped (type=%s)", type);
+        return;
+    }
+    for (int i = 0; i < b->dynScriptCount; i++)
+    {
+        if (b->dynScripts[i].node == n)
+        {
+            return; /* already queued/run */
+        }
+    }
+    int slot = -1;
+    for (int i = 0; i < JSBRIDGE_DYN_SCRIPTS_MAX; i++)
+    {
+        if (b->dynScripts[i].state == 0)
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+    {
+        logger_log("[js] dynamic script queue full (%d)", JSBRIDGE_DYN_SCRIPTS_MAX);
+        return;
+    }
+    char *abs = url_resolve(b->doc->baseUrl, src);
+    if (!abs)
+    {
+        return;
+    }
+    if (strncmp(abs, "http://", 7) != 0 && strncmp(abs, "https://", 8) != 0)
+    {
+        JFree(abs);
+        return;
+    }
+    b->dynScripts[slot].node = n;
+    snprintf(b->dynScripts[slot].url, sizeof(b->dynScripts[slot].url), "%s", abs);
+    b->dynScripts[slot].state = 1;
+    if (slot + 1 > b->dynScriptCount)
+    {
+        b->dynScriptCount = slot + 1;
+    }
+    logger_log("[js] dynamic script queued: %s", abs);
+    JFree(abs);
+}
+
+static void dyn_script_on_success(int status, char **headerKeys,
+                                  char **headerVals, int headerCount,
+                                  const char *body, size_t bodyLen,
+                                  const char *url)
+{
+    (void)headerKeys;
+    (void)headerVals;
+    (void)headerCount;
+    (void)url;
+    JsBridge *b = g_dynFetchBridge;
+    int idx = g_dynFetchIndex;
+    g_dynFetchBridge = NULL;
+    g_dynFetchIndex = -1;
+    if (!b || idx < 0 || idx >= b->dynScriptCount)
+    {
+        return;
+    }
+    void *node = b->dynScripts[idx].node;
+    b->dynScripts[idx].state = 3;
+    if (status < 200 || status >= 300 || !body || bodyLen == 0)
+    {
+        logger_log("[js] dynamic script FAIL status=%d len=%zu %s", status,
+                   bodyLen, b->dynScripts[idx].url);
+        jsbridge_dispatch_element_event(b, node, "error");
+        return;
+    }
+    logger_log("[js] dynamic script run %zuB: %s", bodyLen,
+               b->dynScripts[idx].url);
+    b->curTagStart = NULL;
+    b->curTagLen = 0;
+    b->curSrcUrl = b->dynScripts[idx].url;
+    b->lastExtSrcUrl = b->dynScripts[idx].url;
+    jsbridge_page_script(b, body, bodyLen);
+    b->curSrcUrl = NULL;
+    jsbridge_dispatch_element_event(b, node, "load");
+}
+
+static void dyn_script_on_error(const char *message)
+{
+    JsBridge *b = g_dynFetchBridge;
+    int idx = g_dynFetchIndex;
+    g_dynFetchBridge = NULL;
+    g_dynFetchIndex = -1;
+    if (!b || idx < 0 || idx >= b->dynScriptCount)
+    {
+        return;
+    }
+    b->dynScripts[idx].state = 3;
+    logger_log("[js] dynamic script error: %s (%s)", b->dynScripts[idx].url,
+               message ? message : "");
+    jsbridge_dispatch_element_event(b, b->dynScripts[idx].node, "error");
+}
+
+void jsbridge_dyn_scripts_pump(JsBridge *b)
+{
+    if (!b || !b->dynScriptCount || g_dynFetchBridge)
+    {
+        return;
+    }
+    if (http_is_loading())
+    {
+        return; /* XHR/fetch or a page load owns the client */
+    }
+    for (int i = 0; i < b->dynScriptCount; i++)
+    {
+        if (b->dynScripts[i].state != 1)
+        {
+            continue;
+        }
+        b->dynScripts[i].state = 2;
+        g_dynFetchBridge = b;
+        g_dynFetchIndex = i;
+        HttpCallbacks cbs;
+        memset(&cbs, 0, sizeof(cbs));
+        cbs.onSuccess = dyn_script_on_success;
+        cbs.onError = dyn_script_on_error;
+        logger_log("[js] dynamic script fetch: %s", b->dynScripts[i].url);
+        int started = http_get(b->dynScripts[i].url, &cbs);
+        if (!started && g_dynFetchBridge == b)
+        {
+            g_dynFetchBridge = NULL;
+            g_dynFetchIndex = -1;
+            b->dynScripts[i].state = 3;
+            jsbridge_dispatch_element_event(b, b->dynScripts[i].node, "error");
+        }
+        return;
+    }
+}
+
 void js_doc_close(JsBridge *b)
 {
     if (!b)
@@ -1606,6 +1806,14 @@ void js_doc_close(JsBridge *b)
     {
         http_cancel();
         b->xhrInFlight = 0;
+    }
+    /* Same for a runtime <script src> fetch: the bridge is about to die,
+     * so the completion must never touch it. */
+    if (g_dynFetchBridge == b)
+    {
+        http_cancel();
+        g_dynFetchBridge = NULL;
+        g_dynFetchIndex = -1;
     }
     if (g_xhrBridge == b)
     {
@@ -6061,6 +6269,21 @@ int jsbridge_take_dom_dirty(JsBridge *b)
     }
     b->domDirty = 0;
     logger_log("[dom] dirty: innerHTML assignment triggered rewalk");
+    return 1;
+}
+
+int jsbridge_take_nav_request(JsBridge *b, char *out, size_t cap)
+{
+    if (!b || !b->navRequestSet || !b->navRequest[0])
+    {
+        return 0;
+    }
+    b->navRequestSet = 0;
+    if (out && cap)
+    {
+        snprintf(out, cap, "%s", b->navRequest);
+    }
+    b->navRequest[0] = '\0';
     return 1;
 }
 

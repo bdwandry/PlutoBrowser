@@ -397,7 +397,8 @@ void pluto_mem_dump_live(void (*logfn)(const char *fmt, ...))
     {
         if (top[k].ptr)
         {
-            logfn("[mem]   block %d: %luKB", k, top[k].size / 1024);
+            logfn("[mem]   block %d: %luKB ptr=%p", k,
+                  top[k].size / 1024, top[k].ptr);
         }
     }
 }

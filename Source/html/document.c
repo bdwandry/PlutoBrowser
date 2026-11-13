@@ -7538,6 +7538,67 @@ static int refresh_from_content(DocParseResult *out, const char *content,
     return 1;
 }
 
+/* ── Token-stream inert-container depth (base/meta pre-scan) ────────────────
+ * The base/meta scan below reads the FLAT token stream, so it must honour
+ * the containment the DOM walker gets for free. <noscript> is inert only
+ * while the scripting flag is on (a no-JS browser still honours a noscript
+ * meta refresh); <template>/<noembed>/<noframes> are inert in every mode.
+ * Google's search shell ships its /httpservice/retry/enablejs meta refresh
+ * inside <noscript> — following it landed every JS-enabled page on the
+ * "Turn on JavaScript to keep searching" screen. */
+typedef struct
+{
+    int noscript;
+    int template;
+    int noembed;
+    int noframes;
+} InertDepth;
+
+static void inert_depth_update(InertDepth *d, const Token *tok, int scriptingOn)
+{
+    if (!d || !tok || tok->type != TOK_TAG || !tok->name)
+    {
+        return;
+    }
+    int *slot = NULL;
+    if (strcmp(tok->name, "template") == 0)
+    {
+        slot = &d->template;
+    }
+    else if (strcmp(tok->name, "noembed") == 0)
+    {
+        slot = &d->noembed;
+    }
+    else if (strcmp(tok->name, "noframes") == 0)
+    {
+        slot = &d->noframes;
+    }
+    else if (scriptingOn && strcmp(tok->name, "noscript") == 0)
+    {
+        slot = &d->noscript;
+    }
+    if (!slot)
+    {
+        return;
+    }
+    if (tok->isClosing)
+    {
+        if (*slot > 0)
+        {
+            (*slot)--;
+        }
+    }
+    else if (!tok->isSelfClosing)
+    {
+        (*slot)++;
+    }
+}
+
+static int inert_depth_any(const InertDepth *d)
+{
+    return d && (d->noscript || d->template || d->noembed || d->noframes);
+}
+
 /* ── Table column definitions (<colgroup>/<col>, WHATWG §4.9.4/§4.9.5) ────── */
 
 /* One <col> inside a group. span defaults to 1; invalid/negative → 1.
@@ -7815,6 +7876,30 @@ static void walk_state_abort(DocWalkState *st)
         return;
     }
     walk_state_free_buffers(st);
+    /* R68 PARTIAL-WALK OWNERSHIP: the render task keeps the blocks the
+     * walker already produced when this abort is an OOM. Those blocks and
+     * every string they point at live in st->w.arena — freeing it here
+     * left layout reading freed memory (device crash 2026-11-13: Reuters
+     * walk OOM at 157 blocks, then layout_normalize_align dereferenced
+     * block->align=0x51 from the freed arena). Adopt the arena into the
+     * document so the kept blocks stay valid; document_free owns it. If
+     * the adoption allocation itself fails, drop the block count so the
+     * caller cannot keep dangling pointers. */
+    DocParseResult *out = st->out;
+    if (out && out->blockCount > 0 && st->w.arena.head)
+    {
+        DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+        if (keep)
+        {
+            *keep = st->w.arena;
+            st->w.arena.head = NULL;
+            out->_arena = keep;
+        }
+        else
+        {
+            out->blockCount = 0;
+        }
+    }
     doc_arena_free_all(&st->w.arena);
     PLUTO_FREE(st);
 }
@@ -8088,12 +8173,19 @@ static int document_parse_ex_budget(const char *htmlString,
         {
             return -1;
         }
-        out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
-        if (!out->rawHtml)
+        if (opts && opts->adoptHtml)
         {
-            return -1;
+            out->rawHtml = (char *)htmlString; /* caller transfers ownership */
         }
-        strcpy(out->rawHtml, htmlString);
+        else
+        {
+            out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+            if (!out->rawHtml)
+            {
+                return -1;
+            }
+            strcpy(out->rawHtml, htmlString);
+        }
         out->mode = mode;
         return 0;
     }
@@ -8102,10 +8194,21 @@ static int document_parse_ex_budget(const char *htmlString,
     {
         char base[512];
         snprintf(base, sizeof(base), "%s", baseUrl ? baseUrl : "");
+        /* Same scripting flag the walker applies: <noscript> content is
+         * invisible to an engine-enabled page, and inert containers are
+         * never parsed. The flat token stream must honour both. */
+        const int scriptingOn = (scriptPolicy != DOC_SCRIPT_OFF) ? 1 : 0;
         const char *tokenBase = NULL;
+        InertDepth inert;
+        memset(&inert, 0, sizeof(inert));
         for (int i = 0; i < tr.tokens.count; i++)
         {
             const Token *tok = &tr.tokens.items[i];
+            inert_depth_update(&inert, tok, scriptingOn);
+            if (inert_depth_any(&inert))
+            {
+                continue;
+            }
             if (tok->type == TOK_TAG && strcmp(tok->name, "base") == 0 && !tok->isClosing)
             {
                 const char *href = NULL;
@@ -8142,9 +8245,15 @@ static int document_parse_ex_budget(const char *htmlString,
         }
         snprintf(out->baseUrl, sizeof(out->baseUrl), "%s", base);
 
+        memset(&inert, 0, sizeof(inert));
         for (int i = 0; i < tr.tokens.count; i++)
         {
             const Token *tok = &tr.tokens.items[i];
+            inert_depth_update(&inert, tok, scriptingOn);
+            if (inert_depth_any(&inert))
+            {
+                continue;
+            }
             if (tok->type == TOK_TAG && strcmp(tok->name, "meta") == 0 && !tok->isClosing)
             {
                 const char *httpEquiv = NULL;
@@ -8185,10 +8294,17 @@ static int document_parse_ex_budget(const char *htmlString,
      * live tree); it is freed by document_free, never here. FULL behaves like
      * RUN_KEEP but also executes fetched external <script src> bodies stored
      * in out->extScripts (prefetched by html/jsext before parsing). */
-    out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
-    if (out->rawHtml)
+    if (opts && opts->adoptHtml)
     {
-        strcpy(out->rawHtml, htmlString);
+        out->rawHtml = (char *)htmlString; /* caller transfers ownership */
+    }
+    else
+    {
+        out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+        if (out->rawHtml)
+        {
+            strcpy(out->rawHtml, htmlString);
+        }
     }
     /* 4c. CSS engine (roadmap #2): extract <style> bodies from the raw HTML
      * (the tokenizer skips them, so the DOM never carries stylesheet text)
@@ -8240,12 +8356,18 @@ static int document_parse_ex_budget(const char *htmlString,
      * server HTML without JS instead of crashing. Simulator builds have no
      * budget gate, so headroom is effectively unlimited there. */
     if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml &&
-        pluto_mem_headroom_bytes() < 900UL * 1024UL)
+        pluto_mem_headroom_bytes() < 1536UL * 1024UL)
     {
+        /* 1.5MB floor: the XS machine's INITIAL allocations (384KB chunk +
+         * heap/key tables + 128KB parser buffer + bridge state) can exceed
+         * a 900KB grant; the old gate let fxCreateMachine_nr start and
+         * fault mid-construction under the Reuters 1.24MB body (device
+         * crash 2026-11-13, heap 12.9MB, mmfar=0x5fff0). Refuse the engine
+         * cleanly and keep the server HTML instead. */
         out->jsErrors = 1;
         snprintf(out->jsLastError, sizeof(out->jsLastError),
                  "engine skipped: low memory");
-        logger_log("[js] engine skipped: headroom %luKB < 900KB",
+        logger_log("[js] engine skipped: headroom %luKB < 1536KB",
                    pluto_mem_headroom_bytes() / 1024);
     }
     else if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)

@@ -352,6 +352,12 @@ typedef struct
     const int *detailsOpen;
     int detailsOpenCount;
     DocSvgDecoderFn svgDecoder; /* NULL → inline svg decode fails (no block) */
+    /* adoptHtml: the caller transfers ownership of the NUL-terminated
+     * htmlString buffer to the DocParseResult (out->rawHtml points at it;
+     * document_free frees it). Saves a full page-body copy — the render
+     * task's body becomes the doc's rawHtml instead of being duplicated
+     * for the page lifetime (device Reuters 1.24MB body receipt). */
+    int adoptHtml;
 } DocParseOpts;
 
 /* scriptPolicy: how document_parse handles inline <script> bodies.

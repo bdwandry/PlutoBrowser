@@ -453,6 +453,14 @@ struct JsBridge
     int histCount; /* entries in use (0..JSBRIDGE_HIST_MAX) */
     int histIdx;   /* current entry index */
 
+    /* Scripted navigation request (location.assign/replace): the engine
+     * records the RESOLVED URL and the frame loop drains it AFTER the JS
+     * bracket returns, then runs the real navigate_to. Never navigates
+     * from inside an engine call (tearing down the live bridge there is
+     * the R67 in-flight hazard). 640 matches main.c's pendingNavUrl. */
+    char navRequest[640];
+    int navRequestSet;
+
 
     int callBudget; /* DOM-mutation budget (per page) */
     int inClick;    /* dispatch re-entrancy guard */
@@ -509,6 +517,20 @@ struct JsBridge
     JsScriptSlot scriptQueue[JSBRIDGE_MAX_SCRIPTS];
     int scriptQueueCount; /* entries parked (<= JSBRIDGE_MAX_SCRIPTS) */
     int scriptQueueNext;  /* next to run; == scriptQueueCount when drained */
+
+    /* Runtime-inserted <script src> lane (document.createElement('script')
+     * + appendChild, script.src assignment while connected). Static HTML
+     * scripts ride scriptQueue/jsext; this queue is for scripts the PAGE
+     * creates at runtime — bundlers, analytics, Google's BotGuard loader.
+     * One fetch at a time through the shared HTTP client (idle-gated), then
+     * run in the page engine and fire load/error on the element. */
+    struct
+    {
+        void *node; /* DomNode* (borrowed; bridge/page lifetime) */
+        char url[1024];
+        unsigned char state; /* 0 free, 1 queued, 2 fetching, 3 done */
+    } dynScripts[JSBRIDGE_DYN_SCRIPTS_MAX];
+    int dynScriptCount; /* high-water mark of used slots */
 
     /* API-P5: the module graph ledger. modKeys hold every resolved module
      * URL this document has loaded; modState 0/1/2 = unvisited/visiting/
