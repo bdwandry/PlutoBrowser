@@ -2104,10 +2104,10 @@ static const char *walk_align(Walker *w, AttrList a)
     return NULL;
 }
 
-/* CSS list-style-type value → marker code (0 = unknown, keep HTML value).
+/* CSS list-style-type value (including the type token fanned out from a
+ * list-style shorthand) → marker code (0 = unknown, keep HTML value).
  * Codes: '1' decimal, 'a/A' alpha, 'i/I' roman, 'd' disc (*), 'c' circle
- * (o), 's' square (+), 'n' none (no marker). Only the FIRST token counts
- * (list-style shorthand: type comes first). */
+ * (o), 's' square (+), 'n' none (no marker). Only the FIRST token counts. */
 static char walk_list_marker(const char *v, size_t vlen)
 {
     if (!v || vlen == 0)

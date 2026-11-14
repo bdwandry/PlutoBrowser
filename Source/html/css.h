@@ -38,7 +38,7 @@
  *       text-transform/capitalize        → case flags (walker-applied)
  *       white-space pre/pre-line/nowrap  → spacing flags (walker+layout)
  *       overflow-wrap:break-word / word-break:break-all → mid-word split
- *       list-style-type                  → marker codes (walker+layout)
+ *       list-style(-type)                → marker codes (walker+layout)
  *       border / border-width / border-style → block outline (layout)
  *       margin/padding (+ all side longhands) → block spacing (halved px)
  *       width (tables)                   → table width override

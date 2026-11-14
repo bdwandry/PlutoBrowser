@@ -1581,12 +1581,22 @@ static void test_e2e(void)
         "ol.ur { list-style-type: upper-roman; list-style-type: decimal }"
         "li.plain-none { list-style-type: none }"
         "li.direct { list-style-type: upper-alpha }"
+        "ul.shorthand { list-style: none }"
+        "li.shorthand-li { list-style: none }"
+        "ul.shorthand-square { list-style: square inside }"
+        "ul.mix-a { list-style: none; list-style-type: circle }"
+        "ul.mix-b { list-style-type: circle; list-style: none }"
         "</style></head><body>"
         "<ul class=\"sq\"><li>SqItem</li><li><ul><li>NestedPlain</li></ul></li></ul>"
         "<ul class=\"ci\"><li>CiItem</li></ul>"
         "<ol class=\"rm\"><li>Three</li></ol>"
         "<ol class=\"ur\"><li>Seven</li></ol>"
         "<ul><li class=\"plain-none\">Gone</li><li class=\"direct\">Beta</li></ul>"
+        "<ul class=\"shorthand\"><li>ShorthandNone</li></ul>"
+        "<ul><li class=\"shorthand-li\">ShorthandLiNone</li></ul>"
+        "<ul class=\"shorthand-square\"><li>ShorthandSquare</li></ul>"
+        "<ul class=\"mix-a\"><li>MixLaterLong</li></ul>"
+        "<ul class=\"mix-b\"><li>MixLaterShort</li></ul>"
         "</body></html>");
     CHECK(d && !d->parseError, "e2e8: parses");
     CHECK(block_marker(d, "SqItem") == 's', "e2e8: ul square");
@@ -1598,6 +1608,16 @@ static void test_e2e(void)
           "e2e8: later decimal beats upper-roman");
     CHECK(block_marker(d, "Gone") == 'n', "e2e8: li none");
     CHECK(block_marker(d, "Beta") == 'A', "e2e8: li direct override");
+    CHECK(block_marker(d, "ShorthandNone") == 'n',
+          "e2e8: list-style shorthand none on ul");
+    CHECK(block_marker(d, "ShorthandLiNone") == 'n',
+          "e2e8: list-style shorthand none on li");
+    CHECK(block_marker(d, "ShorthandSquare") == 's',
+          "e2e8: list-style shorthand type token");
+    CHECK(block_marker(d, "MixLaterLong") == 'c',
+          "e2e8: later longhand wins");
+    CHECK(block_marker(d, "MixLaterShort") == 'n',
+          "e2e8: later shorthand wins");
     free_page(d);
 
     /* 9. ::before/::after generated content through the real walker. */

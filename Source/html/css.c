@@ -2600,6 +2600,61 @@ static const char *find_color_token(const char *vs, size_t vlen,
     return NULL;
 }
 
+/* First marker-type token in a list-style shorthand (for fan-out):
+ * the type can appear in any order alongside an image/position token
+ * ("none", "square inside", "url(x) disc", …). Tokens inside url()/
+ * quoted image values are skipped as whole parenthesized spans. */
+static const char *find_list_style_type(const char *vs, size_t vlen,
+                                        size_t *tlenOut)
+{
+    const char *z = vs + vlen;
+    const char *p = vs;
+    while (p < z)
+    {
+        while (p < z && css_isspace(*p))
+        {
+            p++;
+        }
+        if (p >= z)
+        {
+            break;
+        }
+        const char *tok = p;
+        int depth = 0;
+        while (p < z)
+        {
+            if (*p == '(')
+            {
+                depth++;
+            }
+            else if (*p == ')' && depth > 0)
+            {
+                depth--;
+            }
+            else if (depth == 0 && css_isspace(*p))
+            {
+                break;
+            }
+            p++;
+        }
+        size_t n = (size_t)(p - tok);
+        if (css_val_eq(tok, n, "disc") || css_val_eq(tok, n, "circle") ||
+            css_val_eq(tok, n, "square") || css_val_eq(tok, n, "decimal") ||
+            css_val_eq(tok, n, "lower-roman") ||
+            css_val_eq(tok, n, "upper-roman") ||
+            css_val_eq(tok, n, "lower-alpha") ||
+            css_val_eq(tok, n, "upper-alpha") || css_val_eq(tok, n, "none"))
+        {
+            if (tlenOut)
+            {
+                *tlenOut = n;
+            }
+            return tok;
+        }
+    }
+    return NULL;
+}
+
 /* margin/padding shorthand fan-out: split the value into 1-4 tokens and
  * register side longhands (1→all, 2→tb/rl, 3→t/rl/b, 4→t/r/b/l). */
 static void add_prop(CssEngine *eng, CssRule *r, const char *name,
@@ -2932,6 +2987,20 @@ static void parse_decl_block(CssEngine *eng, CssRule *r, const char *p,
                     if (tok)
                     {
                         add_prop(eng, r, "background-color", 16, tok, tlen,
+                                 important);
+                    }
+                }
+                else if (nlen == 10 && css_eq_ncase(ns, "list-style", 10))
+                {
+                    /* list-style fans out its type token as the queried
+                     * longhand. Registering it in declaration order keeps
+                     * a later list-style-type/later shorthand winner exact. */
+                    size_t tlen = 0;
+                    const char *tok = find_list_style_type(
+                        vs, (size_t)(ve - vs), &tlen);
+                    if (tok)
+                    {
+                        add_prop(eng, r, "list-style-type", 15, tok, tlen,
                                  important);
                     }
                 }
