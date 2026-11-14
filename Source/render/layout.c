@@ -1110,6 +1110,7 @@ typedef struct
     unsigned short id;
     int itemFrom, itemTo, rectFrom, rectTo;
     int padL, padR, padT, padB; /* container content-box inset (CSS px) */
+    int gap; /* authored gap after this item (halved px) */
 } FlexGroup;
 
 /* Place one flex row's items on a single line. Items were laid out in
@@ -1126,13 +1127,17 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
     {
         n = 16;
     }
-    int padL = 0, padR = 0, padT = 0, padB = 0;
+    int padL = 0, padR = 0, padT = 0, padB = 0, gapsTotal = 0;
     if (n > 0)
     {
         padL = groups[0].padL;
         padR = groups[0].padR;
         padT = groups[0].padT;
         padB = groups[0].padB;
+        for (int g = 1; g < n; g++)
+        {
+            gapsTotal += groups[g - 1].gap;
+        }
     }
     int contentX = marginX + padL;
     int contentW = maxWidth - padL - padR;
@@ -1186,6 +1191,7 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
             rowH = gh[g];
         }
     }
+    totalW += gapsTotal;
     int gap = 0;
     if (justify == 3 && n > 1)
     {
@@ -1208,8 +1214,8 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
     {
         x0 = contentX;
     }
-    logger_log("[bar] flex startY=%d n=%d pad=%d/%d/%d/%d totalW=%d rowH=%d",
-               rowStartY, n, padL, padR, padT, padB, totalW, rowH);
+    logger_log("[bar] flex startY=%d n=%d pad=%d/%d/%d/%d totalW=%d rowH=%d gaps=%d",
+               rowStartY, n, padL, padR, padT, padB, totalW, rowH, gapsTotal);
     for (int g = 0; g < n; g++)
     {
         logger_log("[bar] flex g=%d id=%d items=%d..%d bbox=%d,%d..%d,%d gh=%d gw=%d",
@@ -1238,7 +1244,11 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
         }
         lm_shift_rects(groups[g].rectFrom,
                        groups[g].rectTo - groups[g].rectFrom, dx, dy);
-        cursor += gw[g] + gap;
+        cursor += gw[g];
+        if (g + 1 < n)
+        {
+            cursor += groups[g].gap + (justify == 3 ? gap : 0);
+        }
     }
     *currentYOut = rowStartY + padT + rowH + padB + 6;
     logger_log("[bar] flex placed endY=%d", *currentYOut);
@@ -1322,6 +1332,7 @@ void layout_build(DocParseResult *doc)
                     fg->padR = block->flexPadR;
                     fg->padT = block->flexPadT;
                     fg->padB = block->flexPadB;
+                    fg->gap = block->gapApplied;
                 }
             }
         }
@@ -2451,6 +2462,68 @@ void layout_build(DocParseResult *doc)
             tf_apply_items(tfMFrom, g_itemCount, block, maxWidth, boxH);
             currentY += boxH + 10;
         }
+        /* R72: CSS inline-block link button (direct row-flex item). */
+        else if (block->type == DOC_BLOCK_LINK_BUTTON)
+        {
+            int bw = block->border > 0 ? block->border : 0;
+            int padL = block->btnPadL ? block->btnPadL : 9;
+            int padR = block->btnPadR ? block->btnPadR : 9;
+            int padT = block->btnPadT ? block->btnPadT : 5;
+            int padB = block->btnPadB ? block->btnPadB : 5;
+            int radius = block->btnRadius ? block->btnRadius : 5;
+            const char *label = block->label ? block->label : "";
+            LCDFont *font = style_font(PLUTO_FONT_BODY_BOLD);
+            int lineH = 18;
+            int tw = measure(font, label);
+            int boxW = tw + padL + padR + 2 * bw;
+            int boxH = lineH + padT + padB + 2 * bw;
+            int boxX = marginX + block->indent;
+            int boxY = currentY + block->spacingTop;
+            if (boxW > maxWidth)
+            {
+                boxW = maxWidth;
+            }
+            int itemFrom = g_itemCount;
+            /* Keep link buttons outline-only: a dithered 1-bit fill crosses
+             * the label, so the primary pill should match the secondary. */
+            if (bw > 0)
+            {
+                LayoutItem *fi = item_new(LRI_BOX_FRAME);
+                if (!fi)
+                {
+                    return;
+                }
+                fi->x = boxX;
+                fi->y = boxY;
+                fi->w = boxW;
+                fi->y2 = boxY + boxH;
+                fi->radius = radius;
+            }
+            LayoutItem *ti = item_new(LRI_TEXT);
+            if (!ti)
+            {
+                return;
+            }
+            ti->text = label;
+            ti->font = font;
+            ti->x = boxX + padL + bw;
+            ti->y = boxY + padT + bw;
+            ti->w = tw;
+            ti->h = lineH;
+            ti->bold = 1;
+            if (block->href && block->href[0])
+            {
+                add_rect_aux(block->href, label, boxX, boxY, boxW, boxH, 0,
+                             NULL);
+            }
+            tf_apply_items(itemFrom, g_itemCount, block, boxW, boxH);
+            logger_log("[link-btn] layout x=%d y=%d w=%d h=%d pad=%d/%d/%d/%d border=%d bg=%d radius=%d row=%d item=%d",
+                       boxX, boxY, boxW, boxH, padL, padR, padT, padB, bw,
+                       block->bgGray, radius, block->flexRow,
+                       block->flexItem);
+            currentY = boxY + boxH + block->spacingBottom +
+                       block->gapApplied;
+        }
         /* 15. Bordered Boxes */
         else if (block->type == DOC_BLOCK_BOX_OPEN)
         {
@@ -2498,7 +2571,8 @@ void layout_build(DocParseResult *doc)
          * the spec default; round stays table-only). Widths that would
          * go degenerate simply stop (no partial frames). */
         int boxBottom = currentY - block->gapApplied;
-        if (block->border > 0 && boxBottom > borderTop)
+        if (block->type != DOC_BLOCK_LINK_BUTTON && block->border > 0 &&
+            boxBottom > borderTop)
         {
             int bw = block->border > 3 ? 3 : block->border;
             for (int k = 0; k < bw; k++)
@@ -2526,7 +2600,8 @@ void layout_build(DocParseResult *doc)
          * layout_draw paints shades in a first pass (under content), so
          * emission order here is irrelevant. Density from luminance:
          * <160 → 50% lines, else 25%. */
-        if (block->bgGray >= 96 && block->bgGray <= 215 &&
+        if (block->type != DOC_BLOCK_LINK_BUTTON &&
+            block->bgGray >= 96 && block->bgGray <= 215 &&
             boxBottom > borderTop)
         {
             LayoutItem *si = item_new(LRI_SHADE);

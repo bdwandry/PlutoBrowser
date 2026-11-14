@@ -4942,6 +4942,122 @@ static void walk_css_apply(Walker *w, unsigned css)
     }
 }
 
+/* R72 — CSS LINK BUTTON. A flex container's direct inline-block anchor is
+ * blockified by CSS; the 1-bit walker's box-switch path only covers div/span,
+ * so without this each label flowed into the container's single paragraph and
+ * both button borders landed on it. Open a dedicated compact block instead,
+ * carrying the authored padding/radius and the parent's row/item identity.
+ * The normal anchor path still runs afterwards, attaching the href/link list;
+ * layout draws the label and the full-box tap rect from the shared fields. */
+static DocBlock *walk_link_button_open(Walker *w, const DomNode *node, AttrList a)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !node->parent || w->cell ||
+        w->dropdownDepth > 0 || !node->tag || strcmp(node->tag, "a") != 0)
+    {
+        return NULL;
+    }
+    const char *rawHref = attr_val(a, "href");
+    if (!rawHref || !rawHref[0])
+    {
+        return NULL;
+    }
+    /* The button contract only applies to a direct child of a ROW flex
+     * container. Parent lookup is exact: wrappers remain normal block flow. */
+    FlexCtx *fc = NULL;
+    for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+    {
+        if (w->flexCtx[ci].box == node->parent)
+        {
+            if (w->flexCtx[ci].row)
+            {
+                fc = &w->flexCtx[ci];
+            }
+            break;
+        }
+    }
+    if (!fc)
+    {
+        return NULL;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0;
+    const char *dv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "display", &dl);
+    if (!dv || !css_val_eq(dv, dl, "inline-block"))
+    {
+        return NULL;
+    }
+    int db = 0, dg = -1, dr = 0;
+    if (!walk_decor_values(w, node, node->tag, a, &db, &dg, &dr))
+    {
+        return NULL; /* a plain inline-block link stays inline text */
+    }
+    int pl = (walk_px_full(w, node, node->tag, a, "padding-left") + 1) / 2;
+    int pr = (walk_px_full(w, node, node->tag, a, "padding-right") + 1) / 2;
+    int pt = (walk_px_full(w, node, node->tag, a, "padding-top") + 1) / 2;
+    int pb = (walk_px_full(w, node, node->tag, a, "padding-bottom") + 1) / 2;
+    if (pl > 24) pl = 24;
+    if (pr > 24) pr = 24;
+    if (pt > 16) pt = 16;
+    if (pb > 16) pb = 16;
+    char ltxt[256];
+    doc_concat_node_text(node, ltxt, sizeof(ltxt));
+    char *label = doc_arena_collapse(w, ltxt);
+    if (!label || !label[0])
+    {
+        return NULL;
+    }
+    int item = 0;
+    for (int k = 0; k < node->parent->childCount; k++)
+    {
+        if (node->parent->children[k] == node)
+        {
+            item = k + 1;
+            break;
+        }
+    }
+    if (item <= 0)
+    {
+        return NULL;
+    }
+    flush_current_block(w);
+    DocBlock *b = new_block(w, DOC_BLOCK_LINK_BUTTON);
+    if (!b)
+    {
+        return NULL;
+    }
+    b->label = label;
+    b->btnPadL = (unsigned char)pl;
+    b->btnPadR = (unsigned char)pr;
+    b->btnPadT = (unsigned char)pt;
+    b->btnPadB = (unsigned char)pb;
+    b->btnRadius = (unsigned char)dr;
+    b->flexRow = (unsigned short)fc->rowId;
+    b->flexItem = (unsigned short)item;
+    b->flexJustify = (unsigned char)fc->justify;
+    b->flexCenter = (unsigned char)fc->center;
+    b->flexPadL = (unsigned char)fc->padL;
+    b->flexPadR = (unsigned char)fc->padR;
+    b->flexPadT = (unsigned char)fc->padT;
+    b->flexPadB = (unsigned char)fc->padB;
+    b->gapApplied = fc->gap;
+    b->hasSpacing = 1;
+    w->currentBlock = b;
+    if (!push_exit(w, WX_FLUSH))
+    {
+        return NULL;
+    }
+    logger_log("[link-btn] label=%.30s pad=%d/%d/%d/%d deco=%d/%d/%d row=%d item=%d gap=%d",
+               label, pl, pr, pt, pb, db, dg, dr, b->flexRow, b->flexItem,
+               b->gapApplied);
+    return b;
+}
+
 static void handle_element(Walker *w, const DomNode *node)
 {
     const char *tag = node->tag ? node->tag : "";
@@ -5466,6 +5582,7 @@ static void handle_element(Walker *w, const DomNode *node)
     /* ── Links ── */
     else if (strcmp(tag, "a") == 0)
     {
+        DocBlock *linkButton = walk_link_button_open(w, node, a);
         ExitCtx *x = push_exit(w, WX_LINK_END);
         if (x)
         {
@@ -5483,6 +5600,10 @@ static void handle_element(Walker *w, const DomNode *node)
             w->anchorCounter++;
             w->currentAnchorIndex = w->anchorCounter;
             strbuf_reset(&w->linkText);
+            if (linkButton)
+            {
+                linkButton->href = doc_arena_str(w, w->currentHref);
+            }
         }
     }
 

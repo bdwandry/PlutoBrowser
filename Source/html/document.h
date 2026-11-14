@@ -125,6 +125,7 @@ typedef struct
 #define DOC_BLOCK_METER 16
 #define DOC_BLOCK_MATH 17
 #define DOC_BLOCK_READER_HEADER 18 /* emitted by readability (later phase) */
+#define DOC_BLOCK_LINK_BUTTON 19 /* CSS inline-block link rendered as a pill */
 
 /* Walker caps (Lua MAX_BLOCKS / MAX_INLINES). Shared with readability.c. */
 #define DOC_MAX_BLOCKS 1200
@@ -338,6 +339,11 @@ typedef struct
     /* Flex-container content-box padding (full CSS px). Direct children carry
      * it so row layout insets items exactly like the author's box. */
     unsigned char flexPadL, flexPadR, flexPadT, flexPadB;
+    /* R72 CSS link button: a direct inline-block <a> inside a row-flex
+     * container becomes its own compact button block. Metrics are halved
+     * CSS px (the layout scale); label/href ride the shared fields. */
+    unsigned char btnPadL, btnPadR, btnPadT, btnPadB;
+    unsigned char btnRadius;
     /* A disclosure panel the author positioned out of flow (position:
      * absolute/fixed). Dropdown panels are laid out outside the sticky pin
      * span as a right-aligned overlay box; these bits mark the span. */

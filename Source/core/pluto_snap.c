@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 3 /* v3: R71 pin span + spanning box decorations */
+#define SNAP_VERSION 4 /* v4: R72 row-flex link-button metrics */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0
@@ -461,6 +461,15 @@ static void w_block(SnapWriter *w, const DocBlock *b)
     w_i32(w, b->pinStart); /* SNAP v3: sticky app-bar span flags */
     w_i32(w, b->pinEnd);
     w_i32(w, b->menuButton); /* SNAP v3: disclosure menu button */
+    /* SNAP v4: flex-row transport + R72 compact link-button metrics. */
+    w_i32(w, b->flexRow);
+    w_i32(w, b->flexItem);
+    w_i32(w, b->gapApplied);
+    w_i32(w, b->btnPadL);
+    w_i32(w, b->btnPadR);
+    w_i32(w, b->btnPadT);
+    w_i32(w, b->btnPadB);
+    w_i32(w, b->btnRadius);
     w_i32(w, b->inlineCount);
     for (int i = 0; i < b->inlineCount; i++)
     {
@@ -578,6 +587,14 @@ static int r_block(SnapReader *r, DocArena *arena, DocBlock *b)
     b->pinStart = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
     b->pinEnd = (unsigned char)(r_i32(r) != 0);
     b->menuButton = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
+    b->flexRow = (unsigned short)r_i32(r); /* SNAP v4 */
+    b->flexItem = (unsigned short)r_i32(r);
+    b->gapApplied = (int)r_i32(r);
+    b->btnPadL = (unsigned char)r_i32(r);
+    b->btnPadR = (unsigned char)r_i32(r);
+    b->btnPadT = (unsigned char)r_i32(r);
+    b->btnPadB = (unsigned char)r_i32(r);
+    b->btnRadius = (unsigned char)r_i32(r);
     b->inlineCount = (int)r_i32(r);
     if (b->inlineCount < 0 || b->inlineCount > DOC_MAX_INLINES)
     {
