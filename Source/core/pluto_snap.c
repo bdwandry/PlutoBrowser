@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 2 /* v2: DocBlock.border (CSS borders) */
+#define SNAP_VERSION 3 /* v3: R71 pin span + spanning box decorations */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0
@@ -458,6 +458,9 @@ static void w_block(SnapWriter *w, const DocBlock *b)
     w_i32(w, b->invert);
     w_i32(w, b->border); /* SNAP v2: CSS border width px */
     w_i32(w, b->bgGray); /* SNAP v2: CSS background luminance */
+    w_i32(w, b->pinStart); /* SNAP v3: sticky app-bar span flags */
+    w_i32(w, b->pinEnd);
+    w_i32(w, b->menuButton); /* SNAP v3: disclosure menu button */
     w_i32(w, b->inlineCount);
     for (int i = 0; i < b->inlineCount; i++)
     {
@@ -572,6 +575,9 @@ static int r_block(SnapReader *r, DocArena *arena, DocBlock *b)
     b->invert = (int)r_i32(r);
     b->border = (int)r_i32(r); /* SNAP v2 (v1 streams rejected by version) */
     b->bgGray = (int)r_i32(r); /* SNAP v2 */
+    b->pinStart = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
+    b->pinEnd = (unsigned char)(r_i32(r) != 0);
+    b->menuButton = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
     b->inlineCount = (int)r_i32(r);
     if (b->inlineCount < 0 || b->inlineCount > DOC_MAX_INLINES)
     {
@@ -1030,6 +1036,36 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
     {
         w_block(&w, doc->blocks[i]);
     }
+    /* R71 spanning decorations (SNAP v3). Only COMPLETE spans persist: an
+     * element whose content was entirely hidden leaves an unfinished entry
+     * (startBlock = -1), and a stream carrying one would fail the load
+     * validation and turn every such page into a cache miss. */
+    {
+        int decorValid = 0;
+        for (int i = 0; i < doc->decorCount && i < DOC_BOX_DECOR_MAX; i++)
+        {
+            if (doc->decor[i].startBlock >= 0 &&
+                doc->decor[i].endBlock >= doc->decor[i].startBlock)
+            {
+                decorValid++;
+            }
+        }
+        w_i32(&w, decorValid);
+        for (int i = 0; i < doc->decorCount && i < DOC_BOX_DECOR_MAX && !w.err;
+             i++)
+        {
+            if (doc->decor[i].startBlock < 0 ||
+                doc->decor[i].endBlock < doc->decor[i].startBlock)
+            {
+                continue;
+            }
+        w_i32(&w, doc->decor[i].startBlock);
+        w_i32(&w, doc->decor[i].endBlock);
+        w_i32(&w, doc->decor[i].border);
+        w_i32(&w, doc->decor[i].bgGray);
+        w_i32(&w, doc->decor[i].radius);
+        }
+    }
     for (int i = 0; i < doc->linkCount && !w.err; i++)
     {
         w_link(&w, doc->links[i]);
@@ -1246,6 +1282,29 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
                        url);
             pluto_snap_invalidate(url, mode);
             goto fail;
+        }
+    }
+    /* R71 spanning decorations (SNAP v3). */
+    {
+        long decorCount = r_i32(&r);
+        if (r.err || decorCount < 0 || decorCount > DOC_BOX_DECOR_MAX)
+        {
+            goto fail;
+        }
+        doc->decorCount = (int)decorCount;
+        for (int i = 0; i < doc->decorCount; i++)
+        {
+            DocBoxDecor *d = &doc->decor[i];
+            d->startBlock = (int)r_i32(&r);
+            d->endBlock = (int)r_i32(&r);
+            d->border = (int)r_i32(&r);
+            d->bgGray = (int)r_i32(&r);
+            d->radius = (int)r_i32(&r);
+            if (r.err || d->startBlock < 0 || d->endBlock < d->startBlock ||
+                d->endBlock >= (int)blockCount)
+            {
+                goto fail;
+            }
         }
     }
     if (linkCount > 0)

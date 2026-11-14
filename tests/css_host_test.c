@@ -241,6 +241,38 @@ static int block_border(const DocParseResult *doc, const char *needle)
     return -1;
 }
 
+/* R71: the spanning decoration covering a block (borders/backgrounds on a
+ * container are carried by DocParseResult.decor now, not the lead block). */
+static int decor_covering(const DocParseResult *doc, int blockIndex,
+                          int *border, int *bg, int *radius)
+{
+    if (blockIndex < 0)
+    {
+        return 0;
+    }
+    for (int i = 0; i < doc->decorCount; i++)
+    {
+        const DocBoxDecor *d = &doc->decor[i];
+        if (d->startBlock <= blockIndex && d->endBlock >= blockIndex)
+        {
+            if (border)
+            {
+                *border = d->border;
+            }
+            if (bg)
+            {
+                *bg = d->bgGray;
+            }
+            if (radius)
+            {
+                *radius = d->radius;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int block_index(const DocParseResult *doc, const char *needle)
 {
     for (int i = 0; i < doc->blockCount; i++)
@@ -1670,10 +1702,12 @@ static void test_e2e(void)
                 {
                     mdGray = b->bgGray;
                     mdInv = b->invert;
+                    decor_covering(d, i, NULL, &mdGray, NULL);
                 }
                 if (strstr(t, "LightKid"))
                 {
                     ltGray = b->bgGray;
+                    decor_covering(d, i, NULL, &ltGray, NULL);
                 }
                 if (strstr(t, "PaperKid"))
                 {
@@ -1682,6 +1716,7 @@ static void test_e2e(void)
                 if (strstr(t, "ShortKid"))
                 {
                     shGray = b->bgGray;
+                    decor_covering(d, i, NULL, &shGray, NULL);
                 }
             }
         }
@@ -1860,10 +1895,24 @@ static void test_e2e(void)
         "<table border=\"1\"><tr><td>AttrTab</td></tr></table>"
         "</body></html>");
     CHECK(d && !d->parseError, "e2e11: parses");
-    CHECK(block_border(d, "BoxedKid") == 2, "e2e11: shorthand width");
-    CHECK(block_border(d, "PlainKid") == 0, "e2e11: none");
-    CHECK(block_border(d, "ThickKid") == 3, "e2e11: clamped to 3");
-    CHECK(block_border(d, "StyledKid") == 0, "e2e11: style none kills");
+    {
+        int bd = -1;
+        CHECK(decor_covering(d, block_index(d, "BoxedKid"), &bd, NULL, NULL) &&
+                  bd == 2,
+              "e2e11: shorthand width");
+        bd = -1;
+        CHECK(!decor_covering(d, block_index(d, "PlainKid"), &bd, NULL, NULL) ||
+                  bd == 0,
+              "e2e11: none");
+        bd = -1;
+        CHECK(decor_covering(d, block_index(d, "ThickKid"), &bd, NULL, NULL) &&
+                  bd == 3,
+              "e2e11: clamped to 3");
+        bd = -1;
+        CHECK(!decor_covering(d, block_index(d, "StyledKid"), &bd, NULL, NULL) ||
+                  bd == 0,
+              "e2e11: style none kills");
+    }
     {
         int bt = -1, bn = -1, at = -1;
         for (int i = 0; i < d->blockCount; i++)
@@ -1993,6 +2042,523 @@ static void test_e2e(void)
     free_page(d);
 }
 
+/* ── R71: collapse recipe, ARIA disclosure, sticky pin, spanning decor ──── */
+static void test_r71(void)
+{
+    /* CSS: position:sticky is its own signal (not out-of-flow). */
+    {
+        CssSheet sh[1];
+        CssEngine eng;
+        (void)css_scan_sheets(
+            "<style>.s{position:sticky;top:0}.f{position:fixed;top:0}"
+            "</style>",
+            sh, 1);
+        css_parse_sheets(&eng, sh, 1);
+        unsigned s = css_compute(&eng, "header", "s", NULL, NULL, NULL);
+        unsigned f = css_compute(&eng, "div", "f", NULL, NULL, NULL);
+        CHECK((s & CSS_F_STICKY) && !(s & CSS_F_OOF),
+              "r71: sticky is a pin signal, not out-of-flow");
+        CHECK((f & CSS_F_OOF) && !(f & CSS_F_STICKY),
+              "r71: fixed keeps the out-of-flow signal");
+    }
+
+    /* Mobile @media with a rem breakpoint: the modern nav pattern (base
+     * row, narrow-screen list hidden, toggle shown). */
+    {
+        DocParseResult *dm = parse_page(
+            "<html><head><style>"
+            ".nl{display:flex}"
+            ".nt{display:none}"
+            "@media (max-width:40rem){.nl{display:none}.nt{display:inline-flex}}"
+            "</style></head><body>"
+            "<nav><button class=\"nt\" aria-expanded=\"false\" "
+            "aria-controls=\"navlist\">Menu</button>"
+            "<ul id=\"navlist\" class=\"nl\"><li>NavItemX</li></ul></nav>"
+            "<p>AfterNavBody</p></body></html>");
+        CHECK(dm && !dm->parseError, "r71: rem media page parses");
+        CHECK(block_index(dm, "NavItemX") < 0,
+              "r71: @media (max-width:40rem) hides the mobile nav list");
+        int menu = 0;
+        for (int i = 0; dm && i < dm->blockCount; i++)
+        {
+            if (dm->blocks[i]->toggleKey &&
+                strcmp(dm->blocks[i]->toggleKey, "x1") == 0)
+            {
+                menu = dm->blocks[i]->menuButton;
+            }
+        }
+        CHECK(menu == 1, "r71: nav-list disclosure renders as a menu button");
+        if (dm)
+        {
+            free_page(dm);
+        }
+    }
+
+    /* Skip-link recipe: the :focus rule's small offset must not defeat the
+     * base rule's far-negative park (always-match focus policy). */
+    {
+        DocParseResult *ds = parse_page(
+            "<html><head><style>"
+            ".skip{position:absolute;top:0;left:-9999px}"
+            ".skip:focus{top:.5rem;left:.5rem}"
+            "</style></head><body>"
+            "<a class=\"skip\" href=\"#main\">SkipLinkText</a>"
+            "<p>SkipBodyText</p></body></html>");
+        CHECK(ds && !ds->parseError, "r71: skip page parses");
+        CHECK(block_index(ds, "SkipLinkText") < 0,
+              "r71: off-screen skip link stays hidden with a :focus rule");
+        CHECK(block_index(ds, "SkipBodyText") >= 0,
+              "r71: skip-link page content renders");
+        if (ds)
+        {
+            free_page(ds);
+        }
+    }
+
+    /* Zero-height + clipped overflow collapses the subtree (the universal
+     * accordion panel recipe), while sibling content survives. */
+    DocParseResult *d = parse_page(
+        "<html><head><style>"
+        ".collapse{height:0;overflow:hidden}"
+        ".panel{max-height:0;overflow:hidden}"
+        ".visiblemarker{height:0;overflow:hidden}"
+        "</style></head><body>"
+        "<div class=\"collapse\"><p>HiddenAccordionBody</p></div>"
+        "<div class=\"panel\"><p>HiddenMaxHeightBody</p></div>"
+        "<p class=\"visiblemarker\">KeptBody</p>"
+        "<p>VisibleBody</p>"
+        "</body></html>");
+    CHECK(d && !d->parseError, "r71: collapse page parses");
+    CHECK(block_index(d, "HiddenAccordionBody") < 0,
+          "r71: height:0 + overflow:hidden drops the subtree");
+    CHECK(block_index(d, "HiddenMaxHeightBody") < 0,
+          "r71: max-height:0 + overflow:hidden drops the subtree");
+    /* A styled EMPTY element is not collapsed by the recipe (height:0 makes
+     * it invisible in a browser, but it carries no content to lose). */
+    CHECK(block_index(d, "VisibleBody") >= 0,
+          "r71: ordinary sibling content survives the collapse recipe");
+    free_page(d);
+
+    /* ARIA disclosure: closed by default, tap state opens the panel. */
+    const char *page =
+        "<html><head><style>"
+        ".collapse{height:0;overflow:hidden}"
+        "</style></head><body>"
+        "<button aria-expanded=\"false\" aria-controls=\"role-1\">"
+        "TriggerLabel</button>"
+        "<div id=\"role-1\" class=\"collapse\"><p>PanelInside</p></div>"
+        "</body></html>";
+    int toggleFound = 0, toggleOpen = -1;
+    d = parse_page(page);
+    CHECK(d && !d->parseError, "r71: disclosure page parses");
+    CHECK(block_index(d, "PanelInside") < 0,
+          "r71: closed disclosure keeps the panel collapsed");
+    for (int i = 0; i < d->blockCount; i++)
+    {
+        DocBlock *b = d->blocks[i];
+        if (b->toggleKey && strcmp(b->toggleKey, "x1") == 0)
+        {
+            toggleFound = 1;
+            toggleOpen = b->toggleOpen;
+            CHECK(b->type == DOC_BLOCK_PARAGRAPH && !b->menuButton,
+                  "r71: disclosure trigger is a paragraph toggle");
+            CHECK(block_index(d, "TriggerLabel") >= 0,
+                  "r71: trigger label carries the visible text");
+        }
+    }
+    CHECK(toggleFound, "r71: disclosure trigger keyed x1");
+    CHECK(toggleOpen == 0, "r71: trigger reports closed");
+    free_page(d);
+
+    {
+        int openState[1] = {1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 1;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(page, "https://example.com/x", MODE_RAW_HTML,
+                                &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: opened disclosure parses");
+        CHECK(block_index(d, "PanelInside") >= 0,
+              "r71: toggled-open panel renders its content");
+        toggleFound = 0;
+        for (int i = 0; i < d->blockCount; i++)
+        {
+            DocBlock *b = d->blocks[i];
+            if (b->toggleKey && strcmp(b->toggleKey, "x1") == 0)
+            {
+                toggleFound = 1;
+                CHECK(b->toggleOpen == 1,
+                      "r71: trigger reports the overridden open state");
+            }
+        }
+        CHECK(toggleFound, "r71: opened trigger still present");
+        free_page(d);
+    }
+
+    /* Real sites use aria-controls ids far longer than 64 bytes. The full
+     * token must key the panel; a truncated id leaves the panel closed no
+     * matter how many times the user taps the trigger. */
+    const char *longId =
+        "role-daimler-truck-north-america-detroit-diesel-data-engineer-and-analytics-engineer";
+    char longPage[2048];
+    snprintf(longPage, sizeof(longPage),
+             "<html><head><style>"
+             ".collapse{height:0;overflow:hidden}"
+             "</style></head><body>"
+             "<button aria-expanded=\"false\" aria-controls=\"%s\">"
+             "LongTrigger</button>"
+             "<div id=\"%s\" class=\"collapse\">"
+             "<p>LongPanelInside</p></div>"
+             "</body></html>",
+             longId, longId);
+    CHECK(strlen(longId) > 64, "r71: long disclosure id exceeds the old cap");
+    d = parse_page(longPage);
+    CHECK(d && !d->parseError, "r71: long-id disclosure page parses");
+    CHECK(block_index(d, "LongPanelInside") < 0,
+          "r71: long-id closed panel stays collapsed");
+    free_page(d);
+
+    {
+        int openState[1] = {1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 1;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(longPage, "https://example.com/long",
+                                MODE_RAW_HTML, &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: opened long-id page parses");
+        CHECK(block_index(d, "LongPanelInside") >= 0,
+              "r71: long aria-controls id opens the panel");
+        free_page(d);
+    }
+
+    /* The controlled panel often sits inside a height:0/overflow:hidden
+     * wrapper that has no id of its own (the usual .collapse container).
+     * Opening the panel must lift that wrapper's collapsed gate too. */
+    const char *nestedPage =
+        "<html><head><style>"
+        ".collapse{height:0;overflow:hidden}"
+        "</style></head><body>"
+        "<button aria-expanded=\"false\" aria-controls=\"role-nested\">"
+        "NestedTrigger</button>"
+        "<div class=\"collapse\"><div id=\"role-nested\" class=\"panel\" "
+        "inert><p>NestedPanelInside</p></div></div>"
+        "</body></html>";
+    d = parse_page(nestedPage);
+    CHECK(d && !d->parseError, "r71: nested disclosure page parses");
+    CHECK(block_index(d, "NestedPanelInside") < 0,
+          "r71: nested closed panel stays collapsed");
+    free_page(d);
+
+    {
+        int openState[1] = {1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 1;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(nestedPage, "https://example.com/nested",
+                                MODE_RAW_HTML, &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: opened nested page parses");
+        CHECK(block_index(d, "NestedPanelInside") >= 0,
+              "r71: open panel lifts its collapsed wrapper gate");
+        free_page(d);
+    }
+
+    /* Disclosure numbering is positional: on /work the nav Menu is x1 and
+     * the first role card is x2. Opening x2 must reveal the role panel
+     * while leaving the nav list closed. */
+    const char *indexedPage =
+        "<html><head><style>"
+        ".collapse{height:0;overflow:hidden}"
+        ".navlist{display:none}"
+        "</style></head><body>"
+        "<button aria-expanded=\"false\" aria-controls=\"navlist\">Menu</button>"
+        "<ul id=\"navlist\" class=\"navlist\"><li>NavItemX</li></ul>"
+        "<button aria-expanded=\"false\" aria-controls=\"role-a\">"
+        "RoleTrigger</button>"
+        "<div class=\"collapse\"><div id=\"role-a\" inert>"
+        "<p>RolePanelInside</p></div></div>"
+        "</body></html>";
+    {
+        int openState[2] = {0, 1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 2;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(indexedPage, "https://example.com/roles",
+                                MODE_RAW_HTML, &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: indexed disclosures parse");
+        CHECK(block_index(d, "NavItemX") < 0,
+              "r71: nav disclosure x1 stays closed when only x2 is open");
+        CHECK(block_index(d, "RolePanelInside") >= 0,
+              "r71: role disclosure x2 opens after the nav menu");
+        int roleOpen = -1;
+        for (int i = 0; i < d->blockCount; i++)
+        {
+            DocBlock *b = d->blocks[i];
+            if (b->toggleKey && strcmp(b->toggleKey, "x2") == 0)
+            {
+                roleOpen = b->toggleOpen;
+            }
+        }
+        CHECK(roleOpen == 1, "r71: x2 reports open while x1 reports closed");
+        free_page(d);
+    }
+
+    /* A disclosure trigger can itself be a flex container. Its synthesized
+     * block still has to carry the enclosing grid/flex container's gap, not
+     * the trigger's own inner gap (the /work role cards are grid items). */
+    d = parse_page(
+        "<html><head><style>"
+        ".roles{display:grid;gap:.75rem}"
+        ".role-toggle{display:flex;gap:1rem}"
+        "@media (max-width:40rem){"
+        ".role-line{display:flex;flex-direction:column;gap:.15rem}"
+        "}"
+        ".collapse{height:0;overflow:hidden}"
+        "</style></head><body>"
+        "<div class=\"roles\">"
+        "<article class=\"role\"><button class=\"role-toggle\" "
+        "aria-expanded=\"false\" aria-controls=\"role-a\">"
+        "<span class=\"role-line\"><span>RoleA</span>"
+        "<span class=\"role-role\">EngineerA</span></span></button>"
+        "<div class=\"collapse\"><div id=\"role-a\"><p>PanelA</p></div></div>"
+        "</article>"
+        "<article class=\"role\"><button class=\"role-toggle\" "
+        "aria-expanded=\"false\" aria-controls=\"role-b\">"
+        "<span class=\"role-line\"><span>RoleB</span>"
+        "<span class=\"role-role\">EngineerB</span></span></button>"
+        "<div class=\"collapse\"><div id=\"role-b\"><p>PanelB</p></div></div>"
+        "</article></div></body></html>");
+    CHECK(d && !d->parseError, "r71: gapped disclosure grid parses");
+    int gapsFound = 0;
+    for (int i = 0; i < d->blockCount; i++)
+    {
+        DocBlock *b = d->blocks[i];
+        if (b->toggleKey && strcmp(b->toggleKey, "x1") == 0)
+        {
+            CHECK(b->gapApplied == 6,
+                  "r71: disclosure item carries the grid's .75rem row-gap");
+            CHECK(b->inlineCount == 3,
+                  "r71: column-flex label keeps its line boundary");
+            if (b->inlineCount == 3)
+            {
+                CHECK(b->inlines[0]->type == DOC_INLINE_TEXT &&
+                          strcmp(b->inlines[0]->text, "RoleA") == 0 &&
+                          b->inlines[1]->type == DOC_INLINE_BR &&
+                          b->inlines[2]->type == DOC_INLINE_TEXT &&
+                          strcmp(b->inlines[2]->text, "EngineerA") == 0,
+                      "r71: title and role render on separate lines");
+            }
+            gapsFound++;
+        }
+        if (b->toggleKey && strcmp(b->toggleKey, "x2") == 0)
+        {
+            CHECK(b->gapApplied == 0,
+                  "r71: last disclosure item closes the grid's trailing gap");
+            gapsFound++;
+        }
+    }
+    CHECK(gapsFound == 2, "r71: both gapped disclosure triggers found");
+    free_page(d);
+
+    /* Sticky app bar: the container's block span is flagged pinStart+
+     * pinEnd (layout re-draws it at the content top when scrolled past). */
+    d = parse_page(
+        "<html><head><style>.bar{position:sticky;top:0}"
+        "</style></head><body>"
+        "<header class=\"bar\"><a href=\"/\">BrandLink</a></header>"
+        "<p>AfterBarBody</p>"
+        "</body></html>");
+    CHECK(d && !d->parseError, "r71: sticky page parses");
+    {
+        int bi = block_index(d, "BrandLink");
+        CHECK(bi >= 0 && d->blocks[bi]->pinStart && d->blocks[bi]->pinEnd,
+              "r71: sticky header carries the pin span");
+        int ai = block_index(d, "AfterBarBody");
+        CHECK(ai >= 0 && !d->blocks[ai]->pinStart && !d->blocks[ai]->pinEnd,
+              "r71: content after the app bar is not pinned");
+    }
+    free_page(d);
+
+    /* Spanning decoration: a card's border/background/radius covers every
+     * block in its subtree, not just the element's own (empty) block. */
+    d = parse_page(
+        "<html><head><style>"
+        ".card{border:2px solid black;background:#888;border-radius:8px}"
+        "</style></head><body>"
+        "<div class=\"card\"><p>CardOne</p><p>CardTwo</p></div>"
+        "<p>OutsideCard</p>"
+        "</body></html>");
+    CHECK(d && !d->parseError, "r71: decor page parses");
+    {
+        int bd = 0, bg = -1, rad = 0;
+        int c1 = block_index(d, "CardOne");
+        int c2 = block_index(d, "CardTwo");
+        CHECK(c1 >= 0 && c2 >= 0, "r71: card blocks present");
+        CHECK(decor_covering(d, c1, &bd, &bg, &rad) && bd == 2 && bg == 136 &&
+                  rad == 4,
+              "r71: card decoration spans the first block with border/bg/radius");
+        bd = 0;
+        bg = -1;
+        rad = 0;
+        CHECK(decor_covering(d, c2, &bd, &bg, &rad) && bd == 2 && bg == 136,
+              "r71: card decoration spans the whole subtree");
+        CHECK(!decor_covering(d, block_index(d, "OutsideCard"), &bd, &bg, &rad),
+              "r71: decoration ends at the container boundary");
+        CHECK(d->blocks[c1]->border == 0 && d->blocks[c1]->bgGray == -1,
+              "r71: lead block does not double-draw the card frame");
+    }
+    free_page(d);
+
+    /* R71 responsive nav: the trigger's CSS box metrics ride the block,
+     * the nav's padding insets the flex row, and an open absolutely-
+     * positioned panel is marked as a separate dropdown span. */
+    const char *navPage =
+        "<html><head><style>"
+        ".bar{position:sticky;top:0}"
+        ".nav{display:flex;justify-content:space-between;align-items:center;"
+        "padding:.75rem 1rem}"
+        ".nt{display:none}"
+        ".nl{display:flex}"
+        "@media (max-width:40rem){"
+        ".nt{display:inline-flex;padding:.45rem .75rem;border:1px solid;"
+        "border-radius:8px;gap:.5rem;font-size:.9rem}"
+        ".nl{display:none;position:absolute;top:100%;right:1rem}"
+        "}"
+        "</style></head><body>"
+        "<header class=\"bar\"><nav class=\"nav\">"
+        "<a href=\"/\">BrandX</a>"
+        "<button class=\"nt\" aria-expanded=\"false\" "
+        "aria-controls=\"navlist\">Menu</button>"
+        "<ul id=\"navlist\" class=\"nl\"><li>NavLinkX</li></ul>"
+        "</nav></header><p>AfterBarX</p></body></html>";
+    d = parse_page(navPage);
+    CHECK(d && !d->parseError, "r71: responsive nav page parses");
+    int navMenu = -1;
+    for (int i = 0; i < d->blockCount; i++)
+    {
+        if (d->blocks[i]->toggleKey &&
+            strcmp(d->blocks[i]->toggleKey, "x1") == 0)
+        {
+            navMenu = i;
+        }
+    }
+    CHECK(navMenu >= 0 && d->blocks[navMenu]->menuButton,
+          "r71: responsive nav trigger is a menu button");
+    if (navMenu >= 0)
+    {
+        DocBlock *mb = d->blocks[navMenu];
+        CHECK(mb->menuPadL == 6 && mb->menuPadR == 6 &&
+                  mb->menuPadT == 4 && mb->menuPadB == 4,
+              "r71: menu button carries the author's halved CSS padding");
+        CHECK(mb->menuGap == 4 && mb->menuRadius == 4,
+              "r71: menu button carries gap and radius");
+        CHECK(mb->flexPadL == 8 && mb->flexPadR == 8 &&
+                  mb->flexPadT == 0 && mb->flexPadB == 0,
+              "r71: pinned bar keeps horizontal nav padding, compacts vertical");
+        CHECK(mb->flexRow != 0 && mb->flexItem == 2,
+              "r71: menu button is the nav row's second item");
+        CHECK(mb->pinEnd, "r71: menu button closes the pinned app bar");
+    }
+    CHECK(block_index(d, "NavLinkX") < 0,
+          "r71: closed responsive nav keeps the panel hidden");
+    free_page(d);
+
+    {
+        int openState[1] = {1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 1;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(navPage, "https://example.com/nav",
+                                MODE_RAW_HTML, &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: open responsive nav parses");
+        int li = block_index(d, "NavLinkX");
+        CHECK(li >= 0, "r71: open responsive nav renders its links");
+        if (li >= 0)
+        {
+            CHECK(d->blocks[li]->dropdown && d->blocks[li]->dropdownStart &&
+                      d->blocks[li]->dropdownEnd,
+                  "r71: absolute-positioned open panel is a dropdown span");
+            CHECK(!d->blocks[li]->pinEnd,
+                  "r71: dropdown panel does not extend the pinned app bar");
+            CHECK(!d->blocks[li]->flexRow,
+                  "r71: dropdown panel stays out of the bar's flex row");
+        }
+        free_page(d);
+    }
+
+    /* The same menu can be named "Open menu" and control a div panel.
+     * Classification follows the disclosure label, not the exact word. */
+    const char *openMenuPage =
+        "<html><head><style>"
+        ".bar{position:sticky;top:0}"
+        ".nav{display:flex;justify-content:space-between;align-items:center;"
+        "padding:.5rem 1rem}"
+        ".panel{display:none;position:absolute;top:100%;right:1rem}"
+        "</style></head><body>"
+        "<header class=\"bar\"><nav class=\"nav\">"
+        "<a href=\"/\">BrandOpen</a>"
+        "<button aria-expanded=\"false\" aria-controls=\"mobile-menu\" "
+        "aria-label=\"Open menu\"></button>"
+        "</nav></header>"
+        "<div id=\"mobile-menu\" class=\"panel\">"
+        "<a href=\"/inside\">OpenMenuLink</a></div>"
+        "<p>AfterOpenMenu</p></body></html>";
+    d = parse_page(openMenuPage);
+    CHECK(d && !d->parseError, "r71: open-menu-label page parses");
+    int openMenu = -1;
+    for (int i = 0; i < d->blockCount; i++)
+    {
+        if (d->blocks[i]->toggleKey &&
+            strcmp(d->blocks[i]->toggleKey, "x1") == 0)
+        {
+            openMenu = i;
+        }
+    }
+    CHECK(openMenu >= 0 && d->blocks[openMenu]->menuButton,
+          "r71: Open menu label is a menu button");
+    if (openMenu >= 0)
+    {
+        CHECK(d->blocks[openMenu]->label &&
+                  strcmp(d->blocks[openMenu]->label, "Open menu") == 0,
+              "r71: menu button keeps the Open menu label");
+        CHECK(d->blocks[openMenu]->flexRow != 0,
+              "r71: Open menu control joins the app-bar row");
+    }
+    CHECK(block_index(d, "OpenMenuLink") < 0,
+          "r71: closed Open menu div panel stays hidden");
+    free_page(d);
+
+    {
+        int openState[1] = {1};
+        DocParseOpts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.disclosureOpen = openState;
+        opts.disclosureOpenCount = 1;
+        d = (DocParseResult *)calloc(1, sizeof(DocParseResult));
+        int rc = document_parse(openMenuPage, "https://example.com/openmenu",
+                                MODE_RAW_HTML, &opts, d);
+        CHECK(rc == 0 && !d->parseError, "r71: open Open menu page parses");
+        int li = block_index(d, "OpenMenuLink");
+        CHECK(li >= 0, "r71: Open menu div panel renders when open");
+        if (li >= 0)
+        {
+            CHECK(d->blocks[li]->dropdown && d->blocks[li]->dropdownStart &&
+                      d->blocks[li]->dropdownEnd,
+                  "r71: Open menu div panel is a dropdown span");
+        }
+        free_page(d);
+    }
+}
+
 /* js_doc_close comes from jsbridge.c (linked). */
 
 int main(void)
@@ -2015,6 +2581,7 @@ int main(void)
     test_multisheet();
     test_important();
     test_e2e();
+    test_r71();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

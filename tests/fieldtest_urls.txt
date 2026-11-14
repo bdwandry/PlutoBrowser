@@ -1,7 +1,7 @@
 # SW0 Benchmark Matrix — 20 sites, 10 classes
 # Format: <engine> <url> [| <criterion>]
 #   criterion = keyword that must appear in the rendered text (case-insensitive,
-#   scanned across blocks AND table cells). No criterion = PASS if any text renders
+4 https://bryanwandrych.com/work | professional experience
 #   (for classes whose content changes constantly — the test is "renders content").
 # Score line in pluto.log: [fieldtest] done (N sites): PASS p / FAIL f — matrix p/N
 # Full JS mode is forced for every site (jsEnabled=2) by the seam.

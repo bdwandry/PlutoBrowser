@@ -126,6 +126,51 @@ int layout_build_failed(void) { return g_buildError; }
 
 /* scrollY flows into draw_table_box for page-space link rects */
 static int g_scrollYForLinks = 0;
+/* R71 pinned app-bar span (page coords). g_pinFrom/g_pinTo are ITEM indices
+ * of the top-anchored position:sticky element's subtree; layout re-draws
+ * exactly that span at CONTENT_Y once scrollY moves past g_pinY. One bar per
+ * page (the 400x240 viewport has room for one app bar). */
+static int g_hasPin = 0;
+static int g_pinOpenSpan = 0;
+static int g_pinFrom = 0, g_pinTo = 0;
+static int g_pinY = 0, g_pinH = 0;
+/* R71 right-aligned disclosure dropdown span (page coords). The panel is
+ * out of flow: its page Y is anchored under the app bar, but its height is
+ * restored out of `currentY` so it overlays content exactly like the
+ * author's position:absolute menu instead of pushing the page down. */
+static int g_dropOpen = 0;
+static int g_dropY = 0;
+static int g_dropFlowSavedY = 0;
+static int g_dropItemFrom = 0, g_dropItemTo = 0, g_dropRectFrom = 0;
+static int g_dropPanelH = 0;
+static int g_dropX = 0, g_dropW = 0;
+/* R71 spanning decorations: the page Y where each decoration's first block
+ * started (filled while the block loop runs; consumed at endBlock). */
+static int g_decorY[DOC_BOX_DECOR_MAX];
+
+/* A disclosure trigger inside an authored bordered card already has a
+ * visible frame while the card is closed. Do not add the synthetic
+ * clickable-row frame on top of it: that produced two concentric borders
+ * around closed role cards. When the card opens, however, the authored
+ * border spans the whole panel and the trigger loses its own boundary, so
+ * layout draws a second frame around the trigger only. */
+static const DocBoxDecor *decor_border_at(const DocParseResult *doc, int bi)
+{
+    if (!doc || bi < 0)
+    {
+        return NULL;
+    }
+    for (int i = 0; i < doc->decorCount && i < DOC_BOX_DECOR_MAX; i++)
+    {
+        const DocBoxDecor *d = &doc->decor[i];
+        if (d->border > 0 && d->startBlock >= 0 && d->endBlock >= d->startBlock &&
+            bi >= d->startBlock && bi <= d->endBlock)
+        {
+            return d;
+        }
+    }
+    return NULL;
+}
 /* Large scratch buffers hoisted to BSS (stack audit): the table-cell and
  * code-box paths nested three 1KB arrays on the game-task stack.
  * Single-threaded: safe to share. */
@@ -168,6 +213,20 @@ void layout_clear(void)
     g_overlay.present = 0;
     g_odRequestedCount = 0;
     g_onDemandConsumed = 0;
+    g_hasPin = 0;
+    g_pinOpenSpan = 0;
+    g_pinFrom = g_pinTo = 0;
+    g_pinY = g_pinH = 0;
+    g_dropOpen = 0;
+    g_dropY = 0;
+    g_dropFlowSavedY = 0;
+    g_dropItemFrom = g_dropItemTo = g_dropRectFrom = 0;
+    g_dropPanelH = 0;
+    g_dropX = g_dropW = 0;
+    for (int di = 0; di < DOC_BOX_DECOR_MAX; di++)
+    {
+        g_decorY[di] = 0;
+    }
     /* Free the whole word-arena chunk list. */
     WordChunk *c = g_wordChunks;
     while (c)
@@ -580,8 +639,7 @@ typedef struct BreakOpts
     /* Phase 5: -webkit-line-clamp budget (0 → unlimited). When a new
      * word would open line N+1, the block stops consuming text
      * instead: the last kept line gains a "..." tail (the web's
-     * card-snippet truncation). */
-    int maxLines;
+     * card-snippet truncation). */            int maxLines;
 } BreakOpts;
 
 /* overflow-wrap:break-word piece emission (one FlowWord per piece, with
@@ -619,7 +677,8 @@ static void break_piece_emit(void *ectx, const char *pc, size_t n, int w,
     {
         flow_push_line(c->fl, c->cur);
         *c->firstWord = 1;
-        aw = w;
+        /* Keep the trailing gap on the moved piece: it separates this
+         * piece from the next word even when the piece starts a new line. */
     }
     FlowWord fw;
     fw.text = arena_word(tmp);
@@ -719,10 +778,14 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
         }
 
         const char *text = inl->text;
+        /* The bundled proportional fonts report a 2–3px space, which is
+         * visually indistinguishable from no space at this screen size.
+         * Keep a clearly readable minimum word gap (the device's word
+         * spaces were collapsing on headings and long paragraphs). */
         int spaceW = measure(font, " ");
-        if (spaceW <= 0)
+        if (spaceW < 6)
         {
-            spaceW = 8;
+            spaceW = 6;
         }
         int pos = 1;
         int n = (int)strlen(text);
@@ -835,8 +898,10 @@ static int break_lines(const DocInline **inlines, int inlineCount, int maxW,
             {
                 flow_push_line(fl, &cur);
                 firstWord = 1;
-                aw = ww;
-                gap = 0;
+                /* Do NOT drop `gap`: it belongs after this word. The gap
+                 * before it was the previous word's advance and is already
+                 * on the previous line. Dropping `gap` here was why the
+                 * first word of every wrapped line stuck to the next word. */
                 if (o.maxLines && fl->count >= o.maxLines)
                 {
                     /* Phase 5 clamp: the push just CLOSED line N — the
@@ -1040,6 +1105,145 @@ static void tf_apply_items(int from, int to, const DocBlock *b, int boxW,
     }
 }
 
+typedef struct
+{
+    unsigned short id;
+    int itemFrom, itemTo, rectFrom, rectTo;
+    int padL, padR, padT, padB; /* container content-box inset (CSS px) */
+} FlexGroup;
+
+/* Place one flex row's items on a single line. Items were laid out in
+ * normal block flow first (so links/rects already exist), then translated
+ * as a unit: justify-content distributes item boxes, align-items centers
+ * them on the cross axis. Hit rects move with their item. */
+static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
+                            int justify, int center, int marginX,
+                            int maxWidth, int *currentYOut)
+{
+    int minX[16], minY[16], maxX[16], maxY[16], gw[16], gh[16];
+    int rowH = 0, totalW = 0;
+    if (n > 16)
+    {
+        n = 16;
+    }
+    int padL = 0, padR = 0, padT = 0, padB = 0;
+    if (n > 0)
+    {
+        padL = groups[0].padL;
+        padR = groups[0].padR;
+        padT = groups[0].padT;
+        padB = groups[0].padB;
+    }
+    int contentX = marginX + padL;
+    int contentW = maxWidth - padL - padR;
+    if (contentW < 1)
+    {
+        contentW = 1;
+    }
+    for (int g = 0; g < n; g++)
+    {
+        minX[g] = 32767;
+        minY[g] = 32767;
+        maxX[g] = -32767;
+        maxY[g] = -32767;
+        for (int i = groups[g].itemFrom; i < groups[g].itemTo; i++)
+        {
+            LayoutItem *it = g_items[i];
+            int ix2 = it->x + it->w;
+            int iy2 = it->y + it->h;
+            if ((it->type == LRI_QUOTE_BAR || it->type == LRI_BOX_FRAME) &&
+                it->y2 > it->y)
+            {
+                iy2 = it->y2;
+            }
+            if (it->x < minX[g])
+            {
+                minX[g] = it->x;
+            }
+            if (it->y < minY[g])
+            {
+                minY[g] = it->y;
+            }
+            if (ix2 > maxX[g])
+            {
+                maxX[g] = ix2;
+            }
+            if (iy2 > maxY[g])
+            {
+                maxY[g] = iy2;
+            }
+        }
+        if (minX[g] == 32767)
+        {
+            minX[g] = maxX[g] = marginX;
+            minY[g] = maxY[g] = rowStartY;
+        }
+        gw[g] = maxX[g] - minX[g];
+        gh[g] = maxY[g] - minY[g];
+        totalW += gw[g];
+        if (gh[g] > rowH)
+        {
+            rowH = gh[g];
+        }
+    }
+    int gap = 0;
+    if (justify == 3 && n > 1)
+    {
+        gap = (contentW - totalW) / (n - 1);
+        if (gap < 0)
+        {
+            gap = 0;
+        }
+    }
+    int x0 = contentX;
+    if (justify == 1)
+    {
+        x0 = contentX + (contentW - totalW) / 2;
+    }
+    else if (justify == 2)
+    {
+        x0 = contentX + contentW - totalW;
+    }
+    if (x0 < contentX)
+    {
+        x0 = contentX;
+    }
+    logger_log("[bar] flex startY=%d n=%d pad=%d/%d/%d/%d totalW=%d rowH=%d",
+               rowStartY, n, padL, padR, padT, padB, totalW, rowH);
+    for (int g = 0; g < n; g++)
+    {
+        logger_log("[bar] flex g=%d id=%d items=%d..%d bbox=%d,%d..%d,%d gh=%d gw=%d",
+                   g, groups[g].id, groups[g].itemFrom, groups[g].itemTo,
+                   minX[g], minY[g], maxX[g], maxY[g], gh[g], gw[g]);
+    }
+    int cursor = x0;
+    for (int g = 0; g < n; g++)
+    {
+        int dx = cursor - minX[g];
+        int dy = rowStartY + padT +
+                 (center ? (rowH - gh[g]) / 2 : 0) - minY[g];
+        for (int i = groups[g].itemFrom; i < groups[g].itemTo; i++)
+        {
+            LayoutItem *it = g_items[i];
+            it->x += dx;
+            it->y += dy;
+            if (it->type == LRI_QUOTE_BAR || it->type == LRI_BOX_FRAME ||
+                it->type == LRI_LINE)
+            {
+                it->x1 += dx;
+                it->x2 += dx;
+                it->y1 += dy;
+                it->y2 += dy;
+            }
+        }
+        lm_shift_rects(groups[g].rectFrom,
+                       groups[g].rectTo - groups[g].rectFrom, dx, dy);
+        cursor += gw[g] + gap;
+    }
+    *currentYOut = rowStartY + padT + rowH + padB + 6;
+    logger_log("[bar] flex placed endY=%d", *currentYOut);
+}
+
 void layout_build(DocParseResult *doc)
 {
     logger_stack_touch();
@@ -1058,6 +1262,11 @@ void layout_build(DocParseResult *doc)
     int maxWidth = CONTENT_TEXT_WIDTH - 4;
     LayoutItem *boxStack[64];
     int boxTop = 0;
+    FlexGroup flexGroups[16];
+    int flexGroupCount = 0;
+    int flexActive = 0;
+    unsigned short flexCurRow = 0;
+    int flexRowStartY = 0, flexJustifyCur = 0, flexCenterCur = 0;
 
     for (int bi = 0; bi < doc->blockCount; bi++)
     {
@@ -1066,10 +1275,89 @@ void layout_build(DocParseResult *doc)
         {
             continue;
         }
+        /* A top-anchored sticky header is app chrome: the site's header is
+         * flush with the viewport top, not inset by the engine's generic 8px
+         * page margin. Snap BEFORE flex-row setup so the row's start (and
+         * therefore the app-bar height) uses the snapped top, not 8px of
+         * blank header above the controls. */
+        if (bi == 0 && block->pinStart && !g_hasPin && !g_pinOpenSpan &&
+            currentY == CONTENT_Y + 8)
+        {
+            currentY = CONTENT_Y;
+        }
+        if (flexActive && block->flexRow != flexCurRow)
+        {
+            flex_finish_row(flexGroups, flexGroupCount, flexRowStartY,
+                            flexJustifyCur, flexCenterCur, marginX, maxWidth,
+                            &currentY);
+            flexActive = 0;
+            flexGroupCount = 0;
+        }
+        if (!flexActive && block->flexRow)
+        {
+            flexActive = 1;
+            flexCurRow = block->flexRow;
+            flexRowStartY = currentY;
+            flexJustifyCur = block->flexJustify;
+            flexCenterCur = block->flexCenter;
+            flexGroupCount = 0;
+        }
+        if (flexActive)
+        {
+            if (flexGroupCount == 0 ||
+                flexGroups[flexGroupCount - 1].id != block->flexItem)
+            {
+                if (flexGroupCount > 0)
+                {
+                    flexGroups[flexGroupCount - 1].itemTo = g_itemCount;
+                    flexGroups[flexGroupCount - 1].rectTo = lm_rect_total();
+                }
+                if (flexGroupCount < 16)
+                {
+                    FlexGroup *fg = &flexGroups[flexGroupCount++];
+                    fg->id = block->flexItem;
+                    fg->itemFrom = fg->itemTo = g_itemCount;
+                    fg->rectFrom = fg->rectTo = lm_rect_total();
+                    fg->padL = block->flexPadL;
+                    fg->padR = block->flexPadR;
+                    fg->padT = block->flexPadT;
+                    fg->padB = block->flexPadB;
+                }
+            }
+        }
         /* Tasks.yieldCheck() call site: outside a task context the C port's
          * budget check is a no-op (build runs inside the navigation task on
          * device, which owns the frame budget). */
         tasks_report_progress(0.8f + 0.2f * ((float)(bi + 1) / (float)doc->blockCount));
+
+        /* R71: remember where each spanning decoration starts (its first
+         * block's top), and open the pinned app-bar item span. */
+        for (int di = 0; di < doc->decorCount && di < DOC_BOX_DECOR_MAX; di++)
+        {
+            const DocBoxDecor *d = &doc->decor[di];
+            if (d->startBlock == bi && d->endBlock >= d->startBlock)
+            {
+                g_decorY[di] = currentY;
+            }
+        }
+        if (block->pinStart && !g_hasPin && !g_pinOpenSpan)
+        {
+            g_pinFrom = g_itemCount;
+            g_pinY = currentY;
+            g_pinOpenSpan = 1;
+        }
+        /* R71 dropdown panel: begin a right-aligned box span. The panel
+         * sits below the app bar and is laid out independently of the pin
+         * span, so opening it never grows the sticky bar. */
+        if (block->dropdownStart && !g_dropOpen)
+        {
+            g_dropOpen = 1;
+            g_dropFlowSavedY = currentY;
+            currentY += 4;
+            g_dropY = currentY;
+            g_dropItemFrom = g_itemCount;
+            g_dropRectFrom = lm_rect_total();
+        }
         /* CSS border top: captured before the branch adds its spacingTop
          * (margin stays outside the box); the bottom inevitably includes
          * the branch's spacingBottom (single post-pass point). */
@@ -1169,20 +1457,142 @@ void layout_build(DocParseResult *doc)
             int indent = block->indent;
             int blockStartX = (isQuote ? marginX + 14 : marginX) + indent;
             int blockMaxW = maxWidth - (isQuote ? 18 : 0) - indent;
+            /* R71 menu button: compact, right-aligned hamburger. Size and
+             * frame it from the trigger's own CSS box (padding/border/radius/
+             * gap/font) instead of a fixed pill; the flex row centers it on
+             * the nav's content axis. */
+            int menuBoxBottom = 0;
+            if (block->menuButton)
+            {
+                const char *mlab = (block->label && block->label[0])
+                                       ? block->label
+                                       : "Menu";
+                int border = block->menuBorder;
+                int padL = block->menuPadL, padR = block->menuPadR;
+                int padT = block->menuPadT, padB = block->menuPadB;
+                int gap = block->menuGap ? block->menuGap : 6;
+                LCDFont *mf = style_font(block->menuFontBig
+                                             ? PLUTO_FONT_BODY
+                                             : PLUTO_FONT_SMALL);
+                /* Optical glyph box, not getFontHeight(): the system small
+                 * font reports a 22px line box for ~15px visible caps, and
+                 * using that inflated the compact control to 30px. */
+                int fontH = block->menuFontBig ? 16 : 14;
+                int iconW = 11;
+                int labelW = measure(mf, mlab) + 2; /* breathing room */
+                int mw = 2 * border + padL + padR + iconW + gap + labelW;
+                if (mw < 44)
+                {
+                    mw = 44;
+                }
+                if (mw > blockMaxW)
+                {
+                    mw = blockMaxW;
+                }
+                int mh = 2 * border + padT + padB + fontH;
+                /* The store's menu trigger is app chrome, not page content:
+                 * keep its box compact (20px) so the sticky row can be a
+                 * true thin app bar on the 240px panel. */
+                if (mh < 18)
+                {
+                    mh = 18;
+                }
+                if (mh > 20)
+                {
+                    mh = 20;
+                }
+                LayoutItem *mi = item_new(LRI_MENU_BUTTON);
+                if (!mi)
+                {
+                    return;
+                }
+                int rightInset = block->flexPadR;
+                mi->x = marginX + maxWidth - rightInset - mw;
+                if (mi->x < marginX)
+                {
+                    mi->x = marginX;
+                }
+                mi->y = currentY + 2;
+                mi->w = mw;
+                mi->h = mh;
+                mi->label = mlab;
+                mi->small = !block->menuFontBig;
+                mi->radius = block->menuRadius;
+                mi->menuPadL = padL;
+                mi->menuPadR = padR;
+                mi->menuPadT = padT;
+                mi->menuPadB = padB;
+                mi->menuBorder = border;
+                mi->menuGap = gap;
+                mi->toggleKey = block->toggleKey;
+                mi->toggleOpen = block->toggleOpen;
+                menuBoxBottom = mi->y + mi->h + 6;
+                logger_log("[bar] menu x=%d y=%d w=%d h=%d pad=%d/%d/%d/%d border=%d radius=%d gap=%d row=%d item=%d",
+                           mi->x, mi->y, mi->w, mi->h, padL, padR, padT,
+                           padB, border, block->menuRadius, gap,
+                           block->flexRow, block->flexItem);
+                if (block->toggleKey)
+                {
+                    char thref[32];
+                    snprintf(thref, sizeof(thref), "toggle:%s",
+                             block->toggleKey);
+                    LayoutRectAux aux;
+                    memset(&aux, 0, sizeof(aux));
+                    aux.isToggle = 1;
+                    aux.toggleKey = block->toggleKey;
+                    aux.toggleOpen = block->toggleOpen;
+                    add_rect_aux(thref, mlab, mi->x, mi->y, mi->w, mi->h, 0,
+                                 &aux);
+                }
+            }
             int tfQFrom = g_itemCount;
             int startQuoteY = currentY + block->spacingTop;
+            /* Non-menu disclosures reserve a small gutter on the right for
+             * the chevron, matching the site's flex row (text + arrow). */
+            int labelMaxW = blockMaxW;
+            if (block->toggleKey && !block->menuButton && blockMaxW > 80)
+            {
+                labelMaxW -= 24;
+            }
             const char *align = layout_normalize_align(block->align);
             BreakOpts bo;
             memset(&bo, 0, sizeof(bo));
             bo.maxLines = block->clampLines;
             FlowLines fl;
             int lineH = break_lines((const DocInline **)block->inlines,
-                                    block->inlineCount, blockMaxW, &bo, &fl);
-            emit_flow(&fl, lineH, blockStartX, blockMaxW, align, startQuoteY,
+                                    block->inlineCount, labelMaxW, &bo, &fl);
+            emit_flow(&fl, lineH, blockStartX, labelMaxW, align, startQuoteY,
                       block->invert);
-            currentY = startQuoteY + lineH * fl.count + 10 + block->spacingBottom +
-                       block->gapApplied;
+            /* Capture the line count BEFORE flow_free(): that helper zeroes
+             * the FlowLines struct. Reading fl.count afterwards made every
+             * ordinary disclosure's hit-rect zero-height, so role cards
+             * rendered but could never be clicked. */
+            int lineCount = fl.count;
+            currentY = startQuoteY + lineH * lineCount + 10 +
+                       block->spacingBottom + block->gapApplied;
+            if (block->menuButton && menuBoxBottom > currentY)
+            {
+                currentY = menuBoxBottom;
+            }
             flow_free(&fl);
+            /* Ordinary ARIA accordion headers (not menu buttons) get a
+             * tappable row + [+]/[-] toggle spanning the header line. */
+            if (block->toggleKey && !block->menuButton && lineCount > 0)
+            {
+                char thref[32];
+                snprintf(thref, sizeof(thref), "toggle:%s", block->toggleKey);
+                LayoutRectAux aux;
+                memset(&aux, 0, sizeof(aux));
+                aux.isToggle = 1;
+                aux.toggleKey = block->toggleKey;
+                aux.toggleOpen = block->toggleOpen;
+                add_rect_aux(thref, block->label ? block->label : "",
+                             blockStartX, startQuoteY, blockMaxW,
+                             lineH * lineCount, 0, &aux);
+                logger_log("[toggle-rect] key=%s x=%d y=%d w=%d h=%d",
+                           block->toggleKey, blockStartX, startQuoteY,
+                           blockMaxW, lineH * lineCount);
+            }
             if (isQuote)
             {
                 LayoutItem *qb = item_new(LRI_QUOTE_BAR);
@@ -1195,7 +1605,84 @@ void layout_build(DocParseResult *doc)
                 qb->y2 = currentY - 4;
             }
             tf_apply_items(tfQFrom, g_itemCount, block, blockMaxW,
-                           lineH * fl.count);
+                           lineH * lineCount);
+            /* Non-menu disclosure headers get a visible frame when the
+             * author did not supply one. It surrounds the same row that
+             * toggle_details() makes clickable, so role/accordion cards
+             * read as controls rather than plain text. */
+            const DocBoxDecor *decorBorder = decor_border_at(doc, bi);
+            int openDecorFrame = block->toggleOpen && decorBorder &&
+                                 decorBorder->endBlock > bi;
+            if (block->toggleKey && !block->menuButton && lineCount > 0)
+            {
+                logger_log("[toggle-frame] key=%s blockBorder=%d decor=%d open=%d inner=%d",
+                           block->toggleKey, block->border,
+                           decorBorder != NULL, block->toggleOpen,
+                           openDecorFrame);
+            }
+            if (block->toggleKey && !block->menuButton && block->border == 0 &&
+                lineCount > 0 && (!decorBorder || openDecorFrame))
+            {
+                LayoutItem *bf = item_new(LRI_BOX_FRAME);
+                if (bf)
+                {
+                    bf->x = blockStartX;
+                    bf->w = blockMaxW;
+                    if (openDecorFrame)
+                    {
+                        /* Mirror the closed card's border box: same full
+                         * width and same height including the trigger's
+                         * trailing block spacing, but NOT the flex/grid gap
+                         * that belongs between cards. The outer authored
+                         * border still wraps the expanded panel below. */
+                        bf->y = startQuoteY;
+                        bf->y2 = currentY - block->gapApplied;
+                        bf->radius = decorBorder->radius;
+                    }
+                    else
+                    {
+                        bf->y = startQuoteY - 1;
+                        bf->y2 = startQuoteY + lineH * lineCount + 1;
+                        bf->radius = 3;
+                    }
+                }
+            }
+            /* Collapsed cards show a down chevron; open cards flip it up,
+             * matching .role-chevron's rotate(45deg)/rotate(225deg). Two
+             * 1px lines form the V (the site uses a rotated 2px border). */
+            if (block->toggleKey && !block->menuButton && lineCount > 0)
+            {
+                int arrowCx = blockStartX + blockMaxW - 14;
+                int arrowCy = startQuoteY + (lineH * lineCount) / 2;
+                int halfW = 4, halfH = 2;
+                int outerY = block->toggleOpen ? arrowCy + halfH
+                                               : arrowCy - halfH;
+                int tipY = block->toggleOpen ? arrowCy - halfH
+                                             : arrowCy + halfH;
+                for (int leg = 0; leg < 2; leg++)
+                {
+                    int ax1 = (leg == 0) ? arrowCx - halfW : arrowCx;
+                    int ay1 = (leg == 0) ? outerY : tipY;
+                    int ax2 = (leg == 0) ? arrowCx : arrowCx + halfW;
+                    int ay2 = (leg == 0) ? tipY : outerY;
+                    LayoutItem *ln = item_new(LRI_LINE);
+                    if (!ln)
+                    {
+                        return;
+                    }
+                    ln->x1 = ax1;
+                    ln->y1 = ay1;
+                    ln->x2 = ax2;
+                    ln->y2 = ay2;
+                    ln->x = ax1 < ax2 ? ax1 : ax2;
+                    ln->y = ay1 < ay2 ? ay1 : ay2;
+                    ln->w = (ax1 < ax2 ? ax2 - ax1 : ax1 - ax2) + 1;
+                    ln->h = (ay1 < ay2 ? ay2 - ay1 : ay1 - ay2) + 1;
+                }
+                logger_log("[toggle-arrow] key=%s x=%d y=%d open=%d",
+                           block->toggleKey, arrowCx, arrowCy,
+                           block->toggleOpen);
+            }
         }
         /* 4. Lists (ul / ol / dl) */
         else if (block->type == DOC_BLOCK_LIST_ITEM)
@@ -1216,12 +1703,13 @@ void layout_build(DocParseResult *doc)
             }
             else
             {
+            int drop = block->dropdown;
             int depth = block->depth ? block->depth : 1;
             int isDt = block->dt;
             int isDd = block->dd;
-            int indent = (depth - 1) * 14;
+            int indent = drop ? 0 : (depth - 1) * 14;
             int bulletIndent = marginX + 4 + indent;
-            int textIndent = marginX + (isDd ? 30 : 20) + indent;
+            int textIndent = marginX + (drop ? 10 : (isDd ? 30 : 20)) + indent;
             int listMaxW = maxWidth - (textIndent - marginX) - 4;
             int lineH = 18;
 
@@ -1230,7 +1718,7 @@ void layout_build(DocParseResult *doc)
              * — draw nothing, no item slot). The ordered/unordered
              * default path below still applies when markerText is
              * NULL (::marker never fired). */
-            if (!isDt && !isDd && block->markerText)
+            if (!drop && !isDt && !isDd && block->markerText)
             {
                 if (block->markerText[0])
                 {
@@ -1248,7 +1736,7 @@ void layout_build(DocParseResult *doc)
                     it->bold = 1;
                 }
             }
-            else if (!isDt && !isDd && block->markerType != 'n')
+            else if (!drop && !isDt && !isDd && block->markerType != 'n')
             {
                 char bulletStr[48];
                 if (block->isOrdered && block->markerType != 'd' &&
@@ -1297,7 +1785,8 @@ void layout_build(DocParseResult *doc)
             emit_flow(&fl, lh, textIndent, listMaxW, align, currentY, 0);
             tf_apply_items(tfLFrom, g_itemCount, block, listMaxW,
                            lh * fl.count);
-            currentY = currentY + lh * fl.count + 6 + block->gapApplied;
+            currentY = currentY + lh * fl.count +
+                       (drop ? 14 : 6) + block->gapApplied;
             flow_free(&fl);
             } /* end non-empty list item */
         }
@@ -2008,7 +2497,8 @@ void layout_build(DocParseResult *doc)
          * with nested 1px frames (LRI_BOX_FRAME draws square corners —
          * the spec default; round stays table-only). Widths that would
          * go degenerate simply stop (no partial frames). */
-        if (block->border > 0 && currentY > borderTop)
+        int boxBottom = currentY - block->gapApplied;
+        if (block->border > 0 && boxBottom > borderTop)
         {
             int bw = block->border > 3 ? 3 : block->border;
             for (int k = 0; k < bw; k++)
@@ -2016,7 +2506,7 @@ void layout_build(DocParseResult *doc)
                 int fx = marginX + k;
                 int fy = borderTop + k;
                 int fw = maxWidth - 2 * k;
-                int fy2 = currentY - k;
+                int fy2 = boxBottom - k;
                 if (fw < 1 || fy2 <= fy)
                 {
                     break;
@@ -2037,7 +2527,7 @@ void layout_build(DocParseResult *doc)
          * emission order here is irrelevant. Density from luminance:
          * <160 → 50% lines, else 25%. */
         if (block->bgGray >= 96 && block->bgGray <= 215 &&
-            currentY > borderTop)
+            boxBottom > borderTop)
         {
             LayoutItem *si = item_new(LRI_SHADE);
             if (!si)
@@ -2047,9 +2537,182 @@ void layout_build(DocParseResult *doc)
             si->x = marginX;
             si->y = borderTop;
             si->w = maxWidth;
-            si->h = currentY - borderTop;
+            si->h = boxBottom - borderTop;
             si->shade = (block->bgGray < 160) ? 2 : 1;
         }
+        /* R71: close the pinned app-bar span (last block of the sticky
+         * container) and any spanning decoration that ends here. */
+        if (flexActive && block->pinEnd)
+        {
+            if (flexGroupCount > 0)
+            {
+                flexGroups[flexGroupCount - 1].itemTo = g_itemCount;
+                flexGroups[flexGroupCount - 1].rectTo = lm_rect_total();
+            }
+            flex_finish_row(flexGroups, flexGroupCount, flexRowStartY,
+                            flexJustifyCur, flexCenterCur, marginX, maxWidth,
+                            &currentY);
+            /* flex_finish_row adds a 6px inter-block tail. Inside a sticky
+             * app bar that tail is part of the bar box, not page flow: it
+             * made the painted bar look taller than its nav row and left a
+             * blank strip below the controls. Trim it from the bar's box. */
+            currentY -= 6;
+            flexActive = 0;
+            flexGroupCount = 0;
+        }
+        if (block->pinEnd && g_pinOpenSpan)
+        {
+            g_pinTo = g_itemCount;
+            g_pinH = currentY - g_pinY;
+            if (g_pinH > 0)
+            {
+                /* The sticky box's own background/border paint full width
+                 * (a header bar is not a text column). It lives INSIDE the
+                 * pin item span so the pinned layer redraws it too. */
+                LayoutItem *pb = item_new(LRI_PIN_BAR);
+                if (pb)
+                {
+                    pb->x = 0;
+                    pb->y = g_pinY;
+                    pb->w = SCREEN_WIDTH;
+                    pb->h = g_pinH;
+                }
+            }
+            g_pinTo = g_itemCount;
+            g_pinOpenSpan = 0;
+            g_hasPin = (g_pinTo > g_pinFrom && g_pinH > 0);
+            logger_log("[bar] pin bi=%d y=%d h=%d items=%d..%d",
+                       bi, g_pinY, g_pinH, g_pinFrom, g_pinTo);
+        }
+        for (int di = 0; di < doc->decorCount && di < DOC_BOX_DECOR_MAX; di++)
+        {
+            const DocBoxDecor *d = &doc->decor[di];
+            if (d->endBlock != bi || d->startBlock < 0)
+            {
+                continue;
+            }
+            int dy0 = g_decorY[di];
+            /* A flex/grid gap is outside the item's border box. currentY
+             * already includes the gap so the NEXT item starts in the right
+             * place; the decoration for THIS item must stop before it or the
+             * gap is swallowed inside the card border and cards touch. */
+            int dy1 = currentY - block->gapApplied;
+            if (dy1 <= dy0)
+            {
+                continue;
+            }
+            if (d->bgGray >= 96 && d->bgGray <= 215)
+            {
+                LayoutItem *si = item_new(LRI_SHADE);
+                if (!si)
+                {
+                    return;
+                }
+                si->x = marginX;
+                si->y = dy0;
+                si->w = maxWidth;
+                si->h = dy1 - dy0;
+                si->shade = (d->bgGray < 160) ? 2 : 1;
+            }
+            if (d->border > 0)
+            {
+                logger_log("[decor-frame] start=%d end=%d bi=%d y=%d..%d",
+                           d->startBlock, d->endBlock, bi, dy0, dy1);
+                int bw = d->border > 3 ? 3 : d->border;
+                for (int k = 0; k < bw; k++)
+                {
+                    int fx = marginX + k;
+                    int fy = dy0 + k;
+                    int fw = maxWidth - 2 * k;
+                    int fy2 = dy1 - k;
+                    if (fw < 1 || fy2 <= fy)
+                    {
+                        break;
+                    }
+                    LayoutItem *fi = item_new(LRI_BOX_FRAME);
+                    if (!fi)
+                    {
+                        return;
+                    }
+                    fi->x = fx;
+                    fi->y = fy;
+                    fi->w = fw;
+                    fi->y2 = fy2;
+                    fi->radius = d->radius > k ? d->radius - k : 0;
+                }
+            }
+        }
+        /* R71 dropdown panel close: compute the right-aligned overlay box,
+         * move the panel's text/hit rects into it, and record the frame. */
+        if (block->dropdownEnd && g_dropOpen)
+        {
+            int dropW = 208;
+            if (dropW > maxWidth - 8)
+            {
+                dropW = maxWidth - 8;
+            }
+            int right = marginX + maxWidth - 16;
+            int left = right - dropW;
+            if (left < marginX)
+            {
+                left = marginX;
+            }
+            int dx = left - marginX;
+            for (int i = g_dropItemFrom; i < g_itemCount; i++)
+            {
+                LayoutItem *it = g_items[i];
+                it->x += dx;
+                if (it->type == LRI_LINE || it->type == LRI_BOX_FRAME ||
+                    it->type == LRI_QUOTE_BAR)
+                {
+                    it->x1 += dx;
+                    it->x2 += dx;
+                }
+            }
+            lm_shift_rects(g_dropRectFrom,
+                           lm_rect_total() - g_dropRectFrom, dx, 0);
+            if (currentY > g_dropY)
+            {
+                LayoutItem *pi = item_new(LRI_DROPDOWN_PANEL);
+                if (pi)
+                {
+                    pi->x = left;
+                    pi->y = g_dropY;
+                    pi->w = dropW;
+                    pi->h = currentY - g_dropY;
+                    pi->radius = 4;
+                }
+                g_dropPanelH = currentY - g_dropY;
+                g_dropX = left;
+                g_dropW = dropW;
+                g_dropItemTo = g_itemCount;
+                /* A dropdown row is a menu target, not a text-column link:
+                 * make the whole panel width tappable and give these rects
+                 * priority over same-coordinate links in the page under the
+                 * overlay. */
+                int dropRectCount = lm_rect_total() - g_dropRectFrom;
+                lm_widen_rects(g_dropRectFrom, dropRectCount, left, dropW);
+                lm_set_overlay_rects(g_dropRectFrom, dropRectCount);
+                logger_log("[bar] dropdown x=%d y=%d w=%d h=%d items=%d..%d",
+                           left, g_dropY, dropW, g_dropPanelH,
+                           g_dropItemFrom, g_dropItemTo);
+            }
+            /* position:absolute is out of flow: the panel must not move
+             * the page or stretch the sticky header box. */
+            currentY = g_dropFlowSavedY;
+            g_dropOpen = 0;
+        }
+        if (flexActive && flexGroupCount > 0)
+        {
+            flexGroups[flexGroupCount - 1].itemTo = g_itemCount;
+            flexGroups[flexGroupCount - 1].rectTo = lm_rect_total();
+        }
+    }
+    if (flexActive)
+    {
+        flex_finish_row(flexGroups, flexGroupCount, flexRowStartY,
+                        flexJustifyCur, flexCenterCur, marginX, maxWidth,
+                        &currentY);
     }
 
     int th = currentY + 20;
@@ -2062,6 +2725,31 @@ void layout_build(DocParseResult *doc)
 
 int layout_get_total_height(void) { return g_totalHeight; }
 int layout_get_item_count(void) { return g_itemCount; }
+
+/* R71: screen point → page Y for hit testing (see layout.h). */
+int layout_page_y(int screenX, int screenY, int scrollY)
+{
+    int pinnedNow = g_hasPin && g_pinH > 0 && scrollY > g_pinY - CONTENT_Y;
+    if (pinnedNow && screenY >= CONTENT_Y &&
+        screenY < CONTENT_Y + g_pinH)
+    {
+        return g_pinY + (screenY - CONTENT_Y);
+    }
+    /* An open dropdown is painted above the page and follows the pinned bar.
+     * Map only points inside its actual box back to its page rows, so page
+     * content outside the panel stays tappable underneath it. */
+    if (g_dropPanelH > 0 && g_dropItemTo > g_dropItemFrom &&
+        screenX >= g_dropX && screenX < g_dropX + g_dropW)
+    {
+        int dropScroll = pinnedNow ? (g_pinY - CONTENT_Y) : scrollY;
+        int dropTop = g_dropY - dropScroll;
+        if (screenY >= dropTop && screenY < dropTop + g_dropPanelH)
+        {
+            return g_dropY + (screenY - dropTop);
+        }
+    }
+    return screenY + scrollY;
+}
 
 const LayoutItem *layout_item_at(int index)
 {
@@ -2498,15 +3186,62 @@ void layout_draw(int scrollY)
     g_pd->graphics->fillRect(0, CONTENT_Y, SCREEN_WIDTH, CONTENT_HEIGHT, kColorWhite);
     g_pd->graphics->setClipRect(0, CONTENT_Y, CONTENT_WIDTH, CONTENT_HEIGHT);
 
-    /* Two passes: gray shades first (under content), then everything
-     * else. Shades must sit under text — emission order can't do it
-     * (the span is only known post-layout). */
+    /* R71: up to THREE LAYERS. Layer 0 = the page at the real scroll offset.
+     * The pinned app-bar span is re-drawn at the content top once the sticky
+     * container's flow position scrolled past the viewport; the open dropdown
+     * is a separate top layer, exactly like the author's position:absolute
+     * menu. Each layer draws the same two passes: gray shades first (under
+     * content), then everything else. */
+    int pinnedNow = g_hasPin && g_pinH > 0 && scrollY > g_pinY - CONTENT_Y;
+    int hasDrop = (g_dropItemTo > g_dropItemFrom);
+    int layerCount = 1 + (pinnedNow ? 1 : 0) + (hasDrop ? 1 : 0);
+    int pinLayer = pinnedNow ? 1 : -1;
+    int dropLayer = hasDrop ? (layerCount - 1) : -1;
+    for (int layer = 0; layer < layerCount; layer++)
+    {
+        if (layer == pinLayer)
+        {
+            int bh = g_pinH > CONTENT_HEIGHT ? CONTENT_HEIGHT : g_pinH;
+            g_pd->graphics->fillRect(0, CONTENT_Y, SCREEN_WIDTH, bh, kColorWhite);
+            g_pd->graphics->drawLine(0, CONTENT_Y + bh - 1, SCREEN_WIDTH,
+                                     CONTENT_Y + bh - 1, 1, kColorBlack);
+        }
+        int layerScroll = (layer == pinLayer ||
+                           (layer == dropLayer && pinnedNow))
+                              ? (g_pinY - CONTENT_Y)
+                              : scrollY;
+        {
+        /* This inner declaration shadows the argument: every draw arm
+         * below uses this layer's offset with no further changes. */
+        int scrollY = layerScroll;
     for (int pass = 0; pass < 2; pass++)
     {
         for (int i = 0; i < g_itemCount; i++)
         {
             LayoutItem *item = g_items[i];
-            int isShade = (item->type == LRI_SHADE);
+            int inDrop = hasDrop && i >= g_dropItemFrom && i < g_dropItemTo;
+            if (dropLayer >= 0)
+            {
+                if (layer == dropLayer && !inDrop)
+                {
+                    continue;
+                }
+                if (layer != dropLayer && inDrop)
+                {
+                    continue;
+                }
+            }
+            if (pinnedNow && layer != dropLayer)
+            {
+                int inPin = (i >= g_pinFrom && i < g_pinTo);
+                if ((layer == 0 && inPin) || (layer != 0 && !inPin))
+                {
+                    continue;
+                }
+            }
+            int isShade = (item->type == LRI_SHADE ||
+                           item->type == LRI_PIN_BAR ||
+                           item->type == LRI_DROPDOWN_PANEL);
             if ((pass == 0) != isShade)
             {
                 continue;
@@ -2514,6 +3249,34 @@ void layout_draw(int scrollY)
             int drawY;
             switch (item->type)
             {
+            case LRI_PIN_BAR:
+            {
+                int y0 = item->y - scrollY;
+                g_pd->graphics->fillRect(0, y0, SCREEN_WIDTH, item->h,
+                                         kColorWhite);
+                g_pd->graphics->drawLine(0, y0 + item->h - 1, SCREEN_WIDTH,
+                                         y0 + item->h - 1, 1, kColorBlack);
+                break;
+            }
+            case LRI_DROPDOWN_PANEL:
+            {
+                int y0 = item->y - scrollY;
+                if (y0 + item->h >= CONTENT_Y && y0 <= SCREEN_HEIGHT)
+                {
+                    int rad = item->radius;
+                    if (rad > item->h / 2)
+                    {
+                        rad = item->h / 2;
+                    }
+                    g_pd->graphics->fillRoundRect(item->x, y0, item->w,
+                                                  item->h, rad,
+                                                  kColorWhite);
+                    g_pd->graphics->drawRoundRect(item->x, y0, item->w,
+                                                  item->h, rad, 1,
+                                                  kColorBlack);
+                }
+                break;
+            }
             case LRI_SHADE:
             {
                 /* Line-dithered gray: 25% = every 4th row, 50% = every
@@ -2744,6 +3507,52 @@ void layout_draw(int scrollY)
                         imgdec_draw(item->x, drawY, item->w, item->h, item->alt,
                                     item->imgHref, 0, item->src);
                     }
+                }
+            }
+            break;
+        }
+        case LRI_MENU_BUTTON:
+        {
+            drawY = item->y - scrollY;
+            if (drawY + item->h >= CONTENT_Y && drawY <= SCREEN_HEIGHT)
+            {
+                int border = item->menuBorder > 0 ? item->menuBorder : 1;
+                int rad = item->radius;
+                if (rad > item->h / 2)
+                {
+                    rad = item->h / 2;
+                }
+                g_pd->graphics->fillRoundRect(item->x, drawY, item->w,
+                                              item->h, rad, kColorWhite);
+                g_pd->graphics->drawRoundRect(item->x, drawY, item->w,
+                                              item->h, rad, border,
+                                              kColorBlack);
+                int hx = item->x + border + item->menuPadL;
+                LCDFont *f = style_font(item->small
+                                            ? PLUTO_FONT_SMALL
+                                            : PLUTO_FONT_BODY);
+                int fh = item->small ? 14 : 16;
+                /* The trigger's 15px caps have a 2px top bearing inside the
+                 * line box. Lift the text one extra pixel so the capital's
+                 * optical center lands on the pill center, where the
+                 * hamburger is drawn. */
+                int textY = drawY + (item->h - fh) / 2 - 2;
+                /* Center the hamburger on the label's full visible bbox
+                 * (cap top through baseline), not the lowercase x-height:
+                 * at the 20px control height the x-height center put the
+                 * icon visibly low next to the capital M. */
+                int iconY = drawY + (item->h - 7) / 2 + 1;
+                for (int r = 0; r < 3; r++)
+                {
+                    g_pd->graphics->drawLine(hx, iconY + r * 3, hx + 9,
+                                             iconY + r * 3, 1, kColorBlack);
+                }
+                if (item->label && item->label[0])
+                {
+                    g_pd->graphics->setFont(f);
+                    g_pd->graphics->drawText(
+                        item->label, strlen(item->label), kUTF8Encoding,
+                        hx + 11 + item->menuGap, textY);
                 }
             }
             break;
@@ -3033,11 +3842,24 @@ void layout_draw(int scrollY)
             int y2 = item->y2 - scrollY;
             if (y2 >= CONTENT_Y && y <= SCREEN_HEIGHT)
             {
+                if (item->radius > 0)
+                {
+                    /* R71: CSS border-radius on cards/inputs. The radius
+                     * is already on the layout scale; a frame thinner than
+                     * its own radius would degenerate, so the corner
+                     * radius shrinks with each nested ring. */
+                    g_pd->graphics->drawRoundRect(item->x, y, item->w, y2 - y,
+                                                  item->radius, 1,
+                                                  kColorBlack);
+                }
+                else
+                {
                 g_pd->graphics->drawLine(item->x, y, item->x + item->w, y, 1, kColorBlack);
                 g_pd->graphics->drawLine(item->x, y2, item->x + item->w, y2, 1, kColorBlack);
                 g_pd->graphics->drawLine(item->x, y, item->x, y2, 1, kColorBlack);
                 g_pd->graphics->drawLine(item->x + item->w, y, item->x + item->w, y2,
                                          1, kColorBlack);
+                }
                 if (item->label && item->label[0])
                 {
                     LCDFont *font = style_font(PLUTO_FONT_SMALL);
@@ -3077,6 +3899,8 @@ void layout_draw(int scrollY)
         }
         } /* per-item loop */
     } /* pass loop: shades, then content */
+        } /* shadow block: layer offset */
+    } /* layer loop: page, then pinned app bar */
 
     lm_draw_selected_highlight(scrollY);
 

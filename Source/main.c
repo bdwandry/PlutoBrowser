@@ -323,7 +323,59 @@ static void details_keys_clear(void)
     {
         pluto_free(detailsKeys[i]);
     }
+    memset(detailsOpenState, 0, sizeof(detailsOpenState));
     detailsKeyCount = 0;
+}
+
+/* R71: ARIA disclosure widgets (aria-expanded + aria-controls), keyed
+ * "x1".."xN" by the walker. Same contract as the details map: the key list
+ * + positional open-state array ride document_parse as disclosureOpen[]. */
+static int disclosureOpenState[64];
+static int disclosureKeyCount = 0;
+static int g_lastDisclosureIdx = -1; /* render-error undo target */
+
+/* The walker numbers triggers x1..xN in document order and reads the
+ * override array by that position. "x2" therefore means slot 1, not "the
+ * first key the user happened to tap" — appending click-order slots made a
+ * role tap write slot 0 while the walker read slot 1, so the panel stayed
+ * closed. Keep the array dense through the highest ordinal seen. */
+static int disclosure_key_index(const char *dkey)
+{
+    if (!dkey || dkey[0] != 'x' || dkey[1] == '\0')
+    {
+        return -1;
+    }
+    int ordinal = 0;
+    const char *p = dkey + 1;
+    while (*p >= '0' && *p <= '9')
+    {
+        ordinal = ordinal * 10 + (*p - '0');
+        if (ordinal > 64)
+        {
+            return -1;
+        }
+        p++;
+    }
+    if (p == dkey + 1 || *p != '\0' || ordinal < 1)
+    {
+        return -1;
+    }
+    int idx = ordinal - 1;
+    if (idx >= disclosureKeyCount)
+    {
+        disclosureKeyCount = idx + 1;
+    }
+    return idx;
+}
+
+/* Toggle state is page-local. Without this reset, an x1 menu opened on the
+ * previous page stays in slot 0; opening any xN disclosure on the next page
+ * re-renders the menu open too. */
+static void disclosure_keys_clear(void)
+{
+    memset(disclosureOpenState, 0, sizeof(disclosureOpenState));
+    disclosureKeyCount = 0;
+    g_lastDisclosureIdx = -1;
 }
 
 /* Diagnostic counters exposed in logs. */
@@ -4024,6 +4076,37 @@ static void fieldtest_tick(void)
         logger_log("[fieldtest] --- snapshot %s", ftUrl[ftIndex]);
         fieldtest_dump_page();
         fieldtest_score_page();
+#if defined(PLUTO_MENU_AUTOTEST)
+        /* Simulator-only menu verification: drive the same disclosure key a
+         * real tap uses, then hold the page so the screenshot shows the open
+         * dropdown. Never defined for device builds. */
+        if (currentDoc && currentState == STATE_PAGE)
+        {
+            /* Open the first ordinary disclosure, not the app-bar menu.
+             * On /work the nav toggle is x1 and the first role is x2; the
+             * test must exercise the role card the report is about. */
+            const char *key = NULL;
+            for (int bi = 0; bi < currentDoc->blockCount; bi++)
+            {
+                if (currentDoc->blocks[bi]->toggleKey &&
+                    !currentDoc->blocks[bi]->menuButton)
+                {
+                    key = currentDoc->blocks[bi]->toggleKey;
+                    break;
+                }
+            }
+            if (key)
+            {
+                logger_log("[menu-autotest] opening %s", key);
+                toggle_details(key);
+                ftPhase = 2;
+                return;
+            }
+            logger_log("[menu-autotest] no role disclosure found");
+        }
+        logger_log("[menu-autotest] skipped state=%d doc=%d", currentState,
+                   currentDoc ? 1 : 0);
+#endif
         ftIndex++;
         if (ftIndex >= ftCount)
         {
@@ -5641,6 +5724,18 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     logger_log("[render-result] %s: blocks=%d links=%d title='%.48s'",
                tag, doc->blockCount, doc->linkCount,
                doc->title[0] ? doc->title : "");
+    {
+        /* R71 receipt: spanning decorations + the sticky app-bar span. */
+        int pinStart = 0;
+        for (int bi = 0; bi < doc->blockCount; bi++)
+        {
+            if (doc->blocks[bi] && doc->blocks[bi]->pinStart)
+            {
+                pinStart++;
+            }
+        }
+        logger_log("[r71] render decor=%d pin=%d", doc->decorCount, pinStart);
+    }
     if (doc->blockCount == 0)
     {
         return;
@@ -5710,10 +5805,79 @@ static unsigned long render_walk_budget_ms(void)
 #endif
 }
 
+/* R71: a toggle re-render (details / ARIA disclosure) reparses rawHtml but
+ * deliberately skips the network CSS stage, so a page whose whole styling
+ * lives in an external <link rel="stylesheet"> used to re-render UNSTYLED —
+ * on bryanwandrych.com/work the collapse recipe itself lives in the external
+ * sheet, so the panel would pop open after its own toggle. Copy the live
+ * doc's sheets into the new doc (document_parse_ex joins them exactly like
+ * freshly fetched ones and owns the copies). Bounded by the same per-page
+ * caps as the fetch path. */
+static void reuse_external_css(RenderTask *rt)
+{
+    if (!rt || !rt->doc || !currentDoc || currentDoc->cssExtN <= 0)
+    {
+        return;
+    }
+    int n = currentDoc->cssExtN;
+    if (n > PLUTO_CSS_EXT_MAX)
+    {
+        n = PLUTO_CSS_EXT_MAX;
+    }
+    rt->doc->cssExtBody =
+        (char **)pluto_mem_realloc(NULL, sizeof(char *) * (size_t)n);
+    rt->doc->cssExtLen =
+        (size_t *)pluto_mem_realloc(NULL, sizeof(size_t) * (size_t)n);
+    if (!rt->doc->cssExtBody || !rt->doc->cssExtLen)
+    {
+        if (rt->doc->cssExtBody)
+        {
+            pluto_mem_realloc(rt->doc->cssExtBody, 0);
+            rt->doc->cssExtBody = NULL;
+        }
+        if (rt->doc->cssExtLen)
+        {
+            pluto_mem_realloc(rt->doc->cssExtLen, 0);
+            rt->doc->cssExtLen = NULL;
+        }
+        return;
+    }
+    int w = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const char *body = currentDoc->cssExtBody[i];
+        size_t len = currentDoc->cssExtLen[i];
+        if (!body || len == 0)
+        {
+            continue;
+        }
+        char *cp = (char *)pluto_mem_realloc(NULL, len + 1);
+        if (!cp)
+        {
+            break;
+        }
+        memcpy(cp, body, len);
+        cp[len] = '\0';
+        rt->doc->cssExtBody[w] = cp;
+        rt->doc->cssExtLen[w] = len;
+        w++;
+    }
+    rt->doc->cssExtN = w;
+    logger_log("[css-ext] toggle reuse: %d sheet(s)", w);
+}
+
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
     unsigned long walkBudget = render_walk_budget_ms();
+
+    /* Fresh navigation: discard the previous page's disclosure/details
+     * overrides. Toggle re-renders and JS-mutation re-walks keep them. */
+    if (!rt->isToggle && !rt->rewalkDoc)
+    {
+        details_keys_clear();
+        disclosure_keys_clear();
+    }
 
     /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
     if (rt->rewalkDoc && !rt->parsed)
@@ -5760,6 +5924,10 @@ static int render_step(TaskCtx *ctx)
                 return -1;
             }
             memset(rt->doc, 0, sizeof(DocParseResult));
+            if (rt->isToggle)
+            {
+                reuse_external_css(rt);
+            }
             tasks_report_progress(0.05f);
         }
 
@@ -6067,13 +6235,21 @@ static int render_step(TaskCtx *ctx)
             progressNetTotal = 0;
         }
 
-        /* detailsOpen overrides for toggle re-renders. */
+        /* detailsOpen / disclosureOpen overrides for toggle re-renders. */
         DocParseOpts opts;
         memset(&opts, 0, sizeof(opts));
-        if (rt->isToggle && detailsKeyCount > 0)
+        if (rt->isToggle)
         {
-            opts.detailsOpen = detailsOpenState;
-            opts.detailsOpenCount = detailsKeyCount;
+            if (detailsKeyCount > 0)
+            {
+                opts.detailsOpen = detailsOpenState;
+                opts.detailsOpenCount = detailsKeyCount;
+            }
+            if (disclosureKeyCount > 0)
+            {
+                opts.disclosureOpen = disclosureOpenState;
+                opts.disclosureOpenCount = disclosureKeyCount;
+            }
         }
         opts.svgDecoder = app_svg_decoder;
         /* The render task's body becomes the document's rawHtml (one
@@ -6473,7 +6649,13 @@ static void render_error(const char *message, void *userdata)
         if (rt->isToggle)
         {
             /* Lua: undo the toggle flip on error. */
-            if (detailsKeyCount > 0)
+            if (g_lastDisclosureIdx >= 0 &&
+                g_lastDisclosureIdx < disclosureKeyCount)
+            {
+                disclosureOpenState[g_lastDisclosureIdx] =
+                    !disclosureOpenState[g_lastDisclosureIdx];
+            }
+            else if (detailsKeyCount > 0)
             {
                 detailsOpenState[detailsKeyCount - 1] =
                     !detailsOpenState[detailsKeyCount - 1];
@@ -7116,6 +7298,56 @@ static void page_rewalk_now(void)
     }
 }
 
+/* Let the page's own click handler own a disclosure when it lands on the
+ * state the user requested. The rewalk then reads the LIVE DOM, preserving
+ * label swaps (Menu -> Close) and other script mutations. If the handler
+ * does not reach the requested aria-expanded state, the native re-parse is
+ * still the fallback (e.g. a script whose internal state cannot close). */
+static int disclosure_try_page_toggle(const char *dkey, int idx, int wantOpen)
+{
+    if (!g_pageJs || !currentDoc || !dkey || dkey[0] != 'x')
+    {
+        return 0;
+    }
+    void *srcNode = NULL;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            srcNode = b->srcNode;
+            break;
+        }
+    }
+    if (!srcNode)
+    {
+        return 0;
+    }
+    const char *before = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int rc = jsbridge_dispatch_element_event(g_pageJs, srcNode, "click");
+    const char *after = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int afterOpen = after && !(after[0] == 'f' || after[0] == 'F');
+    int changed = before ? (after && strcmp(before, after) != 0) : (after != NULL);
+    if (!changed || afterOpen != wantOpen)
+    {
+        logger_log("[toggle] page click missed key=%s want=%d rc=%d "
+                   "aria=%s->%s — native fallback",
+                   dkey, wantOpen, rc, before ? before : "-",
+                   after ? after : "-");
+        return 0;
+    }
+    disclosureOpenState[idx] = wantOpen;
+    g_lastDisclosureIdx = idx;
+    logger_log("[toggle] page-owned key=%s open=%d rc=%d aria=%s->%s", dkey,
+               wantOpen, rc, before ? before : "-", after ? after : "-");
+    /* Live attributes are the truth for this rewalk. Drop overrides left
+     * by an earlier native re-parse so they cannot mask the page's flip. */
+    currentDoc->disclosureOpen = NULL;
+    currentDoc->disclosureOpenCount = 0;
+    page_rewalk_now();
+    return 1;
+}
+
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
 static void toggle_details(const char *dkey)
 {
@@ -7123,12 +7355,36 @@ static void toggle_details(const char *dkey)
     {
         return;
     }
-    int idx = details_key_index(dkey);
+    /* R71: "xN" keys belong to ARIA disclosure widgets, "dN" to <details>. */
+    int *stateArr;
+    int idx;
+    if (dkey && dkey[0] == 'x')
+    {
+        idx = disclosure_key_index(dkey);
+        stateArr = disclosureOpenState;
+        g_lastDisclosureIdx = idx;
+    }
+    else
+    {
+        idx = details_key_index(dkey);
+        stateArr = detailsOpenState;
+        g_lastDisclosureIdx = -1;
+    }
     if (idx < 0)
     {
         return;
     }
-    detailsOpenState[idx] = !detailsOpenState[idx];
+    if (dkey && dkey[0] == 'x')
+    {
+        int wantOpen = !disclosureOpenState[idx];
+        if (disclosure_try_page_toggle(dkey, idx, wantOpen))
+        {
+            return;
+        }
+    }
+    stateArr[idx] = !stateArr[idx];
+    logger_log("[toggle] key=%s idx=%d open=%d", dkey ? dkey : "?", idx,
+               stateArr[idx]);
 
     int prevScroll = scrollY;
     int prevTarget = targetScrollY;
@@ -7142,7 +7398,7 @@ static void toggle_details(const char *dkey)
     if (!rt)
     {
         isRendering = 0;
-        detailsOpenState[idx] = !detailsOpenState[idx]; /* undo flip */
+        stateArr[idx] = !stateArr[idx]; /* undo flip */
         return;
     }
     rt->body = pluto_strdup(currentDoc->rawHtml);
@@ -10209,6 +10465,11 @@ static int updateFrame(void *userdata)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
                         }
+                        else if (activeLink->href &&
+                                 strncmp(activeLink->href, "toggle:", 7) == 0)
+                        {
+                            toggle_details(activeLink->href + 7);
+                        }
                         else if (page_handle_js_click(activeLink->index))
                         {
                             /* A JS click handler ran (see HTML-mode branch). */
@@ -10332,12 +10593,12 @@ static int updateFrame(void *userdata)
                     !(btnCurrent & (1 << 0)) && !(btnCurrent & (1 << 1)) &&
                     !layout_get_on_demand_consumed())
                 {
-                    const LMLink *hitLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hitLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (!hitLink)
                     {
                         /* No link under the cursor: try a bare image hit. */
                         const LayoutItem *imgItem = layout_image_at(
-                            mouseX, mouseY + scrollY);
+                            mouseX, layout_page_y(mouseX, mouseY, scrollY));
                         if (imgItem)
                         {
                             const char *im2 = storage_setting_str("imageMode");
@@ -10370,6 +10631,13 @@ static int updateFrame(void *userdata)
                                  primary->inputItem)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
+                        }
+                        else if (hitLink->href &&
+                                 strncmp(hitLink->href, "toggle:", 7) == 0)
+                        {
+                            /* A disclosure rect whose aux metadata was lost
+                             * still toggles from its href. */
+                            toggle_details(hitLink->href + 7);
                         }
                         else if (page_handle_js_click(hitLink->index))
                         {
@@ -10434,7 +10702,7 @@ static int updateFrame(void *userdata)
                 const char *currentHoverSrc = NULL;
                 if (isHtmlMode)
                 {
-                    const LMLink *hovered = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hovered = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (hovered)
                     {
                         const LMRectAux *pr = lm_rect_aux(hovered->index, 0);
@@ -10727,8 +10995,9 @@ static int updateFrame(void *userdata)
     /* Hover status bar: show URL under cursor (like desktop browsers). */
     if (currentState == STATE_PAGE && currentBrowseMode == MODE_RAW_HTML)
     {
-        const LMLink *hovLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
-        if (hovLink && hovLink->href)
+        const LMLink *hovLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
+        if (hovLink && hovLink->href &&
+            strncmp(hovLink->href, "toggle:", 7) != 0)
         {
             hud_draw_hover_status(hovLink->href);
         }

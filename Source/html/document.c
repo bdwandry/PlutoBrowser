@@ -1355,7 +1355,10 @@ enum
     WX_FIGCAP_END,   /* figcaption: restore figureCaptionDone */
     WX_INERT_END,    /* inert attribute: restore state.inert after the subtree */
     WX_CSS_END,      /* CSS-inherited inline flags: restore pre-CSS state */
-    WX_PSEUDO_END    /* CSS ::after content: emit after the subtree */
+    WX_PSEUDO_END,   /* CSS ::after content: emit after the subtree */
+    WX_DECOR_END,    /* R71: close a spanning box decoration (border/bg) */
+    WX_PIN_END,      /* R71: close a sticky app-bar span */
+    WX_DROPDOWN_END  /* R71: close an out-of-flow disclosure panel span */
 };
 
 typedef struct ExitCtx
@@ -1384,9 +1387,39 @@ typedef struct ExitCtx
      * flowing inside the container's items (exchange at the exit). */
     int gapSaved;
     unsigned char gapSet;
+    /* Flex ROW transport saved at the container boundary. */
+    int flexRowSaved;
+    int flexChildDepthSaved;
+    int flexActiveSaved;
+    int flexJustifySaved;
+    int flexCenterSaved;
+    unsigned char flexSet;
+    unsigned char flexPushed;
     char *pseudoText; /* ::after text (arena), NULL when none */
     int pseudoBlock; /* ::after renders as a sibling block (not inline) */
+    int decorIdx; /* R71 spanning decoration index on the document */
+    int dropdownStart; /* R71 dropdown panel: first block index */
+    int dropdownSaved; /* R71 dropdown panel: outer dropdown depth */
 } ExitCtx;
+
+/* Active row-flex scope. Direct children are identified by climbing the
+ * DOM parent chain from the node that produced each block — block emission
+ * for a child's text happens on a later frame than the child's enter, so a
+ * walk-time "current child" flag cannot survive the frame loop. */
+typedef struct
+{
+    const DomNode *box;
+    int rowId;
+    int justify;
+    int center;
+    int row;
+    int gap; /* this container's row-gap (halved px) */
+    /* Author content-box padding (full CSS px). The row places its items
+     * inside this inset and the sticky bar's height includes it. */
+    int padL, padR, padT, padB;
+    const DomNode *items[16];
+    int itemCount;
+} FlexCtx;
 
 typedef struct WFrame
 {
@@ -1395,6 +1428,12 @@ typedef struct WFrame
     ExitCtx *ctx;
     const char *sep;
 } WFrame;
+
+/* Disclosure panels are addressed by their HTML id. Real pages use ids far
+ * longer than 64 bytes (the bryanwandrych.com role cards are 80+), so the
+ * registry needs the whole token to match the panel it controls. */
+#define WALK_DISCLOSURE_MAX 32
+#define WALK_DISCLOSURE_ID_CAP 256
 
 struct Walker
 {
@@ -1447,6 +1486,30 @@ struct Walker
     int disabledDepth;
     int truncated;
     int detailsIndex;
+    /* R71: ARIA disclosure widgets (aria-expanded + aria-controls).
+     * Sequential x1..xN numbering mirrors details' d1..dN; the controlled
+     * panel ids are registered in document order so the panel's collapse
+     * recipe can consult the trigger's state. ids/targets are small fixed
+     * buffers (no heap): a page with more than 32 disclosures simply
+     * leaves the extra panels at their CSS-closed default. */
+    int disclosureIndex;
+    int disclosureCount;
+    char disclosureIds[WALK_DISCLOSURE_MAX][WALK_DISCLOSURE_ID_CAP];
+    const DomNode *disclosureTargets[WALK_DISCLOSURE_MAX];
+    unsigned char disclosureOpenState[WALK_DISCLOSURE_MAX];
+    unsigned char disclosureMenu[WALK_DISCLOSURE_MAX]; /* controlled panel is a nav menu */
+    /* R71 sticky app-bar span: the block index where the current sticky
+     * element's subtree began (0 while no pin scope is open). The first
+     * block after exit and the last block before it carry pinStart/End. */
+    int pinOpen;
+    int pinStartBlock;
+    /* R71 out-of-flow disclosure panel: nonzero while walking the
+     * controlled panel's subtree. Blocks produced here carry dropdown=1
+     * and stay out of the sticky bar's row/pin span. */
+    int dropdownDepth;
+    /* R71: the DocBlock an active decoration's own border attach touched
+     * (cleared at the span exit when the span covers the whole subtree). */
+    DocBlock *decorLead[DOC_BOX_DECOR_MAX];
     int anchorCounter;
     int figureCaptionDone;
     char *formAction; /* arena */
@@ -1461,6 +1524,22 @@ struct Walker
      * block's slot swaps to the outer scope's gap or drops to zero —
      * the exact BETWEEN-items semantics. */
     int fgGap;
+    /* Flex ROW layout transport: domDepth is the live element depth;
+     * flexRowId/flexChildDepth scope a row container's DIRECT children;
+     * flexActiveItem is the item id inherited by every block in one
+     * direct-child subtree. flexJustify/flexCenter come from the
+     * container's winning CSS. */
+    int domDepth;
+    int flexRowId;
+    int flexChildDepth;
+    int flexActiveItem;
+    int flexItemSeq;
+    int flexJustify;
+    int flexCenter;
+    FlexCtx flexCtx[32]; /* every flex container seen this walk */
+    int flexCtxCount;
+    int flexSeq;
+    const DomNode *curNode;
 
     /* heap StrBufs owned by this walker (figure captions); freed at teardown */
     StrBuf **heapBufs;
@@ -1734,6 +1813,8 @@ static int push_children_except(Walker *w, const DomNode *node, const char *tag)
 
 static char *resolve_href(Walker *w, const char *raw); /* used by the image handler below; defined after URL glue */
 
+static void walk_node(Walker *w, const DomNode *node);
+
 static DocBlock *new_block(Walker *w, int type)
 {
     DocBlock *b = (DocBlock *)doc_arena_alloc(&w->arena, sizeof(DocBlock));
@@ -1749,6 +1830,17 @@ static DocBlock *new_block(Walker *w, int type)
     b->fieldWidth = -1; /* Lua-nil sentinel */
     b->fieldRows = -1;  /* Lua-nil sentinel */
     b->colWidth = -1;   /* Lua-nil sentinel */
+    /* A controlled disclosure panel positioned out of flow is a dropdown:
+     * its blocks render outside the app bar's flex row and pin span. */
+    if (w->dropdownDepth > 0)
+    {
+        b->dropdown = 1;
+        b->flexRow = 0;
+        b->flexItem = 0;
+    }
+    /* A block created inside a flex row container's direct-child subtree
+     * is part of that child's flex item. */
+    b->flexSrcNode = w->curNode;
     return b;
 }
 
@@ -2468,6 +2560,313 @@ static int walk_border_final(const char *wv, size_t wl, const char *sv,
  * in order", which a block already is. inline-block simplifies to block
  * (full-width 1-bit); table-* flattens (no anonymous table objects);
  * list-item takes the block (numbering needs ol/ul context). */
+/* Forward declarations for the R71 decor helpers below (their callees are
+ * defined later in this file). */
+static void walk_class_id(AttrList a, const char **classAttr,
+                          const char **idAttr);
+static const void *css_dom_ancestor(const void *node, int i,
+                                    const char **tagLower,
+                                    const char **classAttr,
+                                    const char **idAttr);
+
+/* R71: is this declared length a ZERO used value? Bare `0` is valid CSS and
+ * is what the collapse recipe overwhelmingly ships (height:0), so this
+ * reads it through the shared unit parser instead of the px-only lookup. */
+static int walk_len_zero(const char *v, size_t vlen)
+{
+    if (!v || vlen == 0)
+    {
+        return 0;
+    }
+    int pctMille = 0;
+    int px = fresh_len_px(v, vlen, 1, &pctMille);
+    return px == 0;
+}
+
+/* R71: tags that create a block-level container in the walker — the set
+ * whose CSS border/background must span the WHOLE subtree (cards,
+ * sections, list items). Inline tags keep the historical per-paragraph
+ * attach (an inline border belongs to the surrounding line). */
+static int walk_decor_tag(const char *tag)
+{
+    static const char *const kTags[] = {
+        "body", "div", "p", "section", "article", "main", "header",
+        "footer", "nav", "aside", "address", "hgroup", "noindex",
+        "search", "figure", "figcaption", "blockquote", "li", "dt",
+        "dd", "form", "fieldset", "details", "dialog", "h1", "h2",
+        "h3", "h4", "h5", "h6", "td", "th", "caption"};
+    if (!tag)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kTags) / sizeof(kTags[0]); i++)
+    {
+        if (strcmp(tag, kTags[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* R71: a sticky element can host an app bar — restrict pinning to the
+ * structural containers real site headers live in. */
+static int walk_pin_tag(const char *tag)
+{
+    static const char *const kTags[] = {"header", "nav", "div", "section",
+                                         "main", "footer", "aside",
+                                         "article", "form", "body"};
+    if (!tag)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kTags) / sizeof(kTags[0]); i++)
+    {
+        if (strcmp(tag, kTags[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* R71: resolve the spanning-decoration values for one container. Returns
+ * 1 when a visible border, a dither background or a corner radius exists.
+ * The numeric scale matches the per-block attach sites (border already
+ * clamped to 0..3, radius halved like every other box length). */
+static int walk_decor_values(Walker *w, const DomNode *node, const char *tag,
+                             AttrList a, int *borderOut, int *bgOut,
+                             int *radiusOut)
+{
+    *borderOut = 0;
+    *bgOut = -1;
+    *radiusOut = 0;
+    if (!w->doc || !w->doc->_css || !node || !tag)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t wl = 0, sl = 0;
+    const char *wv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-width", &wl);
+    const char *sv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-style", &sl);
+    int bw = walk_border_final(wv, wl, sv, sl);
+    if (bw > 3)
+    {
+        bw = 3;
+    }
+    *borderOut = bw > 0 ? bw : 0;
+    size_t gl = 0;
+    const char *gv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "background-color", &gl);
+    if (gv)
+    {
+        int lum = css_color_luminance(gv, gl);
+        if (lum >= 96 && lum <= 215)
+        {
+            *bgOut = lum;
+        }
+    }
+    size_t rl = 0;
+    const char *rv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-radius", &rl);
+    if (rv)
+    {
+        int rpx = css_px_value(rv, rl);
+        if (rpx > 0)
+        {
+            *radiusOut = rpx / 2;
+            if (*radiusOut < 1)
+            {
+                *radiusOut = 1;
+            }
+            if (*radiusOut > 6)
+            {
+                *radiusOut = 6;
+            }
+        }
+    }
+    return (*borderOut > 0 || *bgOut >= 0 || *radiusOut > 0);
+}
+
+/* R71: register/find an ARIA disclosure's controlled panel id. */
+static int walk_disclosure_register(Walker *w, const char *ids, int open,
+                                    int isMenu)
+{
+    if (!w || !ids)
+    {
+        return 0;
+    }
+    char tok[WALK_DISCLOSURE_ID_CAP];
+    size_t n = 0;
+    while (*ids == ' ' || *ids == '\t' || *ids == '\n' || *ids == '\r' ||
+           *ids == '\f')
+    {
+        ids++;
+    }
+    while (*ids && *ids != ' ' && *ids != '\t' && *ids != '\n' &&
+           *ids != '\r' && *ids != '\f' && n + 1 < sizeof(tok))
+    {
+        tok[n++] = *ids++;
+    }
+    tok[n] = '\0';
+    if (n == 0)
+    {
+        return 0;
+    }
+    const DomNode *target = w->walkDom ? dom_find_by_id(w->walkDom, tok) : NULL;
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], tok) == 0)
+        {
+            w->disclosureOpenState[i] = (unsigned char)(open != 0);
+            w->disclosureMenu[i] = (unsigned char)(isMenu != 0);
+            if (target)
+            {
+                w->disclosureTargets[i] = target;
+            }
+            return 1;
+        }
+    }
+    if (w->disclosureCount >= WALK_DISCLOSURE_MAX)
+    {
+        return 0;
+    }
+    memcpy(w->disclosureIds[w->disclosureCount], tok, n + 1);
+    w->disclosureTargets[w->disclosureCount] = target;
+    w->disclosureOpenState[w->disclosureCount] = (unsigned char)(open != 0);
+    w->disclosureMenu[w->disclosureCount] = (unsigned char)(isMenu != 0);
+    w->disclosureCount++;
+    return 1;
+}
+
+static int walk_disclosure_find(Walker *w, const char *id, int *openOut)
+{
+    if (!w || !id)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], id) == 0)
+        {
+            if (openOut)
+            {
+                *openOut = w->disclosureOpenState[i] != 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Is an open disclosure panel somewhere under this node? The controlled
+ * panel is often one level below a height:0/overflow:hidden wrapper (the
+ * usual .collapse container). The wrapper has no id of its own, so the
+ * direct panel check above cannot see the open state; without this bypass
+ * the collapsed wrapper drops the whole subtree and tapping does nothing. */
+static int walk_disclosure_open_below(Walker *w, const DomNode *node)
+{
+    if (!w || !node)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (!w->disclosureOpenState[i])
+        {
+            continue;
+        }
+        const DomNode *p = w->disclosureTargets[i];
+        while (p)
+        {
+            if (p == node)
+            {
+                return 1;
+            }
+            p = p->parent;
+        }
+    }
+    return 0;
+}
+
+/* R71: is this disclosure trigger a navigation menu control? Sites use
+ * several names for the same contract ("Menu", "Open menu", "Toggle
+ * navigation menu"). Treat the command forms as menu controls too, but
+ * keep unrelated popovers ("Hide search menu") out. */
+static int walk_menu_label(const char *lab)
+{
+    if (!lab)
+    {
+        return 0;
+    }
+    while (*lab == ' ' || *lab == '\t' || *lab == '\n' || *lab == '\r')
+    {
+        lab++;
+    }
+    char buf[64];
+    size_t n = 0;
+    while (*lab && n + 1 < sizeof(buf))
+    {
+        char c = *lab++;
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c + ('a' - 'A'));
+        }
+        buf[n++] = c;
+    }
+    while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t' ||
+                     buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+    {
+        n--;
+    }
+    buf[n] = '\0';
+    if (strcmp(buf, "menu") == 0)
+    {
+        return 1;
+    }
+    if (strstr(buf, "search"))
+    {
+        return 0;
+    }
+    static const char *const kCommands[] = {"open ", "close ", "toggle ",
+                                            "show ", "hide "};
+    for (size_t i = 0; i < sizeof(kCommands) / sizeof(kCommands[0]); i++)
+    {
+        size_t cl = strlen(kCommands[i]);
+        size_t bl = strlen(buf);
+        if (bl > cl + 3 && strncmp(buf, kCommands[i], cl) == 0 &&
+            strcmp(buf + bl - 4, "menu") == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Is this controlled disclosure panel a navigation menu? */
+static int walk_disclosure_menu(Walker *w, const char *id)
+{
+    if (!w || !id)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], id) == 0)
+        {
+            return w->disclosureMenu[i] != 0;
+        }
+    }
+    return 0;
+}
+
 static int walk_display_mode(const char *v, size_t vlen, const char *f,
                              size_t flen, int isDiv)
 {
@@ -3202,6 +3601,24 @@ static void walk_anim_engage(Walker *w, DocBlock *b, const DomNode *node,
  * text-align/align attr wins). */
 static void walk_flex_block(Walker *w, DocBlock *b, const char **alignSlot)
 {
+    if (w->dropdownDepth > 0)
+    {
+        return; /* disclosure panel content is not an app-bar flex item */
+    }
+    if (w->flexRowId)
+    {
+        for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+        {
+            if (w->flexCtx[ci].rowId == w->flexRowId)
+            {
+                b->flexPadL = (unsigned char)w->flexCtx[ci].padL;
+                b->flexPadR = (unsigned char)w->flexCtx[ci].padR;
+                b->flexPadT = (unsigned char)w->flexCtx[ci].padT;
+                b->flexPadB = (unsigned char)w->flexCtx[ci].padB;
+                break;
+            }
+        }
+    }
     if (w->fgGap > 0)
     {
         b->gapApplied = w->fgGap; /* the gap after THIS item (halved px) */
@@ -3210,6 +3627,170 @@ static void walk_flex_block(Walker *w, DocBlock *b, const char **alignSlot)
     {
         *alignSlot = doc_arena_str(w, "center");
     }
+}
+
+/* A synthesized block (ARIA disclosure triggers are the main one) represents
+ * an element that may itself be a flex/grid ITEM. Its own display:flex can
+ * take over the walker's live gap before the block is created, so look up
+ * the nearest enclosing container's stored gap instead of trusting fgGap. */
+static void walk_flex_item_gap(Walker *w, DocBlock *b, const DomNode *node)
+{
+    if (!w || !b || !node || w->dropdownDepth > 0)
+    {
+        return;
+    }
+    for (const DomNode *p = node->parent; p; p = p->parent)
+    {
+        for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+        {
+            if (w->flexCtx[ci].box == p)
+            {
+                if (w->flexCtx[ci].gap > 0)
+                {
+                    b->gapApplied = w->flexCtx[ci].gap;
+                }
+                return;
+            }
+        }
+    }
+}
+
+/* A flex-direction:column container stacks its direct children. Disclosure
+ * labels otherwise flatten those children into one string, which removes
+ * authored line breaks (the mobile role cards stack title over role). */
+static int walk_node_is_column_flex(Walker *w, const DomNode *node)
+{
+    if (!w || !w->doc || !w->doc->_css || !node ||
+        node->kind != DOM_ELEMENT || !node->tag || !node->tag[0])
+    {
+        return 0;
+    }
+    AttrList a = attrs_of(node);
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0, fl = 0;
+    const char *dv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "display", &dl);
+    if (!dv || !css_val_has(dv, dl, "flex"))
+    {
+        return 0;
+    }
+    const char *fv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "flex-direction", &fl);
+    logger_log("[toggle-label] parent=%.16s display=%.12s dir=%.12s",
+               node->tag, dv ? dv : "-", fv ? fv : "-");
+    if (fv && css_val_has(fv, fl, "column"))
+    {
+        logger_log("[toggle-label] column-flex parent=%.20s", node->tag);
+        return 1;
+    }
+    return 0;
+}
+
+/* Copy a disclosure trigger's text, preserving line boundaries introduced
+ * by flex-direction:column. Iterative like doc_concat_node_text so a deep
+ * label subtree cannot consume the device's small game-task stack. */
+static size_t disclosure_label_text(Walker *w, const DomNode *node, char *buf,
+                                    size_t cap, size_t off)
+{
+    typedef struct
+    {
+        const DomNode *node;
+        int nextChild;
+    } LabelFrame;
+    if (!node || !buf || cap == 0)
+    {
+        return off;
+    }
+    int frameCap = 64;
+    int top = 0;
+    LabelFrame *st = (LabelFrame *)PLUTO_MALLOC(
+        sizeof(LabelFrame) * (size_t)frameCap);
+    if (!st)
+    {
+        return off;
+    }
+    st[top].node = node;
+    st[top].nextChild = 0;
+    top++;
+    while (top > 0)
+    {
+        LabelFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (n->kind == DOM_TEXT)
+        {
+            const char *t = n->text ? n->text : "";
+            size_t len = strlen(t);
+            if (off + 1 < cap)
+            {
+                size_t room = cap - off - 1;
+                size_t cn = len < room ? len : room;
+                memcpy(buf + off, t, cn);
+            }
+            off += len;
+            top--;
+            continue;
+        }
+        if (n->kind == DOM_COMMENT)
+        {
+            top--;
+            continue;
+        }
+        if (n->tag && strcmp(n->tag, "br") == 0)
+        {
+            if (off + 1 < cap)
+            {
+                buf[off++] = '\n';
+            }
+            top--;
+            continue;
+        }
+        if (f->nextChild < n->childCount)
+        {
+            int ci = f->nextChild++;
+            const DomNode *c = n->children[ci];
+            if (!c)
+            {
+                continue;
+            }
+            if (ci > 0 && c->kind != DOM_COMMENT &&
+                walk_node_is_column_flex(w, n) &&
+                !(c->tag && strcmp(c->tag, "br") == 0))
+            {
+                if (off + 1 < cap)
+                {
+                    buf[off++] = '\n';
+                }
+            }
+            if (top + 1 >= frameCap)
+            {
+                int ncap = frameCap * 2;
+                LabelFrame *grown = (LabelFrame *)PLUTO_REALLOC(
+                    st, sizeof(LabelFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    PLUTO_FREE(st);
+                    return off;
+                }
+                st = grown;
+                frameCap = ncap;
+                f = &st[top - 1];
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
+        }
+    }
+    PLUTO_FREE(st);
+    return off;
 }
 
 static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
@@ -3364,6 +3945,33 @@ static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
         }
     }
     return out;
+}
+
+/* Winning CSS length → FULL CSS px (box padding/control metrics; unlike the
+ * halved spacing channel, draw geometry needs the author's value). 0 =
+ * absent/unresolvable. */
+static int walk_px_full(Walker *w, const DomNode *node, const char *tag,
+                        AttrList a, const char *prop)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !tag || !prop)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    size_t vl = 0;
+    const char *v = css_winning_value((CssEngine *)w->doc->_css, tag,
+                                      classAttr, idAttr, &dom, node, prop, &vl);
+    if (!v || vl == 0)
+    {
+        return 0;
+    }
+    int pct = 0;
+    int px = fresh_len_px(v, vl, 0, &pct);
+    return px > 0 ? px : 0;
 }
 
 /* CSS box length → halved px (Lua-parity scale). -1 when absent/unparsable
@@ -6669,6 +7277,129 @@ static void run_exit(Walker *w, ExitCtx *x)
     case WX_DIALOG_END:
         add_block(w, new_block(w, DOC_BLOCK_BOX_CLOSE));
         break;
+    case WX_DECOR_END:
+    {
+        /* R71: close the spanning decoration over every block the subtree
+         * produced. A decoration that produced no block (an empty element,
+         * or an inline box that flowed into its parent) stays inert; the
+         * per-block attach from walk_node remains the fallback there. */
+        flush_current_block(w);
+        int di = x->decorIdx;
+        if (di >= 0 && di < w->doc->decorCount)
+        {
+            DocBoxDecor *d = &w->doc->decor[di];
+            if (d->startBlock >= 0 && w->doc->blockCount > d->startBlock)
+            {
+                d->endBlock = w->doc->blockCount - 1;
+                DocBlock *lead = w->decorLead[di];
+                if (lead && di < w->doc->decorCount &&
+                    w->doc->blocks[d->startBlock] == lead)
+                {
+                    lead->border = 0;
+                    lead->bgGray = -1;
+                }
+            }
+            else
+            {
+                d->startBlock = -1;
+                d->endBlock = -1;
+            }
+        }
+        break;
+    }
+    case WX_DROPDOWN_END:
+    {
+        /* R71: close a dropdown panel span. The first/last block carry the
+         * markers layout uses to draw the right-aligned panel box. */
+        flush_current_block(w);
+        int ds = x->dropdownStart;
+        if (ds >= 0 && w->doc->blockCount > ds)
+        {
+            w->doc->blocks[ds]->dropdownStart = 1;
+            w->doc->blocks[w->doc->blockCount - 1]->dropdownEnd = 1;
+        }
+        w->dropdownDepth = x->dropdownSaved;
+        break;
+    }
+    case WX_PIN_END:
+    {
+        /* R71: mark the sticky container's block span for the pinned
+         * app-bar layer (first block carries pinStart, last pinEnd). A
+         * dropdown panel inside the header is NOT part of the bar: the pin
+         * span ends at the last flow block, so opening the menu cannot
+         * inflate the app bar or the pinned layer. */
+        flush_current_block(w);
+        int ps = w->pinStartBlock;
+        int last = ps - 1;
+        for (int i = ps; i < w->doc->blockCount; i++)
+        {
+            if (!w->doc->blocks[i]->dropdown)
+            {
+                last = i;
+            }
+        }
+        if (w->pinOpen && last >= ps)
+        {
+            w->doc->blocks[ps]->pinStart = 1;
+            w->doc->blocks[last]->pinEnd = 1;
+            logger_log("[bar] span ps=%d last=%d blocks=%d", ps, last,
+                       w->doc->blockCount);
+            for (int i = ps; i <= last && i < ps + 6; i++)
+            {
+                DocBlock *pb = w->doc->blocks[i];
+                logger_log("[bar] span[%d] type=%d row=%d item=%d pad=%d/%d/%d/%d menu=%d drop=%d",
+                           i, pb->type, pb->flexRow, pb->flexItem,
+                           pb->flexPadL, pb->flexPadR, pb->flexPadT,
+                           pb->flexPadB, pb->menuButton, pb->dropdown);
+            }
+            /* Compose the sticky bar as its author's flex row: a menu
+             * trigger carries the container's justify/align, and every
+             * flow block in the bar becomes one item on that single line. */
+            int rowId = 0, just = 0, ctr = 0;
+            int menuIdx = -1;
+            for (int i = ps; i <= last; i++)
+            {
+                if (w->doc->blocks[i]->menuButton)
+                {
+                    menuIdx = i;
+                    rowId = w->doc->blocks[i]->flexRow;
+                    just = w->doc->blocks[i]->flexJustify;
+                    ctr = w->doc->blocks[i]->flexCenter;
+                    break;
+                }
+            }
+            if (rowId)
+            {
+                unsigned char pl = 0, pr = 0, pt = 0, pb = 0;
+                if (menuIdx >= 0)
+                {
+                    pl = w->doc->blocks[menuIdx]->flexPadL;
+                    pr = w->doc->blocks[menuIdx]->flexPadR;
+                    pt = w->doc->blocks[menuIdx]->flexPadT;
+                    pb = w->doc->blocks[menuIdx]->flexPadB;
+                }
+                int item = 1;
+                for (int i = ps; i <= last; i++)
+                {
+                    DocBlock *pbk = w->doc->blocks[i];
+                    if (pbk->dropdown)
+                    {
+                        continue;
+                    }
+                    pbk->flexRow = (unsigned short)rowId;
+                    pbk->flexItem = (unsigned short)(item++);
+                    pbk->flexJustify = (unsigned char)just;
+                    pbk->flexCenter = (unsigned char)ctr;
+                    pbk->flexPadL = pl;
+                    pbk->flexPadR = pr;
+                    pbk->flexPadT = pt;
+                    pbk->flexPadB = pb;
+                }
+            }
+        }
+        w->pinOpen = 0;
+        break;
+    }
     case WX_INERT_END:
         w->inert = x->inertSaved;
         break;
@@ -6679,6 +7410,18 @@ static void run_exit(Walker *w, ExitCtx *x)
         if (x->cssFlags)
         {
             w->flags = x->flags;
+        }
+        if (x->flexPushed && w->flexCtxCount > 0)
+        {
+            w->flexCtxCount--;
+        }
+        if (x->flexSet)
+        {
+            w->flexRowId = x->flexRowSaved;
+            w->flexChildDepth = x->flexChildDepthSaved;
+            w->flexActiveItem = x->flexActiveSaved;
+            w->flexJustify = x->flexJustifySaved;
+            w->flexCenter = x->flexCenterSaved;
         }
         if (x->gapSet)
         {
@@ -6748,12 +7491,52 @@ static void run_exit(Walker *w, ExitCtx *x)
 
 /* ── Recursive walker → explicit frame loop ────────────────────────────────── */
 
+static void walk_node_impl(Walker *w, const DomNode *node);
+
+/* Depth + flex-item wrapper. Element depth is what distinguishes a flex
+ * container's DIRECT children (the flex items) from deeper descendants.
+ * Every direct child gets one item id; all blocks in its subtree are that
+ * item, so layout can stack them inside the item and place items in a row. */
 static void walk_node(Walker *w, const DomNode *node)
 {
     if (!node)
     {
         return;
     }
+    int isElem = (node->kind == DOM_ELEMENT);
+    if (isElem)
+    {
+        w->domDepth++;
+    }
+    int itemMark = 0;
+    if (isElem && w->flexRowId && w->domDepth == w->flexChildDepth)
+    {
+        w->flexItemSeq++;
+        if (w->flexItemSeq > 0xFFFF)
+        {
+            w->flexItemSeq = 1;
+        }
+        w->flexActiveItem = w->flexItemSeq;
+        itemMark = 1;
+    }
+    walk_node_impl(w, node);
+    if (itemMark)
+    {
+        w->flexActiveItem = 0;
+    }
+    if (isElem)
+    {
+        w->domDepth--;
+    }
+}
+
+static void walk_node_impl(Walker *w, const DomNode *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    w->curNode = node;
 #if defined(TARGET_PLAYDATE)
     /* TEMP crash localizer (device): name the exact node around the
      * receipted bbc wild-PC window. Remove after the root cause lands. */
@@ -6776,6 +7559,20 @@ static void walk_node(Walker *w, const DomNode *node)
         return;
     }
     AttrList a = attrs_of(node);
+    /* R71: a panel already held open by an earlier disclosure trigger is
+     * exempt from the CSS-hidden and zero-height gates — the tap that set
+     * disclosureOpen is the user asking to see exactly this subtree even
+     * though the sheet's closed-state display:none/height:0 still wins
+     * the cascade. General: keyed on the controlled element's id. */
+    int panelOpen = 0;
+    const char *panelId = attr_val(a, "id");
+    if (w->doc && w->doc->_css && !w->cell)
+    {
+        if (panelId && panelId[0])
+        {
+            walk_disclosure_find(w, panelId, &panelOpen);
+        }
+    }
     /* CSS (roadmap #2): resolve the element's <style>-rule matches once.
      * display:none/visibility:hidden suppresses the element AND its subtree
      * (identical semantics to the hidden attribute). */
@@ -6853,9 +7650,76 @@ static void walk_node(Walker *w, const DomNode *node)
             return;
         }
     }
-    else if (cssHidden || cssOverlay || cssA11y)
+    else if ((cssHidden && !panelOpen &&
+              !walk_disclosure_open_below(w, node)) ||
+             cssOverlay || cssA11y)
     {
         return;
+    }
+    /* R71 — DROPDOWN PANEL. A menu-controlled disclosure panel the author
+     * positioned out of flow (the universal mobile nav recipe:
+     * position:absolute; top:100%; right:1rem; display:none). Its blocks
+     * must not join the app bar's flex row or sticky pin span; mark the
+     * subtree so layout can place it as a separate right-aligned panel. */
+    if (panelOpen && panelId && panelId[0] && !w->dropdownDepth &&
+        (cssBits & CSS_F_OOF) && walk_disclosure_menu(w, panelId))
+    {
+        flush_current_block(w);
+        ExitCtx *dx = push_exit(w, WX_DROPDOWN_END);
+        if (dx)
+        {
+            dx->dropdownStart = w->doc->blockCount;
+            dx->dropdownSaved = w->dropdownDepth;
+            w->dropdownDepth++;
+        }
+    }
+    /* R71 — THE COLLAPSE RECIPE. A box with a ZERO used height and clipped
+     * overflow renders no visible content in a real browser (the
+     * universal accordion/disclosure panel shape: height:0 or
+     * max-height:0 combined with overflow:hidden — Bootstrap/Tailwind
+     * utilities and hand-rolled cards all ship it). The flat renderer has
+     * no nested scroll regions, so the honest mapping is to drop the
+     * subtree. The ONE general exception: an ARIA disclosure trigger
+     * earlier in the document may hold this panel OPEN; that is exactly
+     * the state a user tap toggles (see the trigger arm below). */
+    if ((cssBits & CSS_F_OVH) && w->doc && w->doc->_css && !w->cell)
+    {
+        const char *zclass = NULL;
+        const char *zid = NULL;
+        walk_class_id(a, &zclass, &zid);
+        CssDom zdom;
+        dom_css_dom(&zdom, css_dom_ancestor);
+        CssEngine *zeng = (CssEngine *)w->doc->_css;
+        int clipZero = 0;
+        size_t zl = 0;
+        const char *zv = css_winning_value(zeng, node->tag ? node->tag : "",
+                                           zclass, zid, &zdom, node,
+                                           "height", &zl);
+        if (zv && walk_len_zero(zv, zl))
+        {
+            clipZero = 1;
+        }
+        if (!clipZero)
+        {
+            zl = 0;
+            zv = css_winning_value(zeng, node->tag ? node->tag : "",
+                                   zclass, zid, &zdom, node,
+                                   "max-height", &zl);
+            if (zv && walk_len_zero(zv, zl))
+            {
+                clipZero = 1;
+            }
+        }
+        if (clipZero)
+        {
+            int panelOpen = 0;
+            const char *pid = attr_val(a, "id");
+            if (!(pid && walk_disclosure_find(w, pid, &panelOpen) && panelOpen) &&
+                !walk_disclosure_open_below(w, node))
+            {
+                return;
+            }
+        }
     }
     int wasInert = w->inert;
     if (attr_has(a, "inert"))
@@ -6908,6 +7772,81 @@ static void walk_node(Walker *w, const DomNode *node)
                 cx->gapSaved = w->fgGap;
                 cx->gapSet = 1;
                 w->fgGap = gp > 0 ? gp : 0;
+                /* ROW transport: the default flex axis is row. A column
+                 * container keeps the block flow (already the column).
+                 * justify-content and align-items come from the SAME
+                 * winning declarations the browser uses. */
+                const char *fclass = NULL;
+                const char *fid = NULL;
+                walk_class_id(a, &fclass, &fid);
+                CssDom fdom;
+                dom_css_dom(&fdom, css_dom_ancestor);
+                CssEngine *feng = (CssEngine *)w->doc->_css;
+                const char *ftag = node->tag ? node->tag : "";
+                size_t fdl = 0;
+                const char *fdv = css_winning_value(
+                    feng, ftag, fclass, fid, &fdom, node,
+                    "flex-direction", &fdl);
+                int frow = !(fdv && css_val_has(fdv, fdl, "column"));
+                size_t jl = 0;
+                const char *jv = css_winning_value(
+                    feng, ftag, fclass, fid, &fdom, node,
+                    "justify-content", &jl);
+                int just = 0;
+                if (jv)
+                {
+                    if (css_val_has(jv, jl, "space-between"))
+                    {
+                        just = 3;
+                    }
+                    else if (css_val_has(jv, jl, "center"))
+                    {
+                        just = 1;
+                    }
+                    else if (css_val_has(jv, jl, "flex-end") ||
+                             css_val_has(jv, jl, "end") ||
+                             css_val_has(jv, jl, "right"))
+                    {
+                        just = 2;
+                    }
+                }
+                if (w->flexCtxCount < 32)
+                {
+                    FlexCtx *fc = &w->flexCtx[w->flexCtxCount++];
+                    fc->box = node;
+                    fc->rowId = ++w->flexSeq;
+                    fc->gap = w->fgGap;
+                    fc->justify = just;
+                    fc->center = (cssBits & CSS_F_AIC) ? 1 : 0;
+                    fc->row = frow;
+                    /* The layout's spacing scale is halved CSS px (the
+                     * same scale margins/gaps use), so the bar's box
+                     * padding follows it instead of consuming the short
+                     * 240px viewport at 1:1. */
+                    fc->padL = (walk_px_full(w, node, ftag, a,
+                                             "padding-left") + 1) / 2;
+                    fc->padR = (walk_px_full(w, node, ftag, a,
+                                             "padding-right") + 1) / 2;
+                    fc->padT = (walk_px_full(w, node, ftag, a,
+                                             "padding-top") + 1) / 2;
+                    fc->padB = (walk_px_full(w, node, ftag, a,
+                                             "padding-bottom") + 1) / 2;
+                    if (fc->padL > 24) fc->padL = 24;
+                    if (fc->padR > 24) fc->padR = 24;
+                    if (fc->padT > 16) fc->padT = 16;
+                    if (fc->padB > 16) fc->padB = 16;
+                    /* A pinned app bar is device chrome: on the 240px-tall
+                     * panel the author's 12px vertical padding would eat
+                     * a quarter of the viewport. Keep the horizontal inset
+                     * (logo/control framing) and compact the cross axis to
+                     * a 1px breathing edge around the 20-23px control row. */
+                    if (w->pinOpen)
+                    {
+                        fc->padT = 0;
+                        fc->padB = 0;
+                    }
+                    fc->itemCount = 0;
+                }
             }
         }
     }
@@ -6960,6 +7899,306 @@ static void walk_node(Walker *w, const DomNode *node)
             }
         }
     }
+    /* R71 — ARIA DISCLOSURE WIDGET. The standard accessible accordion
+     * trigger is a control carrying aria-expanded + aria-controls (the
+     * controlled panel's id). Sites ship it already-closed; without the
+     * author's JavaScript the old walker rendered the panel's content
+     * unconditionally. Render the trigger as ONE toggle line (the same
+     * [+]/[-] affordance <details> uses) and let a tap flip the panel
+     * state through the normal toggle re-render lane. General: keyed on
+     * the ARIA contract, not on any class/tag/site. */
+    {
+        const char *ac = attr_val(a, "aria-controls");
+        const char *ae = attr_val(a, "aria-expanded");
+        if (ac && ae && !w->cell)
+        {
+            w->disclosureIndex++;
+            int didx = w->disclosureIndex;
+            int dopen = !(ae[0] == 'f' || ae[0] == 'F');
+            if (w->opts && w->opts->disclosureOpen &&
+                (didx - 1) < w->opts->disclosureOpenCount)
+            {
+                dopen = w->opts->disclosureOpen[didx - 1];
+            }
+            static char g_walkDisclosureLabel[1024]; /* hoisted: small stack */
+            static char g_walkDisclosureLines[1024];
+            g_walkDisclosureLabel[0] = '\0';
+            doc_concat_node_text(node, g_walkDisclosureLabel,
+                                 sizeof(g_walkDisclosureLabel));
+            char *lab = doc_arena_collapse(w, g_walkDisclosureLabel);
+            if (!lab || lab[0] == '\0')
+            {
+                const char *al = attr_val(a, "aria-label");
+                lab = doc_arena_str(w, (al && al[0]) ? al : "Show");
+            }
+            /* Menu-button classification: the controlled panel is a
+             * navigation list/menu, or the visible label is literally
+             * "menu". Those render as a compact right-aligned hamburger;
+             * ordinary accordion headers keep their full row + [+]/[-]. */
+            int isMenu = 0;
+            {
+                char tid[WALK_DISCLOSURE_ID_CAP];
+                size_t tn = 0;
+                const char *q = ac;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' ||
+                       *q == '\f')
+                {
+                    q++;
+                }
+                while (*q && *q != ' ' && *q != '\t' && *q != '\n' &&
+                       *q != '\r' && *q != '\f' && tn + 1 < sizeof(tid))
+                {
+                    tid[tn++] = *q++;
+                }
+                tid[tn] = '\0';
+                DomNode *target = (tn && w->walkDom)
+                                      ? dom_find_by_id(w->walkDom, tid)
+                                      : NULL;
+                if (target && target->tag &&
+                    (strcmp(target->tag, "ul") == 0 ||
+                     strcmp(target->tag, "ol") == 0 ||
+                     strcmp(target->tag, "nav") == 0 ||
+                     strcmp(target->tag, "menu") == 0))
+                {
+                    isMenu = 1;
+                }
+                if (!isMenu && walk_menu_label(lab))
+                {
+                    isMenu = 1;
+                }
+            }
+            /* Register AFTER classification: the controlled panel's dropdown
+             * behavior is menu-specific, and the open state stays positional. */
+            walk_disclosure_register(w, ac, dopen, isMenu);
+            flush_current_block(w);
+            DocBlock *bo = new_block(w, DOC_BLOCK_PARAGRAPH);
+            if (bo)
+            {
+                char keybuf[16];
+                snprintf(keybuf, sizeof(keybuf), "x%d", didx);
+                bo->toggleKey = doc_arena_str(w, keybuf);
+                bo->toggleOpen = dopen;
+                /* Both menu and accordion triggers need their source node:
+                 * the click lane dispatches the page's own handler (label
+                 * swaps, aria-expanded updates) before the native fallback. */
+                bo->srcNode = (void *)node;
+                bo->hasSpacing = 1;
+                /* Menu trigger: attach the nearest enclosing ROW flex
+                 * container now (the frame loop has the DOM ancestry at
+                 * hand), so the sticky-bar span can compose its title and
+                 * control on one row later. */
+                if (isMenu && w->flexCtxCount > 0)
+                {
+                    const DomNode *fcChild = node;
+                    const DomNode *fcParent = node->parent;
+                    while (fcParent)
+                    {
+                        int ci = -1;
+                        for (int k = 0; k < w->flexCtxCount; k++)
+                        {
+                            if (w->flexCtx[k].box == fcParent)
+                            {
+                                ci = k;
+                                break;
+                            }
+                        }
+                        if (ci >= 0 && w->flexCtx[ci].row)
+                        {
+                            int item = 0;
+                            for (int k = 0; k < fcParent->childCount; k++)
+                            {
+                                if (fcParent->children[k] == fcChild)
+                                {
+                                    item = k + 1;
+                                    break;
+                                }
+                            }
+                            if (item > 0)
+                            {
+                                bo->flexRow = (unsigned short)w->flexCtx[ci].rowId;
+                                bo->flexItem = (unsigned short)item;
+                                bo->flexJustify =
+                                    (unsigned char)w->flexCtx[ci].justify;
+                                bo->flexCenter =
+                                    (unsigned char)w->flexCtx[ci].center;
+                                bo->flexPadL =
+                                    (unsigned char)w->flexCtx[ci].padL;
+                                bo->flexPadR =
+                                    (unsigned char)w->flexCtx[ci].padR;
+                                bo->flexPadT =
+                                    (unsigned char)w->flexCtx[ci].padT;
+                                bo->flexPadB =
+                                    (unsigned char)w->flexCtx[ci].padB;
+                            }
+                            break;
+                        }
+                        fcChild = fcParent;
+                        fcParent = fcParent->parent;
+                    }
+                }
+                if (isMenu)
+                {
+                    bo->menuButton = 1;
+                    bo->label = lab;
+                    /* Author box metrics (full CSS px) for the control. */
+                    /* Menu box lengths use the engine's halved spacing
+                     * scale; font-size stays in CSS px for the big/small
+                     * bucket decision. */
+                    int pl = (walk_px_full(w, node, node->tag, a,
+                                           "padding-left") + 1) / 2;
+                    int pr = (walk_px_full(w, node, node->tag, a,
+                                           "padding-right") + 1) / 2;
+                    int pt = (walk_px_full(w, node, node->tag, a,
+                                           "padding-top") + 1) / 2;
+                    int pb = (walk_px_full(w, node, node->tag, a,
+                                           "padding-bottom") + 1) / 2;
+                    int bw = (walk_px_full(w, node, node->tag, a,
+                                           "border-width") + 1) / 2;
+                    int rr = (walk_px_full(w, node, node->tag, a,
+                                           "border-radius") + 1) / 2;
+                    int gp = (walk_px_full(w, node, node->tag, a,
+                                           "gap") + 1) / 2;
+                    int fs = walk_px_full(w, node, node->tag, a,
+                                          "font-size");
+                    bo->menuPadL = (unsigned char)(pl > 16 ? 16 : pl);
+                    bo->menuPadR = (unsigned char)(pr > 16 ? 16 : pr);
+                    bo->menuPadT = (unsigned char)(pt > 10 ? 10 : pt);
+                    bo->menuPadB = (unsigned char)(pb > 10 ? 10 : pb);
+                    bo->menuBorder = (unsigned char)(bw > 3 ? 3 : bw);
+                    bo->menuRadius = (unsigned char)(rr > 8 ? 8 : rr);
+                    bo->menuGap = (unsigned char)(gp > 10 ? 10 : gp);
+                    bo->menuFontBig = (unsigned char)(fs > 14);
+                }
+                else
+                {
+                    g_walkDisclosureLines[0] = '\0';
+                    disclosure_label_text(w, node, g_walkDisclosureLines,
+                                         sizeof(g_walkDisclosureLines), 0);
+                    int lineCount = 0;
+                    char *line = g_walkDisclosureLines;
+                    while (line && line[0])
+                    {
+                        char *nl = strchr(line, '\n');
+                        if (nl)
+                        {
+                            *nl = '\0';
+                        }
+                        char *seg = doc_arena_collapse(w, line);
+                        if (seg && seg[0])
+                        {
+                            if (lineCount > 0)
+                            {
+                                DocInline *br = new_inline(w, DOC_INLINE_BR);
+                                if (!br ||
+                                    doc_ptrarr_push((void ***)&bo->inlines,
+                                                    &bo->inlineCount,
+                                                    &bo->inlineCap, br))
+                                {
+                                    w->error = 1;
+                                }
+                            }
+                            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                            if (inl)
+                            {
+                                inl->text = seg;
+                                inl->flags = DOC_INF_BOLD;
+                                if (doc_ptrarr_push((void ***)&bo->inlines,
+                                                    &bo->inlineCount,
+                                                    &bo->inlineCap, inl))
+                                {
+                                    w->error = 1;
+                                }
+                            }
+                            lineCount++;
+                        }
+                        if (!nl)
+                        {
+                            break;
+                        }
+                        line = nl + 1;
+                    }
+                    if (lineCount == 0 && lab && lab[0])
+                    {
+                        DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                        if (inl)
+                        {
+                            inl->text = lab;
+                            inl->flags = DOC_INF_BOLD;
+                            if (doc_ptrarr_push((void ***)&bo->inlines,
+                                                &bo->inlineCount,
+                                                &bo->inlineCap, inl))
+                            {
+                                w->error = 1;
+                            }
+                        }
+                    }
+                    logger_log("[toggle-label] key=%s lines=%d inlines=%d",
+                               keybuf, lineCount, bo->inlineCount);
+                }
+                walk_flex_item_gap(w, bo, node);
+                add_block(w, bo);
+            }
+            return;
+        }
+    }
+
+    /* R71 — APP BAR (position:sticky, top-anchored). Open a pin span
+     * before the handler so its exit frame runs after the whole subtree
+     * and can mark the first/last block. Layout keeps the flow position
+     * and re-draws this span at the content-viewport top once scrolled
+     * past (real sticky semantics). */
+    if ((cssBits & CSS_F_STICKY) && !w->pinOpen && walk_pin_tag(node->tag))
+    {
+        const char *pclass = NULL;
+        const char *pidattr = NULL;
+        walk_class_id(a, &pclass, &pidattr);
+        CssDom pdom;
+        dom_css_dom(&pdom, css_dom_ancestor);
+        size_t ptl = 0;
+        const char *ptv = css_winning_value(
+            (CssEngine *)w->doc->_css, node->tag ? node->tag : "", pclass,
+            pidattr, &pdom, node, "top", &ptl);
+        int ptpct = 0;
+        int ptpx = ptv ? fresh_len_px(ptv, ptl, 1, &ptpct) : -1;
+        if (ptpx >= 0 && ptpx <= 8)
+        {
+            flush_current_block(w);
+            w->pinOpen = 1;
+            w->pinStartBlock = w->doc->blockCount;
+            if (!push_exit(w, WX_PIN_END))
+            {
+                w->pinOpen = 0;
+            }
+        }
+    }
+
+    /* R71 — SPANNING BOX DECORATION. A container's border/background
+     * belongs around its WHOLE subtree; the per-block attach below only
+     * sees the container's own (often empty) block. Record a span now;
+     * the exit frame closes it over every block the subtree produced. */
+    int decorIdx = -1;
+    if (!w->cell && walk_decor_tag(node->tag) && w->doc &&
+        w->doc->decorCount < DOC_BOX_DECOR_MAX)
+    {
+        int db = 0, dg = -1, dr = 0;
+        if (walk_decor_values(w, node, node->tag, a, &db, &dg, &dr))
+        {
+            decorIdx = w->doc->decorCount++;
+            DocBoxDecor *d = &w->doc->decor[decorIdx];
+            d->startBlock = w->doc->blockCount;
+            d->endBlock = -1;
+            d->border = db;
+            d->bgGray = dg;
+            d->radius = dr;
+            w->decorLead[decorIdx] = NULL;
+            ExitCtx *dx = push_exit(w, WX_DECOR_END);
+            if (dx)
+            {
+                dx->decorIdx = decorIdx;
+            }
+        }
+    }
+
     /* CSS display box-switching for the presentational containers
      * (roadmap #2 HARD): div/span honor block/inline/flex/grid/table/
      * contents/float where those differ from the native box. Semantic
@@ -7051,6 +8290,12 @@ static void walk_node(Walker *w, const DomNode *node)
     /* CSS borders: same attachment point (the handler's fresh block). */
     if (w->doc && w->doc->_css && w->currentBlock)
     {
+        /* R71: remember which block the decoration's own attach touched,
+         * so the span exit can retire a duplicate frame. */
+        if (decorIdx >= 0)
+        {
+            w->decorLead[decorIdx] = w->currentBlock;
+        }
         const char *classAttr = NULL;
         const char *idAttr = NULL;
         walk_class_id(a, &classAttr, &idAttr);
@@ -7958,6 +9203,37 @@ static int walk_state_finish(DocWalkState *st)
         out->mode = st->mode;
         out->isReaderMode = 0;
     }
+    /* R71 receipt: one line per walk names the general layout transports
+     * that engaged (the disclosure count is the ARIA trigger registry size,
+     * pinStarts the number of sticky app-bar spans the layout will draw). */
+    {
+        int pinStarts = 0;
+        int menuButtons = 0;
+        for (int bi = 0; bi < out->blockCount; bi++)
+        {
+            if (out->blocks[bi] && out->blocks[bi]->pinStart)
+            {
+                pinStarts++;
+            }
+            if (out->blocks[bi] && out->blocks[bi]->menuButton)
+            {
+                menuButtons++;
+            }
+        }
+        logger_log("[r71] walk blocks=%d decor=%d disclosure=%d pin=%d menu=%d",
+                   out->blockCount, out->decorCount, st->w.disclosureCount,
+                   pinStarts, menuButtons);
+        for (int bi = 0; bi < out->blockCount && bi < 6; bi++)
+        {
+            DocBlock *bb = out->blocks[bi];
+            logger_log("[flex] bi=%d type=%d row=%d item=%d just=%d ctr=%d "
+                       "align=%.12s label=%.20s",
+                       bi, bb->type, bb->flexRow, bb->flexItem,
+                       bb->flexJustify, bb->flexCenter,
+                       bb->align ? bb->align : "-",
+                       bb->label ? bb->label : "-");
+        }
+    }
     PLUTO_FREE(st);
     return 0;
 }
@@ -8073,6 +9349,8 @@ static DocWalkState *walk_state_begin_rewalk(DocParseResult *doc)
     st->rewalkOpts.svgDecoder = doc->svgDecoder;
     st->rewalkOpts.detailsOpen = doc->detailsOpen;
     st->rewalkOpts.detailsOpenCount = doc->detailsOpenCount;
+    st->rewalkOpts.disclosureOpen = doc->disclosureOpen;
+    st->rewalkOpts.disclosureOpenCount = doc->disclosureOpenCount;
 
     Walker *w = &st->w;
     w->doc = doc;
@@ -8134,6 +9412,8 @@ static int document_parse_ex_budget(const char *htmlString,
     out->svgDecoder = opts ? opts->svgDecoder : NULL;
     out->detailsOpen = opts ? opts->detailsOpen : NULL;
     out->detailsOpenCount = opts ? opts->detailsOpenCount : 0;
+    out->disclosureOpen = opts ? opts->disclosureOpen : NULL;
+    out->disclosureOpenCount = opts ? opts->disclosureOpenCount : 0;
     if (outBridge)
     {
         *outBridge = NULL;
@@ -8530,6 +9810,10 @@ int document_rewalk_sliced(DocParseResult *doc, unsigned long budgetMs)
     doc->parseError = 0;
     doc->blockCount = doc->blockCap = 0;
     doc->blocks = NULL;
+    /* R71: spanning decorations index the OLD block array; every re-walk
+     * rebuilds both from scratch. */
+    doc->decorCount = 0;
+    memset(doc->decor, 0, sizeof(doc->decor));
     /* Phase 10: the end-event queue reflects exactly the walk that is
      * about to run (per-(node,name) dedupe persists on the DOM). */
     doc->pendEndCount = 0;

@@ -248,6 +248,21 @@ typedef struct
     int invert;
     int border; /* CSS border width px, 0 = none (snapshot-serialized) */
     int bgGray; /* CSS background luminance, -1 = none (new_block inits) */
+    /* R71 app bar: the FIRST and LAST block of a top-anchored
+     * position:sticky element's subtree. Layout records the item span
+     * and re-draws it pinned at the content-viewport top once the page
+     * scrolls past its flow position (real sticky semantics). */
+    unsigned char pinStart, pinEnd;
+    /* Flex/grid ROW transport (CSS display:flex/grid with row direction):
+     * direct children of the container become flex items. Blocks from one
+     * child share flexItem and stack; different items sit side by side on
+     * one row. Layout groups consecutive blocks by flexRow and applies the
+     * container's justify-content/align-items. 0 = normal block flow. */
+    unsigned short flexRow;  /* row group id (0 = none) */
+    unsigned short flexItem; /* item group within the row (0 = none) */
+    unsigned char flexJustify; /* 0 start, 1 center, 2 end, 3 space-between */
+    unsigned char flexCenter;  /* align-items:center */
+    const void *flexSrcNode; /* DOM provenance (post-walk flex assignment) */
     DocInline **inlines; /* heap array */
     int inlineCount;
     int inlineCap;
@@ -311,9 +326,22 @@ typedef struct
     int optionCap;
     int selectedIndex;
     int multiple;
-    /* box_open / box_close */
-    char *toggleKey; /* arena "d<N>" or NULL */
+    /* box_open / box_close + R71 ARIA disclosure */
+    char *toggleKey; /* arena "d<N>"/"x<N>" or NULL */
     int toggleOpen;
+    unsigned char menuButton; /* R71: render as a compact hamburger button */
+    /* R71 menu-trigger box metrics, resolved from the trigger's own winning
+     * CSS (full CSS px, capped). Layout draws the control at the author's
+     * size/padding/radius instead of the old fixed 56x16 pill. */
+    unsigned char menuPadL, menuPadR, menuPadT, menuPadB;
+    unsigned char menuBorder, menuRadius, menuGap, menuFontBig;
+    /* Flex-container content-box padding (full CSS px). Direct children carry
+     * it so row layout insets items exactly like the author's box. */
+    unsigned char flexPadL, flexPadR, flexPadT, flexPadB;
+    /* A disclosure panel the author positioned out of flow (position:
+     * absolute/fixed). Dropdown panels are laid out outside the sticky pin
+     * span as a right-aligned overlay box; these bits mark the span. */
+    unsigned char dropdown, dropdownStart, dropdownEnd;
     /* form widget column hint (select field sizing) */
     int colWidth; /* <select size>/colgroup hint; -1 = absent */
     /* placeholder */
@@ -351,6 +379,14 @@ typedef struct
      * details[i-1] = 1 → open, 0 → closed. NULL → no overrides. */
     const int *detailsOpen;
     int detailsOpenCount;
+    /* R71: positional overrides for the ARIA disclosure widgets the
+     * walker numbers x1..xN (an element with aria-expanded +
+     * aria-controls). disclosureOpen[i-1] = 1 → the controlled panel
+     * renders even though its stylesheet clips it (height:0 /
+     * max-height:0 + overflow:hidden — the universal collapse recipe).
+     * NULL → the element's own aria-expanded default decides. */
+    const int *disclosureOpen;
+    int disclosureOpenCount;
     DocSvgDecoderFn svgDecoder; /* NULL → inline svg decode fails (no block) */
     /* adoptHtml: the caller transfers ownership of the NUL-terminated
      * htmlString buffer to the DocParseResult (out->rawHtml points at it;
@@ -375,6 +411,24 @@ typedef enum
 
 /* Phase 10: end-event queue cap (animation lane nodes per walk). */
 #define DOC_PEND_END_MAX 16
+
+/* R71: spanning box decorations. A CSS border / gray background on a
+ * CONTAINER belongs around the element's whole subtree, not around the
+ * empty block the element itself creates (the old per-block attach made
+ * cards lose their outline whenever their content lived in child
+ * blocks). The walker records one entry per decorated block container;
+ * layout draws the frame/shade over the finished block span.
+ * startBlock/endBlock are indices into DocParseResult.blocks; an entry
+ * that produced no blocks is ignored (startBlock = endBlock = -1). */
+#define DOC_BOX_DECOR_MAX 12
+typedef struct
+{
+    int startBlock;
+    int endBlock;
+    int border; /* CSS border px (0..3) */
+    int bgGray; /* 96..215 = dither shade, else -1 */
+    int radius; /* rounded-corner px (0 = square) */
+} DocBoxDecor;
 
 /* ── Document result ─────────────────────────────────────────────────────── */
 typedef struct
@@ -470,6 +524,12 @@ typedef struct
     DocSvgDecoderFn svgDecoder;
     const int *detailsOpen;
     int detailsOpenCount;
+    /* R71 disclosure-widget overrides (same contract as opts). */
+    const int *disclosureOpen;
+    int disclosureOpenCount;
+    /* R71 spanning box decorations (see DocBoxDecor above). */
+    DocBoxDecor decor[DOC_BOX_DECOR_MAX];
+    int decorCount;
 } DocParseResult;
 
 /* Inline <script> execution (attach/flush/close + click dispatch) lives in
