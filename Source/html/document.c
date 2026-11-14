@@ -1398,6 +1398,10 @@ typedef struct ExitCtx
     char *pseudoText; /* ::after text (arena), NULL when none */
     int pseudoBlock; /* ::after renders as a sibling block (not inline) */
     int decorIdx; /* R71 spanning decoration index on the document */
+    /* R71 decorated-box padding (halved px). The container's own empty
+     * block is dropped, so its CSS padding would otherwise disappear;
+     * the span exit carries it onto the content blocks. */
+    unsigned char decorPadL, decorPadR, decorPadT, decorPadB;
     int dropdownStart; /* R71 dropdown panel: first block index */
     int dropdownSaved; /* R71 dropdown panel: outer dropdown depth */
 } ExitCtx;
@@ -7292,11 +7296,45 @@ static void run_exit(Walker *w, ExitCtx *x)
             {
                 d->endBlock = w->doc->blockCount - 1;
                 DocBlock *lead = w->decorLead[di];
-                if (lead && di < w->doc->decorCount &&
-                    w->doc->blocks[d->startBlock] == lead)
+                int leadAtStart = lead &&
+                                  w->doc->blocks[d->startBlock] == lead;
+                if (leadAtStart)
                 {
                     lead->border = 0;
                     lead->bgGray = -1;
+                }
+                /* The box's CSS padding belongs inside its frame. The flat
+                 * layout has one horizontal inset channel, so use the
+                 * average side padding; cards normally ship symmetric
+                 * padding and this keeps text off BOTH borders. The
+                 * container's own lead block already carries its padding via
+                 * walk_box_spacing, so do not inset it twice. */
+                int hpad = ((int)x->decorPadL + (int)x->decorPadR + 1) / 2;
+                for (int bi = d->startBlock; bi <= d->endBlock; bi++)
+                {
+                    DocBlock *b = w->doc->blocks[bi];
+                    if (b && (!lead || b != lead))
+                    {
+                        b->indent += hpad;
+                    }
+                }
+                if (!leadAtStart && x->decorPadT > 0)
+                {
+                    w->doc->blocks[d->startBlock]->spacingTop +=
+                        x->decorPadT;
+                }
+                if (w->doc->blocks[d->endBlock] != lead &&
+                    x->decorPadB > 0)
+                {
+                    w->doc->blocks[d->endBlock]->spacingBottom +=
+                        x->decorPadB;
+                }
+                if (hpad || x->decorPadT || x->decorPadB)
+                {
+                    logger_log("[decor-pad] start=%d end=%d pad=%d/%d/%d/%d h=%d",
+                               d->startBlock, d->endBlock, x->decorPadL,
+                               x->decorPadR, x->decorPadT, x->decorPadB,
+                               hpad);
                 }
             }
             else
@@ -8191,10 +8229,34 @@ static void walk_node_impl(Walker *w, const DomNode *node)
             d->bgGray = dg;
             d->radius = dr;
             w->decorLead[decorIdx] = NULL;
+            /* A row-flex box already transports its padding through
+             * FlexCtx; adding it again here would double-inset its items. */
+            int padL = 0, padR = 0, padT = 0, padB = 0;
+            if (!(cssBits & CSS_F_FLEXCT))
+            {
+                padL = (walk_px_full(w, node, node->tag, a,
+                                     "padding-left") + 1) / 2;
+                padR = (walk_px_full(w, node, node->tag, a,
+                                     "padding-right") + 1) / 2;
+                padT = (walk_px_full(w, node, node->tag, a,
+                                     "padding-top") + 1) / 2;
+                padB = (walk_px_full(w, node, node->tag, a,
+                                     "padding-bottom") + 1) / 2;
+                /* Keep a pathological padding from zeroing the content
+                 * measure (the same device-sized caps as the flex bar). */
+                if (padL > 24) padL = 24;
+                if (padR > 24) padR = 24;
+                if (padT > 16) padT = 16;
+                if (padB > 16) padB = 16;
+            }
             ExitCtx *dx = push_exit(w, WX_DECOR_END);
             if (dx)
             {
                 dx->decorIdx = decorIdx;
+                dx->decorPadL = (unsigned char)padL;
+                dx->decorPadR = (unsigned char)padR;
+                dx->decorPadT = (unsigned char)padT;
+                dx->decorPadB = (unsigned char)padB;
             }
         }
     }
