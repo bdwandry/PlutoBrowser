@@ -1191,6 +1191,20 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
             rowH = gh[g];
         }
     }
+    /* Keep any authored indent the items already carried (a card's padding
+     * rides its child blocks). The container's own padding is added on top;
+     * without this the row moves every chip back to the card border. */
+    int itemIndent = 0;
+    if (n > 0 && minX[0] > marginX)
+    {
+        itemIndent = minX[0] - marginX;
+    }
+    contentX = marginX + padL + itemIndent;
+    contentW = maxWidth - padL - padR - itemIndent;
+    if (contentW < 1)
+    {
+        contentW = 1;
+    }
     totalW += gapsTotal;
     int gap = 0;
     if (justify == 3 && n > 1)
@@ -1424,7 +1438,11 @@ void layout_build(DocParseResult *doc)
             tf_apply_items(itemsBefore, g_itemCount, block, maxWidth - indent,
                            lh * linesEmitted);
             currentY += lh * linesEmitted; /* emitFlow returns endY */
-            if (block->level <= 2)
+            /* Card headings sit inside the authored bordered box. A
+             * full-width rule there cuts through the badge row and is not
+             * part of the card design; keep the rule for standalone h2s. */
+            int inCard = block->level == 2 && decor_border_at(doc, bi) != NULL;
+            if (block->level <= 2 && !inCard)
             {
                 LayoutItem *ln = item_new(LRI_LINE);
                 if (!ln)

@@ -5536,12 +5536,32 @@ static void xhr_on_progress(int cur, int total)
     }
 }
 
+/* Store the response's Link header for the engines' XHR/fetch surfaces.
+ * GitHub's commit-count read uses rel="last" in this header, so dropping
+ * it silently collapses every repository count to one item. Bounded copy;
+ * an overlong header is truncated, never unsafe. */
+static void xhr_take_response_link(JsHttpRequest *r, char **keys,
+                                   char **vals, int hc)
+{
+    if (!r)
+    {
+        return;
+    }
+    r->respLink[0] = '\0';
+    for (int i = 0; keys && vals && i < hc; i++)
+    {
+        if (keys[i] && strcasecmp(keys[i], "link") == 0)
+        {
+            snprintf(r->respLink, sizeof(r->respLink), "%s",
+                     vals[i] ? vals[i] : "");
+            return;
+        }
+    }
+}
+
 static void xhr_on_success(int status, char **keys, char **vals, int hc,
                            const char *body, size_t bodyLen, const char *url)
 {
-    (void)keys;
-    (void)vals;
-    (void)hc;
     (void)url;
     JsBridge *b = g_xhrBridge;
     if (!b || !g_xhrActiveId)
@@ -5556,6 +5576,7 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
         return;
     }
     r->state = JS_XHR_DONE;
+    xhr_take_response_link(r, keys, vals, hc);
     if (status < 200 || status >= 300)
     {
         /* Phase 4: browser-true non-2xx — fetch RESOLVES for any completed
@@ -6105,6 +6126,27 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
                  r->xhdrName[xi]);
         snprintf(pairs[npairs].value, sizeof(pairs[npairs].value), "%s",
                  r->xhdrVal[xi]);
+        npairs++;
+    }
+    /* Fetch/XHR defaults to accepting any media type; the page loader's
+     * text/html default belongs to navigations/subresources. API endpoints
+     * reject the wrong Accept outright (GitHub returns 415), so establish
+     * the browser default here unless the page explicitly set one. */
+    int hasAccept = 0;
+    for (int xi = 0; xi < npairs; xi++)
+    {
+        if (strcasecmp(pairs[xi].name, "accept") == 0)
+        {
+            hasAccept = 1;
+            break;
+        }
+    }
+    if (!hasAccept && npairs < JSBRIDGE_XHR_EXTRA_MAX)
+    {
+        snprintf(pairs[npairs].name, sizeof(pairs[npairs].name), "%s",
+                 "Accept");
+        snprintf(pairs[npairs].value, sizeof(pairs[npairs].value), "%s",
+                 "*/*");
         npairs++;
     }
     if (r->method[0] && strcmp(r->method, "POST") == 0 && r->reqBody)

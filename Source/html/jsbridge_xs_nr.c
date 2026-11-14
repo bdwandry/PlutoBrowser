@@ -56,6 +56,7 @@
  * jsbridge_quickjs.c (same accessors, methods, budget + write capture).
  */
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1532,6 +1533,42 @@ static void xs_el_set_checked(xsMachine *the)
                b->doc ? b->doc->blockCount : -1);
 }
 
+/* `hidden` reflection: the HTML hidden attribute. Pages set this property
+ * to show/hide controls (the projects refresh button/card metadata), and
+ * a write must reach the attribute or CSS [hidden] never applies. */
+static void xs_el_get_hidden(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "hidden") : NULL;
+    xsResult = xsBoolean(v ? 1 : 0);
+}
+
+static void xs_el_set_hidden(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        int on = xsToBoolean(xsArg(0));
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "hidden", "");
+        }
+        else if (dom_get_attr(n, "hidden"))
+        {
+            rc = dom_remove_attr(n, "hidden");
+        }
+        if (rc != 0)
+        {
+            xsTypeError("hidden assignment failed");
+        }
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, n);
+    }
+}
+
 /* Forms-Phase 1: `disabled` reflection — browser-true to the REFLECTED
  * property: .disabled reads the element's OWN disabled-attribute
  * presence (a disabled <fieldset> does NOT flip a child's .disabled —
@@ -1555,8 +1592,15 @@ static void xs_el_set_disabled(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "disabled", "")
-                    : dom_remove_attr(n, "disabled");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "disabled", "");
+        }
+        else if (dom_get_attr(n, "disabled"))
+        {
+            rc = dom_remove_attr(n, "disabled");
+        }
         if (rc != 0)
         {
             xsTypeError("disabled assignment failed");
@@ -1584,8 +1628,15 @@ static void xs_el_set_readOnly(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "readonly", "")
-                    : dom_remove_attr(n, "readonly");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "readonly", "");
+        }
+        else if (dom_get_attr(n, "readonly"))
+        {
+            rc = dom_remove_attr(n, "readonly");
+        }
         if (rc != 0)
         {
             xsTypeError("readOnly assignment failed");
@@ -2033,6 +2084,33 @@ static void xs_el_get_type(xsMachine *the)
     {
         xsResult = xsString("submit");
     }
+}
+
+/* `type` is writable on script/style/input/button elements. JSON-LD
+ * injection sets script.type before appending; a getter-only property
+ * throws "set type: no setter" and aborts the rest of that render. */
+static void xs_el_set_type(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = dom_set_attr(b->dom, n, "type", v);
+    JFree(v);
+    if (rc != 0)
+    {
+        xsTypeError("type assignment failed");
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
 }
 
 /* namespaceURI — browser-parity: xhtml for html-parsed nodes, svg for
@@ -2547,6 +2625,70 @@ static void xs_el_prepend(xsMachine *the)
 static void xs_el_append(xsMachine *the)
 {
     xs_el_prepend_append(the, 1);
+}
+
+/* Element.replaceChildren(...nodes): remove every current child and append
+ * the arguments in order. Modern list renderers use this as the atomic
+ * "replace the whole list" operation; without it they throw before their
+ * data fetch starts. */
+static void xs_el_replaceChildren(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        xsTypeError("replaceChildren: no element");
+    }
+    while (n->childCount > 0)
+    {
+        dom_remove_child(n, n->children[0]);
+    }
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c)
+        {
+            continue;
+        }
+        if (dom_append_child(b->dom, n, c) != 0)
+        {
+            xsTypeError("replaceChildren failed");
+        }
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+    xsResult = xsUndefined;
+}
+
+/* ChildNode.remove(): detach this node from its parent. */
+static void xs_el_remove(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *p = n ? n->parent : NULL;
+    if (p && dom_remove_child(p, n) == 0)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, p);
+    }
+    xsResult = xsUndefined;
 }
 
 static void xs_el_appendChild(xsMachine *the)
@@ -5861,6 +6003,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"selectedIndex", xs_el_get_selectedIndex, NULL},
         {"options", xs_el_get_options, NULL},
         {"disabled", xs_el_get_disabled, xs_el_set_disabled},
+        {"hidden", xs_el_get_hidden, xs_el_set_hidden},
         {"readOnly", xs_el_get_readOnly, xs_el_set_readOnly},
         /* Forms-Phase 6: the form's enumerated IDL mirrors (the browser
          * reflect shapes; tag-gated, aliasing encoding → enctype). */
@@ -5886,7 +6029,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"data", xs_el_get_data, NULL},
         {"dataset", xs_el_get_dataset, NULL},
         {"nodeValue", xs_el_get_nodeValue, xs_el_set_nodeValue},
-        {"type", xs_el_get_type, NULL},
+        {"type", xs_el_get_type, xs_el_set_type},
         {"namespaceURI", xs_el_get_namespaceURI, NULL},
         {"classList", xs_el_get_classList, NULL},
         {"style", xs_el_get_style, NULL},
@@ -5917,6 +6060,8 @@ static void xs_build_el_proto(JsBridge *b)
         {"insertBefore", xs_el_insertBefore, 2},
         {"prepend", xs_el_prepend, 0},
         {"append", xs_el_append, 0},
+        {"replaceChildren", xs_el_replaceChildren, 0},
+        {"remove", xs_el_remove, 0},
         {"querySelector", xs_el_querySelector, 1},
         {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"closest", xs_el_closest, 1},
@@ -9618,6 +9763,10 @@ static const char g_fetchShimSrc[] =
     "        var tx = this.responseText || '';\n"
     "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
     "          url: String(url), redirected: false,\n"
+    "          headers: { get: function (name) {\n"
+    "            try { return xhr.getResponseHeader(String(name)) || ''; }\n"
+    "            catch (he) { return ''; }\n"
+    "          } },\n"
     "          text: function () { return g.Promise.resolve(tx); },\n"
     "          json: function () {\n"
     "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
@@ -12607,6 +12756,26 @@ static void xs_xhr_get_responseURL(xsMachine *the)
     xsResult = xsString((r && r->url[0]) ? r->url : "");
 }
 
+/* The fetch shim's Response.headers.get(name). The router retains the
+ * response Link header (GitHub pagination); other names return "" until
+ * a page needs them. */
+static void xs_xhr_get_response_header(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    char *name = to_cstring(the, xsArg(0));
+    const char *out = "";
+    if (r && name && strcasecmp(name, "link") == 0)
+    {
+        out = r->respLink;
+    }
+    xsResult = xsString(out);
+    if (name)
+    {
+        JFree(name);
+    }
+}
+
 static void xs_build_xhr_proto(JsBridge *b)
 {
     xsMachine *the = machine_of(b);
@@ -12618,6 +12787,8 @@ static void xs_build_xhr_proto(JsBridge *b)
     def_fn(the, st->xhrProto, "setRequestHeader", xs_xhr_set_request_header,
            2);
     def_fn(the, st->xhrProto, "abort", xs_xhr_abort, 0);
+    def_fn(the, st->xhrProto, "getResponseHeader",
+           xs_xhr_get_response_header, 1);
     struct
     {
         const char *name;

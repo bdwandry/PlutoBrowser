@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 4 /* v4: R72 row-flex link-button metrics */
+#define SNAP_VERSION 5 /* v5: 32 spanning decorations + row-flex chips */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0

@@ -34,7 +34,7 @@
  * click handler, and DOM mutations surface through the standard rewalk.
  * Caps (all #ifndef-guarded so builds can tighten them): */
 #ifndef JSBRIDGE_TIMERS_MAX
-#define JSBRIDGE_TIMERS_MAX 12      /* live timers per page */
+#define JSBRIDGE_TIMERS_MAX 32      /* live timers per page */
 #endif
 #ifndef JSBRIDGE_TIMER_MIN_MS
 #define JSBRIDGE_TIMER_MIN_MS 50    /* clamp tiny delays (battery + thrash) */
@@ -61,13 +61,13 @@
  * calls the pinned handler, DOM mutations surface via callBudget → rewalk.
  * Caps (#ifndef-guarded): */
 #ifndef JSBRIDGE_XHR_MAX
-#define JSBRIDGE_XHR_MAX 4          /* live requests per page */
+#define JSBRIDGE_XHR_MAX 32         /* live requests per page */
 #endif
 #ifndef JSBRIDGE_XHR_BODY_MAX
-#define JSBRIDGE_XHR_BODY_MAX (64 * 1024)  /* response body cap (SDK-alloc) */
+#define JSBRIDGE_XHR_BODY_MAX (256 * 1024) /* response body cap (SDK-alloc) */
 #endif
 #ifndef JSBRIDGE_XHR_PAGE_BUDGET
-#define JSBRIDGE_XHR_PAGE_BUDGET (128 * 1024) /* delivered bytes per page */
+#define JSBRIDGE_XHR_PAGE_BUDGET (512 * 1024) /* delivered bytes per page */
 #endif
 #ifndef JSBRIDGE_XHR_URL_MAX
 #define JSBRIDGE_XHR_URL_MAX 512
@@ -105,6 +105,10 @@ typedef struct
     char err[96];        /* error message when ok==0 */
     char *body;          /* SDK-allocated response (owned; freed at sweep) */
     size_t bodyLen;
+    /* Response Link header (pagination / rel=last). Browsers expose this
+     * through XHR.getResponseHeader and fetch Response.headers; GitHub's
+     * commit-count read depends on it. Empty string = header absent. */
+    char respLink[512];
     void *fnRef;         /* engine-held completion handler */
     /* Phase 4 (browser-true error routing): engine-held onerror ref,
      * dispatched ONLY when the completion is a transport failure

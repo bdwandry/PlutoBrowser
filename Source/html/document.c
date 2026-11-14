@@ -1387,6 +1387,7 @@ typedef struct ExitCtx
      * flowing inside the container's items (exchange at the exit). */
     int gapSaved;
     unsigned char gapSet;
+    int blockStart; /* first block at CSS entry (item-boundary gap) */
     /* Flex ROW transport saved at the container boundary. */
     int flexRowSaved;
     int flexChildDepthSaved;
@@ -2632,6 +2633,37 @@ static int walk_pin_tag(const char *tag)
         }
     }
     return 0;
+}
+
+/* A row flex container already transports its content-box padding through
+ * FlexCtx. A column flex container does not; its decoration must still inset
+ * the card contents. Grid keeps the block-flow policy and needs the padding
+ * here too. Returns 1 only for the row-flex case. */
+static int walk_flex_row_padding_skip(Walker *w, const DomNode *node,
+                                      const char *tag, AttrList a)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !tag)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0;
+    const char *dv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "display", &dl);
+    if (!dv || (!css_val_eq(dv, dl, "flex") &&
+                !css_val_eq(dv, dl, "inline-flex")))
+    {
+        return 0;
+    }
+    size_t fl = 0;
+    const char *fv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "flex-direction", &fl);
+    return !(fv && css_val_has(fv, fl, "column"));
 }
 
 /* R71: resolve the spanning-decoration values for one container. Returns
@@ -4942,22 +4974,29 @@ static void walk_css_apply(Walker *w, unsigned css)
     }
 }
 
-/* R72 — CSS LINK BUTTON. A flex container's direct inline-block anchor is
- * blockified by CSS; the 1-bit walker's box-switch path only covers div/span,
+/* R72 — CSS FLEX CHIP. A flex container's direct inline-block child is
+ * blockified by CSS. The 1-bit walker's box-switch path only covers div/span,
  * so without this each label flowed into the container's single paragraph and
  * both button borders landed on it. Open a dedicated compact block instead,
  * carrying the authored padding/radius and the parent's row/item identity.
- * The normal anchor path still runs afterwards, attaching the href/link list;
- * layout draws the label and the full-box tap rect from the shared fields. */
-static DocBlock *walk_link_button_open(Walker *w, const DomNode *node, AttrList a)
+ * Anchors continue through the normal link path (href + tap rect); spans
+ * (badge/pill tags) are emitted here directly. Layout draws the label and the
+ * full-box frame from the shared fields. */
+static DocBlock *walk_flex_chip_open(Walker *w, const DomNode *node, AttrList a)
 {
     if (!w || !w->doc || !w->doc->_css || !node || !node->parent || w->cell ||
-        w->dropdownDepth > 0 || !node->tag || strcmp(node->tag, "a") != 0)
+        w->dropdownDepth > 0 || !node->tag)
+    {
+        return NULL;
+    }
+    int isAnchor = strcmp(node->tag, "a") == 0;
+    int isSpan = strcmp(node->tag, "span") == 0;
+    if (!isAnchor && !isSpan)
     {
         return NULL;
     }
     const char *rawHref = attr_val(a, "href");
-    if (!rawHref || !rawHref[0])
+    if (isAnchor && (!rawHref || !rawHref[0]))
     {
         return NULL;
     }
@@ -5582,7 +5621,7 @@ static void handle_element(Walker *w, const DomNode *node)
     /* ── Links ── */
     else if (strcmp(tag, "a") == 0)
     {
-        DocBlock *linkButton = walk_link_button_open(w, node, a);
+        DocBlock *linkButton = walk_flex_chip_open(w, node, a);
         ExitCtx *x = push_exit(w, WX_LINK_END);
         if (x)
         {
@@ -7434,20 +7473,28 @@ static void run_exit(Walker *w, ExitCtx *x)
                 for (int bi = d->startBlock; bi <= d->endBlock; bi++)
                 {
                     DocBlock *b = w->doc->blocks[bi];
-                    if (b && (!lead || b != lead))
+                    /* The first block is often the card heading, not the
+                     * container itself: it does not inherit the article's
+                     * padding. Use a minimum inset so every child clears
+                     * the frame without double-insetting a lead that
+                     * already carries its own margin/padding. */
+                    if (b && b->indent < hpad)
                     {
-                        b->indent += hpad;
+                        b->indent = hpad;
                     }
                 }
-                if (!leadAtStart && x->decorPadT > 0)
+                if (x->decorPadT > 0 &&
+                    w->doc->blocks[d->startBlock]->spacingTop <
+                        x->decorPadT)
                 {
-                    w->doc->blocks[d->startBlock]->spacingTop +=
+                    w->doc->blocks[d->startBlock]->spacingTop =
                         x->decorPadT;
                 }
-                if (w->doc->blocks[d->endBlock] != lead &&
-                    x->decorPadB > 0)
+                if (x->decorPadB > 0 &&
+                    w->doc->blocks[d->endBlock]->spacingBottom <
+                        x->decorPadB)
                 {
-                    w->doc->blocks[d->endBlock]->spacingBottom +=
+                    w->doc->blocks[d->endBlock]->spacingBottom =
                         x->decorPadB;
                 }
                 if (hpad || x->decorPadT || x->decorPadB)
@@ -7604,6 +7651,20 @@ static void run_exit(Walker *w, ExitCtx *x)
                 tail->gapApplied = x->gapSaved; /* 0 closes the slot */
             }
             w->fgGap = x->gapSaved;
+            /* A flex/grid CONTAINER is itself an item in the outer
+             * container. Apply that outer gap after its last block so the
+             * next card/section starts after the authored gutter. The
+             * decoration end subtracts this same slot, keeping the border
+             * outside the gap. */
+            if (w->fgGap > 0 && w->doc && x->blockStart >= 0 &&
+                w->doc->blockCount > x->blockStart)
+            {
+                DocBlock *tail = w->doc->blocks[w->doc->blockCount - 1];
+                if (tail && tail->gapApplied < w->fgGap)
+                {
+                    tail->gapApplied = w->fgGap;
+                }
+            }
         }
         break;
     case WX_PSEUDO_END:
@@ -7930,6 +7991,7 @@ static void walk_node_impl(Walker *w, const DomNode *node)
                 int gp = flex_gap_px(w, node, node->tag, a);
                 cx->gapSaved = w->fgGap;
                 cx->gapSet = 1;
+                cx->blockStart = w->doc ? w->doc->blockCount : 0;
                 w->fgGap = gp > 0 ? gp : 0;
                 /* ROW transport: the default flex axis is row. A column
                  * container keeps the block flow (already the column).
@@ -8353,7 +8415,7 @@ static void walk_node_impl(Walker *w, const DomNode *node)
             /* A row-flex box already transports its padding through
              * FlexCtx; adding it again here would double-inset its items. */
             int padL = 0, padR = 0, padT = 0, padB = 0;
-            if (!(cssBits & CSS_F_FLEXCT))
+            if (!walk_flex_row_padding_skip(w, node, node->tag, a))
             {
                 padL = (walk_px_full(w, node, node->tag, a,
                                      "padding-left") + 1) / 2;
@@ -8390,7 +8452,17 @@ static void walk_node_impl(Walker *w, const DomNode *node)
      * here (not in handle_element) so the post-handler CSS below still
      * attaches to the synthetic block uniformly. */
     int dispHandled = 0;
-    if (w->doc && w->doc->_css && !w->cell &&
+    /* Inline-block spans that are direct children of a flex row (badge
+     * pills such as GitHub's language/commit tags) become compact flex
+     * items. Their full label is captured by walk_flex_chip_open; walking
+     * the children again would duplicate that text into a block. */
+    if (w->doc && w->doc->_css && !w->cell && node->tag &&
+        strcmp(node->tag, "span") == 0 &&
+        walk_flex_chip_open(w, node, a))
+    {
+        dispHandled = 1;
+    }
+    if (!dispHandled && w->doc && w->doc->_css && !w->cell &&
         ((node->tag && strcmp(node->tag, "div") == 0) ||
          (node->tag && strcmp(node->tag, "span") == 0)))
     {

@@ -426,7 +426,7 @@ typedef enum
  * layout draws the frame/shade over the finished block span.
  * startBlock/endBlock are indices into DocParseResult.blocks; an entry
  * that produced no blocks is ignored (startBlock = endBlock = -1). */
-#define DOC_BOX_DECOR_MAX 12
+#define DOC_BOX_DECOR_MAX 32
 typedef struct
 {
     int startBlock;
