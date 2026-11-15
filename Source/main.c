@@ -7,6 +7,8 @@
  * - The full state machine arrives in later phases.
  */
 #include <stdio.h>
+#include <string.h>
+#include <strings.h>
 #include "pd_api.h"
 
 #ifdef TARGET_SIMULATOR
@@ -193,6 +195,10 @@ static int progressNetCur = 0;
 static int progressNetTotal = 0;
 static int progressTotal = 0;
 static int isRendering = 0;
+/* Set when the current page response is Cloudflare's managed challenge.
+ * The response is not parsed; the browser shows a specific error page and
+ * the fieldtest harnesses report a distinct blocked result. */
+static int g_pageChallenge = 0;
 static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
 static int pendingFlipUnload = 0;             /* settings flip: unload old page
                                                * before the deferred reload */
@@ -1038,7 +1044,7 @@ static void doc_dump_timer_lines(void)
 }
 static void js_timers_autotest_tick(void)
 {
-    if (g_timersTestPhase == 3 || isRendering)
+    if (g_timersTestPhase == 3 || isRendering || !currentDoc)
     {
         return;
     }
@@ -3975,6 +3981,14 @@ static void fieldtest_dump_page(void)
 }
 static void fieldtest_score_page(void)
 {
+    if (g_pageChallenge)
+    {
+        logger_log("[fieldtest] RESULT: FAIL (bot-challenge) site=%s",
+                   ftUrl[ftIndex]);
+        fieldtest_hist_log("FAIL", ftUrl[ftIndex]);
+        ftFail++;
+        return;
+    }
     if (ftCrit[ftIndex][0])
     {
         char needle[128];
@@ -4067,7 +4081,8 @@ static void fieldtest_tick(void)
     /* phase 1: spend FIELDTEST_FRAMES_PER_SITE on each site */
     if (ftFrames >= FIELDTEST_FRAMES_PER_SITE)
     {
-        if (currentState == STATE_ERROR && !ftRetried[ftIndex])
+        if (currentState == STATE_ERROR && !ftRetried[ftIndex] &&
+            !g_pageChallenge)
         {
             /* transient sim network flake (-16): one retry per site */
             ftRetried[ftIndex] = 1;
@@ -4471,11 +4486,17 @@ static void ftdev_tick(void)
      * + JS compile. 30s hard timeout per site; 3s settle after the first
      * PAGE state so late images/scripts land. */
     g_ftdevSiteFrames++;
+    if (g_pageChallenge)
+    {
+        ftdev_advance("FAIL", "bot-challenge");
+        return;
+    }
     if (currentState == STATE_PAGE)
     {
         g_ftdevSawPage = 1;
     }
-    if (currentState == STATE_ERROR && !g_ftdevRetried && g_ftdevSiteFrames < 300)
+    if (currentState == STATE_ERROR && !g_ftdevRetried &&
+        !g_pageChallenge && g_ftdevSiteFrames < 300)
     {
         g_ftdevRetried = 1;
         logger_log("[ftdev] retry (error page) site=%d %s", g_ftdevIndex + 1,
@@ -6751,6 +6772,7 @@ static void navigate_to(const char *urlString)
     {
         return;
     }
+    g_pageChallenge = 0; /* fresh navigation: old response's status is gone */
 
     /* A pending transport auto-retry belongs to the navigation that armed
      * it. Without this cancel it fires 2s later and HIJACKS whatever the
@@ -7163,11 +7185,72 @@ void pluto_ui_net_progress(int cur, int total)
     }
 }
 
+/* Bounded body search: HTTP bodies are length-addressed, not NUL-ended. */
+static int http_body_has(const char *body, size_t bodyLen, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (!body || n == 0 || bodyLen < n)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i + n <= bodyLen; i++)
+    {
+        if (memcmp(body + i, needle, n) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Cloudflare's managed challenge is a 403 with Cf-Mitigated: challenge.
+ * The header is authoritative; body markers are a fallback for proxies
+ * that strip response headers. This is a classification only: it does not
+ * pretend to solve the challenge. */
+static int http_is_cloudflare_challenge(int status, char **headerKeys,
+                                        char **headerVals, int headerCount,
+                                        const char *body, size_t bodyLen)
+{
+    for (int i = 0; i < headerCount; i++)
+    {
+        if (!headerKeys || !headerKeys[i] || !headerVals || !headerVals[i])
+        {
+            continue;
+        }
+        if (strcasecmp(headerKeys[i], "cf-mitigated") == 0 &&
+            strcasecmp(headerVals[i], "challenge") == 0)
+        {
+            return 1;
+        }
+    }
+    if (status != 403)
+    {
+        return 0;
+    }
+    return http_body_has(body, bodyLen, "__cf_chl_opt") ||
+           http_body_has(body, bodyLen, "cdn-cgi/challenge-platform/") ||
+           http_body_has(body, bodyLen, "<title>Just a moment...</title>");
+}
+
 static void http_on_success(int status, char **headerKeys, char **headerVals,
                             int headerCount, const char *body, size_t bodyLen,
                             const char *url)
 {
-    (void)status;
+    if (http_is_cloudflare_challenge(status, headerKeys, headerVals,
+                                     headerCount, body, bodyLen))
+    {
+        g_pageChallenge = 1;
+        logger_log("[http] Cloudflare challenge detected (status=%d) url=%s",
+                   status, url ? url : "");
+        error_page_show("This site requires a browser check that "
+                        "PlutoBrowser cannot complete. Cloudflare blocked "
+                        "the page.",
+                        url ? url : "");
+        currentState = STATE_ERROR;
+        snprintf(pageTitle, sizeof(pageTitle), "Browser Check Required");
+        update_system_menu();
+        return;
+    }
     const char *contentType = NULL;
     for (int i = 0; i < headerCount; i++)
     {

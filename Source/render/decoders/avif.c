@@ -722,6 +722,19 @@ static LCDBitmap *avif_decode_inner(const uint8_t *data, size_t len)
         s.allocator.alloc_picture_callback = avif_pic_alloc;
         s.allocator.release_picture_callback = avif_pic_release;
     }
+#if defined(TARGET_PLAYDATE) && defined(__arm__)
+    /* R68: probe AFTER the picture arena is resident. The progressive
+     * single-block probe above runs before this 1.5MB allocation; if it is
+     * checked too early, the arena can consume the exact headroom dav1d
+     * needs for its raw context/CDF/tile mallocs. Reserve that entire
+     * SIMULTANEOUS mix now, while the real decode heap is present. */
+    if (!avif_heap_ok())
+    {
+        logger_log("[avif] budget: skip %ux%u — simultaneous heap probe failed",
+                   (unsigned)m.ispe_w, (unsigned)m.ispe_h);
+        goto done;
+    }
+#endif
     logger_log("[avif] container ok (peak=%u)", logger_stack_peak());
     if (dav1d_open(&c, &s) < 0)
     {
