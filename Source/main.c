@@ -11217,8 +11217,11 @@ static int updateFrame(void *userdata)
     pdtimer_update();
 
     /* R67: SDK connection releases are safe only when no render/walk is
-     * live. A release during the sliced walk was the bbc wild-PC window. */
-    http_set_release_gate(!isRendering && currentState != STATE_LOADING);
+     * live. A release during the sliced walk was the bbc wild-PC window.
+     * Do not also gate on STATE_LOADING: between network fetches the client
+     * is idle, and blocking the TCP graveyard for the whole page load
+     * exhausts the SDK's four-slot pool on fetch-heavy pages. */
+    http_set_release_gate(!isRendering);
 
     /* Phase 24: pump the HTTP state machine each frame. */
     http_update();

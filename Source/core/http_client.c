@@ -142,6 +142,7 @@ static int g_identityEncoding = 0;
 void http_set_identity_encoding(int on) { g_identityEncoding = on; }
 static int g_connOpen = 0;         /* open callback fired, connected */
 static int g_openFailed = 0;
+static int g_poolRecovery = 0; /* NET_BUFFER_TOO_SMALL recovery owed */
 static int g_connClosed = 0;
 static char g_error[256];
 static unsigned int g_requestStart = 0;
@@ -241,8 +242,11 @@ static void drain_deferred_releases(void)
     g_deferReleaseN = 0;
 }
 
-/* Park a closed connection until the SDK event loop has drained. */
-static void grave_add(TCPConnection *t)
+/* Park a closed connection until the SDK event loop has drained.
+ * A failed ASYNC OPEN never established TLS, so it has no live session
+ * to protect: callers pass frames=0 for that case to return its SDK
+ * connection slot on the next idle tick. */
+static void grave_add_after(TCPConnection *t, int frames)
 {
     if (!t)
     {
@@ -251,7 +255,7 @@ static void grave_add(TCPConnection *t)
     if (g_graveN < GRAVE_MAX)
     {
         g_grave[g_graveN].conn = t;
-        g_grave[g_graveN].frames = GRAVE_FRAMES;
+        g_grave[g_graveN].frames = frames;
         g_graveN++;
         return;
     }
@@ -264,12 +268,17 @@ static void grave_add(TCPConnection *t)
         memmove(&g_grave[0], &g_grave[1],
                 sizeof(g_grave[0]) * (GRAVE_MAX - 1));
         g_grave[GRAVE_MAX - 1].conn = t;
-        g_grave[GRAVE_MAX - 1].frames = GRAVE_FRAMES;
+        g_grave[GRAVE_MAX - 1].frames = frames;
     }
     else
     {
         logger_log("[http] grave ring full — closed connection left to SDK");
     }
+}
+
+static void grave_add(TCPConnection *t)
+{
+    grave_add_after(t, GRAVE_FRAMES);
 }
 
 /* Release graveyard entries whose cooling-off expired AND no session is
@@ -295,18 +304,21 @@ static void grave_tick(void)
 /* Navigation: the client is idle, so release every entry whose timer
  * already expired. Entries closed during THIS navigation keep their
  * fresh timer (an immediate close+release is the receipted SDK trap). */
-static void grave_release_expired(void)
+static int grave_release_expired(void)
 {
+    int released = 0;
     for (int i = 0; i < g_graveN;)
     {
         if (g_grave[i].frames <= 0)
         {
             g_pd->network->tcp->release(g_grave[i].conn);
             g_grave[i] = g_grave[--g_graveN];
+            released++;
             continue;
         }
         i++;
     }
+    return released;
 }
 
 /* Navigation hard reset (called after http_cancel, while the client is
@@ -2824,7 +2836,9 @@ static void close_tcp(void)
              * object in the graveyard — never release a TLS connection the
              * SDK may still have event-loop state for (hazard 2). */
             g_pd->network->tcp->close(t);
-            grave_add(t);
+            /* Failed opens never established TLS; don't hold their SDK
+             * slots for the full TLS cool-off. */
+            grave_add_after(t, g_openFailed ? 0 : GRAVE_FRAMES);
         }
         else
         {
@@ -3837,6 +3851,10 @@ static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
     if (err != NET_OK)
     {
         g_openFailed = 1;
+        if (err == NET_BUFFER_TOO_SMALL)
+        {
+            g_poolRecovery = 1;
+        }
         netmon_probe_fail(); /* network-layer fault */
         /* Phase 5 taxonomy: the raw SDK code stays on the log so the
          * refused/DNS shapes are receipted, and the mapped phrase rides
@@ -5824,6 +5842,15 @@ void http_update(void)
         HttpCallbacks cb = g_cb;
 
         reset_state();
+
+        if (g_poolRecovery)
+        {
+            int released;
+            g_poolRecovery = 0;
+            released = grave_release_expired();
+            logger_log("[http] pool recovery: released %d expired connection(s)",
+                       released);
+        }
 
         if (cb.onError)
         {
