@@ -2228,6 +2228,8 @@ static void xs_el_set_textContent(xsMachine *the)
         {
             xsTypeError("textContent assignment failed");
         }
+        b->domDirty = 1; /* text mutation must reach the next walk */
+        jsbridge_note_dom_mutation(b, n);
     }
 }
 
@@ -2625,6 +2627,83 @@ static void xs_el_prepend(xsMachine *the)
 static void xs_el_append(xsMachine *the)
 {
     xs_el_prepend_append(the, 1);
+}
+
+/* ChildNode.before()/after() (DOM §4.8): insert nodes (or text) immediately
+ * before/after this node in its parent. The contact form's success handler
+ * places its status card with form.after(...) and card.after(...); without
+ * these methods the success path throws after building the card. Multiple
+ * nodes are kept in argument order; a detached node is a no-op, like a
+ * browser. */
+static void xs_el_before_after(xsMachine *the, int after)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *parent = n ? n->parent : NULL;
+    if (!parent)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    DomNode *ref = n;
+    if (after)
+    {
+        ref = NULL;
+        for (int i = 0; i + 1 < parent->childCount; i++)
+        {
+            if (parent->children[i] == n)
+            {
+                ref = parent->children[i + 1];
+                break;
+            }
+        }
+    }
+    int moved = 0;
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c || c == n || c == ref)
+        {
+            continue;
+        }
+        if (dom_insert_before(b->dom, parent, c, ref) != 0)
+        {
+            xsTypeError("before/after failed");
+        }
+        moved = 1;
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    if (moved)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, parent);
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_el_before(xsMachine *the)
+{
+    xs_el_before_after(the, 0);
+}
+
+static void xs_el_after(xsMachine *the)
+{
+    xs_el_before_after(the, 1);
 }
 
 /* Element.replaceChildren(...nodes): remove every current child and append
@@ -3822,11 +3901,16 @@ static xsSlot xs_push_element(JsBridge *b, DomNode *node)
     xs_set_host_data_site(the, "element", obj, node);
     if (st->elwCount < XS_ELW_CAP)
     {
-        xsResult = obj; /* marked-slot anchor while the arrays settle */
+        /* xsResult is the caller's return slot (querySelectorAll builds an
+         * array there). Keep it alive while the new wrapper allocates, then
+         * restore it: the persistent cache slot takes over rooting below. */
+        xsSlot savedResult = xsResult;
+        xsResult = obj;
         int w = st->elwCount++;
         st->elwNode[w] = node;
         st->elwWrap[w] = obj;
         xsRemember(st->elwWrap[w]);
+        xsResult = savedResult;
     }
     else if (!st->elwOverflow)
     {
@@ -6060,6 +6144,8 @@ static void xs_build_el_proto(JsBridge *b)
         {"insertBefore", xs_el_insertBefore, 2},
         {"prepend", xs_el_prepend, 0},
         {"append", xs_el_append, 0},
+        {"before", xs_el_before, 0},
+        {"after", xs_el_after, 0},
         {"replaceChildren", xs_el_replaceChildren, 0},
         {"remove", xs_el_remove, 0},
         {"querySelector", xs_el_querySelector, 1},

@@ -89,8 +89,11 @@
  *       align-items:center propagates cross-axis centering to the
  *         container's child blocks through the CSS-exit carry; the
  *         container's own text block centers too (it is an anonymous
- *         flex item). align-self:center centers only its own element
- *         (element-scoped carry, stripped at the boundary). Both are
+ *         flex item). Sticky app-bar items are the exception: their
+ *         cross axis is the bar row's height, so the carry does not
+ *         become their text alignment. align-self:center centers only
+ *         its own element (element-scoped carry, stripped at the
+ *         boundary). Both are
  *         gated on the container actually being flex/grid — on a
  *         block box the name is inspected but inert (CSS-correct).
  *         flex-direction (row/column/…): the flow already IS the

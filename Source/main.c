@@ -404,8 +404,9 @@ static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
 static DomNode *form_node_ancestor(DomNode *n);
 /* Forms-Phase 4: the form API host hooks (registered at boot) + the
- * implicit-submission chain the keyboard's Enter commits ride. The
- * bridge rides the call so mid-parse scripts (a battery page running
+ * synthetic Enter-implicit-submission chain. The Playdate keyboard's
+ * OK is a text commit, not an Enter key, so it does not ride this chain.
+ * The bridge rides the call so mid-parse scripts (a battery page running
  * its inline form API calls before g_pageJs exists) still dispatch
  * through their own machine. */
 static int pluto_host_form_reset(JsBridge *b, void *formNode);
@@ -3397,9 +3398,10 @@ static void formval_autotest_tick(void)
  *   phase 5: form.reset() (the host hook) → the typed value returns
  *            to "" (block + value attribute + focused echo restored,
  *            no events);
- *   phase 6: retype via the OK-commit lane (form_kb_ok_commit — the
- *            exact did_hide journey) → the Enter chain rides the
- *            default submit button (click → gate → submit → wire);
+ *   phase 6: retype via the synthetic Enter-key lane (form_kb_ok_commit);
+ *            this is NOT the keyboard's OK action (OK only commits) → the
+ *            Enter chain rides the default submit button (click → gate
+ *            → submit → wire);
  *   phase 7: the navigation landed on about:formprobe?user=EnterValid
  *            (&age= — Forms-Phase 6 makes the query the browser-true
  *            form data set; the old legacy walk skipped the empty
@@ -3652,7 +3654,7 @@ static void forment_autotest_tick(void)
             g_formentPhase = 9;
             return;
         }
-        logger_log("[forment-autotest] OK-commit → implicit Enter chain");
+        logger_log("[forment-autotest] synthetic Enter-key lane → implicit submit");
         form_key_snapshot(user);
         form_kb_ok_commit("EnterValid");
         g_formentFrames = 0;
@@ -3665,8 +3667,8 @@ static void forment_autotest_tick(void)
             strncmp(currentDoc->baseUrl, "about:formprobe?", 16) == 0 &&
             strstr(currentDoc->baseUrl, "user=EnterValid"))
         {
-            logger_log("[forment-autotest] PASS: Enter rode the default "
-                       "button through the full chain (url=%s)",
+            logger_log("[forment-autotest] PASS: synthetic Enter rode the "
+                       "default button through the full chain (url=%s)",
                        currentDoc->baseUrl);
             g_formentPhase = 9;
             return;
@@ -8785,10 +8787,10 @@ static int g_formKbOkayPressed = 0; /* last will_hide's OK flag (Phase 4) */
 static void form_kb_will_hide(int okButtonPressed, void *ud)
 {
     (void)ud;
-    /* Forms-Phase 4: remember WHY the keyboard hid. OK = the Enter
-     * commit → implicit submission follows the change commit (the
-     * browser's Enter order). A plain dismissal (tapping elsewhere)
-     * commits without submitting. */
+    /* Remember WHY the keyboard hid. The Playdate keyboard's OK is its
+     * done/confirm action, not an Enter key: both OK and a plain dismissal
+     * commit the text, and neither submits the form. Submission belongs to
+     * the form's own button. */
     g_formKbOkayPressed = okButtonPressed ? 1 : 0;
 }
 
@@ -8814,13 +8816,11 @@ static void form_kb_did_hide(void *ud)
             form_key_write(txt, 1 /* commit → input + change */);
             if (g_formKbOkayPressed)
             {
-                /* Forms-Phase 4: the browser's Enter order — the commit
-                 * (input+change) just ran; implicit submission follows
-                 * when the field belongs to a form. textarea fields
-                 * never implicitly submit (pluto_form_enter_commit
-                 * checks). */
-                logger_log("[form] keyboard OK commit → enter chain");
-                pluto_form_enter_commit();
+                /* The keyboard's OK is a text commit, not an Enter key.
+                 * Firing input+change is enough for react's controlled
+                 * input; implicit submission waits for the form's own
+                 * submit button. */
+                logger_log("[form] keyboard OK commit (no implicit submit)");
             }
             else
             {
@@ -8858,11 +8858,10 @@ static void form_kb_text_changed(void *ud)
     }
 }
 
-/* Forms-Phase 4 (autotest lane): the keyboard's OK commit exactly as
- * form_kb_did_hide rides it — the change commit, then the Enter-implicit
- * chain (pluto_form_enter_commit checks the field's form, the textarea
- * exception and the default button). The driver calls this to exercise
- * a real user's OK press without opening the OS keyboard. */
+/* Forms-Phase 4 (autotest lane): synthetic Enter-key lane. The Playdate
+ * keyboard's OK no longer submits, but this keeps the Enter-implicit
+ * chain covered (pluto_form_enter_commit checks the field's form, the
+ * textarea exception and the default button). */
 static void form_kb_ok_commit(const char *text)
 {
     form_key_write(text, 1 /* commit → input + change */);
@@ -9241,7 +9240,8 @@ static int pluto_host_form_wire(JsBridge *b, void *formNode,
     return 1;
 }
 
-/* The Enter-implicit chain (the keyboard's OK commit). Browser truth:
+/* The Enter-implicit chain (synthetic Enter-key lane; the Playdate
+ * keyboard's OK commit deliberately does NOT submit). Browser truth:
  * implicit submission on a TEXT field rides the form's default button
  * when one exists (its click + activation: the click, then the gate
  * honoring its formNovalidate, then the submit event, then the wire);

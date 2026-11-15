@@ -3659,7 +3659,13 @@ static void walk_flex_block(Walker *w, DocBlock *b, const char **alignSlot)
     {
         b->gapApplied = w->fgGap; /* the gap after THIS item (halved px) */
     }
-    if (*alignSlot == NULL && (w->flags & (CSS_F_AIC | CSS_F_ASC)))
+    /* Phase 6: align-items/align-self carry cross-axis centering through
+     * the CSS exit (the element's own text-align/align attr wins). Sticky
+     * app-bar items are the exception: their cross axis is the bar row's
+     * height, so that centering must not become the item's text-align
+     * (which is exactly what used to center the brand in the app bar). */
+    if (!w->pinOpen && *alignSlot == NULL &&
+        (w->flags & (CSS_F_AIC | CSS_F_ASC)))
     {
         *alignSlot = doc_arena_str(w, "center");
     }

@@ -6397,15 +6397,34 @@ static void apply_prop(const CssEngine *eng, unsigned *out, const char *prop,
     {
         /* opacity:0 is visually invisible (the common modal/overlay
          * pre-animation state). A static first render honors it; the
-         * animation lane is not a compositor. */
-        const char *q = buf;
-        while (*q == ' ' || *q == '\t')
+         * animation lane is not a compositor. Parse the NUMBER: 0.25 is
+         * a normal dimming value (Lobsters uses it for hidden stories)
+         * and must not hide the subtree like a zero opacity. */
+        char *end = NULL;
+        double op = strtod(buf, &end);
+        int zero = 0;
+        if (end && end != buf)
         {
-            q++;
+            while (*end == ' ' || *end == '\t' || *end == '\r' ||
+                   *end == '\n')
+            {
+                end++;
+            }
+            if (*end == '%')
+            {
+                end++;
+                while (*end == ' ' || *end == '\t' || *end == '\r' ||
+                       *end == '\n')
+                {
+                    end++;
+                }
+            }
+            if (*end == '\0' && op == 0.0)
+            {
+                zero = 1;
+            }
         }
-        if ((q[0] == '0' && (q[1] == '\0' || q[1] == '.' || q[1] == '%' ||
-                             q[1] == ' ' || q[1] == '\t')) ||
-            strstr(buf, "transparent"))
+        if (zero)
         {
             *out |= CSS_F_HIDDEN;
         }
