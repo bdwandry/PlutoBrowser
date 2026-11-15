@@ -729,7 +729,8 @@ DocBoxSpacing doc_parse_box_spacing(const DocStyleEntry *attrs, int attrCount)
  * walker already converted away from). Semantics identical: text nodes
  * advance the logical offset by their FULL length, writes clamped to cap.
  */
-static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
+static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off,
+                         int visible)
 {
     typedef struct
     {
@@ -775,6 +776,12 @@ static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
             {
                 continue;
             }
+            if (visible && c->kind == DOM_ELEMENT && c->tag &&
+                (!strcmp(c->tag, "style") || !strcmp(c->tag, "script") ||
+                 !strcmp(c->tag, "template")))
+            {
+                continue;
+            }
             if (top + 1 >= cap_)
             {
                 int ncap = cap_ * 2;
@@ -804,7 +811,22 @@ static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
 
 size_t doc_concat_node_text(const DomNode *node, char *buf, size_t cap)
 {
-    size_t need = concat_rec(node, buf, cap, 0);
+    size_t need = concat_rec(node, buf, cap, 0, 0);
+    if (cap > 0)
+    {
+        size_t written = need < cap - 1 ? need : cap - 1;
+        buf[written] = '\0';
+    }
+    return need;
+}
+
+/* Visible text for a rendered label (button, link, disclosure). Unlike
+ * textContent, inline <style>/<script>/<template> payloads are not part of
+ * what the page paints. Google ships <style> blocks inside buttons; without
+ * this split the CSS became the button's label and inflated the search box. */
+static size_t doc_concat_visible_text(const DomNode *node, char *buf, size_t cap)
+{
+    size_t need = concat_rec(node, buf, cap, 0, 1);
     if (cap > 0)
     {
         size_t written = need < cap - 1 ? need : cap - 1;
@@ -5051,7 +5073,7 @@ static DocBlock *walk_flex_chip_open(Walker *w, const DomNode *node, AttrList a)
     if (pt > 16) pt = 16;
     if (pb > 16) pb = 16;
     char ltxt[256];
-    doc_concat_node_text(node, ltxt, sizeof(ltxt));
+    doc_concat_visible_text(node, ltxt, sizeof(ltxt));
     char *label = doc_arena_collapse(w, ltxt);
     if (!label || !label[0])
     {
@@ -6411,9 +6433,22 @@ static void handle_element(Walker *w, const DomNode *node)
             strcmp(bbuf, "reset") == 0)
         {
             static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
-            doc_concat_node_text(node, lbuf, sizeof(lbuf));
+            doc_concat_visible_text(node, lbuf, sizeof(lbuf));
             char *label = doc_arena_collapse(w, lbuf);
             int disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
+            /* Icon-only controls have no visible text to render. Do not
+             * fabricate a "Button" row for them; disclosure buttons keep
+             * their ARIA label lane and named form buttons keep their
+             * native value/name. Children still walk, so a button-wrapped
+             * image can render on its own. */
+            const char *btnExpanded = attr_val(a, "aria-expanded");
+            const char *btnControls = attr_val(a, "aria-controls");
+            int iconOnly = (!label || label[0] == '\0') &&
+                           !attr_val(a, "name") && !attr_val(a, "value") &&
+                           !(btnExpanded && btnExpanded[0]) &&
+                           !(btnControls && btnControls[0]);
+            if (!iconOnly)
+            {
             flush_current_block(w);
             DocBlock *b = new_block(w, DOC_BLOCK_INPUT_SUBMIT);
             if (b)
@@ -6458,6 +6493,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->inert = (w->inert > 0) || disabled;
                 add_block(w, b);
+            }
             }
         }
     }
@@ -7461,6 +7497,37 @@ static void run_exit(Walker *w, ExitCtx *x)
             if (d->startBlock >= 0 && w->doc->blockCount > d->startBlock)
             {
                 d->endBlock = w->doc->blockCount - 1;
+                /* A form-only container's border/background is not a card
+                 * outline; drawing its span frame swallows the controls and
+                 * leaves the empty area that made Google's search box look
+                 * like a giant bordered panel. Keep authored frames when
+                 * the span also contains prose/content. */
+                int decorHasInput = 0;
+                int decorHasText = 0;
+                for (int bi = d->startBlock;
+                     bi <= d->endBlock && bi < w->doc->blockCount; bi++)
+                {
+                    DocBlock *db = w->doc->blocks[bi];
+                    int bt = db ? db->type : -1;
+                    if (bt == DOC_BLOCK_INPUT_FIELD)
+                    {
+                        decorHasInput = 1;
+                    }
+                    else if (bt == DOC_BLOCK_PARAGRAPH ||
+                             bt == DOC_BLOCK_HEADING ||
+                             bt == DOC_BLOCK_BLOCKQUOTE ||
+                             bt == DOC_BLOCK_LIST_ITEM ||
+                             bt == DOC_BLOCK_CODE_BLOCK ||
+                             bt == DOC_BLOCK_TABLE)
+                    {
+                        decorHasText = 1;
+                    }
+                }
+                if (decorHasInput && !decorHasText)
+                {
+                    d->border = 0;
+                    d->bgGray = -1;
+                }
                 DocBlock *lead = w->decorLead[di];
                 int leadAtStart = lead &&
                                   w->doc->blocks[d->startBlock] == lead;
@@ -8137,7 +8204,14 @@ static void walk_node_impl(Walker *w, const DomNode *node)
     {
         const char *ac = attr_val(a, "aria-controls");
         const char *ae = attr_val(a, "aria-expanded");
-        if (ac && ae && !w->cell)
+        /* Comboboxes also expose aria-expanded + aria-controls. A form
+         * control is a native field, not an accordion trigger; treating
+         * Google's search textarea as a disclosure dropped the field and
+         * left its enclosing box as a giant empty frame. */
+        if (ac && ae && !w->cell &&
+            strcmp(node->tag ? node->tag : "", "input") != 0 &&
+            strcmp(node->tag ? node->tag : "", "textarea") != 0 &&
+            strcmp(node->tag ? node->tag : "", "select") != 0)
         {
             w->disclosureIndex++;
             int didx = w->disclosureIndex;
@@ -8150,8 +8224,8 @@ static void walk_node_impl(Walker *w, const DomNode *node)
             static char g_walkDisclosureLabel[1024]; /* hoisted: small stack */
             static char g_walkDisclosureLines[1024];
             g_walkDisclosureLabel[0] = '\0';
-            doc_concat_node_text(node, g_walkDisclosureLabel,
-                                 sizeof(g_walkDisclosureLabel));
+            doc_concat_visible_text(node, g_walkDisclosureLabel,
+                                    sizeof(g_walkDisclosureLabel));
             char *lab = doc_arena_collapse(w, g_walkDisclosureLabel);
             if (!lab || lab[0] == '\0')
             {

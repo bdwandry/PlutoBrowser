@@ -4675,12 +4675,12 @@ static void css_autotest_tick(void)
 
 #if defined(PLUTO_NAV_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic repro for the
- * google.com navigation crash. Boots to the home page, presses A on the
- * Google speed-dial card through the REAL home-page input path, then
- * watches the navigation complete: state 2 (page rendered) with a live doc
- * is PASS; an error page for google.com FAILs. Verifies the OS is still
- * alive 10s later (the device errorlog overflow killed the task ~3s after
- * the nav). PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
+ * google.com navigation crash. Boots STRAIGHT to google.com (armed in the
+ * kEventInit handler — no home-page card steering), then watches the
+ * navigation complete: state 2 (page rendered) with a live doc is PASS; an
+ * error page for google.com FAILs. Verifies the OS is still alive 10s later
+ * (the device errorlog overflow killed the task ~3s after the nav).
+ * PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
 #ifdef PLUTO_NAV_AUTOTEST_ENGINE
@@ -4706,10 +4706,6 @@ static void nav_autotest_tick(void)
     }
     if (g_navTestPhase == 0)
     {
-        if (currentState != STATE_HOME)
-        {
-            return;
-        }
         if (NAV_AUTOTEST_ENGINE_VAL >= 0)
         {
             static int navEngineApplied = 0;
@@ -4727,28 +4723,10 @@ static void nav_autotest_tick(void)
                 navEngineApplied = 1;
             }
         }
-        /* The Google speed-dial card is bookmark #2 (index 2): Storage
-         * order is Bitmap Gallery(1), Google(2), ... Steer with crank. */
-        int target = 2;
-        if (home_page_selected_index() != target)
-        {
-            home_page_handle_crank(HOME_CRANK_STEP_PX);
-            return;
-        }
-        logger_log("[nav-autotest] on Google card, pressing A");
-        char *u = home_page_handle_input(1u << 5, NULL);
-        if (u)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", u);
-            pluto_free(u);
-            g_navTestPhase = 1;
-        }
-        else
-        {
-            logger_log("[nav-autotest] FAIL: A on Google card returned no URL");
-            g_navTestPhase = 3;
-        }
+        /* Navigation was armed directly at boot; just start watching. */
+        logger_log("[nav-autotest] waiting for direct google.com render");
+        g_navTestPhase = 1;
+        g_navTestFrames = 0;
         return;
     }
     if (g_navTestPhase == 1)
@@ -11888,9 +11866,15 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 #endif
 
 #if defined(PLUTO_NAV_AUTOTEST)
-        /* TEMPORARY (autotest builds, sim + device): leave the app on the
-         * home page — nav_autotest_tick() steers the Google speed-dial card
-         * and presses A through the real input path (see updateFrame). */
+        /* TEMPORARY (autotest builds, sim + device): navigate STRAIGHT to
+         * google.com at boot. The old seam cranked to the Google speed-dial
+         * card and pressed A; when the crank steering never landed on
+         * index 2 the run sat on the home page forever. Direct navigation
+         * removes that failure mode — nav_autotest_tick only watches. */
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 "https://google.com");
+        logger_log("[nav-autotest] direct navigation to https://google.com");
 #endif
 
         /* Keyboard instance. The port's contract:

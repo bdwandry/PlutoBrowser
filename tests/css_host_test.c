@@ -2577,6 +2577,111 @@ static void test_r71(void)
         }
         free_page(d);
     }
+
+    /* A combobox is not an accordion: Google's search textarea carries
+     * aria-expanded + aria-controls for its autocomplete panel. It must
+     * stay a DOC_BLOCK_INPUT_FIELD, not become a disclosure toggle. */
+    d = parse_page(
+        "<html><head><style>.collapse{height:0;overflow:hidden}</style></head><body>"
+        "<form role=\"search\"><textarea name=\"q\" aria-label=\"Search\" "
+        "aria-expanded=\"false\" aria-controls=\"suggestions\"></textarea></form>"
+        "<div id=\"suggestions\" class=\"collapse\"><p>SuggestionText</p></div>"
+        "</body></html>");
+    CHECK(d && !d->parseError, "r71: combobox textarea page parses");
+    {
+        int field = -1;
+        for (int i = 0; d && i < d->blockCount; i++)
+        {
+            if (d->blocks[i]->type == DOC_BLOCK_INPUT_FIELD &&
+                d->blocks[i]->name && strcmp(d->blocks[i]->name, "q") == 0)
+            {
+                field = i;
+            }
+        }
+        CHECK(field >= 0,
+              "r71: aria-expanded textarea remains an input field");
+        if (field >= 0)
+        {
+            CHECK(d->blocks[field]->toggleKey == NULL,
+                  "r71: combobox textarea is not a disclosure toggle");
+        }
+        CHECK(block_index(d, "SuggestionText") < 0,
+              "r71: closed combobox panel stays hidden");
+    }
+    free_page(d);
+
+    /* Inline <style> is not painted button text. Google's controls ship
+     * style blocks inside buttons; textContent would include the CSS, but
+     * the rendered label must not. */
+    d = parse_page(
+        "<html><body><button>VisibleButton"
+        "<style>.x{color:red}</style></button>"
+        "<p>AfterButton</p></body></html>");
+    CHECK(d && !d->parseError, "r71: styled button page parses");
+    {
+        int visible = 0;
+        int css_leak = 0;
+        for (int i = 0; d && i < d->blockCount; i++)
+        {
+            DocBlock *b = d->blocks[i];
+            if (b->type != DOC_BLOCK_INPUT_SUBMIT || !b->label)
+            {
+                continue;
+            }
+            if (strcmp(b->label, "VisibleButton") == 0)
+            {
+                visible = 1;
+            }
+            if (strstr(b->label, "color:red"))
+            {
+                css_leak = 1;
+            }
+        }
+        CHECK(visible, "r71: button keeps its visible label");
+        CHECK(!css_leak, "r71: button label excludes inline style text");
+    }
+    free_page(d);
+
+    /* Icon-only controls must not become a fabricated "Button" row. */
+    d = parse_page(
+        "<html><body><button type=\"button\" "
+        "aria-label=\"Add files, tools, and select a model\"></button>"
+        "<p>AfterIconButton</p></body></html>");
+    CHECK(d && !d->parseError, "r71: icon-only button page parses");
+    {
+        int submits = 0;
+        for (int i = 0; d && i < d->blockCount; i++)
+        {
+            if (d->blocks[i]->type == DOC_BLOCK_INPUT_SUBMIT)
+            {
+                submits++;
+            }
+        }
+        CHECK(submits == 0, "r71: icon-only button is not rendered as Button");
+        CHECK(block_index(d, "AfterIconButton") >= 0,
+              "r71: icon-only button does not consume following text");
+    }
+    free_page(d);
+
+    /* A form-only container border must not become a giant card frame. */
+    d = parse_page(
+        "<html><head><style>.searchbox{border:1px solid #000;"
+        "background:#eee}</style></head><body>"
+        "<div class=\"searchbox\"><input name=\"q\"></div>"
+        "</body></html>");
+    CHECK(d && !d->parseError, "r71: form-only box page parses");
+    {
+        int framed = 0;
+        for (int i = 0; d && i < d->decorCount; i++)
+        {
+            if (d->decor[i].border > 0)
+            {
+                framed++;
+            }
+        }
+        CHECK(framed == 0, "r71: form-only container border is suppressed");
+    }
+    free_page(d);
 }
 
 /* js_doc_close comes from jsbridge.c (linked). */
