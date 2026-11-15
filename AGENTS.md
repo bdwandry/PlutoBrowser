@@ -38,5 +38,6 @@ The MD5 hashes MUST match. If they don't, re-copy and verify again. Do NOT eject
 - **TERMINATE SIMULATOR IMMEDIATELY AFTER EVERY TEST.** Never leave simulator running. Never have more than one simulator process active. Kill it right after checking logs — do not wait. Use `kill -9 <PID>` (NOT `pkill` — it doesn't work on macOS for Playdate Simulator). Verify with `ps aux | grep -i "playdate simulator" | grep -v grep`.
 - Test in simulator first, then deploy to device
 - Recompile PDX every code edit before copying to device
-- Never run git commands — user handles all git operations
+- By default, never run Git commands — the user handles all Git operations.
+  - **Exception — "git push":** when the user tells you **"git push"**, Git is unlocked for the remainder of that session. Stage the current changes (`git add .`), commit them with a descriptive message, and push the current branch. This does not authorize force-pushes or branch switching.
 - Log everything — do NOT remove log statements unless user says to
