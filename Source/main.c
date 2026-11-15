@@ -3719,6 +3719,27 @@ static int ftIndex = -1;
 static unsigned ftFrames = 0;
 static int ftPhase = 0; /* 0=boot-wait, 1=running, 2=done */
 static int ftPass = 0, ftFail = 0;
+/* Seam hygiene: the matrix forces a per-site engine (and Full JS) into the
+ * SAVED settings. A run that ended on engine 0 (muJS) left every later
+ * launch unable to compile modern page scripts — bryanwandrych.com/projects
+ * sat on its "Loading projects…" status because site.js never ran. Remember
+ * the user's values when the matrix starts and put them back when it ends. */
+static int ftSavedJsEngine = -1;
+static int ftSavedJsEnabled = -1;
+static void fieldtest_restore_settings(void)
+{
+    if (ftSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", ftSavedJsEngine);
+    storage_set_setting_int("jsEnabled", ftSavedJsEnabled);
+    jsbridge_set_engine(ftSavedJsEngine);
+    storage_save();
+    logger_log("[fieldtest] restored saved jsEngine=%d jsEnabled=%d",
+               ftSavedJsEngine, ftSavedJsEnabled);
+    ftSavedJsEngine = -1;
+}
 /* Checkpoint file: macOS's AppKit automatic termination can kill the sim
  * mid-matrix (long idle stretches); state persists so a supervisor relaunch
  * RESUMES instead of restarting - the run stays one logical session. */
@@ -4062,6 +4083,11 @@ static void fieldtest_tick(void)
         {
             return;
         }
+        if (ftSavedJsEngine < 0)
+        {
+            ftSavedJsEngine = storage_setting_int("jsEngine");
+            ftSavedJsEnabled = storage_setting_int("jsEnabled");
+        }
         storage_set_setting_int("jsEnabled", 2); /* Full: external scripts */
         if (ftIndex < 0)
         {
@@ -4131,6 +4157,7 @@ static void fieldtest_tick(void)
                        "matrix %d/%d",
                        ftCount, ftPass, ftFail, ftPass, ftCount);
             fieldtest_state_clear();
+            fieldtest_restore_settings();
             ftPhase = 2;
             return;
         }
@@ -4196,6 +4223,25 @@ static unsigned g_ftdevFrames = 0;
 static int g_ftdevIndex = 0;
 static int g_ftdevEnd = FTDEV_MAX_SITES;
 static int g_ftdevEngine = 4;
+/* Same seam hygiene as the simulator matrix: the device run writes its
+ * engine + Full JS into the saved settings and must put the user's values
+ * back when the run completes. */
+static int g_ftdevSavedJsEngine = -1;
+static int g_ftdevSavedJsEnabled = -1;
+static void ftdev_restore_settings(void)
+{
+    if (g_ftdevSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_ftdevSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_ftdevSavedJsEnabled);
+    jsbridge_set_engine(g_ftdevSavedJsEngine);
+    storage_save();
+    logger_log("[ftdev] restored saved jsEngine=%d jsEnabled=%d",
+               g_ftdevSavedJsEngine, g_ftdevSavedJsEnabled);
+    g_ftdevSavedJsEngine = -1;
+}
 static int g_ftdevSiteFrames = 0;
 static int g_ftdevRetried = 0;
 static int g_ftdevSawPage = 0;
@@ -4372,6 +4418,7 @@ static void ftdev_advance(const char *verdict, const char *why)
         ftdev_write_text("ftdev_results.txt", line, 1);
         logger_log("[ftdev] done: PASS %d / FAIL %d (through site %d)",
                    g_ftdevPass, g_ftdevFail, g_ftdevIndex);
+        ftdev_restore_settings();
         g_ftdevPhase = 2;
         return;
     }
@@ -4450,6 +4497,11 @@ static void ftdev_tick(void)
                        g_ftdevIndex, g_ftdevEnd);
             g_ftdevPhase = 2;
             return;
+        }
+        if (g_ftdevSavedJsEngine < 0)
+        {
+            g_ftdevSavedJsEngine = storage_setting_int("jsEngine");
+            g_ftdevSavedJsEnabled = storage_setting_int("jsEnabled");
         }
         storage_set_setting_int("jsEnabled", 2); /* Full JS */
         storage_set_setting_int("jsEngine", g_ftdevEngine);
@@ -4683,6 +4735,24 @@ static void css_autotest_tick(void)
  * PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
+/* The optional engine force is a test override; restore the engine the user
+ * had saved when the run finishes (same leak the fieldtest seam had). */
+static int g_navSavedJsEngine = -1;
+static int g_navSavedJsEnabled = -1;
+static void nav_autotest_restore_settings(void)
+{
+    if (g_navSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_navSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_navSavedJsEnabled);
+    jsbridge_set_engine(g_navSavedJsEngine);
+    storage_save();
+    logger_log("[nav-autotest] restored jsEngine=%d jsEnabled=%d",
+               g_navSavedJsEngine, g_navSavedJsEnabled);
+    g_navSavedJsEngine = -1;
+}
 #ifdef PLUTO_NAV_AUTOTEST_ENGINE
 /* Optional engine force for the run: 0=muJS 1=Duktape 2=QuickJS 3=XS
  * (Moddable). Storage AND the live router are set before navigation; the
@@ -4697,6 +4767,10 @@ static void nav_autotest_tick(void)
 {
     if (g_navTestPhase == 3 || isRendering)
     {
+        if (g_navTestPhase == 3)
+        {
+            nav_autotest_restore_settings();
+        }
         return;
     }
     ++g_navTestFrames;
@@ -4711,6 +4785,8 @@ static void nav_autotest_tick(void)
             static int navEngineApplied = 0;
             if (!navEngineApplied)
             {
+                g_navSavedJsEngine = storage_setting_int("jsEngine");
+                g_navSavedJsEnabled = storage_setting_int("jsEnabled");
                 storage_set_setting_int("jsEngine", NAV_AUTOTEST_ENGINE_VAL);
                 jsbridge_set_engine(NAV_AUTOTEST_ENGINE_VAL);
                 if (storage_setting_int("jsEnabled") != 2)
@@ -11867,14 +11943,32 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 
 #if defined(PLUTO_NAV_AUTOTEST)
         /* TEMPORARY (autotest builds, sim + device): navigate STRAIGHT to
-         * google.com at boot. The old seam cranked to the Google speed-dial
-         * card and pressed A; when the crank steering never landed on
-         * index 2 the run sat on the home page forever. Direct navigation
-         * removes that failure mode — nav_autotest_tick only watches. */
+         * the target at boot. The default is google.com; a seam build can
+         * point it at another live page through tests/nav_autotest_url.h
+         * (URL literals cannot ride -D: "//" starts a preprocessor comment).
+         * The old seam cranked to the Google speed-dial card and pressed A;
+         * when the crank steering never landed on index 2 the run sat on the
+         * home page forever. Direct navigation removes that failure mode —
+         * nav_autotest_tick only watches. */
+#ifdef PLUTO_NAV_AUTOTEST_TARGET_FILE
+#include "../tests/nav_autotest_url.h"
+#define NAV_AUTOTEST_URL_STR PLUTO_NAV_AUTOTEST_URL_STR
+#else
+#define NAV_AUTOTEST_URL_STR "https://google.com"
+#endif
+#ifdef PLUTO_NAV_AUTOTEST_FULLJS
+        if (storage_setting_int("jsEnabled") != 2)
+        {
+            storage_set_setting_int("jsEnabled", 2);
+            logger_log("[nav-autotest] jsEnabled forced to 2 (Full)");
+        }
+        snapBypass = 1;
+#endif
         pendingNavUrlSet = 1;
         snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
-                 "https://google.com");
-        logger_log("[nav-autotest] direct navigation to https://google.com");
+                 NAV_AUTOTEST_URL_STR);
+        logger_log("[nav-autotest] direct navigation to %s",
+                   NAV_AUTOTEST_URL_STR);
 #endif
 
         /* Keyboard instance. The port's contract:
