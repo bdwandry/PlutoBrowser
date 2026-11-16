@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 5 /* v5: 32 spanning decorations + row-flex chips */
+#define SNAP_VERSION 7 /* v7: row/menu metrics + hidden disclosure panels */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0
@@ -464,6 +464,30 @@ static void w_block(SnapWriter *w, const DocBlock *b)
     /* SNAP v4: flex-row transport + R72 compact link-button metrics. */
     w_i32(w, b->flexRow);
     w_i32(w, b->flexItem);
+    /* SNAP v6: the row's composition inputs. Without these a reloaded
+     * snapshot loses justify-content/align-items and the pinned app bar
+     * collapses to the left instead of the author's space-between row. */
+    w_i32(w, b->flexJustify);
+    w_i32(w, b->flexCenter);
+    w_i32(w, b->flexPadL);
+    w_i32(w, b->flexPadR);
+    w_i32(w, b->flexPadT);
+    w_i32(w, b->flexPadB);
+    w_i32(w, b->menuPadL);
+    w_i32(w, b->menuPadR);
+    w_i32(w, b->menuPadT);
+    w_i32(w, b->menuPadB);
+    w_i32(w, b->menuBorder);
+    w_i32(w, b->menuRadius);
+    w_i32(w, b->menuGap);
+    w_i32(w, b->menuFontBig);
+    /* SNAP v7: closed disclosure panels ride the snapshot as hidden blocks,
+     * so a tap can expand the author's menu without raw HTML or a reparse. */
+    w_i32(w, b->dropdown);
+    w_i32(w, b->dropdownStart);
+    w_i32(w, b->dropdownEnd);
+    w_i32(w, b->panelHidden);
+    w_str(w, b->panelKey);
     w_i32(w, b->gapApplied);
     w_i32(w, b->btnPadL);
     w_i32(w, b->btnPadR);
@@ -589,6 +613,29 @@ static int r_block(SnapReader *r, DocArena *arena, DocBlock *b)
     b->menuButton = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
     b->flexRow = (unsigned short)r_i32(r); /* SNAP v4 */
     b->flexItem = (unsigned short)r_i32(r);
+    b->flexJustify = (unsigned char)r_i32(r); /* SNAP v6 */
+    b->flexCenter = (unsigned char)r_i32(r);
+    b->flexPadL = (unsigned char)r_i32(r);
+    b->flexPadR = (unsigned char)r_i32(r);
+    b->flexPadT = (unsigned char)r_i32(r);
+    b->flexPadB = (unsigned char)r_i32(r);
+    b->menuPadL = (unsigned char)r_i32(r);
+    b->menuPadR = (unsigned char)r_i32(r);
+    b->menuPadT = (unsigned char)r_i32(r);
+    b->menuPadB = (unsigned char)r_i32(r);
+    b->menuBorder = (unsigned char)r_i32(r);
+    b->menuRadius = (unsigned char)r_i32(r);
+    b->menuGap = (unsigned char)r_i32(r);
+    b->menuFontBig = (unsigned char)r_i32(r);
+    b->dropdown = (unsigned char)(r_i32(r) != 0); /* SNAP v7 */
+    b->dropdownStart = (unsigned char)(r_i32(r) != 0);
+    b->dropdownEnd = (unsigned char)(r_i32(r) != 0);
+    b->panelHidden = (unsigned char)(r_i32(r) != 0);
+    b->panelKey = r_str(r, arena);
+    if (b->panelKey[0] == '\0')
+    {
+        b->panelKey = NULL;
+    }
     b->gapApplied = (int)r_i32(r);
     b->btnPadL = (unsigned char)r_i32(r);
     b->btnPadR = (unsigned char)r_i32(r);
@@ -965,6 +1012,22 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
     {
         return 0;
     }
+    /* A snapshot is a fresh page load. Never overwrite the cached closed
+     * page with an interaction state left open by a toggle re-render: the
+     * next navigation would otherwise restore the menu/accordion open.
+     * Open dropdowns carry dropdownStart with panelHidden cleared, even
+     * when the walker had no panelKey to attach (the panel-open walk). */
+    for (int i = 0; i < doc->blockCount; i++)
+    {
+        const DocBlock *b = doc->blocks[i];
+        if (b && !b->panelHidden &&
+            (b->dropdownStart || b->dropdown ||
+             (b->panelKey && b->panelKey[0])))
+        {
+            logger_log("[snap] save skipped (open disclosure panel)");
+            return 0;
+        }
+    }
     /* R29: never persist an EMPTY render. A degenerate snapshot turns
      * any transient failure — bot-blocked fetch (LinkedIn-class 999),
      * stalled JS, interrupted load — into a PERMANENT one: the fast
@@ -1288,6 +1351,87 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
             doc->blocks[i] = b;
         }
         doc->blockCount = (int)blockCount;
+        /* A snapshot restores a fresh page load, never the interaction
+         * state that happened to be live when it was written. Older builds
+         * saved the menu open after a toggle re-render; canonicalize every
+         * disclosure panel back to its authored closed state here so a
+         * stale cache on the device heals without a re-fetch.
+         *
+         * Two shapes exist:
+         *  - closed-panel walk: blocks carry panelKey/panelHidden.
+         *  - panel-open walk (the poisoned cache): blocks carry only the
+         *    dropdown span markers, with no trigger key. Recover the key
+         *    from the nearest preceding disclosure trigger and mark the
+         *    whole span hidden, exactly like a normal closed-panel walk. */
+        {
+            int hasPanel = 0;
+            for (int i = 0; i < doc->blockCount; i++)
+            {
+                DocBlock *b = doc->blocks[i];
+                if (!b)
+                {
+                    continue;
+                }
+                if (b->panelKey && b->panelKey[0])
+                {
+                    b->panelHidden = 1;
+                    hasPanel = 1;
+                }
+                else if (b->dropdownStart)
+                {
+                    const char *key = NULL;
+                    for (int k = i - 1; k >= 0; k--)
+                    {
+                        const DocBlock *t = doc->blocks[k];
+                        if (t && t->toggleKey && t->toggleKey[0])
+                        {
+                            key = t->toggleKey;
+                            break;
+                        }
+                    }
+                    if (key)
+                    {
+                        int end = i;
+                        while (end + 1 < doc->blockCount &&
+                               !doc->blocks[end]->dropdownEnd)
+                        {
+                            end++;
+                        }
+                        for (int j = i; j <= end; j++)
+                        {
+                            DocBlock *p = doc->blocks[j];
+                            p->dropdown = 1;
+                            p->panelKey = doc_arena_strdup(arena, key);
+                            p->panelHidden = 1;
+                            p->flexRow = 0;
+                            p->flexItem = 0;
+                        }
+                        hasPanel = 1;
+                    }
+                }
+            }
+            if (hasPanel)
+            {
+                for (int i = 0; i < doc->blockCount; i++)
+                {
+                    DocBlock *b = doc->blocks[i];
+                    if (!b || !b->toggleKey || !b->toggleKey[0])
+                    {
+                        continue;
+                    }
+                    for (int j = 0; j < doc->blockCount; j++)
+                    {
+                        const DocBlock *p = doc->blocks[j];
+                        if (p && p->panelKey &&
+                            strcmp(p->panelKey, b->toggleKey) == 0)
+                        {
+                            b->toggleOpen = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         /* R29: a cached EMPTY render (the walker's 1-block "(Empty Web
          * Page)" placeholder — the shape a bot-blocked/failed first visit
          * produces) is not a usable page: treat it as a MISS and DELETE

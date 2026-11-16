@@ -348,6 +348,12 @@ typedef struct
      * absolute/fixed). Dropdown panels are laid out outside the sticky pin
      * span as a right-aligned overlay box; these bits mark the span. */
     unsigned char dropdown, dropdownStart, dropdownEnd;
+    /* Closed disclosure panel kept in the render model so a snapshot page
+     * can expand it without raw HTML/DOM: every block of the panel carries
+     * the trigger key and starts hidden; layout skips hidden panel blocks
+     * and draws the whole span as a dropdown once the key is open. */
+    const char *panelKey; /* arena trigger key ("xN"), NULL outside panels */
+    unsigned char panelHidden; /* 1 = panel is closed */
     /* form widget column hint (select field sizing) */
     int colWidth; /* <select size>/colgroup hint; -1 = absent */
     /* placeholder */

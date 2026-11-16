@@ -1228,8 +1228,9 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
     {
         x0 = contentX;
     }
-    logger_log("[bar] flex startY=%d n=%d pad=%d/%d/%d/%d totalW=%d rowH=%d gaps=%d",
-               rowStartY, n, padL, padR, padT, padB, totalW, rowH, gapsTotal);
+    logger_log("[bar] flex startY=%d n=%d pad=%d/%d/%d/%d totalW=%d rowH=%d gaps=%d just=%d ctr=%d",
+               rowStartY, n, padL, padR, padT, padB, totalW, rowH, gapsTotal,
+               justify, center);
     for (int g = 0; g < n; g++)
     {
         logger_log("[bar] flex g=%d id=%d items=%d..%d bbox=%d,%d..%d,%d gh=%d gw=%d",
@@ -1258,6 +1259,8 @@ static void flex_finish_row(FlexGroup *groups, int n, int rowStartY,
         }
         lm_shift_rects(groups[g].rectFrom,
                        groups[g].rectTo - groups[g].rectFrom, dx, dy);
+        logger_log("[bar] flex move g=%d x=%d y=%d w=%d h=%d", g,
+                   minX[g] + dx, minY[g] + dy, gw[g], gh[g]);
         cursor += gw[g];
         if (g + 1 < n)
         {
@@ -1349,6 +1352,15 @@ void layout_build(DocParseResult *doc)
                     fg->gap = block->gapApplied;
                 }
             }
+        }
+        /* Closed disclosure panels ride the document as hidden blocks so a
+         * snapshot page can expand them without raw HTML; skip their layout
+         * until the trigger flips panelHidden. */
+        if (block->panelHidden)
+        {
+            logger_log("[bar] panel closed key=%s",
+                       block->panelKey ? block->panelKey : "?");
+            continue;
         }
         /* Tasks.yieldCheck() call site: outside a task context the C port's
          * budget check is a no-op (build runs inside the navigation task on

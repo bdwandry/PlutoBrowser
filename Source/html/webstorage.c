@@ -252,16 +252,22 @@ static void ws_load_origin(WsStore *l)
                 size_t kLen = (size_t)(tab - q);
                 size_t vLen = qLen - (size_t)(tab - q) - 1;
                 char k[WS_KEY_MAX];
-                char v[WS_VAL_MAX * 2];
                 snprintf(k, sizeof(k), "%.*s", (int)(kLen > WS_KEY_MAX - 1 ? WS_KEY_MAX - 1 : kLen), q);
-                snprintf(v, sizeof(v), "%.*s", (int)(vLen > sizeof(v) - 1 ? (int)sizeof(v) - 1 : (int)vLen), tab + 1);
-                /* un-escape keeps persist/restore symmetric */
+                /* Un-escape the value slice in place: NUL at the line end,
+                 * unescape into one entry-sized buffer, restore the byte.
+                 * Avoids a second value-sized stack copy (the game-task
+                 * stack is ~62KB and the site's cache is 7.5KB). */
+                char *v = (char *)(tab + 1);
+                char saved = v[vLen];
+                v[vLen] = '\0';
                 char uk[WS_KEY_MAX];
-                char uv[WS_VAL_MAX];
                 ws_unescape(k, uk, sizeof(uk));
-                ws_unescape(v, uv, sizeof(uv));
+                /* Unescape directly into the entry's resident value buffer.
+                 * No second value-sized stack copy: the device's game-task
+                 * stack is ~62KB and the site's cache is 7.5KB. */
+                ws_unescape(v, l->entries[l->count].val, sizeof(l->entries[l->count].val));
+                v[vLen] = saved;
                 snprintf(l->entries[l->count].key, sizeof(l->entries[l->count].key), "%s", uk);
-                snprintf(l->entries[l->count].val, sizeof(l->entries[l->count].val), "%s", uv);
                 l->count++;
                 q = qEol ? qEol + 1 : g_raw + g_rawLen;
             }
@@ -369,19 +375,26 @@ static void ws_save_file(const char *why)
         len = prefix;
     }
     len += snprintf(g_img + len, sizeof(g_img) - len, "@%s\n", g_origin);
-    char line[WS_VAL_MAX * 2 + WS_KEY_MAX + 8];
     for (int i = 0; i < l->count; i++)
     {
         char ek[WS_KEY_MAX * 2];
-        char ev[WS_VAL_MAX * 2];
         ws_escape(l->entries[i].key, ek, sizeof(ek));
-        ws_escape(l->entries[i].val, ev, sizeof(ev));
-        len += snprintf(g_img + len, sizeof(g_img) - len, "%s\t%s\n", ek, ev);
+        len += snprintf(g_img + len, sizeof(g_img) - len, "%s\t", ek);
         if (len >= WS_RAW_MAX - 8)
         {
             len = WS_RAW_MAX - 8; /* hard cap, image stays parseable */
             break;
         }
+        /* Escape directly into the image: no value-sized stack copy. */
+        ws_escape(l->entries[i].val, g_img + len,
+                  sizeof(g_img) - (size_t)len);
+        len += (int)strlen(g_img + len);
+        if (len >= WS_RAW_MAX - 2)
+        {
+            len = WS_RAW_MAX - 2;
+            break;
+        }
+        g_img[len++] = '\n';
     }
     int tail = g_myEnd < g_rawLen ? g_rawLen - g_myEnd : 0;
     if (tail > 0 && len + tail <= WS_RAW_MAX - 1)
@@ -447,14 +460,20 @@ int ws_key(WsStore *s, int idx, char *out, size_t outMax)
     return 1;
 }
 
-int ws_get(WsStore *s, const char *key, char *out, size_t outMax)
+const char *ws_get_ptr(WsStore *s, const char *key)
 {
     int idx = s ? ws_find(s, key) : -1;
-    if (idx < 0)
+    return idx >= 0 ? s->entries[idx].val : NULL;
+}
+
+int ws_get(WsStore *s, const char *key, char *out, size_t outMax)
+{
+    const char *v = ws_get_ptr(s, key);
+    if (!v)
     {
         return 0;
     }
-    snprintf(out, outMax, "%s", s->entries[idx].val);
+    snprintf(out, outMax, "%s", v);
     return 1;
 }
 

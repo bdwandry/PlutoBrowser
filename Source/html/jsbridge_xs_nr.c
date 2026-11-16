@@ -6539,14 +6539,15 @@ static void xs_storage_getItem(xsMachine *the)
     {
         xsTypeError("out of memory");
     }
-    char out[WS_VAL_MAX];
-    int hit = ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value: xsString copies it immediately, so no
+     * 8KB stack buffer is needed on the device's ~62KB game-task stack. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
+    xsResult = v ? xsString(v) : xsNull;
     JFree(k);
-    xsResult = hit ? xsString(out) : xsNull;
 }
 
 static void xs_storage_setItem(xsMachine *the)
@@ -9792,8 +9793,9 @@ static int xs_try_bundler_split_src(JsBridge *b, const char *src, size_t len,
  * (router HTTP), so the shim is a tiny SCRIPT (one xs_run_tiny run, before
  * the page's first script) rather than C promise plumbing. Response shape
  * covers the handler's usage: .ok (200–299), .status, .text()/.json()
- * promise-returning. The signal object's timeoutms drives a setTimeout
- * reject (the real spec abort machinery is out of scope here). */
+ * promise-returning. The website's AbortSignal.timeout(15s) is advisory:
+ * the transport owns the hard deadline, because the device's GitHub
+ * requests take longer than 15s and must still build the cards. */
 static const char g_fetchShimSrc[] =
     "/* pluto fetch shim (engine-owned) */\n"
     "(function (g) {\n"
@@ -9837,12 +9839,8 @@ static const char g_fetchShimSrc[] =
     "          catch (hfe) {}\n"
     "        }\n"
     "      }\n"
-    "      if (ms > 0) {\n"
-    "        timer = setTimeout(function () {\n"
-    "          timer = 0;\n"
-    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
-    "        }, ms);\n"
-    "      }\n"
+    "      /* AbortSignal.timeout(15s) is advisory here: the transport owns\n"
+    "         the hard deadline; the device's GitHub reply can exceed 15s. */\n"
     "      xhr.onload = function () {\n"
     "        if (timer) { clearTimeout(timer); timer = 0; }\n"
     "        var st = this.status || 0;\n"

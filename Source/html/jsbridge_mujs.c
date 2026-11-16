@@ -2348,15 +2348,15 @@ static void js_ws_getItem(js_State *J)
     JsBridge *b = (JsBridge *)js_getcontext(J);
     BUDGET_OR_THROW(b);
     const char *k = js_tostring(J, 1);
-    char out[WS_VAL_MAX];
-    int hit = s && ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value; js_pushstring copies it immediately. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
-    if (hit)
+    if (v)
     {
-        js_pushstring(J, out);
+        js_pushstring(J, v);
     }
     else
     {

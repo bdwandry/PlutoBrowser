@@ -58,6 +58,7 @@
 #include "html/document.h"
 #include "html/css.h" /* Phase 1.5: stylesheet-scan API + caps */
 #include "html/jsbridge.h"
+#include "html/webstorage.h"
 #include "html/jsbridge_internal.h" /* Forms-Phase 3: the shared validity layer */
 #include "html/jsext.h"
 #include "html/sdisco.h" /* the script-derived submission routes (no site data) */
@@ -549,6 +550,29 @@ static void view_menu_callback(void *ud)
     }
 }
 
+static void menu_reload(void *ud)
+{
+    (void)ud;
+    if (!currentUrlObj || !currentUrlObj->normalized[0] ||
+        strncmp(currentUrlObj->scheme, "about", 5) == 0)
+    {
+        return;
+    }
+    snapBypass = 1;
+    /* The website caches its GitHub payload in localStorage. A hard reload
+     * must mean "go to GitHub again", not replay that payload, so drop this
+     * origin's webstorage too. Normal navigation keeps it (the site's own
+     * cache is part of how the page is programmed). */
+    ws_clear(ws_local());
+    pluto_snap_invalidate(currentUrlObj->normalized,
+                          (int)currentBrowseMode);
+    pendingNavUrlSet = 1;
+    snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+             currentUrlObj->normalized);
+    logger_log("[nav] hard reload: %s (snapshot bypass)",
+               currentUrlObj->normalized);
+}
+
 static void update_system_menu(void)
 {
     pd->system->removeAllMenuItems();
@@ -558,9 +582,10 @@ static void update_system_menu(void)
         strcmp(currentUrlObj->scheme, "about") != 0)
     {
         int initial = (currentBrowseMode == MODE_READER) ? 0 : 1;
-        g_viewMenuItem = pd->system->addOptionsMenuItem(
+        g_viewMenuItem =        pd->system->addOptionsMenuItem(
             "View", k_viewOptions, 2, view_menu_callback, NULL);
         pd->system->setMenuItemValue(g_viewMenuItem, initial);
+        pd->system->addMenuItem("Reload", menu_reload, NULL);
     }
     pd->system->addMenuItem("Settings", menu_settings, NULL);
     pd->system->addMenuItem("History", menu_history, NULL);
@@ -4735,6 +4760,9 @@ static void css_autotest_tick(void)
  * PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+static int g_navTestReloaded = 0;
+#endif
 /* The optional engine force is a test override; restore the engine the user
  * had saved when the run finishes (same leak the fieldtest seam had). */
 static int g_navSavedJsEngine = -1;
@@ -4811,6 +4839,14 @@ static void nav_autotest_tick(void)
         {
             logger_log("[nav-autotest] PASS: google.com rendered (title=%.40s, "
                        "%u frames)", pageTitle, g_navTestFrames);
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+            if (!g_navTestReloaded)
+            {
+                g_navTestReloaded = 1;
+                logger_log("[nav-autotest] forcing cache-bypassed reload");
+                menu_reload(NULL);
+            }
+#endif
             g_navTestPhase = 2;
             g_navTestFrames = 0;
         }
@@ -7487,11 +7523,65 @@ static int disclosure_try_page_toggle(const char *dkey, int idx, int wantOpen)
     return 1;
 }
 
+/* Snapshot pages carry no raw HTML or DOM, so the normal toggle re-render
+ * cannot run. A closed disclosure panel is still in the render model as
+ * hidden blocks (panelKey/panelHidden), so flip that span and rebuild the
+ * layout locally — no network, parse, JS, or re-render task. */
+static int snapshot_toggle_panel(const char *dkey)
+{
+    if (!currentDoc || !dkey || !dkey[0])
+    {
+        return 0;
+    }
+    int found = 0;
+    int closed = 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            found = 1;
+            closed = b->panelHidden;
+            break;
+        }
+    }
+    if (!found)
+    {
+        return 0;
+    }
+    int open = closed ? 1 : 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            b->panelHidden = open ? 0 : 1;
+        }
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            b->toggleOpen = open;
+        }
+    }
+    logger_log("[toggle] snapshot key=%s open=%d (layout rebuild)", dkey, open);
+    layout_build(currentDoc);
+    return 1;
+}
+
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
 static void toggle_details(const char *dkey)
 {
-    if (!currentDoc || !currentDoc->rawHtml || !currentDoc->rawHtml[0] || isRendering)
+    if (!currentDoc || isRendering)
     {
+        return;
+    }
+    if (!currentDoc->rawHtml || !currentDoc->rawHtml[0])
+    {
+        if (snapshot_toggle_panel(dkey))
+        {
+            return;
+        }
+        logger_log("[toggle] key=%s ignored (snapshot, no panel blocks)",
+                   dkey ? dkey : "?");
         return;
     }
     /* R71: "xN" keys belong to ARIA disclosure widgets, "dN" to <details>. */

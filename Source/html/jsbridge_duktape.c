@@ -2337,15 +2337,15 @@ static duk_ret_t duk_storage_getItem(duk_context *ctx)
 {
     WsStore *s = duk_storage_of(ctx);
     const char *k = duk_to_string(ctx, 0);
-    char out[WS_VAL_MAX];
-    int hit = s && ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value; duk_push_string copies it immediately. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
-    if (hit)
+    if (v)
     {
-        duk_push_string(ctx, out);
+        duk_push_string(ctx, v);
     }
     else
     {
@@ -2620,12 +2620,8 @@ static const char *g_dukFetchShimSrc =
     "          catch (hfe) {}\n"
     "        }\n"
     "      }\n"
-    "      if (ms > 0) {\n"
-    "        timer = setTimeout(function () {\n"
-    "          timer = 0;\n"
-    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
-    "        }, ms);\n"
-    "      }\n"
+    "      /* AbortSignal.timeout(15s) is advisory here: the transport owns\n"
+    "         the hard deadline; the device's GitHub reply can exceed 15s. */\n"
     "      xhr.onload = function () {\n"
     "        if (timer) { clearTimeout(timer); timer = 0; }\n"
     "        var st = this.status || 0;\n"

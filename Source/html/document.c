@@ -1380,7 +1380,8 @@ enum
     WX_PSEUDO_END,   /* CSS ::after content: emit after the subtree */
     WX_DECOR_END,    /* R71: close a spanning box decoration (border/bg) */
     WX_PIN_END,      /* R71: close a sticky app-bar span */
-    WX_DROPDOWN_END  /* R71: close an out-of-flow disclosure panel span */
+    WX_DROPDOWN_END, /* R71: close an out-of-flow disclosure panel span */
+    WX_PANEL_END     /* R71: close a closed disclosure panel span */
 };
 
 typedef struct ExitCtx
@@ -1427,6 +1428,8 @@ typedef struct ExitCtx
     unsigned char decorPadL, decorPadR, decorPadT, decorPadB;
     int dropdownStart; /* R71 dropdown panel: first block index */
     int dropdownSaved; /* R71 dropdown panel: outer dropdown depth */
+    int panelStart;      /* R71 closed disclosure panel: first block */
+    const char *panelKey; /* R71 closed disclosure panel: trigger key */
 } ExitCtx;
 
 /* Active row-flex scope. Direct children are identified by climbing the
@@ -7600,6 +7603,45 @@ static void run_exit(Walker *w, ExitCtx *x)
         w->dropdownDepth = x->dropdownSaved;
         break;
     }
+    case WX_PANEL_END:
+    {
+        flush_current_block(w);
+        int ps = x->panelStart;
+        if (ps >= 0 && w->doc->blockCount > ps)
+        {
+            /* The panel is addressed by its DOM id, but the tap/toggle lane
+             * uses the trigger's positional "xN" key. Map id -> registration
+             * order here so hidden blocks carry the same key as the trigger. */
+            char keybuf[16];
+            const char *rawKey = x->panelKey ? x->panelKey : "";
+            const char *key = rawKey;
+            for (int i = 0; i < w->disclosureCount; i++)
+            {
+                if (strcmp(w->disclosureIds[i], rawKey) == 0)
+                {
+                    snprintf(keybuf, sizeof(keybuf), "x%d", i + 1);
+                    key = keybuf;
+                    break;
+                }
+            }
+            key = doc_arena_str(w, key);
+            for (int i = ps; i < w->doc->blockCount; i++)
+            {
+                DocBlock *pb = w->doc->blocks[i];
+                pb->dropdown = 1;
+                pb->panelKey = key;
+                pb->panelHidden = 1;
+                pb->flexRow = 0;
+                pb->flexItem = 0;
+            }
+            w->doc->blocks[ps]->dropdownStart = 1;
+            w->doc->blocks[w->doc->blockCount - 1]->dropdownEnd = 1;
+            logger_log("[bar] closed panel key=%s blocks=%d..%d", key, ps,
+                       w->doc->blockCount - 1);
+        }
+        w->dropdownDepth = x->dropdownSaved;
+        break;
+    }
     case WX_PIN_END:
     {
         /* R71: mark the sticky container's block span for the pinned
@@ -7866,6 +7908,16 @@ static void walk_node_impl(Walker *w, const DomNode *node)
             walk_disclosure_find(w, panelId, &panelOpen);
         }
     }
+    /* A trigger earlier in the document can own this panel even while the
+     * panel's closed-state CSS hides it. Closed panels are still walked:
+     * their blocks stay in the model flagged hidden, so a snapshot page
+     * (no raw HTML/DOM) can expand them later without a reparse. */
+    int panelControlled = 0;
+    if (w->doc && w->doc->_css && !w->cell && panelId && panelId[0])
+    {
+        panelControlled = walk_disclosure_find(w, panelId, &panelOpen);
+    }
+    int panelClosed = panelControlled && !panelOpen;
     /* CSS (roadmap #2): resolve the element's <style>-rule matches once.
      * display:none/visibility:hidden suppresses the element AND its subtree
      * (identical semantics to the hidden attribute). */
@@ -7943,7 +7995,7 @@ static void walk_node_impl(Walker *w, const DomNode *node)
             return;
         }
     }
-    else if ((cssHidden && !panelOpen &&
+    else if ((cssHidden && !panelOpen && !panelClosed &&
               !walk_disclosure_open_below(w, node)) ||
              cssOverlay || cssA11y)
     {
@@ -7963,6 +8015,23 @@ static void walk_node_impl(Walker *w, const DomNode *node)
         {
             dx->dropdownStart = w->doc->blockCount;
             dx->dropdownSaved = w->dropdownDepth;
+            w->dropdownDepth++;
+        }
+    }
+    /* R71 — CLOSED DISCLOSURE PANEL. Walk the hidden panel anyway so its
+     * blocks ride the render model/snapshot. The exit marks the span
+     * hidden + dropdown; opening the trigger simply clears panelHidden
+     * and rebuilds layout (snapshot pages have no DOM/raw HTML). */
+    if (panelClosed && panelId && panelId[0] && !w->dropdownDepth &&
+        (cssBits & CSS_F_OOF) && walk_disclosure_menu(w, panelId))
+    {
+        flush_current_block(w);
+        ExitCtx *px = push_exit(w, WX_PANEL_END);
+        if (px)
+        {
+            px->panelStart = w->doc->blockCount;
+            px->panelKey = panelId;
+            px->dropdownSaved = w->dropdownDepth;
             w->dropdownDepth++;
         }
     }
