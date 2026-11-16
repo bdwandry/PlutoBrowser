@@ -38,7 +38,7 @@
  *       text-transform/capitalize        → case flags (walker-applied)
  *       white-space pre/pre-line/nowrap  → spacing flags (walker+layout)
  *       overflow-wrap:break-word / word-break:break-all → mid-word split
- *       list-style-type                  → marker codes (walker+layout)
+ *       list-style(-type)                → marker codes (walker+layout)
  *       border / border-width / border-style → block outline (layout)
  *       margin/padding (+ all side longhands) → block spacing (halved px)
  *       width (tables)                   → table width override
@@ -48,10 +48,13 @@
  *       font-size (keywords/px/%/em)     → small/big buckets
  *       text-indent                      → block indent (no margin wins)
  *       color white-ish                  → invert flag
- *     Positioning (Phase 4 policy, revised R66): static flows.
- *     relative and sticky keep flowing (sticky chrome scrolls away
- *     instead of eating the 240px viewport — the honest 1-bit
- *     mapping). absolute/fixed ALSO flow in document order: dropping
+ *     Positioning (Phase 4 policy, revised R66/R71): static flows.
+ *     relative keeps flowing. A top-anchored position:sticky element
+ *     (top:0-ish) becomes a PINNED app bar: it stays in flow at the
+ *     top of the page and, once scrolled past, its span is re-drawn at
+ *     the content-viewport top (real sticky behavior — modern site
+ *     headers). Sticky without a top offset scrolls away like
+ *     relative. absolute/fixed ALSO flow in document order: dropping
  *     every offset/z-index box deleted the primary header/search box
  *     on modern sites (bing.com/google.com), leaving only footer
  *     menus. The one out-of-flow drop is the off-screen hiding recipe
@@ -86,8 +89,11 @@
  *       align-items:center propagates cross-axis centering to the
  *         container's child blocks through the CSS-exit carry; the
  *         container's own text block centers too (it is an anonymous
- *         flex item). align-self:center centers only its own element
- *         (element-scoped carry, stripped at the boundary). Both are
+ *         flex item). Sticky app-bar items are the exception: their
+ *         cross axis is the bar row's height, so the carry does not
+ *         become their text alignment. align-self:center centers only
+ *         its own element (element-scoped carry, stripped at the
+ *         boundary). Both are
  *         gated on the container actually being flex/grid — on a
  *         block box the name is inspected but inert (CSS-correct).
  *         flex-direction (row/column/…): the flow already IS the
@@ -153,7 +159,9 @@
 #define CSS_MAX_SELECTORS 4         /* comma-group entries kept per rule */
 #define CSS_SELECTOR_MAX 96         /* chars per complex selector */
 #define CSS_COMPOUND_MAX 8          /* compound parts per complex selector */
-#define CSS_MAX_PROPS 8             /* declarations kept per rule */
+#define CSS_MAX_PROPS 24            /* declarations kept per rule (shorthand
+                                      * expansion can consume many slots;
+                                      * display/position must survive) */
 
 /* 1-bit viewport for @media evaluation (device geometry). */
 #define CSS_VIEWPORT_W 400
@@ -215,6 +223,12 @@
  * Only THIS signal drops an out-of-flow subtree — an ordinary fixed/absolute
  * header or search box flows in document order instead of vanishing. */
 #define CSS_F_OFFSCREEN 0x40000000
+/* R71: position:sticky. The walker turns a top-anchored sticky element into
+ * a PINNED app bar: it keeps its document-flow position AND the layout
+ * re-draws its item span at the top of the content viewport once the flow
+ * position scrolls past it (real sticky semantics; position:fixed keeps the
+ * established flow-in-order policy). */
+#define CSS_F_STICKY 0x80000000u
 #define CSS_INHERIT_MASK (CSS_F_BOLD | CSS_F_ITALIC | CSS_F_UNDERLINE | \
                           CSS_F_STRIKE | CSS_F_INVERT | CSS_F_UPPER | \
                           CSS_F_LOWER | CSS_F_CAP | CSS_F_PRE | \

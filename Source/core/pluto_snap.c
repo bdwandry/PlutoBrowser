@@ -181,7 +181,7 @@ static char *r_str(SnapReader *r, DocArena *arena)
 #define SNAP_MAGIC_1 'L'
 #define SNAP_MAGIC_2 'S'
 #define SNAP_MAGIC_3 '1'
-#define SNAP_VERSION 2 /* v2: DocBlock.border (CSS borders) */
+#define SNAP_VERSION 7 /* v7: row/menu metrics + hidden disclosure panels */
 #define SNAP_HEADER_BYTES 12
 
 /* snap_key: 64-bit FNV-1a of url, mixed with mode + version salt. Returns 0
@@ -458,6 +458,42 @@ static void w_block(SnapWriter *w, const DocBlock *b)
     w_i32(w, b->invert);
     w_i32(w, b->border); /* SNAP v2: CSS border width px */
     w_i32(w, b->bgGray); /* SNAP v2: CSS background luminance */
+    w_i32(w, b->pinStart); /* SNAP v3: sticky app-bar span flags */
+    w_i32(w, b->pinEnd);
+    w_i32(w, b->menuButton); /* SNAP v3: disclosure menu button */
+    /* SNAP v4: flex-row transport + R72 compact link-button metrics. */
+    w_i32(w, b->flexRow);
+    w_i32(w, b->flexItem);
+    /* SNAP v6: the row's composition inputs. Without these a reloaded
+     * snapshot loses justify-content/align-items and the pinned app bar
+     * collapses to the left instead of the author's space-between row. */
+    w_i32(w, b->flexJustify);
+    w_i32(w, b->flexCenter);
+    w_i32(w, b->flexPadL);
+    w_i32(w, b->flexPadR);
+    w_i32(w, b->flexPadT);
+    w_i32(w, b->flexPadB);
+    w_i32(w, b->menuPadL);
+    w_i32(w, b->menuPadR);
+    w_i32(w, b->menuPadT);
+    w_i32(w, b->menuPadB);
+    w_i32(w, b->menuBorder);
+    w_i32(w, b->menuRadius);
+    w_i32(w, b->menuGap);
+    w_i32(w, b->menuFontBig);
+    /* SNAP v7: closed disclosure panels ride the snapshot as hidden blocks,
+     * so a tap can expand the author's menu without raw HTML or a reparse. */
+    w_i32(w, b->dropdown);
+    w_i32(w, b->dropdownStart);
+    w_i32(w, b->dropdownEnd);
+    w_i32(w, b->panelHidden);
+    w_str(w, b->panelKey);
+    w_i32(w, b->gapApplied);
+    w_i32(w, b->btnPadL);
+    w_i32(w, b->btnPadR);
+    w_i32(w, b->btnPadT);
+    w_i32(w, b->btnPadB);
+    w_i32(w, b->btnRadius);
     w_i32(w, b->inlineCount);
     for (int i = 0; i < b->inlineCount; i++)
     {
@@ -572,6 +608,40 @@ static int r_block(SnapReader *r, DocArena *arena, DocBlock *b)
     b->invert = (int)r_i32(r);
     b->border = (int)r_i32(r); /* SNAP v2 (v1 streams rejected by version) */
     b->bgGray = (int)r_i32(r); /* SNAP v2 */
+    b->pinStart = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
+    b->pinEnd = (unsigned char)(r_i32(r) != 0);
+    b->menuButton = (unsigned char)(r_i32(r) != 0); /* SNAP v3 */
+    b->flexRow = (unsigned short)r_i32(r); /* SNAP v4 */
+    b->flexItem = (unsigned short)r_i32(r);
+    b->flexJustify = (unsigned char)r_i32(r); /* SNAP v6 */
+    b->flexCenter = (unsigned char)r_i32(r);
+    b->flexPadL = (unsigned char)r_i32(r);
+    b->flexPadR = (unsigned char)r_i32(r);
+    b->flexPadT = (unsigned char)r_i32(r);
+    b->flexPadB = (unsigned char)r_i32(r);
+    b->menuPadL = (unsigned char)r_i32(r);
+    b->menuPadR = (unsigned char)r_i32(r);
+    b->menuPadT = (unsigned char)r_i32(r);
+    b->menuPadB = (unsigned char)r_i32(r);
+    b->menuBorder = (unsigned char)r_i32(r);
+    b->menuRadius = (unsigned char)r_i32(r);
+    b->menuGap = (unsigned char)r_i32(r);
+    b->menuFontBig = (unsigned char)r_i32(r);
+    b->dropdown = (unsigned char)(r_i32(r) != 0); /* SNAP v7 */
+    b->dropdownStart = (unsigned char)(r_i32(r) != 0);
+    b->dropdownEnd = (unsigned char)(r_i32(r) != 0);
+    b->panelHidden = (unsigned char)(r_i32(r) != 0);
+    b->panelKey = r_str(r, arena);
+    if (b->panelKey[0] == '\0')
+    {
+        b->panelKey = NULL;
+    }
+    b->gapApplied = (int)r_i32(r);
+    b->btnPadL = (unsigned char)r_i32(r);
+    b->btnPadR = (unsigned char)r_i32(r);
+    b->btnPadT = (unsigned char)r_i32(r);
+    b->btnPadB = (unsigned char)r_i32(r);
+    b->btnRadius = (unsigned char)r_i32(r);
     b->inlineCount = (int)r_i32(r);
     if (b->inlineCount < 0 || b->inlineCount > DOC_MAX_INLINES)
     {
@@ -935,11 +1005,57 @@ static int snap_skip_url(const char *url)
     return 0;
 }
 
+/* ARIA disclosures (aria-expanded + aria-controls) are script-owned: their
+ * trigger text, state and panel visibility are commonly swapped by the
+ * page's own click handler. A snapshot is a static render model and has no
+ * live DOM, so it cannot run that handler. Serving one freezes the authored
+ * label (e.g. "Menu" never becomes "Close"). Native <details> disclosures
+ * do not use toggleKey and remain snapshot-safe. */
+static int snap_has_scripted_disclosure(const DocParseResult *doc)
+{
+    if (!doc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < doc->blockCount; i++)
+    {
+        const DocBlock *b = doc->blocks[i];
+        if (b && b->toggleKey && b->toggleKey[0] == 'x')
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
                      unsigned long epoch)
 {
     if (!doc || doc->parseError || snap_skip_url(url))
     {
+        return 0;
+    }
+    /* A snapshot is a fresh page load. Never overwrite the cached closed
+     * page with an interaction state left open by a toggle re-render: the
+     * next navigation would otherwise restore the menu/accordion open.
+     * Open dropdowns carry dropdownStart with panelHidden cleared, even
+     * when the walker had no panelKey to attach (the panel-open walk). */
+    for (int i = 0; i < doc->blockCount; i++)
+    {
+        const DocBlock *b = doc->blocks[i];
+        if (b && !b->panelHidden &&
+            (b->dropdownStart || b->dropdown ||
+             (b->panelKey && b->panelKey[0])))
+        {
+            logger_log("[snap] save skipped (open disclosure panel)");
+            return 0;
+        }
+    }
+    if (snap_has_scripted_disclosure(doc))
+    {
+        /* Its click handler owns the label/state, so a restored snapshot
+         * would replay only the authored closed state forever. */
+        logger_log("[snap] skip save (scripted disclosure): %s", url);
         return 0;
     }
     /* R29: never persist an EMPTY render. A degenerate snapshot turns
@@ -1030,6 +1146,36 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
     {
         w_block(&w, doc->blocks[i]);
     }
+    /* R71 spanning decorations (SNAP v3). Only COMPLETE spans persist: an
+     * element whose content was entirely hidden leaves an unfinished entry
+     * (startBlock = -1), and a stream carrying one would fail the load
+     * validation and turn every such page into a cache miss. */
+    {
+        int decorValid = 0;
+        for (int i = 0; i < doc->decorCount && i < DOC_BOX_DECOR_MAX; i++)
+        {
+            if (doc->decor[i].startBlock >= 0 &&
+                doc->decor[i].endBlock >= doc->decor[i].startBlock)
+            {
+                decorValid++;
+            }
+        }
+        w_i32(&w, decorValid);
+        for (int i = 0; i < doc->decorCount && i < DOC_BOX_DECOR_MAX && !w.err;
+             i++)
+        {
+            if (doc->decor[i].startBlock < 0 ||
+                doc->decor[i].endBlock < doc->decor[i].startBlock)
+            {
+                continue;
+            }
+        w_i32(&w, doc->decor[i].startBlock);
+        w_i32(&w, doc->decor[i].endBlock);
+        w_i32(&w, doc->decor[i].border);
+        w_i32(&w, doc->decor[i].bgGray);
+        w_i32(&w, doc->decor[i].radius);
+        }
+    }
     for (int i = 0; i < doc->linkCount && !w.err; i++)
     {
         w_link(&w, doc->links[i]);
@@ -1066,6 +1212,7 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
                                 unsigned long ttlSeconds)
 {
     unsigned char *image = NULL;
+    int bypass = 0;
     if (!url || !url[0] || snap_skip_url(url))
     {
         return NULL;
@@ -1235,6 +1382,87 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
             doc->blocks[i] = b;
         }
         doc->blockCount = (int)blockCount;
+        /* A snapshot restores a fresh page load, never the interaction
+         * state that happened to be live when it was written. Older builds
+         * saved the menu open after a toggle re-render; canonicalize every
+         * disclosure panel back to its authored closed state here so a
+         * stale cache on the device heals without a re-fetch.
+         *
+         * Two shapes exist:
+         *  - closed-panel walk: blocks carry panelKey/panelHidden.
+         *  - panel-open walk (the poisoned cache): blocks carry only the
+         *    dropdown span markers, with no trigger key. Recover the key
+         *    from the nearest preceding disclosure trigger and mark the
+         *    whole span hidden, exactly like a normal closed-panel walk. */
+        {
+            int hasPanel = 0;
+            for (int i = 0; i < doc->blockCount; i++)
+            {
+                DocBlock *b = doc->blocks[i];
+                if (!b)
+                {
+                    continue;
+                }
+                if (b->panelKey && b->panelKey[0])
+                {
+                    b->panelHidden = 1;
+                    hasPanel = 1;
+                }
+                else if (b->dropdownStart)
+                {
+                    const char *key = NULL;
+                    for (int k = i - 1; k >= 0; k--)
+                    {
+                        const DocBlock *t = doc->blocks[k];
+                        if (t && t->toggleKey && t->toggleKey[0])
+                        {
+                            key = t->toggleKey;
+                            break;
+                        }
+                    }
+                    if (key)
+                    {
+                        int end = i;
+                        while (end + 1 < doc->blockCount &&
+                               !doc->blocks[end]->dropdownEnd)
+                        {
+                            end++;
+                        }
+                        for (int j = i; j <= end; j++)
+                        {
+                            DocBlock *p = doc->blocks[j];
+                            p->dropdown = 1;
+                            p->panelKey = doc_arena_strdup(arena, key);
+                            p->panelHidden = 1;
+                            p->flexRow = 0;
+                            p->flexItem = 0;
+                        }
+                        hasPanel = 1;
+                    }
+                }
+            }
+            if (hasPanel)
+            {
+                for (int i = 0; i < doc->blockCount; i++)
+                {
+                    DocBlock *b = doc->blocks[i];
+                    if (!b || !b->toggleKey || !b->toggleKey[0])
+                    {
+                        continue;
+                    }
+                    for (int j = 0; j < doc->blockCount; j++)
+                    {
+                        const DocBlock *p = doc->blocks[j];
+                        if (p && p->panelKey &&
+                            strcmp(p->panelKey, b->toggleKey) == 0)
+                        {
+                            b->toggleOpen = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         /* R29: a cached EMPTY render (the walker's 1-block "(Empty Web
          * Page)" placeholder — the shape a bot-blocked/failed first visit
          * produces) is not a usable page: treat it as a MISS and DELETE
@@ -1246,6 +1474,29 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
                        url);
             pluto_snap_invalidate(url, mode);
             goto fail;
+        }
+    }
+    /* R71 spanning decorations (SNAP v3). */
+    {
+        long decorCount = r_i32(&r);
+        if (r.err || decorCount < 0 || decorCount > DOC_BOX_DECOR_MAX)
+        {
+            goto fail;
+        }
+        doc->decorCount = (int)decorCount;
+        for (int i = 0; i < doc->decorCount; i++)
+        {
+            DocBoxDecor *d = &doc->decor[i];
+            d->startBlock = (int)r_i32(&r);
+            d->endBlock = (int)r_i32(&r);
+            d->border = (int)r_i32(&r);
+            d->bgGray = (int)r_i32(&r);
+            d->radius = (int)r_i32(&r);
+            if (r.err || d->startBlock < 0 || d->endBlock < d->startBlock ||
+                d->endBlock >= (int)blockCount)
+            {
+                goto fail;
+            }
         }
     }
     if (linkCount > 0)
@@ -1311,13 +1562,25 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
          * render a partially-restored page */
     goto fail;
     }
+    if (snap_has_scripted_disclosure(doc))
+    {
+        /* Old entries from before this policy must heal themselves: they
+         * look complete but their disclosure handlers can never run. */
+        logger_log("[snap] bypass scripted disclosure (needs live JS): %s",
+                   url);
+        bypass = 1;
+    goto fail;
+    }
     pluto_spill_store_close(h);
     PLUTO_FREE(image);
     logger_log("[snap] hit url=%s blocks=%ld links=%ld", url, blockCount, linkCount);
     return doc;
 
 fail:
-    logger_log("[snap] load failed (corrupt entry)");
+    if (!bypass)
+    {
+        logger_log("[snap] load failed (corrupt entry)");
+    }
     pluto_spill_store_close(h);
     PLUTO_FREE(image);
     if (doc)
@@ -1341,6 +1604,10 @@ fail:
         doc_arena_free_all(arena);
         PLUTO_FREE(doc->_arena);
         PLUTO_FREE(doc);
+    }
+    if (bypass)
+    {
+        pluto_snap_invalidate(url, mode);
     }
     return NULL;
 }

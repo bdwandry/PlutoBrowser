@@ -25,7 +25,7 @@ Unlike single-purpose feed readers, Pluto Browser lets you navigate to any web a
 | **B + Right** | **Forward** in page history (while address bar is armed). |
 | **A + Left** | **Back** in page history (while on a page). |
 | **A + Right** | **Forward** in page history (while on a page). |
-| **Menu** | Open Playdate system menu (Home-Page, View mode, Settings, History, Clear Cookies). |
+| **Menu** | Open Playdate system menu. Settings is always available; web pages also get Home-Page and Reload. |
 
 ### Reader Mode
 

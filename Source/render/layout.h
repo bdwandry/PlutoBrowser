@@ -57,7 +57,10 @@ typedef enum
     LRI_PLACEHOLDER,
     LRI_METER,
     LRI_BOX_FRAME,
-    LRI_SHADE /* CSS gray background: line-dithered fill (x,y,w,h + shade) */
+    LRI_SHADE, /* CSS gray background: line-dithered fill (x,y,w,h + shade) */
+    LRI_MENU_BUTTON, /* R71: compact hamburger disclosure button */
+    LRI_PIN_BAR, /* R71: full-width sticky app-bar fill + bottom rule */
+    LRI_DROPDOWN_PANEL /* R71: right-aligned disclosure panel box */
 } LayoutItemType;
 
 /* Per-rect metadata the reference attached to LinkManager rect tables
@@ -121,6 +124,11 @@ typedef struct LayoutItem
     /* LRI_BOX_FRAME (uses x1..y2 above) */
     const char *toggleKey; /* borrowed or NULL */
     int toggleOpen;
+    int radius; /* R71: rounded-corner px (0 = square frame) */
+
+    /* LRI_MENU_BUTTON box metrics (full CSS px; see DocBlock.menu*) */
+    int menuPadL, menuPadR, menuPadT, menuPadB;
+    int menuBorder, menuGap;
 
     /* LRI_SHADE */
     int shade; /* 1 = 25% lines, 2 = 50% lines */
@@ -186,6 +194,14 @@ void layout_set_selected_input(const LayoutItem *item);
 int layout_get_on_demand_consumed(void);
 void layout_clear_on_demand_consumed(void);
 const char *layout_get_hovered_image_src(void);
+
+/* R71: map a screen point to a PAGE Y for hit testing. Inside the pinned
+ * app-bar band the visible header is the sticky copy, so the mapped page Y
+ * is the header's own flow position (its link rects), not the content that
+ * scrolled underneath it. Inside an open out-of-flow dropdown, the point is
+ * mapped to the panel's page rows; outside the panel it remains
+ * screenY + scrollY. */
+int layout_page_y(int screenX, int screenY, int scrollY);
 
 /* ── Eviction (viewport/hover image modes) ───────────────────────────────── */
 void layout_evict_offscreen(int scrollY);

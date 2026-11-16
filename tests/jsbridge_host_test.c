@@ -339,27 +339,31 @@ static int has_link(const DocParseResult *d, const char *needle)
             g_fakeHttpMode = FAKE_HTTP_FAIL;
             document_free(d);
         }
-        /* X4: caps — 5 requests > JSBRIDGE_XHR_MAX(4): the 5th open fails. */
+        /* X4: caps — JSBRIDGE_XHR_MAX + 1 requests: the last open fails. */
         {
+            char page[1024];
+            char want[32];
+            snprintf(page, sizeof(page),
+                     "<html><head><title>X4</title></head><body><p id=\"o\">p</p>"
+                     "<script>"
+                     "var ok = 0, refused = 0;"
+                     "for (var i = 0; i < %d; i++) {"
+                     "  try {"
+                     "    var x = new XMLHttpRequest();"
+                     "    x.open('GET', 'about:blank');"
+                     "    x.send();"
+                     "    ok++;"
+                     "  } catch (e) { refused++; }"
+                     "}"
+                     "document.getElementById('o').textContent = 'ok' + ok + 'ref' + refused;"
+                     "</script></body></html>",
+                     JSBRIDGE_XHR_MAX + 1);
+            snprintf(want, sizeof(want), "ok%dref1", JSBRIDGE_XHR_MAX);
             DocParseResult *d = calloc(1, sizeof(DocParseResult));
-            document_parse_ex(
-                "<html><head><title>X4</title></head><body><p id=\"o\">p</p>"
-                "<script>"
-                "var ok = 0, refused = 0;"
-                "for (var i = 0; i < 5; i++) {"
-                "  try {"
-                "    var x = new XMLHttpRequest();"
-                "    x.open('GET', 'about:blank');"
-                "    x.send();"
-                "    ok++;"
-                "  } catch (e) { refused++; }"
-                "}"
-                "document.getElementById('o').textContent = 'ok' + ok + 'ref' + refused;"
-                "</script></body></html>",
-                "https://example.com/page", MODE_RAW_HTML, NULL,
-                DOC_SCRIPT_RUN_KEEP, NULL, d);
-            CHECK(find_inline_text(d, "ok4ref1"),
-                  "xhr: 5th request refused when table is full");
+            document_parse_ex(page, "https://example.com/page", MODE_RAW_HTML,
+                              NULL, DOC_SCRIPT_RUN_KEEP, NULL, d);
+            CHECK(find_inline_text(d, want),
+                  "xhr: request past the table cap is refused");
             document_free(d);
         }
         /* X5: method gate — POST refused. */

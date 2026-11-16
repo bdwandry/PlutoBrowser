@@ -11,6 +11,30 @@
 > standing rule: host suite (ASan+UBSan) → simulator PDX launch + pluto.log, ALL 4 ENGINES for
 > anything touching JS → physical device per AGENTS.md.)**
 
+> **R71 — APP BAR FROM THE PAGE'S OWN CSS: REAL ROW FLEX + FULL-WIDTH STICKY BAR
+> (2026-11-13).** User report: bryanwandrych.com/work's app bar stacked the brand and
+> menu, sat inset instead of full width, showed the desktop nav links, and exposed the
+> skip link. Root cause found downstream: `CSS_MAX_PROPS` was 8, but a 12-declaration
+> rule expands shorthands (`background`/`border`) into ~12 longhands before the decisive
+> `display:none`, so the mobile nav rules and skip-link `left:-9999px` were parsed but
+> their winning declarations were dropped. Fixed generally: 24-declaration budget plus
+> presence-priority replacement when full (display/visibility/position/offset/overflow/
+> size always outrank decoration slots). R71 also adds a real ROW-FLEX lane driven by the
+> sheet's own `display:flex`, `flex-direction`, `justify-content`, and `align-items`:
+> flex containers register in the walk, a menu trigger attaches to its nearest row
+> container, the sticky span composes its blocks into that row, and layout distributes
+> item boxes (start/center/end/space-between, cross-axis center) while translating the
+> hit rects with the items. Sticky bars now paint a full-width bar fill + bottom rule
+> (`LRI_PIN_BAR`) inside the pinned item span. No site class/tag strings are consulted;
+> the only contract is CSS flex + `position:sticky` + the general ARIA disclosure shape.
+> RECEIPTS: host CSS suite 331/331 (r71 rem-media, skip-link :focus parking, menu-button,
+> transparency); live sim fieldtest `RESULT: PASS` bryanwandrych.com/work, `blocks=19
+> decor=7 disclosure=8 pin=1 menu=1`; `[flex] bi=0 row=1 item=1 just=3 ctr=1` (brand) and
+> `bi=1 row=1 item=2 just=3 ctr=1` (menu); reviewed simulator screenshot shows brand left,
+> hamburger menu right, compact full-width bar, no nav list/skip link. Device PDX
+> `pdex.bin` MD5 `e2fcf0de4217d44687a66c8297b50f32` matched on `/Volumes/PLAYDATE` before
+> eject; launched via pdutil. pdxinfo buildNumber=21.
+
 > **R70 — GOOGLE SEARCH: THE "TURN ON JAVASCRIPT" WALL ROOT-CAUSED AND THE XS-NR BROWSER
 > SURFACE COMPLETED (2026-11-12).** User report: google.com → type in the page search box →
 > Google Search → the browser lands on "Turn on JavaScript to keep searching" even though

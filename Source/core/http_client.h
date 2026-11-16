@@ -88,6 +88,11 @@ typedef struct
                            const char *url);
     void (*onError)(const char *message);
     void (*onProgress)(int cur, int total);
+    /* General XHR GET lane: allow a same-host persistent TCP connection and
+     * keep the body in RAM so chunked completion can be detected without
+     * waiting for the server to close the socket. Other request lanes leave
+     * this 0 and keep their existing spill/close path. */
+    int keepAlive;
 } HttpCallbacks;
 
 /* Initialize (stores the API pointer). Call once at boot — inits BOTH

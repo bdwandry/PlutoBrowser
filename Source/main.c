@@ -7,10 +7,18 @@
  * - The full state machine arrives in later phases.
  */
 #include <stdio.h>
+#include <string.h>
+#include <strings.h>
 #include "pd_api.h"
 
 #ifdef TARGET_SIMULATOR
 #include <stdlib.h>
+#endif
+
+#ifdef TARGET_PLAYDATE
+/* Device-only newlib guard (core/pluto_times_stub.c): the game-task
+ * environment pointer is invalid; clear it before date formatting. */
+void pluto_env_sanitize(void);
 #endif
 
 #include "core/logger.h"
@@ -56,6 +64,7 @@
 #include "html/document.h"
 #include "html/css.h" /* Phase 1.5: stylesheet-scan API + caps */
 #include "html/jsbridge.h"
+#include "html/webstorage.h"
 #include "html/jsbridge_internal.h" /* Forms-Phase 3: the shared validity layer */
 #include "html/jsext.h"
 #include "html/sdisco.h" /* the script-derived submission routes (no site data) */
@@ -193,6 +202,10 @@ static int progressNetCur = 0;
 static int progressNetTotal = 0;
 static int progressTotal = 0;
 static int isRendering = 0;
+/* Set when the current page response is Cloudflare's managed challenge.
+ * The response is not parsed; the browser shows a specific error page and
+ * the fieldtest harnesses report a distinct blocked result. */
+static int g_pageChallenge = 0;
 static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
 static int pendingFlipUnload = 0;             /* settings flip: unload old page
                                                * before the deferred reload */
@@ -323,7 +336,59 @@ static void details_keys_clear(void)
     {
         pluto_free(detailsKeys[i]);
     }
+    memset(detailsOpenState, 0, sizeof(detailsOpenState));
     detailsKeyCount = 0;
+}
+
+/* R71: ARIA disclosure widgets (aria-expanded + aria-controls), keyed
+ * "x1".."xN" by the walker. Same contract as the details map: the key list
+ * + positional open-state array ride document_parse as disclosureOpen[]. */
+static int disclosureOpenState[64];
+static int disclosureKeyCount = 0;
+static int g_lastDisclosureIdx = -1; /* render-error undo target */
+
+/* The walker numbers triggers x1..xN in document order and reads the
+ * override array by that position. "x2" therefore means slot 1, not "the
+ * first key the user happened to tap" — appending click-order slots made a
+ * role tap write slot 0 while the walker read slot 1, so the panel stayed
+ * closed. Keep the array dense through the highest ordinal seen. */
+static int disclosure_key_index(const char *dkey)
+{
+    if (!dkey || dkey[0] != 'x' || dkey[1] == '\0')
+    {
+        return -1;
+    }
+    int ordinal = 0;
+    const char *p = dkey + 1;
+    while (*p >= '0' && *p <= '9')
+    {
+        ordinal = ordinal * 10 + (*p - '0');
+        if (ordinal > 64)
+        {
+            return -1;
+        }
+        p++;
+    }
+    if (p == dkey + 1 || *p != '\0' || ordinal < 1)
+    {
+        return -1;
+    }
+    int idx = ordinal - 1;
+    if (idx >= disclosureKeyCount)
+    {
+        disclosureKeyCount = idx + 1;
+    }
+    return idx;
+}
+
+/* Toggle state is page-local. Without this reset, an x1 menu opened on the
+ * previous page stays in slot 0; opening any xN disclosure on the next page
+ * re-renders the menu open too. */
+static void disclosure_keys_clear(void)
+{
+    memset(disclosureOpenState, 0, sizeof(disclosureOpenState));
+    disclosureKeyCount = 0;
+    g_lastDisclosureIdx = -1;
 }
 
 /* Diagnostic counters exposed in logs. */
@@ -352,8 +417,9 @@ static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
 static DomNode *form_node_ancestor(DomNode *n);
 /* Forms-Phase 4: the form API host hooks (registered at boot) + the
- * implicit-submission chain the keyboard's Enter commits ride. The
- * bridge rides the call so mid-parse scripts (a battery page running
+ * synthetic Enter-implicit-submission chain. The Playdate keyboard's
+ * OK is a text commit, not an Enter key, so it does not ride this chain.
+ * The bridge rides the call so mid-parse scripts (a battery page running
  * its inline form API calls before g_pageJs exists) still dispatch
  * through their own machine. */
 static int pluto_host_form_reset(JsBridge *b, void *formNode);
@@ -374,7 +440,6 @@ static int g_navAutoRetrying = 0;       /* the current navigate_to IS the retry 
 static unsigned int g_navAutoRetryTimer = 0; /* pending 2s retry timer id */
 static void update_system_menu(void);
 static void settings_on_change(void);
-static void view_menu_callback(void *ud);
 static void meta_refresh_cb(void *ud);
 #if defined(PLUTO_NAV_AUTOTEST)
 static void nav_autotest_tick(void);
@@ -437,10 +502,6 @@ static void settings_cleared_cookies(void)
     cookie_jar_clear();
 }
 
-/* Reader/HTML "View" options item (Lua: addOptionsMenuItem("View", ...)). */
-static PDMenuItem *g_viewMenuItem = NULL;
-static const char *k_viewOptions[2] = { "Reader", "HTML" };
-
 /* ── SW6 snapshot cache ────────────────────────────────────────────────── */
 /* SW6 fast-path telemetry: how many navigations rendered from a snapshot
  * (also consumed by the snap autotest for a deterministic PASS verdict). */
@@ -461,51 +522,62 @@ static int cache_off(void)
     return storage_setting_int("cacheWebsite") != 1;
 }
 
-static void view_menu_callback(void *ud)
+static void menu_reload(void *ud)
 {
     (void)ud;
-    if (!g_viewMenuItem || !pd)
+    if (!currentUrlObj || !currentUrlObj->normalized[0] ||
+        strncmp(currentUrlObj->scheme, "about", 5) == 0)
     {
         return;
     }
-    int v = pd->system->getMenuItemValue(g_viewMenuItem);
-    int newMode = (v == 0) ? MODE_READER : MODE_RAW_HTML;
-    if (newMode != currentBrowseMode)
-    {
-        currentBrowseMode = newMode;
-        storage_set_setting_int("mode", currentBrowseMode);
-        storage_save();
-        snapBypass = 1; /* hard reload: snapshot would be for the OLD mode */
-        if (currentDoc && currentDoc->rawHtml && currentDoc->rawHtml[0] &&
-            currentUrlObj)
-        {
-            render_body(currentDoc->rawHtml, currentUrlObj->normalized, 0);
-        }
-        else if (currentUrlObj)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
-                     currentUrlObj->normalized);
-        }
-    }
+    snapBypass = 1;
+    /* The website caches its GitHub payload in localStorage. A hard reload
+     * must mean "go to GitHub again", not replay that payload, so drop this
+     * origin's webstorage too. Normal navigation keeps it (the site's own
+     * cache is part of how the page is programmed). */
+    ws_clear(ws_local());
+    pluto_snap_invalidate(currentUrlObj->normalized,
+                          (int)currentBrowseMode);
+    pendingNavUrlSet = 1;
+    snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+             currentUrlObj->normalized);
+    logger_log("[nav] hard reload: %s (snapshot bypass)",
+               currentUrlObj->normalized);
 }
 
+/* Playdate allows at most THREE custom system-menu items. Every branch
+ * below adds exactly three, and Settings is always one of them. Earlier
+ * this function added six; the OS silently refused the overflow, so on a
+ * web page the visible menu was Home-Page / View / Reload and Settings
+ * disappeared. View mode lives in Settings > Browse Mode, so the web-page
+ * slots go to Home-Page / Reload / Settings. */
 static void update_system_menu(void)
 {
     pd->system->removeAllMenuItems();
-    g_viewMenuItem = NULL;
-    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
-    if (currentState == STATE_PAGE && currentUrlObj &&
-        strcmp(currentUrlObj->scheme, "about") != 0)
+
+    int webPage = currentUrlObj && currentUrlObj->normalized[0] &&
+                  strcmp(currentUrlObj->scheme, "about") != 0;
+
+    if (currentState == STATE_HOME)
     {
-        int initial = (currentBrowseMode == MODE_READER) ? 0 : 1;
-        g_viewMenuItem = pd->system->addOptionsMenuItem(
-            "View", k_viewOptions, 2, view_menu_callback, NULL);
-        pd->system->setMenuItemValue(g_viewMenuItem, initial);
+        /* Home-Page is redundant here; keep the two other actions plus the
+         * always-present Settings entry. */
+        pd->system->addMenuItem("Settings", menu_settings, NULL);
+        pd->system->addMenuItem("History", menu_history, NULL);
+        pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
+        return;
+    }
+
+    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
+    if (webPage)
+    {
+        pd->system->addMenuItem("Reload", menu_reload, NULL);
+    }
+    else
+    {
+        pd->system->addMenuItem("History", menu_history, NULL);
     }
     pd->system->addMenuItem("Settings", menu_settings, NULL);
-    pd->system->addMenuItem("History", menu_history, NULL);
-    pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
 }
 
 /* ── renderBody (port): parse + Layout.build as a cooperative task ───────── */
@@ -985,7 +1057,7 @@ static void doc_dump_timer_lines(void)
 }
 static void js_timers_autotest_tick(void)
 {
-    if (g_timersTestPhase == 3 || isRendering)
+    if (g_timersTestPhase == 3 || isRendering || !currentDoc)
     {
         return;
     }
@@ -3345,9 +3417,10 @@ static void formval_autotest_tick(void)
  *   phase 5: form.reset() (the host hook) → the typed value returns
  *            to "" (block + value attribute + focused echo restored,
  *            no events);
- *   phase 6: retype via the OK-commit lane (form_kb_ok_commit — the
- *            exact did_hide journey) → the Enter chain rides the
- *            default submit button (click → gate → submit → wire);
+ *   phase 6: retype via the synthetic Enter-key lane (form_kb_ok_commit);
+ *            this is NOT the keyboard's OK action (OK only commits) → the
+ *            Enter chain rides the default submit button (click → gate
+ *            → submit → wire);
  *   phase 7: the navigation landed on about:formprobe?user=EnterValid
  *            (&age= — Forms-Phase 6 makes the query the browser-true
  *            form data set; the old legacy walk skipped the empty
@@ -3600,7 +3673,7 @@ static void forment_autotest_tick(void)
             g_formentPhase = 9;
             return;
         }
-        logger_log("[forment-autotest] OK-commit → implicit Enter chain");
+        logger_log("[forment-autotest] synthetic Enter-key lane → implicit submit");
         form_key_snapshot(user);
         form_kb_ok_commit("EnterValid");
         g_formentFrames = 0;
@@ -3613,8 +3686,8 @@ static void forment_autotest_tick(void)
             strncmp(currentDoc->baseUrl, "about:formprobe?", 16) == 0 &&
             strstr(currentDoc->baseUrl, "user=EnterValid"))
         {
-            logger_log("[forment-autotest] PASS: Enter rode the default "
-                       "button through the full chain (url=%s)",
+            logger_log("[forment-autotest] PASS: synthetic Enter rode the "
+                       "default button through the full chain (url=%s)",
                        currentDoc->baseUrl);
             g_formentPhase = 9;
             return;
@@ -3659,6 +3732,27 @@ static int ftIndex = -1;
 static unsigned ftFrames = 0;
 static int ftPhase = 0; /* 0=boot-wait, 1=running, 2=done */
 static int ftPass = 0, ftFail = 0;
+/* Seam hygiene: the matrix forces a per-site engine (and Full JS) into the
+ * SAVED settings. A run that ended on engine 0 (muJS) left every later
+ * launch unable to compile modern page scripts — bryanwandrych.com/projects
+ * sat on its "Loading projects…" status because site.js never ran. Remember
+ * the user's values when the matrix starts and put them back when it ends. */
+static int ftSavedJsEngine = -1;
+static int ftSavedJsEnabled = -1;
+static void fieldtest_restore_settings(void)
+{
+    if (ftSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", ftSavedJsEngine);
+    storage_set_setting_int("jsEnabled", ftSavedJsEnabled);
+    jsbridge_set_engine(ftSavedJsEngine);
+    storage_save();
+    logger_log("[fieldtest] restored saved jsEngine=%d jsEnabled=%d",
+               ftSavedJsEngine, ftSavedJsEnabled);
+    ftSavedJsEngine = -1;
+}
 /* Checkpoint file: macOS's AppKit automatic termination can kill the sim
  * mid-matrix (long idle stretches); state persists so a supervisor relaunch
  * RESUMES instead of restarting - the run stays one logical session. */
@@ -3921,6 +4015,14 @@ static void fieldtest_dump_page(void)
 }
 static void fieldtest_score_page(void)
 {
+    if (g_pageChallenge)
+    {
+        logger_log("[fieldtest] RESULT: FAIL (bot-challenge) site=%s",
+                   ftUrl[ftIndex]);
+        fieldtest_hist_log("FAIL", ftUrl[ftIndex]);
+        ftFail++;
+        return;
+    }
     if (ftCrit[ftIndex][0])
     {
         char needle[128];
@@ -3994,6 +4096,11 @@ static void fieldtest_tick(void)
         {
             return;
         }
+        if (ftSavedJsEngine < 0)
+        {
+            ftSavedJsEngine = storage_setting_int("jsEngine");
+            ftSavedJsEnabled = storage_setting_int("jsEnabled");
+        }
         storage_set_setting_int("jsEnabled", 2); /* Full: external scripts */
         if (ftIndex < 0)
         {
@@ -4013,7 +4120,8 @@ static void fieldtest_tick(void)
     /* phase 1: spend FIELDTEST_FRAMES_PER_SITE on each site */
     if (ftFrames >= FIELDTEST_FRAMES_PER_SITE)
     {
-        if (currentState == STATE_ERROR && !ftRetried[ftIndex])
+        if (currentState == STATE_ERROR && !ftRetried[ftIndex] &&
+            !g_pageChallenge)
         {
             /* transient sim network flake (-16): one retry per site */
             ftRetried[ftIndex] = 1;
@@ -4024,6 +4132,37 @@ static void fieldtest_tick(void)
         logger_log("[fieldtest] --- snapshot %s", ftUrl[ftIndex]);
         fieldtest_dump_page();
         fieldtest_score_page();
+#if defined(PLUTO_MENU_AUTOTEST)
+        /* Simulator-only menu verification: drive the same disclosure key a
+         * real tap uses, then hold the page so the screenshot shows the open
+         * dropdown. Never defined for device builds. */
+        if (currentDoc && currentState == STATE_PAGE)
+        {
+            /* Open the first ordinary disclosure, not the app-bar menu.
+             * On /work the nav toggle is x1 and the first role is x2; the
+             * test must exercise the role card the report is about. */
+            const char *key = NULL;
+            for (int bi = 0; bi < currentDoc->blockCount; bi++)
+            {
+                if (currentDoc->blocks[bi]->toggleKey &&
+                    !currentDoc->blocks[bi]->menuButton)
+                {
+                    key = currentDoc->blocks[bi]->toggleKey;
+                    break;
+                }
+            }
+            if (key)
+            {
+                logger_log("[menu-autotest] opening %s", key);
+                toggle_details(key);
+                ftPhase = 2;
+                return;
+            }
+            logger_log("[menu-autotest] no role disclosure found");
+        }
+        logger_log("[menu-autotest] skipped state=%d doc=%d", currentState,
+                   currentDoc ? 1 : 0);
+#endif
         ftIndex++;
         if (ftIndex >= ftCount)
         {
@@ -4031,6 +4170,7 @@ static void fieldtest_tick(void)
                        "matrix %d/%d",
                        ftCount, ftPass, ftFail, ftPass, ftCount);
             fieldtest_state_clear();
+            fieldtest_restore_settings();
             ftPhase = 2;
             return;
         }
@@ -4096,6 +4236,25 @@ static unsigned g_ftdevFrames = 0;
 static int g_ftdevIndex = 0;
 static int g_ftdevEnd = FTDEV_MAX_SITES;
 static int g_ftdevEngine = 4;
+/* Same seam hygiene as the simulator matrix: the device run writes its
+ * engine + Full JS into the saved settings and must put the user's values
+ * back when the run completes. */
+static int g_ftdevSavedJsEngine = -1;
+static int g_ftdevSavedJsEnabled = -1;
+static void ftdev_restore_settings(void)
+{
+    if (g_ftdevSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_ftdevSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_ftdevSavedJsEnabled);
+    jsbridge_set_engine(g_ftdevSavedJsEngine);
+    storage_save();
+    logger_log("[ftdev] restored saved jsEngine=%d jsEnabled=%d",
+               g_ftdevSavedJsEngine, g_ftdevSavedJsEnabled);
+    g_ftdevSavedJsEngine = -1;
+}
 static int g_ftdevSiteFrames = 0;
 static int g_ftdevRetried = 0;
 static int g_ftdevSawPage = 0;
@@ -4272,6 +4431,7 @@ static void ftdev_advance(const char *verdict, const char *why)
         ftdev_write_text("ftdev_results.txt", line, 1);
         logger_log("[ftdev] done: PASS %d / FAIL %d (through site %d)",
                    g_ftdevPass, g_ftdevFail, g_ftdevIndex);
+        ftdev_restore_settings();
         g_ftdevPhase = 2;
         return;
     }
@@ -4351,6 +4511,11 @@ static void ftdev_tick(void)
             g_ftdevPhase = 2;
             return;
         }
+        if (g_ftdevSavedJsEngine < 0)
+        {
+            g_ftdevSavedJsEngine = storage_setting_int("jsEngine");
+            g_ftdevSavedJsEnabled = storage_setting_int("jsEnabled");
+        }
         storage_set_setting_int("jsEnabled", 2); /* Full JS */
         storage_set_setting_int("jsEngine", g_ftdevEngine);
         jsbridge_set_engine(g_ftdevEngine);
@@ -4386,11 +4551,17 @@ static void ftdev_tick(void)
      * + JS compile. 30s hard timeout per site; 3s settle after the first
      * PAGE state so late images/scripts land. */
     g_ftdevSiteFrames++;
+    if (g_pageChallenge)
+    {
+        ftdev_advance("FAIL", "bot-challenge");
+        return;
+    }
     if (currentState == STATE_PAGE)
     {
         g_ftdevSawPage = 1;
     }
-    if (currentState == STATE_ERROR && !g_ftdevRetried && g_ftdevSiteFrames < 300)
+    if (currentState == STATE_ERROR && !g_ftdevRetried &&
+        !g_pageChallenge && g_ftdevSiteFrames < 300)
     {
         g_ftdevRetried = 1;
         logger_log("[ftdev] retry (error page) site=%d %s", g_ftdevIndex + 1,
@@ -4569,14 +4740,35 @@ static void css_autotest_tick(void)
 
 #if defined(PLUTO_NAV_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic repro for the
- * google.com navigation crash. Boots to the home page, presses A on the
- * Google speed-dial card through the REAL home-page input path, then
- * watches the navigation complete: state 2 (page rendered) with a live doc
- * is PASS; an error page for google.com FAILs. Verifies the OS is still
- * alive 10s later (the device errorlog overflow killed the task ~3s after
- * the nav). PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
+ * google.com navigation crash. Boots STRAIGHT to google.com (armed in the
+ * kEventInit handler — no home-page card steering), then watches the
+ * navigation complete: state 2 (page rendered) with a live doc is PASS; an
+ * error page for google.com FAILs. Verifies the OS is still alive 10s later
+ * (the device errorlog overflow killed the task ~3s after the nav).
+ * PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+static int g_navTestReloaded = 0;
+#endif
+/* The optional engine force is a test override; restore the engine the user
+ * had saved when the run finishes (same leak the fieldtest seam had). */
+static int g_navSavedJsEngine = -1;
+static int g_navSavedJsEnabled = -1;
+static void nav_autotest_restore_settings(void)
+{
+    if (g_navSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_navSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_navSavedJsEnabled);
+    jsbridge_set_engine(g_navSavedJsEngine);
+    storage_save();
+    logger_log("[nav-autotest] restored jsEngine=%d jsEnabled=%d",
+               g_navSavedJsEngine, g_navSavedJsEnabled);
+    g_navSavedJsEngine = -1;
+}
 #ifdef PLUTO_NAV_AUTOTEST_ENGINE
 /* Optional engine force for the run: 0=muJS 1=Duktape 2=QuickJS 3=XS
  * (Moddable). Storage AND the live router are set before navigation; the
@@ -4591,6 +4783,10 @@ static void nav_autotest_tick(void)
 {
     if (g_navTestPhase == 3 || isRendering)
     {
+        if (g_navTestPhase == 3)
+        {
+            nav_autotest_restore_settings();
+        }
         return;
     }
     ++g_navTestFrames;
@@ -4600,15 +4796,13 @@ static void nav_autotest_tick(void)
     }
     if (g_navTestPhase == 0)
     {
-        if (currentState != STATE_HOME)
-        {
-            return;
-        }
         if (NAV_AUTOTEST_ENGINE_VAL >= 0)
         {
             static int navEngineApplied = 0;
             if (!navEngineApplied)
             {
+                g_navSavedJsEngine = storage_setting_int("jsEngine");
+                g_navSavedJsEnabled = storage_setting_int("jsEnabled");
                 storage_set_setting_int("jsEngine", NAV_AUTOTEST_ENGINE_VAL);
                 jsbridge_set_engine(NAV_AUTOTEST_ENGINE_VAL);
                 if (storage_setting_int("jsEnabled") != 2)
@@ -4621,28 +4815,10 @@ static void nav_autotest_tick(void)
                 navEngineApplied = 1;
             }
         }
-        /* The Google speed-dial card is bookmark #2 (index 2): Storage
-         * order is Bitmap Gallery(1), Google(2), ... Steer with crank. */
-        int target = 2;
-        if (home_page_selected_index() != target)
-        {
-            home_page_handle_crank(HOME_CRANK_STEP_PX);
-            return;
-        }
-        logger_log("[nav-autotest] on Google card, pressing A");
-        char *u = home_page_handle_input(1u << 5, NULL);
-        if (u)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", u);
-            pluto_free(u);
-            g_navTestPhase = 1;
-        }
-        else
-        {
-            logger_log("[nav-autotest] FAIL: A on Google card returned no URL");
-            g_navTestPhase = 3;
-        }
+        /* Navigation was armed directly at boot; just start watching. */
+        logger_log("[nav-autotest] waiting for direct google.com render");
+        g_navTestPhase = 1;
+        g_navTestFrames = 0;
         return;
     }
     if (g_navTestPhase == 1)
@@ -4651,6 +4827,14 @@ static void nav_autotest_tick(void)
         {
             logger_log("[nav-autotest] PASS: google.com rendered (title=%.40s, "
                        "%u frames)", pageTitle, g_navTestFrames);
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+            if (!g_navTestReloaded)
+            {
+                g_navTestReloaded = 1;
+                logger_log("[nav-autotest] forcing cache-bypassed reload");
+                menu_reload(NULL);
+            }
+#endif
             g_navTestPhase = 2;
             g_navTestFrames = 0;
         }
@@ -5641,6 +5825,18 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     logger_log("[render-result] %s: blocks=%d links=%d title='%.48s'",
                tag, doc->blockCount, doc->linkCount,
                doc->title[0] ? doc->title : "");
+    {
+        /* R71 receipt: spanning decorations + the sticky app-bar span. */
+        int pinStart = 0;
+        for (int bi = 0; bi < doc->blockCount; bi++)
+        {
+            if (doc->blocks[bi] && doc->blocks[bi]->pinStart)
+            {
+                pinStart++;
+            }
+        }
+        logger_log("[r71] render decor=%d pin=%d", doc->decorCount, pinStart);
+    }
     if (doc->blockCount == 0)
     {
         return;
@@ -5710,10 +5906,79 @@ static unsigned long render_walk_budget_ms(void)
 #endif
 }
 
+/* R71: a toggle re-render (details / ARIA disclosure) reparses rawHtml but
+ * deliberately skips the network CSS stage, so a page whose whole styling
+ * lives in an external <link rel="stylesheet"> used to re-render UNSTYLED —
+ * on bryanwandrych.com/work the collapse recipe itself lives in the external
+ * sheet, so the panel would pop open after its own toggle. Copy the live
+ * doc's sheets into the new doc (document_parse_ex joins them exactly like
+ * freshly fetched ones and owns the copies). Bounded by the same per-page
+ * caps as the fetch path. */
+static void reuse_external_css(RenderTask *rt)
+{
+    if (!rt || !rt->doc || !currentDoc || currentDoc->cssExtN <= 0)
+    {
+        return;
+    }
+    int n = currentDoc->cssExtN;
+    if (n > PLUTO_CSS_EXT_MAX)
+    {
+        n = PLUTO_CSS_EXT_MAX;
+    }
+    rt->doc->cssExtBody =
+        (char **)pluto_mem_realloc(NULL, sizeof(char *) * (size_t)n);
+    rt->doc->cssExtLen =
+        (size_t *)pluto_mem_realloc(NULL, sizeof(size_t) * (size_t)n);
+    if (!rt->doc->cssExtBody || !rt->doc->cssExtLen)
+    {
+        if (rt->doc->cssExtBody)
+        {
+            pluto_mem_realloc(rt->doc->cssExtBody, 0);
+            rt->doc->cssExtBody = NULL;
+        }
+        if (rt->doc->cssExtLen)
+        {
+            pluto_mem_realloc(rt->doc->cssExtLen, 0);
+            rt->doc->cssExtLen = NULL;
+        }
+        return;
+    }
+    int w = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const char *body = currentDoc->cssExtBody[i];
+        size_t len = currentDoc->cssExtLen[i];
+        if (!body || len == 0)
+        {
+            continue;
+        }
+        char *cp = (char *)pluto_mem_realloc(NULL, len + 1);
+        if (!cp)
+        {
+            break;
+        }
+        memcpy(cp, body, len);
+        cp[len] = '\0';
+        rt->doc->cssExtBody[w] = cp;
+        rt->doc->cssExtLen[w] = len;
+        w++;
+    }
+    rt->doc->cssExtN = w;
+    logger_log("[css-ext] toggle reuse: %d sheet(s)", w);
+}
+
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
     unsigned long walkBudget = render_walk_budget_ms();
+
+    /* Fresh navigation: discard the previous page's disclosure/details
+     * overrides. Toggle re-renders and JS-mutation re-walks keep them. */
+    if (!rt->isToggle && !rt->rewalkDoc)
+    {
+        details_keys_clear();
+        disclosure_keys_clear();
+    }
 
     /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
     if (rt->rewalkDoc && !rt->parsed)
@@ -5760,6 +6025,10 @@ static int render_step(TaskCtx *ctx)
                 return -1;
             }
             memset(rt->doc, 0, sizeof(DocParseResult));
+            if (rt->isToggle)
+            {
+                reuse_external_css(rt);
+            }
             tasks_report_progress(0.05f);
         }
 
@@ -6067,13 +6336,21 @@ static int render_step(TaskCtx *ctx)
             progressNetTotal = 0;
         }
 
-        /* detailsOpen overrides for toggle re-renders. */
+        /* detailsOpen / disclosureOpen overrides for toggle re-renders. */
         DocParseOpts opts;
         memset(&opts, 0, sizeof(opts));
-        if (rt->isToggle && detailsKeyCount > 0)
+        if (rt->isToggle)
         {
-            opts.detailsOpen = detailsOpenState;
-            opts.detailsOpenCount = detailsKeyCount;
+            if (detailsKeyCount > 0)
+            {
+                opts.detailsOpen = detailsOpenState;
+                opts.detailsOpenCount = detailsKeyCount;
+            }
+            if (disclosureKeyCount > 0)
+            {
+                opts.disclosureOpen = disclosureOpenState;
+                opts.disclosureOpenCount = disclosureKeyCount;
+            }
         }
         opts.svgDecoder = app_svg_decoder;
         /* The render task's body becomes the document's rawHtml (one
@@ -6473,7 +6750,13 @@ static void render_error(const char *message, void *userdata)
         if (rt->isToggle)
         {
             /* Lua: undo the toggle flip on error. */
-            if (detailsKeyCount > 0)
+            if (g_lastDisclosureIdx >= 0 &&
+                g_lastDisclosureIdx < disclosureKeyCount)
+            {
+                disclosureOpenState[g_lastDisclosureIdx] =
+                    !disclosureOpenState[g_lastDisclosureIdx];
+            }
+            else if (detailsKeyCount > 0)
             {
                 detailsOpenState[detailsKeyCount - 1] =
                     !detailsOpenState[detailsKeyCount - 1];
@@ -6567,6 +6850,7 @@ static void navigate_to(const char *urlString)
     {
         return;
     }
+    g_pageChallenge = 0; /* fresh navigation: old response's status is gone */
 
     /* A pending transport auto-retry belongs to the navigation that armed
      * it. Without this cancel it fires 2s later and HIJACKS whatever the
@@ -6979,11 +7263,72 @@ void pluto_ui_net_progress(int cur, int total)
     }
 }
 
+/* Bounded body search: HTTP bodies are length-addressed, not NUL-ended. */
+static int http_body_has(const char *body, size_t bodyLen, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (!body || n == 0 || bodyLen < n)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i + n <= bodyLen; i++)
+    {
+        if (memcmp(body + i, needle, n) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Cloudflare's managed challenge is a 403 with Cf-Mitigated: challenge.
+ * The header is authoritative; body markers are a fallback for proxies
+ * that strip response headers. This is a classification only: it does not
+ * pretend to solve the challenge. */
+static int http_is_cloudflare_challenge(int status, char **headerKeys,
+                                        char **headerVals, int headerCount,
+                                        const char *body, size_t bodyLen)
+{
+    for (int i = 0; i < headerCount; i++)
+    {
+        if (!headerKeys || !headerKeys[i] || !headerVals || !headerVals[i])
+        {
+            continue;
+        }
+        if (strcasecmp(headerKeys[i], "cf-mitigated") == 0 &&
+            strcasecmp(headerVals[i], "challenge") == 0)
+        {
+            return 1;
+        }
+    }
+    if (status != 403)
+    {
+        return 0;
+    }
+    return http_body_has(body, bodyLen, "__cf_chl_opt") ||
+           http_body_has(body, bodyLen, "cdn-cgi/challenge-platform/") ||
+           http_body_has(body, bodyLen, "<title>Just a moment...</title>");
+}
+
 static void http_on_success(int status, char **headerKeys, char **headerVals,
                             int headerCount, const char *body, size_t bodyLen,
                             const char *url)
 {
-    (void)status;
+    if (http_is_cloudflare_challenge(status, headerKeys, headerVals,
+                                     headerCount, body, bodyLen))
+    {
+        g_pageChallenge = 1;
+        logger_log("[http] Cloudflare challenge detected (status=%d) url=%s",
+                   status, url ? url : "");
+        error_page_show("This site requires a browser check that "
+                        "PlutoBrowser cannot complete. Cloudflare blocked "
+                        "the page.",
+                        url ? url : "");
+        currentState = STATE_ERROR;
+        snprintf(pageTitle, sizeof(pageTitle), "Browser Check Required");
+        update_system_menu();
+        return;
+    }
     const char *contentType = NULL;
     for (int i = 0; i < headerCount; i++)
     {
@@ -7116,19 +7461,147 @@ static void page_rewalk_now(void)
     }
 }
 
+/* Let the page's own click handler own a disclosure when it lands on the
+ * state the user requested. The rewalk then reads the LIVE DOM, preserving
+ * label swaps (Menu -> Close) and other script mutations. If the handler
+ * does not reach the requested aria-expanded state, the native re-parse is
+ * still the fallback (e.g. a script whose internal state cannot close). */
+static int disclosure_try_page_toggle(const char *dkey, int idx, int wantOpen)
+{
+    if (!g_pageJs || !currentDoc || !dkey || dkey[0] != 'x')
+    {
+        return 0;
+    }
+    void *srcNode = NULL;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            srcNode = b->srcNode;
+            break;
+        }
+    }
+    if (!srcNode)
+    {
+        return 0;
+    }
+    const char *before = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int rc = jsbridge_dispatch_element_event(g_pageJs, srcNode, "click");
+    const char *after = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int afterOpen = after && !(after[0] == 'f' || after[0] == 'F');
+    int changed = before ? (after && strcmp(before, after) != 0) : (after != NULL);
+    if (!changed || afterOpen != wantOpen)
+    {
+        logger_log("[toggle] page click missed key=%s want=%d rc=%d "
+                   "aria=%s->%s — native fallback",
+                   dkey, wantOpen, rc, before ? before : "-",
+                   after ? after : "-");
+        return 0;
+    }
+    disclosureOpenState[idx] = wantOpen;
+    g_lastDisclosureIdx = idx;
+    logger_log("[toggle] page-owned key=%s open=%d rc=%d aria=%s->%s", dkey,
+               wantOpen, rc, before ? before : "-", after ? after : "-");
+    /* Live attributes are the truth for this rewalk. Drop overrides left
+     * by an earlier native re-parse so they cannot mask the page's flip. */
+    currentDoc->disclosureOpen = NULL;
+    currentDoc->disclosureOpenCount = 0;
+    page_rewalk_now();
+    return 1;
+}
+
+/* Snapshot pages carry no raw HTML or DOM, so the normal toggle re-render
+ * cannot run. A closed disclosure panel is still in the render model as
+ * hidden blocks (panelKey/panelHidden), so flip that span and rebuild the
+ * layout locally — no network, parse, JS, or re-render task. */
+static int snapshot_toggle_panel(const char *dkey)
+{
+    if (!currentDoc || !dkey || !dkey[0])
+    {
+        return 0;
+    }
+    int found = 0;
+    int closed = 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            found = 1;
+            closed = b->panelHidden;
+            break;
+        }
+    }
+    if (!found)
+    {
+        return 0;
+    }
+    int open = closed ? 1 : 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            b->panelHidden = open ? 0 : 1;
+        }
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            b->toggleOpen = open;
+        }
+    }
+    logger_log("[toggle] snapshot key=%s open=%d (layout rebuild)", dkey, open);
+    layout_build(currentDoc);
+    return 1;
+}
+
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
 static void toggle_details(const char *dkey)
 {
-    if (!currentDoc || !currentDoc->rawHtml || !currentDoc->rawHtml[0] || isRendering)
+    if (!currentDoc || isRendering)
     {
         return;
     }
-    int idx = details_key_index(dkey);
+    if (!currentDoc->rawHtml || !currentDoc->rawHtml[0])
+    {
+        if (snapshot_toggle_panel(dkey))
+        {
+            return;
+        }
+        logger_log("[toggle] key=%s ignored (snapshot, no panel blocks)",
+                   dkey ? dkey : "?");
+        return;
+    }
+    /* R71: "xN" keys belong to ARIA disclosure widgets, "dN" to <details>. */
+    int *stateArr;
+    int idx;
+    if (dkey && dkey[0] == 'x')
+    {
+        idx = disclosure_key_index(dkey);
+        stateArr = disclosureOpenState;
+        g_lastDisclosureIdx = idx;
+    }
+    else
+    {
+        idx = details_key_index(dkey);
+        stateArr = detailsOpenState;
+        g_lastDisclosureIdx = -1;
+    }
     if (idx < 0)
     {
         return;
     }
-    detailsOpenState[idx] = !detailsOpenState[idx];
+    if (dkey && dkey[0] == 'x')
+    {
+        int wantOpen = !disclosureOpenState[idx];
+        if (disclosure_try_page_toggle(dkey, idx, wantOpen))
+        {
+            return;
+        }
+    }
+    stateArr[idx] = !stateArr[idx];
+    logger_log("[toggle] key=%s idx=%d open=%d", dkey ? dkey : "?", idx,
+               stateArr[idx]);
 
     int prevScroll = scrollY;
     int prevTarget = targetScrollY;
@@ -7142,7 +7615,7 @@ static void toggle_details(const char *dkey)
     if (!rt)
     {
         isRendering = 0;
-        detailsOpenState[idx] = !detailsOpenState[idx]; /* undo flip */
+        stateArr[idx] = !stateArr[idx]; /* undo flip */
         return;
     }
     rt->body = pluto_strdup(currentDoc->rawHtml);
@@ -8529,10 +9002,10 @@ static int g_formKbOkayPressed = 0; /* last will_hide's OK flag (Phase 4) */
 static void form_kb_will_hide(int okButtonPressed, void *ud)
 {
     (void)ud;
-    /* Forms-Phase 4: remember WHY the keyboard hid. OK = the Enter
-     * commit → implicit submission follows the change commit (the
-     * browser's Enter order). A plain dismissal (tapping elsewhere)
-     * commits without submitting. */
+    /* Remember WHY the keyboard hid. The Playdate keyboard's OK is its
+     * done/confirm action, not an Enter key: both OK and a plain dismissal
+     * commit the text, and neither submits the form. Submission belongs to
+     * the form's own button. */
     g_formKbOkayPressed = okButtonPressed ? 1 : 0;
 }
 
@@ -8558,13 +9031,11 @@ static void form_kb_did_hide(void *ud)
             form_key_write(txt, 1 /* commit → input + change */);
             if (g_formKbOkayPressed)
             {
-                /* Forms-Phase 4: the browser's Enter order — the commit
-                 * (input+change) just ran; implicit submission follows
-                 * when the field belongs to a form. textarea fields
-                 * never implicitly submit (pluto_form_enter_commit
-                 * checks). */
-                logger_log("[form] keyboard OK commit → enter chain");
-                pluto_form_enter_commit();
+                /* The keyboard's OK is a text commit, not an Enter key.
+                 * Firing input+change is enough for react's controlled
+                 * input; implicit submission waits for the form's own
+                 * submit button. */
+                logger_log("[form] keyboard OK commit (no implicit submit)");
             }
             else
             {
@@ -8602,11 +9073,10 @@ static void form_kb_text_changed(void *ud)
     }
 }
 
-/* Forms-Phase 4 (autotest lane): the keyboard's OK commit exactly as
- * form_kb_did_hide rides it — the change commit, then the Enter-implicit
- * chain (pluto_form_enter_commit checks the field's form, the textarea
- * exception and the default button). The driver calls this to exercise
- * a real user's OK press without opening the OS keyboard. */
+/* Forms-Phase 4 (autotest lane): synthetic Enter-key lane. The Playdate
+ * keyboard's OK no longer submits, but this keeps the Enter-implicit
+ * chain covered (pluto_form_enter_commit checks the field's form, the
+ * textarea exception and the default button). */
 static void form_kb_ok_commit(const char *text)
 {
     form_key_write(text, 1 /* commit → input + change */);
@@ -8985,7 +9455,8 @@ static int pluto_host_form_wire(JsBridge *b, void *formNode,
     return 1;
 }
 
-/* The Enter-implicit chain (the keyboard's OK commit). Browser truth:
+/* The Enter-implicit chain (synthetic Enter-key lane; the Playdate
+ * keyboard's OK commit deliberately does NOT submit). Browser truth:
  * implicit submission on a TEXT field rides the form's default button
  * when one exists (its click + activation: the click, then the gate
  * honoring its formNovalidate, then the submit event, then the wire);
@@ -9773,6 +10244,9 @@ static void draw_render_progress_ui(void)
 
 static int updateFrame(void *userdata)
 {
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
     (void)userdata;
     frameCount++;
 
@@ -10209,6 +10683,11 @@ static int updateFrame(void *userdata)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
                         }
+                        else if (activeLink->href &&
+                                 strncmp(activeLink->href, "toggle:", 7) == 0)
+                        {
+                            toggle_details(activeLink->href + 7);
+                        }
                         else if (page_handle_js_click(activeLink->index))
                         {
                             /* A JS click handler ran (see HTML-mode branch). */
@@ -10332,12 +10811,12 @@ static int updateFrame(void *userdata)
                     !(btnCurrent & (1 << 0)) && !(btnCurrent & (1 << 1)) &&
                     !layout_get_on_demand_consumed())
                 {
-                    const LMLink *hitLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hitLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (!hitLink)
                     {
                         /* No link under the cursor: try a bare image hit. */
                         const LayoutItem *imgItem = layout_image_at(
-                            mouseX, mouseY + scrollY);
+                            mouseX, layout_page_y(mouseX, mouseY, scrollY));
                         if (imgItem)
                         {
                             const char *im2 = storage_setting_str("imageMode");
@@ -10370,6 +10849,13 @@ static int updateFrame(void *userdata)
                                  primary->inputItem)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
+                        }
+                        else if (hitLink->href &&
+                                 strncmp(hitLink->href, "toggle:", 7) == 0)
+                        {
+                            /* A disclosure rect whose aux metadata was lost
+                             * still toggles from its href. */
+                            toggle_details(hitLink->href + 7);
                         }
                         else if (page_handle_js_click(hitLink->index))
                         {
@@ -10434,7 +10920,7 @@ static int updateFrame(void *userdata)
                 const char *currentHoverSrc = NULL;
                 if (isHtmlMode)
                 {
-                    const LMLink *hovered = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hovered = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (hovered)
                     {
                         const LMRectAux *pr = lm_rect_aux(hovered->index, 0);
@@ -10727,8 +11213,9 @@ static int updateFrame(void *userdata)
     /* Hover status bar: show URL under cursor (like desktop browsers). */
     if (currentState == STATE_PAGE && currentBrowseMode == MODE_RAW_HTML)
     {
-        const LMLink *hovLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
-        if (hovLink && hovLink->href)
+        const LMLink *hovLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
+        if (hovLink && hovLink->href &&
+            strncmp(hovLink->href, "toggle:", 7) != 0)
         {
             hud_draw_hover_status(hovLink->href);
         }
@@ -10865,8 +11352,11 @@ static int updateFrame(void *userdata)
     pdtimer_update();
 
     /* R67: SDK connection releases are safe only when no render/walk is
-     * live. A release during the sliced walk was the bbc wild-PC window. */
-    http_set_release_gate(!isRendering && currentState != STATE_LOADING);
+     * live. A release during the sliced walk was the bbc wild-PC window.
+     * Do not also gate on STATE_LOADING: between network fetches the client
+     * is idle, and blocking the TCP graveyard for the whole page load
+     * exhausts the SDK's four-slot pool on fetch-heavy pages. */
+    http_set_release_gate(!isRendering);
 
     /* Phase 24: pump the HTTP state machine each frame. */
     http_update();
@@ -10891,6 +11381,9 @@ __declspec(dllexport)
 __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSystemEvent event, uint32_t arg)
 {
     (void)arg;
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
 
     switch (event)
     {
@@ -11533,9 +12026,33 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 #endif
 
 #if defined(PLUTO_NAV_AUTOTEST)
-        /* TEMPORARY (autotest builds, sim + device): leave the app on the
-         * home page — nav_autotest_tick() steers the Google speed-dial card
-         * and presses A through the real input path (see updateFrame). */
+        /* TEMPORARY (autotest builds, sim + device): navigate STRAIGHT to
+         * the target at boot. The default is google.com; a seam build can
+         * point it at another live page through tests/nav_autotest_url.h
+         * (URL literals cannot ride -D: "//" starts a preprocessor comment).
+         * The old seam cranked to the Google speed-dial card and pressed A;
+         * when the crank steering never landed on index 2 the run sat on the
+         * home page forever. Direct navigation removes that failure mode —
+         * nav_autotest_tick only watches. */
+#ifdef PLUTO_NAV_AUTOTEST_TARGET_FILE
+#include "../tests/nav_autotest_url.h"
+#define NAV_AUTOTEST_URL_STR PLUTO_NAV_AUTOTEST_URL_STR
+#else
+#define NAV_AUTOTEST_URL_STR "https://google.com"
+#endif
+#ifdef PLUTO_NAV_AUTOTEST_FULLJS
+        if (storage_setting_int("jsEnabled") != 2)
+        {
+            storage_set_setting_int("jsEnabled", 2);
+            logger_log("[nav-autotest] jsEnabled forced to 2 (Full)");
+        }
+        snapBypass = 1;
+#endif
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 NAV_AUTOTEST_URL_STR);
+        logger_log("[nav-autotest] direct navigation to %s",
+                   NAV_AUTOTEST_URL_STR);
 #endif
 
         /* Keyboard instance. The port's contract:

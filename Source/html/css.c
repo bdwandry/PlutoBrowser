@@ -1814,6 +1814,8 @@ static int css_known_prop(const char *n, size_t len)
          * the probe fixture exposed this gap: width/height always
          * belonged in the census vocabulary. */
         {"width", 5},            {"height", 6},
+        {"max-height", 10},      {"max-width", 9},
+        {"border-radius", 13},
         {"font-size", 9},        {"color", 5},
         /* Phase 9 transform lane: `transform` values parse at the walk
          * side (translate/translateX/translateY = real paint offsets via
@@ -2598,11 +2600,67 @@ static const char *find_color_token(const char *vs, size_t vlen,
     return NULL;
 }
 
+/* First marker-type token in a list-style shorthand (for fan-out):
+ * the type can appear in any order alongside an image/position token
+ * ("none", "square inside", "url(x) disc", …). Tokens inside url()/
+ * quoted image values are skipped as whole parenthesized spans. */
+static const char *find_list_style_type(const char *vs, size_t vlen,
+                                        size_t *tlenOut)
+{
+    const char *z = vs + vlen;
+    const char *p = vs;
+    while (p < z)
+    {
+        while (p < z && css_isspace(*p))
+        {
+            p++;
+        }
+        if (p >= z)
+        {
+            break;
+        }
+        const char *tok = p;
+        int depth = 0;
+        while (p < z)
+        {
+            if (*p == '(')
+            {
+                depth++;
+            }
+            else if (*p == ')' && depth > 0)
+            {
+                depth--;
+            }
+            else if (depth == 0 && css_isspace(*p))
+            {
+                break;
+            }
+            p++;
+        }
+        size_t n = (size_t)(p - tok);
+        if (css_val_eq(tok, n, "disc") || css_val_eq(tok, n, "circle") ||
+            css_val_eq(tok, n, "square") || css_val_eq(tok, n, "decimal") ||
+            css_val_eq(tok, n, "lower-roman") ||
+            css_val_eq(tok, n, "upper-roman") ||
+            css_val_eq(tok, n, "lower-alpha") ||
+            css_val_eq(tok, n, "upper-alpha") || css_val_eq(tok, n, "none"))
+        {
+            if (tlenOut)
+            {
+                *tlenOut = n;
+            }
+            return tok;
+        }
+    }
+    return NULL;
+}
+
 /* margin/padding shorthand fan-out: split the value into 1-4 tokens and
  * register side longhands (1→all, 2→tb/rl, 3→t/rl/b, 4→t/r/b/l). */
 static void add_prop(CssEngine *eng, CssRule *r, const char *name,
                      size_t nlen, const char *val, size_t vlen,
                      int important);
+static int css_prop_is_presence(const char *p, size_t n);
 static void expand_box(CssEngine *eng, CssRule *r, const char *name,
                        size_t nlen, const char *vs, size_t vlen,
                        int important)
@@ -2755,6 +2813,27 @@ static void add_prop(CssEngine *eng, CssRule *r, const char *name,
     }
     if (r->propCount >= CSS_MAX_PROPS)
     {
+        /* Full table: visibility/position declarations always outrank a
+         * typography or shorthand-expanded decoration slot. Long rules
+         * (the mobile nav recipe runs 12+ source declarations, and
+         * background/border expand to ~12 longhands before display:none)
+         * would otherwise lose the one declaration that decides whether
+         * the panel renders at all. */
+        if (css_prop_is_presence(name, nlen))
+        {
+            for (unsigned char i = 0; i < CSS_MAX_PROPS; i++)
+            {
+                if (!css_prop_is_presence(r->prop[i], r->propLen[i]))
+                {
+                    r->prop[i] = name;
+                    r->val[i] = val;
+                    r->propLen[i] = (unsigned char)nlen;
+                    r->valLen[i] = (unsigned char)vlen;
+                    r->propImp[i] = (unsigned char)(important ? 1 : 0);
+                    return;
+                }
+            }
+        }
         return;
     }
 #if PLUTO_CSS_SKIP_TALLY
@@ -2908,6 +2987,20 @@ static void parse_decl_block(CssEngine *eng, CssRule *r, const char *p,
                     if (tok)
                     {
                         add_prop(eng, r, "background-color", 16, tok, tlen,
+                                 important);
+                    }
+                }
+                else if (nlen == 10 && css_eq_ncase(ns, "list-style", 10))
+                {
+                    /* list-style fans out its type token as the queried
+                     * longhand. Registering it in declaration order keeps
+                     * a later list-style-type/later shorthand winner exact. */
+                    size_t tlen = 0;
+                    const char *tok = find_list_style_type(
+                        vs, (size_t)(ve - vs), &tlen);
+                    if (tok)
+                    {
+                        add_prop(eng, r, "list-style-type", 15, tok, tlen,
                                  important);
                     }
                 }
@@ -5088,6 +5181,19 @@ static int rgb_lum(const char *s, const char *z)
     return (299 * c[0] + 587 * c[1] + 114 * c[2]) / 1000;
 }
 
+static int css_hexv(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if ((c | 32) >= 'a' && (c | 32) <= 'f')
+    {
+        return (c | 32) - 'a' + 10;
+    }
+    return -1;
+}
+
 int css_color_luminance(const char *val, size_t vlen)
 {
     if (!val || vlen == 0)
@@ -5108,7 +5214,26 @@ int css_color_luminance(const char *val, size_t vlen)
             {
                 he++;
             }
-            int lum = hex_lum(h, (size_t)(he - h));
+            /* Alpha-aware: #rgba/#rrggbbaa with alpha below 0x80 is
+             * effectively invisible on the web (hover tints like
+             * #5cc8ff1a) — do NOT turn it into a dithered shade band or
+             * decor frame. Fully transparent and near-transparent both
+             * read as "no color". */
+            size_t hl = (size_t)(he - h);
+            if (hl == 4 || hl == 8)
+            {
+                int a1 = css_hexv(hl == 4 ? h[3] : h[6]);
+                int a2 = (hl == 4) ? a1 : css_hexv(h[7]);
+                if (a1 >= 0 && a2 >= 0)
+                {
+                    int av = (hl == 4) ? a1 * 17 : a1 * 16 + a2;
+                    if (av < 0x80)
+                    {
+                        continue; /* transparent: no shade candidate */
+                    }
+                }
+            }
+            int lum = hex_lum(h, hl);
             if (lum >= 0)
             {
                 return lum;
@@ -6228,9 +6353,14 @@ static void apply_prop(const CssEngine *eng, unsigned *out, const char *prop,
     else if (plen == 8 && memcmp(prop, "position", 8) == 0)
     {
         /* Phase 4 positioning vocabulary: which values are OUT OF FLOW.
-         * static/relative/sticky keep flowing — sticky chrome scrolls
-         * away instead of eating the 240px viewport. */
-        if (strstr(buf, "fixed") || strstr(buf, "absolute"))
+         * static/relative keep flowing. R71: sticky is its own signal —
+         * a top-anchored sticky element is the app-bar pattern, and the
+         * walker pins it (see CSS_F_STICKY). */
+        if (strstr(buf, "sticky"))
+        {
+            *out |= CSS_F_STICKY;
+        }
+        else if (strstr(buf, "fixed") || strstr(buf, "absolute"))
         {
             *out |= CSS_F_OOF;
         }
@@ -6267,15 +6397,34 @@ static void apply_prop(const CssEngine *eng, unsigned *out, const char *prop,
     {
         /* opacity:0 is visually invisible (the common modal/overlay
          * pre-animation state). A static first render honors it; the
-         * animation lane is not a compositor. */
-        const char *q = buf;
-        while (*q == ' ' || *q == '\t')
+         * animation lane is not a compositor. Parse the NUMBER: 0.25 is
+         * a normal dimming value (Lobsters uses it for hidden stories)
+         * and must not hide the subtree like a zero opacity. */
+        char *end = NULL;
+        double op = strtod(buf, &end);
+        int zero = 0;
+        if (end && end != buf)
         {
-            q++;
+            while (*end == ' ' || *end == '\t' || *end == '\r' ||
+                   *end == '\n')
+            {
+                end++;
+            }
+            if (*end == '%')
+            {
+                end++;
+                while (*end == ' ' || *end == '\t' || *end == '\r' ||
+                       *end == '\n')
+                {
+                    end++;
+                }
+            }
+            if (*end == '\0' && op == 0.0)
+            {
+                zero = 1;
+            }
         }
-        if ((q[0] == '0' && (q[1] == '\0' || q[1] == '.' || q[1] == '%' ||
-                             q[1] == ' ' || q[1] == '\t')) ||
-            strstr(buf, "transparent"))
+        if (zero)
         {
             *out |= CSS_F_HIDDEN;
         }
@@ -6597,6 +6746,44 @@ unsigned css_compute(const CssEngine *eng, const char *tagLower,
         }
         for (unsigned char pj = 0; pj < r->propCount; pj++)
         {
+            /* Off-screen parking is decided from EVERY matched rule, not
+             * only the winning declaration: the skip-link recipe ships
+             * .skip{left:-9999px} plus .skip:focus{left:.5rem}; the
+             * always-match focus policy makes the small offset win the
+             * property, which used to resurrect the parked link. Any
+             * matched far-negative left/top/text-indent still means the
+             * author parks this element off-screen. */
+            if ((r->propLen[pj] == 4 &&
+                 memcmp(r->prop[pj], "left", 4) == 0) ||
+                (r->propLen[pj] == 3 &&
+                 memcmp(r->prop[pj], "top", 3) == 0) ||
+                (r->propLen[pj] == 11 &&
+                 memcmp(r->prop[pj], "text-indent", 11) == 0))
+            {
+                const char *vv = r->val[pj];
+                size_t vn = r->valLen[pj], q = 0;
+                while (q < vn && (vv[q] == ' ' || vv[q] == '\t'))
+                {
+                    q++;
+                }
+                if (q < vn && vv[q] == '-' && q + 1 < vn)
+                {
+                    int digits = 0;
+                    for (size_t w2 = q + 1;
+                         w2 < vn && vv[w2] >= '0' && vv[w2] <= '9'; w2++)
+                    {
+                        digits = digits * 10 + (vv[w2] - '0');
+                        if (digits >= 1000)
+                        {
+                            break;
+                        }
+                    }
+                    if (digits >= 1000)
+                    {
+                        out |= CSS_F_OFFSCREEN;
+                    }
+                }
+            }
             /* find this property in the best-so-far table */
             unsigned char bi;
             for (bi = 0; bi < bestCount; bi++)

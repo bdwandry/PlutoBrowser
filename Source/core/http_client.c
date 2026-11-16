@@ -142,6 +142,7 @@ static int g_identityEncoding = 0;
 void http_set_identity_encoding(int on) { g_identityEncoding = on; }
 static int g_connOpen = 0;         /* open callback fired, connected */
 static int g_openFailed = 0;
+static int g_poolRecovery = 0; /* NET_BUFFER_TOO_SMALL recovery owed */
 static int g_connClosed = 0;
 static char g_error[256];
 static unsigned int g_requestStart = 0;
@@ -171,6 +172,19 @@ static char g_pooledHost[256];
 static int g_pooledPort = 0;
 static int g_pooledSsl = 0;
 static TCPConnection *g_orphanTcp = NULL;  /* open callback owns close+release */
+
+/* XHR GET keep-alive lane. This is deliberately separate from the R52
+ * close/reopen pool above: the socket is never re-opened after close. It is
+ * kept OPEN across sequential same-host requests, so the TLS session is
+ * reused without touching either R52 hazard. Page loads, images and POSTs
+ * never enter this lane. */
+static TCPConnection *g_idleTcp = NULL;
+static char g_idleHost[256];
+static int g_idlePort = 0;
+static int g_idleSsl = 0;
+static int g_idleClosed = 0;
+static int g_reusedConn = 0;
+static int g_reuseRetried = 0;
 
 /* Graveyard: closed connections waiting for the SDK event loop to drain.
  * A SINGLE slot used to hold this: every new fetch overwrote it, so all
@@ -241,8 +255,11 @@ static void drain_deferred_releases(void)
     g_deferReleaseN = 0;
 }
 
-/* Park a closed connection until the SDK event loop has drained. */
-static void grave_add(TCPConnection *t)
+/* Park a closed connection until the SDK event loop has drained.
+ * A failed ASYNC OPEN never established TLS, so it has no live session
+ * to protect: callers pass frames=0 for that case to return its SDK
+ * connection slot on the next idle tick. */
+static void grave_add_after(TCPConnection *t, int frames)
 {
     if (!t)
     {
@@ -251,7 +268,7 @@ static void grave_add(TCPConnection *t)
     if (g_graveN < GRAVE_MAX)
     {
         g_grave[g_graveN].conn = t;
-        g_grave[g_graveN].frames = GRAVE_FRAMES;
+        g_grave[g_graveN].frames = frames;
         g_graveN++;
         return;
     }
@@ -264,12 +281,17 @@ static void grave_add(TCPConnection *t)
         memmove(&g_grave[0], &g_grave[1],
                 sizeof(g_grave[0]) * (GRAVE_MAX - 1));
         g_grave[GRAVE_MAX - 1].conn = t;
-        g_grave[GRAVE_MAX - 1].frames = GRAVE_FRAMES;
+        g_grave[GRAVE_MAX - 1].frames = frames;
     }
     else
     {
         logger_log("[http] grave ring full — closed connection left to SDK");
     }
+}
+
+static void grave_add(TCPConnection *t)
+{
+    grave_add_after(t, GRAVE_FRAMES);
 }
 
 /* Release graveyard entries whose cooling-off expired AND no session is
@@ -295,25 +317,52 @@ static void grave_tick(void)
 /* Navigation: the client is idle, so release every entry whose timer
  * already expired. Entries closed during THIS navigation keep their
  * fresh timer (an immediate close+release is the receipted SDK trap). */
-static void grave_release_expired(void)
+static int grave_release_expired(void)
 {
+    int released = 0;
     for (int i = 0; i < g_graveN;)
     {
         if (g_grave[i].frames <= 0)
         {
             g_pd->network->tcp->release(g_grave[i].conn);
             g_grave[i] = g_grave[--g_graveN];
+            released++;
             continue;
         }
         i++;
     }
+    return released;
 }
 
 /* Navigation hard reset (called after http_cancel, while the client is
  * idle): close anything still open and release every closed object so
  * the next page starts with the SDK's full connection pool. */
+static void close_idle_tcp(void)
+{
+    if (!g_idleTcp)
+    {
+        return;
+    }
+    TCPConnection *t = g_idleTcp;
+    int alreadyClosed = g_idleClosed;
+    g_idleTcp = NULL;
+    g_idleClosed = 0;
+    if (!alreadyClosed && g_pd && g_pd->network && g_pd->network->tcp)
+    {
+        g_pd->network->tcp->close(t);
+        grave_add_after(t, GRAVE_FRAMES);
+    }
+    else
+    {
+        /* The close callback already observed the server close; the
+         * object only needs the normal idle release. */
+        grave_add_after(t, 0);
+    }
+}
+
 void http_navigation_reset(void)
 {
+    close_idle_tcp();
     if (g_pooledTcp)
     {
         g_pd->network->tcp->close(g_pooledTcp);
@@ -2824,7 +2873,9 @@ static void close_tcp(void)
              * object in the graveyard — never release a TLS connection the
              * SDK may still have event-loop state for (hazard 2). */
             g_pd->network->tcp->close(t);
-            grave_add(t);
+            /* Failed opens never established TLS; don't hold their SDK
+             * slots for the full TLS cool-off. */
+            grave_add_after(t, g_openFailed ? 0 : GRAVE_FRAMES);
         }
         else
         {
@@ -2868,6 +2919,8 @@ static void reset_state(void)
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
     g_error[0] = '\0';
     g_attemptStart = 0;
     g_connectAttempts = 0;
@@ -3266,7 +3319,11 @@ static void build_request(StrBuf *out)
             }
         }
     }
-    strbuf_appendf(out, "Connection: close\r\n\r\n");
+    int keepAlive = g_cb.keepAlive &&
+                    (!g_reqMethod[0] || strcmp(g_reqMethod, "GET") == 0) &&
+                    !isPostReq;
+    strbuf_appendf(out, "Connection: %s\r\n\r\n",
+                   keepAlive ? "keep-alive" : "close");
     if (isPostReq && g_reqBody && g_reqBodyLen)
     {
         strbuf_append_n(out, g_reqBody, g_reqBodyLen);
@@ -3643,7 +3700,7 @@ static int parse_headers_saved(void)
      * zero body bytes in the same TCP read, open the spill file now; the
      * pump starts streaming on the next read. Any body bytes already in
      * RAM stay there (they are the prefix; disk continues after them). */
-    if (g_status >= 200 && g_status < 300)
+    if (g_status >= 200 && g_status < 300 && !g_cb.keepAlive)
     {
         if (g_isGzip)
         {
@@ -3677,6 +3734,10 @@ static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
     if (g_tcp == conn && g_state != HS_IDLE)
     {
         g_connClosed = 1;
+    }
+    if (g_idleTcp == conn)
+    {
+        g_idleClosed = 1;
     }
 }
 
@@ -3837,6 +3898,10 @@ static void tcp_open_cb(TCPConnection *conn, PDNetErr err, void *ud)
     if (err != NET_OK)
     {
         g_openFailed = 1;
+        if (err == NET_BUFFER_TOO_SMALL)
+        {
+            g_poolRecovery = 1;
+        }
         netmon_probe_fail(); /* network-layer fault */
         /* Phase 5 taxonomy: the raw SDK code stays on the log so the
          * refused/DNS shapes are receipted, and the mapped phrase rides
@@ -4182,6 +4247,8 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
     g_error[0] = '\0';
     g_attemptStart = 0;
     g_connectAttempts = 0;
@@ -4379,6 +4446,44 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
  * deferral pattern). */
 static void open_connection(void)
 {
+    /* XHR GET fast path: reuse the still-open same-host socket. No close()
+     * and no re-open() happens here — the connection has stayed open since
+     * the previous response completed. */
+    if (g_idleTcp)
+    {
+        int sameHost = g_parsed &&
+                       strcmp(g_idleHost, g_parsed->host) == 0 &&
+                       g_idlePort == g_parsed->port &&
+                       g_idleSsl == g_parsed->isSsl;
+        int getRequest = !g_reqMethod[0] || strcmp(g_reqMethod, "GET") == 0;
+        if (g_cb.keepAlive && getRequest && sameHost && !g_idleClosed)
+        {
+            TCPConnection *t = g_idleTcp;
+            g_idleTcp = NULL;
+            g_idleClosed = 0;
+            g_tcp = t;
+            g_pooledTcp = t;
+            snprintf(g_pooledHost, sizeof(g_pooledHost), "%s",
+                     g_parsed->host);
+            g_pooledPort = g_parsed->port;
+            g_pooledSsl = g_parsed->isSsl;
+            g_connOpen = 1;
+            g_connClosed = 0;
+            g_reusedConn = 1;
+            g_reuseRetried = 0;
+            /* Re-arm the per-request transport knobs; the callback stays
+             * attached to this same object. */
+            g_pd->network->tcp->setReadTimeout(t, SDK_TIMEOUT_MS);
+            g_pd->network->tcp->setReadBufferSize(t, SDK_READ_BUFFER);
+            g_pd->network->tcp->setConnectionClosedCallback(t,
+                                                           tcp_closed_cb);
+            logger_log("[http] keep-alive reuse %s:%d%s", g_parsed->host,
+                       g_parsed->port, g_parsed->isSsl ? " (tls)" : "");
+            return;
+        }
+        close_idle_tcp();
+    }
+
     /* R52: POOLING DISABLED (device runs 48+49: byte-identical hard crash
      * 8s into the soak's second navigation, r0/pc pointing into the string
      * "bryanwandrych"). Sequence: the page's TLS connection is pooled, the
@@ -4438,6 +4543,8 @@ static void open_connection(void)
     g_pooledSsl = g_parsed->isSsl;
 
     g_tcp = tcp;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
 
     /* Generation id: any callback that no longer matches is a stale event. */
     unsigned int myId = ++g_requestId;
@@ -4646,6 +4753,69 @@ int http_is_loading(void)
     return g_state == HS_CONNECTING || g_state == HS_READING ||
            g_state == HS_RETRY_WAIT || g_state == HS_RADIO_HEAL ||
            g_state == HS_ACCESS_WAIT;
+}
+
+/* A completed response is safe to keep on the same socket only when the
+ * request opted into the XHR GET lane, the framing was self-delimiting, and
+ * the server did not ask to close. */
+static int keep_alive_response_ok(void)
+{
+    if (!g_cb.keepAlive)
+    {
+        return 0;
+    }
+    if (g_reqMethod[0] && strcmp(g_reqMethod, "GET") != 0)
+    {
+        return 0;
+    }
+    if (g_savedStatus < 200 || g_savedStatus >= 300)
+    {
+        return 0;
+    }
+    if (!g_tcp || !g_connOpen || g_connClosed)
+    {
+        return 0;
+    }
+    if (!g_savedIsChunked && g_contentLength < 0)
+    {
+        return 0; /* close-delimited body: no safe request boundary */
+    }
+    const char *conn = saved_header("connection");
+    if (conn)
+    {
+        char low[64];
+        int n = 0;
+        for (; conn[n] && n < (int)sizeof(low) - 1; n++)
+        {
+            char c = conn[n];
+            low[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        low[n] = '\0';
+        if (strstr(low, "close") != NULL)
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void park_connection_for_reuse(void)
+{
+    if (!keep_alive_response_ok())
+    {
+        return;
+    }
+    TCPConnection *t = g_tcp;
+    g_tcp = NULL;
+    g_pooledTcp = NULL;
+    g_idleTcp = t;
+    snprintf(g_idleHost, sizeof(g_idleHost), "%s",
+             g_parsed ? g_parsed->host : "");
+    g_idlePort = g_parsed ? g_parsed->port : 0;
+    g_idleSsl = g_parsed ? g_parsed->isSsl : 0;
+    g_idleClosed = 0;
+    logger_log("[http] keep-alive park %s:%d%s", g_idleHost, g_idlePort,
+               g_idleSsl ? " (tls)" : "");
 }
 
 /* ── Update: call once per frame ──────────────────────────────────────────── */
@@ -5018,6 +5188,20 @@ void http_update(void)
         else if (sent == NET_WRITE_BUSY)
         {
             g_writePending = 1; /* retry next frame */
+        }
+        else if (g_reusedConn && !g_reuseRetried)
+        {
+            /* The idle server closed the keep-alive socket between frames.
+             * Retire it and retry this request once on a fresh connection. */
+            g_reuseRetried = 1;
+            logger_log("[http] keep-alive write failed (%d); reopening",
+                       (int)sent);
+            close_tcp();
+            g_connOpen = 0;
+            g_connClosed = 0;
+            g_openFailed = 0;
+            g_attemptStart = 0;
+            g_state = HS_CONNECTING;
         }
         else
         {
@@ -5805,6 +5989,9 @@ void http_update(void)
         static char urlSnapshot[1024];
         strncpy(urlSnapshot, g_url, sizeof(urlSnapshot) - 1);
         urlSnapshot[sizeof(urlSnapshot) - 1] = '\0';
+        /* Detach before reset_state so reset cannot close the socket we
+         * intend to reuse for the next queued XHR. */
+        park_connection_for_reuse();
         HttpCallbacks cb = g_cb;
 
         reset_state();
@@ -5824,6 +6011,15 @@ void http_update(void)
         HttpCallbacks cb = g_cb;
 
         reset_state();
+
+        if (g_poolRecovery)
+        {
+            int released;
+            g_poolRecovery = 0;
+            released = grave_release_expired();
+            logger_log("[http] pool recovery: released %d expired connection(s)",
+                       released);
+        }
 
         if (cb.onError)
         {

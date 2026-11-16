@@ -56,6 +56,7 @@
  * jsbridge_quickjs.c (same accessors, methods, budget + write capture).
  */
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1532,6 +1533,42 @@ static void xs_el_set_checked(xsMachine *the)
                b->doc ? b->doc->blockCount : -1);
 }
 
+/* `hidden` reflection: the HTML hidden attribute. Pages set this property
+ * to show/hide controls (the projects refresh button/card metadata), and
+ * a write must reach the attribute or CSS [hidden] never applies. */
+static void xs_el_get_hidden(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "hidden") : NULL;
+    xsResult = xsBoolean(v ? 1 : 0);
+}
+
+static void xs_el_set_hidden(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        int on = xsToBoolean(xsArg(0));
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "hidden", "");
+        }
+        else if (dom_get_attr(n, "hidden"))
+        {
+            rc = dom_remove_attr(n, "hidden");
+        }
+        if (rc != 0)
+        {
+            xsTypeError("hidden assignment failed");
+        }
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, n);
+    }
+}
+
 /* Forms-Phase 1: `disabled` reflection — browser-true to the REFLECTED
  * property: .disabled reads the element's OWN disabled-attribute
  * presence (a disabled <fieldset> does NOT flip a child's .disabled —
@@ -1555,8 +1592,15 @@ static void xs_el_set_disabled(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "disabled", "")
-                    : dom_remove_attr(n, "disabled");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "disabled", "");
+        }
+        else if (dom_get_attr(n, "disabled"))
+        {
+            rc = dom_remove_attr(n, "disabled");
+        }
         if (rc != 0)
         {
             xsTypeError("disabled assignment failed");
@@ -1584,8 +1628,15 @@ static void xs_el_set_readOnly(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "readonly", "")
-                    : dom_remove_attr(n, "readonly");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "readonly", "");
+        }
+        else if (dom_get_attr(n, "readonly"))
+        {
+            rc = dom_remove_attr(n, "readonly");
+        }
         if (rc != 0)
         {
             xsTypeError("readOnly assignment failed");
@@ -2035,6 +2086,33 @@ static void xs_el_get_type(xsMachine *the)
     }
 }
 
+/* `type` is writable on script/style/input/button elements. JSON-LD
+ * injection sets script.type before appending; a getter-only property
+ * throws "set type: no setter" and aborts the rest of that render. */
+static void xs_el_set_type(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = dom_set_attr(b->dom, n, "type", v);
+    JFree(v);
+    if (rc != 0)
+    {
+        xsTypeError("type assignment failed");
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+}
+
 /* namespaceURI — browser-parity: xhtml for html-parsed nodes, svg for
  * svg tags. The hoisting path uses it to skip foreign elements. */
 static void xs_el_get_namespaceURI(xsMachine *the)
@@ -2150,6 +2228,8 @@ static void xs_el_set_textContent(xsMachine *the)
         {
             xsTypeError("textContent assignment failed");
         }
+        b->domDirty = 1; /* text mutation must reach the next walk */
+        jsbridge_note_dom_mutation(b, n);
     }
 }
 
@@ -2547,6 +2627,147 @@ static void xs_el_prepend(xsMachine *the)
 static void xs_el_append(xsMachine *the)
 {
     xs_el_prepend_append(the, 1);
+}
+
+/* ChildNode.before()/after() (DOM §4.8): insert nodes (or text) immediately
+ * before/after this node in its parent. The contact form's success handler
+ * places its status card with form.after(...) and card.after(...); without
+ * these methods the success path throws after building the card. Multiple
+ * nodes are kept in argument order; a detached node is a no-op, like a
+ * browser. */
+static void xs_el_before_after(xsMachine *the, int after)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *parent = n ? n->parent : NULL;
+    if (!parent)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    DomNode *ref = n;
+    if (after)
+    {
+        ref = NULL;
+        for (int i = 0; i + 1 < parent->childCount; i++)
+        {
+            if (parent->children[i] == n)
+            {
+                ref = parent->children[i + 1];
+                break;
+            }
+        }
+    }
+    int moved = 0;
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c || c == n || c == ref)
+        {
+            continue;
+        }
+        if (dom_insert_before(b->dom, parent, c, ref) != 0)
+        {
+            xsTypeError("before/after failed");
+        }
+        moved = 1;
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    if (moved)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, parent);
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_el_before(xsMachine *the)
+{
+    xs_el_before_after(the, 0);
+}
+
+static void xs_el_after(xsMachine *the)
+{
+    xs_el_before_after(the, 1);
+}
+
+/* Element.replaceChildren(...nodes): remove every current child and append
+ * the arguments in order. Modern list renderers use this as the atomic
+ * "replace the whole list" operation; without it they throw before their
+ * data fetch starts. */
+static void xs_el_replaceChildren(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        xsTypeError("replaceChildren: no element");
+    }
+    while (n->childCount > 0)
+    {
+        dom_remove_child(n, n->children[0]);
+    }
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c)
+        {
+            continue;
+        }
+        if (dom_append_child(b->dom, n, c) != 0)
+        {
+            xsTypeError("replaceChildren failed");
+        }
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+    xsResult = xsUndefined;
+}
+
+/* ChildNode.remove(): detach this node from its parent. */
+static void xs_el_remove(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *p = n ? n->parent : NULL;
+    if (p && dom_remove_child(p, n) == 0)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, p);
+    }
+    xsResult = xsUndefined;
 }
 
 static void xs_el_appendChild(xsMachine *the)
@@ -3680,11 +3901,16 @@ static xsSlot xs_push_element(JsBridge *b, DomNode *node)
     xs_set_host_data_site(the, "element", obj, node);
     if (st->elwCount < XS_ELW_CAP)
     {
-        xsResult = obj; /* marked-slot anchor while the arrays settle */
+        /* xsResult is the caller's return slot (querySelectorAll builds an
+         * array there). Keep it alive while the new wrapper allocates, then
+         * restore it: the persistent cache slot takes over rooting below. */
+        xsSlot savedResult = xsResult;
+        xsResult = obj;
         int w = st->elwCount++;
         st->elwNode[w] = node;
         st->elwWrap[w] = obj;
         xsRemember(st->elwWrap[w]);
+        xsResult = savedResult;
     }
     else if (!st->elwOverflow)
     {
@@ -5861,6 +6087,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"selectedIndex", xs_el_get_selectedIndex, NULL},
         {"options", xs_el_get_options, NULL},
         {"disabled", xs_el_get_disabled, xs_el_set_disabled},
+        {"hidden", xs_el_get_hidden, xs_el_set_hidden},
         {"readOnly", xs_el_get_readOnly, xs_el_set_readOnly},
         /* Forms-Phase 6: the form's enumerated IDL mirrors (the browser
          * reflect shapes; tag-gated, aliasing encoding → enctype). */
@@ -5886,7 +6113,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"data", xs_el_get_data, NULL},
         {"dataset", xs_el_get_dataset, NULL},
         {"nodeValue", xs_el_get_nodeValue, xs_el_set_nodeValue},
-        {"type", xs_el_get_type, NULL},
+        {"type", xs_el_get_type, xs_el_set_type},
         {"namespaceURI", xs_el_get_namespaceURI, NULL},
         {"classList", xs_el_get_classList, NULL},
         {"style", xs_el_get_style, NULL},
@@ -5917,6 +6144,10 @@ static void xs_build_el_proto(JsBridge *b)
         {"insertBefore", xs_el_insertBefore, 2},
         {"prepend", xs_el_prepend, 0},
         {"append", xs_el_append, 0},
+        {"before", xs_el_before, 0},
+        {"after", xs_el_after, 0},
+        {"replaceChildren", xs_el_replaceChildren, 0},
+        {"remove", xs_el_remove, 0},
         {"querySelector", xs_el_querySelector, 1},
         {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"closest", xs_el_closest, 1},
@@ -6308,14 +6539,15 @@ static void xs_storage_getItem(xsMachine *the)
     {
         xsTypeError("out of memory");
     }
-    char out[WS_VAL_MAX];
-    int hit = ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value: xsString copies it immediately, so no
+     * 8KB stack buffer is needed on the device's ~62KB game-task stack. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
+    xsResult = v ? xsString(v) : xsNull;
     JFree(k);
-    xsResult = hit ? xsString(out) : xsNull;
 }
 
 static void xs_storage_setItem(xsMachine *the)
@@ -9561,11 +9793,73 @@ static int xs_try_bundler_split_src(JsBridge *b, const char *src, size_t len,
  * (router HTTP), so the shim is a tiny SCRIPT (one xs_run_tiny run, before
  * the page's first script) rather than C promise plumbing. Response shape
  * covers the handler's usage: .ok (200–299), .status, .text()/.json()
- * promise-returning. The signal object's timeoutms drives a setTimeout
- * reject (the real spec abort machinery is out of scope here). */
+ * promise-returning. The website's AbortSignal.timeout(15s) is advisory:
+ * the transport owns the hard deadline, because the device's GitHub
+ * requests take longer than 15s and must still build the cards. */
 static const char g_fetchShimSrc[] =
     "/* pluto fetch shim (engine-owned) */\n"
     "(function (g) {\n"
+    "  /* Device date/number compatibility: the game task's libc locale and\n"
+    "     timezone environment are unusable. These shims keep the same visible\n"
+    "     integer/date output without entering the native locale path. */\n"
+    "  try {\n"
+    "    var pNum = function (v) {\n"
+    "      var n = Number(v);\n"
+    "      if (n !== n || !isFinite(n)) { return String(n); }\n"
+    "      var s = String(n);\n"
+    "      if (s.indexOf('e') >= 0 || s.indexOf('E') >= 0) { return s; }\n"
+    "      var neg = s.charAt(0) === '-';\n"
+    "      if (neg) { s = s.slice(1); }\n"
+    "      var dot = s.indexOf('.');\n"
+    "      var frac = dot >= 0 ? s.slice(dot) : '';\n"
+    "      var int = dot >= 0 ? s.slice(0, dot) : s;\n"
+    "      var out = '';\n"
+    "      while (int.length > 3) {\n"
+    "        out = ',' + int.slice(-3) + out;\n"
+    "        int = int.slice(0, -3);\n"
+    "      }\n"
+    "      return (neg ? '-' : '') + int + out + frac;\n"
+    "    };\n"
+    "    Number.prototype.toLocaleString = function () {\n"
+    "      console.log('[probe] number.toLocaleString');\n"
+    "      return pNum(this.valueOf());\n"
+    "    };\n"
+    "    var pOldDate = Date;\n"
+    "    var pIso = function (s) {\n"
+    "      var m = /^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?Z$/.exec(s);\n"
+    "      if (m) {\n"
+    "        return pOldDate.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +(m[7] || 0));\n"
+    "      }\n"
+    "      return pOldDate.parse(s);\n"
+    "    };\n"
+    "    var pMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\n"
+    "    pOldDate.prototype.toLocaleDateString = function () {\n"
+    "      console.log('[probe] date.toLocaleDateString');\n"
+    "      var t = this.getTime();\n"
+    "      if (t !== t) { return 'Invalid Date'; }\n"
+    "      var d = new pOldDate(t);\n"
+    "      return pMonths[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();\n"
+    "    };\n"
+    "    var pDate = function () {\n"
+    "      var a = arguments;\n"
+    "      console.log('[probe] Date', a.length, a.length ? typeof a[0] : 'none');\n"
+    "      if (!(this instanceof pDate)) { return new pOldDate().toString(); }\n"
+    "      if (a.length === 0) { return new pOldDate(); }\n"
+    "      if (a.length === 1) {\n"
+    "        return new pOldDate(typeof a[0] === 'string' ? pIso(a[0]) : a[0]);\n"
+    "      }\n"
+    "      return new pOldDate(a[0], a[1], a.length < 3 ? 1 : a[2],\n"
+    "        a.length < 4 ? 0 : a[3], a.length < 5 ? 0 : a[4],\n"
+    "        a.length < 6 ? 0 : a[5], a.length < 7 ? 0 : a[6]);\n"
+    "    };\n"
+    "    pDate.prototype = pOldDate.prototype;\n"
+    "    pDate.now = pOldDate.now;\n"
+    "    pDate.parse = function (s) { return pIso(String(s)); };\n"
+    "    pDate.UTC = pOldDate.UTC;\n"
+    "    g.Date = pDate;\n"
+    "  } catch (pe) {\n"
+    "    console.log('[probe] date/number shim error', pe);\n"
+    "  }\n"
     "  if (typeof g.fetch === 'function') { return; }\n"
     "  if (typeof g.AbortSignal !== 'function') {\n"
     "    var AS = function AbortSignal() {};\n"
@@ -9606,18 +9900,18 @@ static const char g_fetchShimSrc[] =
     "          catch (hfe) {}\n"
     "        }\n"
     "      }\n"
-    "      if (ms > 0) {\n"
-    "        timer = setTimeout(function () {\n"
-    "          timer = 0;\n"
-    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
-    "        }, ms);\n"
-    "      }\n"
+    "      /* AbortSignal.timeout(15s) is advisory here: the transport owns\n"
+    "         the hard deadline; the device's GitHub reply can exceed 15s. */\n"
     "      xhr.onload = function () {\n"
     "        if (timer) { clearTimeout(timer); timer = 0; }\n"
     "        var st = this.status || 0;\n"
     "        var tx = this.responseText || '';\n"
     "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
     "          url: String(url), redirected: false,\n"
+    "          headers: { get: function (name) {\n"
+    "            try { return xhr.getResponseHeader(String(name)) || ''; }\n"
+    "            catch (he) { return ''; }\n"
+    "          } },\n"
     "          text: function () { return g.Promise.resolve(tx); },\n"
     "          json: function () {\n"
     "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
@@ -12607,6 +12901,26 @@ static void xs_xhr_get_responseURL(xsMachine *the)
     xsResult = xsString((r && r->url[0]) ? r->url : "");
 }
 
+/* The fetch shim's Response.headers.get(name). The router retains the
+ * response Link header (GitHub pagination); other names return "" until
+ * a page needs them. */
+static void xs_xhr_get_response_header(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    char *name = to_cstring(the, xsArg(0));
+    const char *out = "";
+    if (r && name && strcasecmp(name, "link") == 0)
+    {
+        out = r->respLink;
+    }
+    xsResult = xsString(out);
+    if (name)
+    {
+        JFree(name);
+    }
+}
+
 static void xs_build_xhr_proto(JsBridge *b)
 {
     xsMachine *the = machine_of(b);
@@ -12618,6 +12932,8 @@ static void xs_build_xhr_proto(JsBridge *b)
     def_fn(the, st->xhrProto, "setRequestHeader", xs_xhr_set_request_header,
            2);
     def_fn(the, st->xhrProto, "abort", xs_xhr_abort, 0);
+    def_fn(the, st->xhrProto, "getResponseHeader",
+           xs_xhr_get_response_header, 1);
     struct
     {
         const char *name;

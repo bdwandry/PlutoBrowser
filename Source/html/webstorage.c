@@ -25,7 +25,6 @@
 extern PlaydateAPI *pluto_pd(void);
 
 #define WS_FILENAME "webstorage_js.txt" /* Data-sandbox file (both targets) */
-#define WS_RAW_MAX 12288                /* persisted-file image budget */
 
 typedef struct WsEntry
 {
@@ -252,16 +251,22 @@ static void ws_load_origin(WsStore *l)
                 size_t kLen = (size_t)(tab - q);
                 size_t vLen = qLen - (size_t)(tab - q) - 1;
                 char k[WS_KEY_MAX];
-                char v[WS_VAL_MAX * 2];
                 snprintf(k, sizeof(k), "%.*s", (int)(kLen > WS_KEY_MAX - 1 ? WS_KEY_MAX - 1 : kLen), q);
-                snprintf(v, sizeof(v), "%.*s", (int)(vLen > sizeof(v) - 1 ? (int)sizeof(v) - 1 : (int)vLen), tab + 1);
-                /* un-escape keeps persist/restore symmetric */
+                /* Un-escape the value slice in place: NUL at the line end,
+                 * unescape into one entry-sized buffer, restore the byte.
+                 * Avoids a second value-sized stack copy (the game-task
+                 * stack is ~62KB and the site's cache is 7.5KB). */
+                char *v = (char *)(tab + 1);
+                char saved = v[vLen];
+                v[vLen] = '\0';
                 char uk[WS_KEY_MAX];
-                char uv[WS_VAL_MAX];
                 ws_unescape(k, uk, sizeof(uk));
-                ws_unescape(v, uv, sizeof(uv));
+                /* Unescape directly into the entry's resident value buffer.
+                 * No second value-sized stack copy: the device's game-task
+                 * stack is ~62KB and the site's cache is 7.5KB. */
+                ws_unescape(v, l->entries[l->count].val, sizeof(l->entries[l->count].val));
+                v[vLen] = saved;
                 snprintf(l->entries[l->count].key, sizeof(l->entries[l->count].key), "%s", uk);
-                snprintf(l->entries[l->count].val, sizeof(l->entries[l->count].val), "%s", uv);
                 l->count++;
                 q = qEol ? qEol + 1 : g_raw + g_rawLen;
             }
@@ -369,19 +374,26 @@ static void ws_save_file(const char *why)
         len = prefix;
     }
     len += snprintf(g_img + len, sizeof(g_img) - len, "@%s\n", g_origin);
-    char line[WS_VAL_MAX * 2 + WS_KEY_MAX + 8];
     for (int i = 0; i < l->count; i++)
     {
         char ek[WS_KEY_MAX * 2];
-        char ev[WS_VAL_MAX * 2];
         ws_escape(l->entries[i].key, ek, sizeof(ek));
-        ws_escape(l->entries[i].val, ev, sizeof(ev));
-        len += snprintf(g_img + len, sizeof(g_img) - len, "%s\t%s\n", ek, ev);
+        len += snprintf(g_img + len, sizeof(g_img) - len, "%s\t", ek);
         if (len >= WS_RAW_MAX - 8)
         {
             len = WS_RAW_MAX - 8; /* hard cap, image stays parseable */
             break;
         }
+        /* Escape directly into the image: no value-sized stack copy. */
+        ws_escape(l->entries[i].val, g_img + len,
+                  sizeof(g_img) - (size_t)len);
+        len += (int)strlen(g_img + len);
+        if (len >= WS_RAW_MAX - 2)
+        {
+            len = WS_RAW_MAX - 2;
+            break;
+        }
+        g_img[len++] = '\n';
     }
     int tail = g_myEnd < g_rawLen ? g_rawLen - g_myEnd : 0;
     if (tail > 0 && len + tail <= WS_RAW_MAX - 1)
@@ -399,10 +411,31 @@ static void ws_save_file(const char *why)
         logger_log("[webstorage] save open FAILED (%s)", WS_FILENAME);
         return;
     }
-    /* One bounded write (≤ WS_RAW_MAX inside the spill road's proven
-     * 16KB single-write envelope). */
-    pluto_pd()->file->write(f, g_img, (unsigned int)len);
+    /* The SDK's proven single-write envelope is 16KB; stream larger
+     * snapshots in bounded chunks so one large localStorage value cannot
+     * fail at the file layer. */
+    int writeOk = 1;
+    size_t off = 0;
+    while (off < (size_t)len)
+    {
+        unsigned int chunk = (len - (int)off > 16384)
+                                 ? 16384u
+                                 : (unsigned int)(len - (int)off);
+        int wrote = pluto_pd()->file->write(f, g_img + off, chunk);
+        if (wrote != (int)chunk)
+        {
+            writeOk = 0;
+            logger_log("[webstorage] save write short at %zu/%d (%d)",
+                       off, len, wrote);
+            break;
+        }
+        off += (size_t)wrote;
+    }
     pluto_pd()->file->close(f);
+    if (!writeOk)
+    {
+        return; /* keep the resident store; retry on the next mutation */
+    }
 
     /* Adopt the image: g_raw = file truth; section span updates. */
     memcpy(g_raw, g_img, (size_t)len);
@@ -447,14 +480,20 @@ int ws_key(WsStore *s, int idx, char *out, size_t outMax)
     return 1;
 }
 
-int ws_get(WsStore *s, const char *key, char *out, size_t outMax)
+const char *ws_get_ptr(WsStore *s, const char *key)
 {
     int idx = s ? ws_find(s, key) : -1;
-    if (idx < 0)
+    return idx >= 0 ? s->entries[idx].val : NULL;
+}
+
+int ws_get(WsStore *s, const char *key, char *out, size_t outMax)
+{
+    const char *v = ws_get_ptr(s, key);
+    if (!v)
     {
         return 0;
     }
-    snprintf(out, outMax, "%s", s->entries[idx].val);
+    snprintf(out, outMax, "%s", v);
     return 1;
 }
 
