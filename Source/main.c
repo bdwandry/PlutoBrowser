@@ -15,6 +15,12 @@
 #include <stdlib.h>
 #endif
 
+#ifdef TARGET_PLAYDATE
+/* Device-only newlib guard (core/pluto_times_stub.c): the game-task
+ * environment pointer is invalid; clear it before date formatting. */
+void pluto_env_sanitize(void);
+#endif
+
 #include "core/logger.h"
 #include "core/pluto_mem.h"
 #include "core/pluto_spill.h"
@@ -10238,6 +10244,9 @@ static void draw_render_progress_ui(void)
 
 static int updateFrame(void *userdata)
 {
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
     (void)userdata;
     frameCount++;
 
@@ -11372,6 +11381,9 @@ __declspec(dllexport)
 __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSystemEvent event, uint32_t arg)
 {
     (void)arg;
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
 
     switch (event)
     {

@@ -70,6 +70,24 @@
 #include <string.h>
 #include <time.h>
 
+/* Device-only date guard. newlib's localtime() calls tzset(), which walks
+ * the game task's environment; that environment is invalid here and faulted
+ * in _findenv_r() while the projects page was formatting GitHub card dates.
+ * Use the UTC breakdown instead (gmtime never reads the environment). The
+ * date text still formats; no DOM, layout, or rendering behavior changes. */
+#if defined(TARGET_PLAYDATE)
+#include <sys/time.h>
+struct tm *pluto_date_gmtime(const time_t *t);
+#define c_localtime pluto_date_gmtime
+/* The SDK is the only reliable device clock. The stock XS fxDateNow() calls
+ * c_gettimeofday() and assumes success; route it to the epoch-backed host
+ * implementation so Date.now()/new Date() never see uninitialised time. */
+int pluto_date_gettimeofday(struct timeval *tp, void *tzp);
+#define c_timeval struct timeval
+#undef c_gettimeofday
+#define c_gettimeofday pluto_date_gettimeofday
+#endif
+
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
