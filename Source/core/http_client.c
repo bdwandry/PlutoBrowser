@@ -173,6 +173,19 @@ static int g_pooledPort = 0;
 static int g_pooledSsl = 0;
 static TCPConnection *g_orphanTcp = NULL;  /* open callback owns close+release */
 
+/* XHR GET keep-alive lane. This is deliberately separate from the R52
+ * close/reopen pool above: the socket is never re-opened after close. It is
+ * kept OPEN across sequential same-host requests, so the TLS session is
+ * reused without touching either R52 hazard. Page loads, images and POSTs
+ * never enter this lane. */
+static TCPConnection *g_idleTcp = NULL;
+static char g_idleHost[256];
+static int g_idlePort = 0;
+static int g_idleSsl = 0;
+static int g_idleClosed = 0;
+static int g_reusedConn = 0;
+static int g_reuseRetried = 0;
+
 /* Graveyard: closed connections waiting for the SDK event loop to drain.
  * A SINGLE slot used to hold this: every new fetch overwrote it, so all
  * but the last closed object leaked. A page with many fetches (Google's
@@ -324,8 +337,32 @@ static int grave_release_expired(void)
 /* Navigation hard reset (called after http_cancel, while the client is
  * idle): close anything still open and release every closed object so
  * the next page starts with the SDK's full connection pool. */
+static void close_idle_tcp(void)
+{
+    if (!g_idleTcp)
+    {
+        return;
+    }
+    TCPConnection *t = g_idleTcp;
+    int alreadyClosed = g_idleClosed;
+    g_idleTcp = NULL;
+    g_idleClosed = 0;
+    if (!alreadyClosed && g_pd && g_pd->network && g_pd->network->tcp)
+    {
+        g_pd->network->tcp->close(t);
+        grave_add_after(t, GRAVE_FRAMES);
+    }
+    else
+    {
+        /* The close callback already observed the server close; the
+         * object only needs the normal idle release. */
+        grave_add_after(t, 0);
+    }
+}
+
 void http_navigation_reset(void)
 {
+    close_idle_tcp();
     if (g_pooledTcp)
     {
         g_pd->network->tcp->close(g_pooledTcp);
@@ -2882,6 +2919,8 @@ static void reset_state(void)
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
     g_error[0] = '\0';
     g_attemptStart = 0;
     g_connectAttempts = 0;
@@ -3280,7 +3319,11 @@ static void build_request(StrBuf *out)
             }
         }
     }
-    strbuf_appendf(out, "Connection: close\r\n\r\n");
+    int keepAlive = g_cb.keepAlive &&
+                    (!g_reqMethod[0] || strcmp(g_reqMethod, "GET") == 0) &&
+                    !isPostReq;
+    strbuf_appendf(out, "Connection: %s\r\n\r\n",
+                   keepAlive ? "keep-alive" : "close");
     if (isPostReq && g_reqBody && g_reqBodyLen)
     {
         strbuf_append_n(out, g_reqBody, g_reqBodyLen);
@@ -3657,7 +3700,7 @@ static int parse_headers_saved(void)
      * zero body bytes in the same TCP read, open the spill file now; the
      * pump starts streaming on the next read. Any body bytes already in
      * RAM stay there (they are the prefix; disk continues after them). */
-    if (g_status >= 200 && g_status < 300)
+    if (g_status >= 200 && g_status < 300 && !g_cb.keepAlive)
     {
         if (g_isGzip)
         {
@@ -3691,6 +3734,10 @@ static void tcp_closed_cb(TCPConnection *conn, PDNetErr err)
     if (g_tcp == conn && g_state != HS_IDLE)
     {
         g_connClosed = 1;
+    }
+    if (g_idleTcp == conn)
+    {
+        g_idleClosed = 1;
     }
 }
 
@@ -4200,6 +4247,8 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
     g_connOpen = 0;
     g_openFailed = 0;
     g_connClosed = 0;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
     g_error[0] = '\0';
     g_attemptStart = 0;
     g_connectAttempts = 0;
@@ -4397,6 +4446,44 @@ static int start_request(const char *urlString, const HttpCallbacks *callbacks)
  * deferral pattern). */
 static void open_connection(void)
 {
+    /* XHR GET fast path: reuse the still-open same-host socket. No close()
+     * and no re-open() happens here — the connection has stayed open since
+     * the previous response completed. */
+    if (g_idleTcp)
+    {
+        int sameHost = g_parsed &&
+                       strcmp(g_idleHost, g_parsed->host) == 0 &&
+                       g_idlePort == g_parsed->port &&
+                       g_idleSsl == g_parsed->isSsl;
+        int getRequest = !g_reqMethod[0] || strcmp(g_reqMethod, "GET") == 0;
+        if (g_cb.keepAlive && getRequest && sameHost && !g_idleClosed)
+        {
+            TCPConnection *t = g_idleTcp;
+            g_idleTcp = NULL;
+            g_idleClosed = 0;
+            g_tcp = t;
+            g_pooledTcp = t;
+            snprintf(g_pooledHost, sizeof(g_pooledHost), "%s",
+                     g_parsed->host);
+            g_pooledPort = g_parsed->port;
+            g_pooledSsl = g_parsed->isSsl;
+            g_connOpen = 1;
+            g_connClosed = 0;
+            g_reusedConn = 1;
+            g_reuseRetried = 0;
+            /* Re-arm the per-request transport knobs; the callback stays
+             * attached to this same object. */
+            g_pd->network->tcp->setReadTimeout(t, SDK_TIMEOUT_MS);
+            g_pd->network->tcp->setReadBufferSize(t, SDK_READ_BUFFER);
+            g_pd->network->tcp->setConnectionClosedCallback(t,
+                                                           tcp_closed_cb);
+            logger_log("[http] keep-alive reuse %s:%d%s", g_parsed->host,
+                       g_parsed->port, g_parsed->isSsl ? " (tls)" : "");
+            return;
+        }
+        close_idle_tcp();
+    }
+
     /* R52: POOLING DISABLED (device runs 48+49: byte-identical hard crash
      * 8s into the soak's second navigation, r0/pc pointing into the string
      * "bryanwandrych"). Sequence: the page's TLS connection is pooled, the
@@ -4456,6 +4543,8 @@ static void open_connection(void)
     g_pooledSsl = g_parsed->isSsl;
 
     g_tcp = tcp;
+    g_reusedConn = 0;
+    g_reuseRetried = 0;
 
     /* Generation id: any callback that no longer matches is a stale event. */
     unsigned int myId = ++g_requestId;
@@ -4664,6 +4753,69 @@ int http_is_loading(void)
     return g_state == HS_CONNECTING || g_state == HS_READING ||
            g_state == HS_RETRY_WAIT || g_state == HS_RADIO_HEAL ||
            g_state == HS_ACCESS_WAIT;
+}
+
+/* A completed response is safe to keep on the same socket only when the
+ * request opted into the XHR GET lane, the framing was self-delimiting, and
+ * the server did not ask to close. */
+static int keep_alive_response_ok(void)
+{
+    if (!g_cb.keepAlive)
+    {
+        return 0;
+    }
+    if (g_reqMethod[0] && strcmp(g_reqMethod, "GET") != 0)
+    {
+        return 0;
+    }
+    if (g_savedStatus < 200 || g_savedStatus >= 300)
+    {
+        return 0;
+    }
+    if (!g_tcp || !g_connOpen || g_connClosed)
+    {
+        return 0;
+    }
+    if (!g_savedIsChunked && g_contentLength < 0)
+    {
+        return 0; /* close-delimited body: no safe request boundary */
+    }
+    const char *conn = saved_header("connection");
+    if (conn)
+    {
+        char low[64];
+        int n = 0;
+        for (; conn[n] && n < (int)sizeof(low) - 1; n++)
+        {
+            char c = conn[n];
+            low[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        low[n] = '\0';
+        if (strstr(low, "close") != NULL)
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void park_connection_for_reuse(void)
+{
+    if (!keep_alive_response_ok())
+    {
+        return;
+    }
+    TCPConnection *t = g_tcp;
+    g_tcp = NULL;
+    g_pooledTcp = NULL;
+    g_idleTcp = t;
+    snprintf(g_idleHost, sizeof(g_idleHost), "%s",
+             g_parsed ? g_parsed->host : "");
+    g_idlePort = g_parsed ? g_parsed->port : 0;
+    g_idleSsl = g_parsed ? g_parsed->isSsl : 0;
+    g_idleClosed = 0;
+    logger_log("[http] keep-alive park %s:%d%s", g_idleHost, g_idlePort,
+               g_idleSsl ? " (tls)" : "");
 }
 
 /* ── Update: call once per frame ──────────────────────────────────────────── */
@@ -5036,6 +5188,20 @@ void http_update(void)
         else if (sent == NET_WRITE_BUSY)
         {
             g_writePending = 1; /* retry next frame */
+        }
+        else if (g_reusedConn && !g_reuseRetried)
+        {
+            /* The idle server closed the keep-alive socket between frames.
+             * Retire it and retry this request once on a fresh connection. */
+            g_reuseRetried = 1;
+            logger_log("[http] keep-alive write failed (%d); reopening",
+                       (int)sent);
+            close_tcp();
+            g_connOpen = 0;
+            g_connClosed = 0;
+            g_openFailed = 0;
+            g_attemptStart = 0;
+            g_state = HS_CONNECTING;
         }
         else
         {
@@ -5823,6 +5989,9 @@ void http_update(void)
         static char urlSnapshot[1024];
         strncpy(urlSnapshot, g_url, sizeof(urlSnapshot) - 1);
         urlSnapshot[sizeof(urlSnapshot) - 1] = '\0';
+        /* Detach before reset_state so reset cannot close the socket we
+         * intend to reuse for the next queued XHR. */
+        park_connection_for_reuse();
         HttpCallbacks cb = g_cb;
 
         reset_state();

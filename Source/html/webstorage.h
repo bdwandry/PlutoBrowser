@@ -6,8 +6,9 @@
  * key(i) returns the i-th key or null, clear() empties the current
  * origin's store only, and setItem() fails (quota) beyond 12KB per
  * origin — the same DOMException semantic browsers report, sized for
- * this device rather than the desktop's 5MB. The 8KB value ceiling fits
- * the website's own GitHub payload cache.
+ * this device rather than the desktop's 5MB. The value and origin budgets
+ * are large enough for real JSON snapshots (including a multi-repository
+ * GitHub cache); the bytes still live in the on-disk webstorage file.
  *
  * Scope (the browser's origin rule, adapted for this UA — documented
  * for the whole engine, never per-site):
@@ -49,11 +50,12 @@
 #define PLUTO_WEBSTORAGE_H
 
 #define WS_KEY_MAX 56    /* key chars + NUL (browsers: any; capped here) */
-#define WS_VAL_MAX 8192  /* value chars + NUL (fits the site's GitHub cache) */
-#define WS_MAX_ENTRIES 1 /* one key per origin: the site caches one payload */
+#define WS_VAL_MAX 32768  /* value chars + NUL (large JSON snapshots) */
+#define WS_MAX_ENTRIES 1  /* one key per origin: the common cache shape */
 #define WS_MAX_ORIGINS 4
 #define WS_ORIGIN_MAX 64
-#define WS_QUOTA_BYTES 12288 /* per-origin quota; keeps one 7.5KB cache whole */
+#define WS_QUOTA_BYTES 49152 /* per-origin quota; one 32KB value + key */
+#define WS_RAW_MAX 98304    /* persisted-file image budget (all origins) */
 
 typedef struct WsStore WsStore;
 

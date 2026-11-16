@@ -6131,6 +6131,11 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
     cbs.onSuccess = xhr_on_success;
     cbs.onError = xhr_on_error;
     cbs.onProgress = xhr_on_progress;
+    /* Same-host GET XHRs may reuse one persistent connection. The body is
+     * kept in RAM (XHR has its own 512KB page budget) so a chunked response
+     * reaches DONE when its terminal chunk arrives instead of waiting for
+     * the connection to close. POSTs keep the historical spill lane. */
+    cbs.keepAlive = (!r->method[0] || strcmp(r->method, "GET") == 0);
     g_xhrActiveId = r->id;
     b->xhrInFlight = r->id;
     r->state = JS_XHR_HEADERS_SENT;

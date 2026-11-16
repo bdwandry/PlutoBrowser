@@ -25,7 +25,6 @@
 extern PlaydateAPI *pluto_pd(void);
 
 #define WS_FILENAME "webstorage_js.txt" /* Data-sandbox file (both targets) */
-#define WS_RAW_MAX 12288                /* persisted-file image budget */
 
 typedef struct WsEntry
 {
@@ -412,10 +411,31 @@ static void ws_save_file(const char *why)
         logger_log("[webstorage] save open FAILED (%s)", WS_FILENAME);
         return;
     }
-    /* One bounded write (≤ WS_RAW_MAX inside the spill road's proven
-     * 16KB single-write envelope). */
-    pluto_pd()->file->write(f, g_img, (unsigned int)len);
+    /* The SDK's proven single-write envelope is 16KB; stream larger
+     * snapshots in bounded chunks so one large localStorage value cannot
+     * fail at the file layer. */
+    int writeOk = 1;
+    size_t off = 0;
+    while (off < (size_t)len)
+    {
+        unsigned int chunk = (len - (int)off > 16384)
+                                 ? 16384u
+                                 : (unsigned int)(len - (int)off);
+        int wrote = pluto_pd()->file->write(f, g_img + off, chunk);
+        if (wrote != (int)chunk)
+        {
+            writeOk = 0;
+            logger_log("[webstorage] save write short at %zu/%d (%d)",
+                       off, len, wrote);
+            break;
+        }
+        off += (size_t)wrote;
+    }
     pluto_pd()->file->close(f);
+    if (!writeOk)
+    {
+        return; /* keep the resident store; retry on the next mutation */
+    }
 
     /* Adopt the image: g_raw = file truth; section span updates. */
     memcpy(g_raw, g_img, (size_t)len);
