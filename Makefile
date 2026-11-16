@@ -411,6 +411,7 @@ ifdef DEVICEDEFS
 CPFLAGS += $(DEVICEDEFS)
 endif
 
+
 # Per-function stack-usage reports (build/*.su) — device game-task stack is
 # small; P18's watchdog crash was an aggregate eventHandler frame overflow.
 # Audit with: sort -t, -k2 -rn build/*.su | head
