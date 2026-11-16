@@ -434,7 +434,6 @@ static int g_navAutoRetrying = 0;       /* the current navigate_to IS the retry 
 static unsigned int g_navAutoRetryTimer = 0; /* pending 2s retry timer id */
 static void update_system_menu(void);
 static void settings_on_change(void);
-static void view_menu_callback(void *ud);
 static void meta_refresh_cb(void *ud);
 #if defined(PLUTO_NAV_AUTOTEST)
 static void nav_autotest_tick(void);
@@ -497,10 +496,6 @@ static void settings_cleared_cookies(void)
     cookie_jar_clear();
 }
 
-/* Reader/HTML "View" options item (Lua: addOptionsMenuItem("View", ...)). */
-static PDMenuItem *g_viewMenuItem = NULL;
-static const char *k_viewOptions[2] = { "Reader", "HTML" };
-
 /* ── SW6 snapshot cache ────────────────────────────────────────────────── */
 /* SW6 fast-path telemetry: how many navigations rendered from a snapshot
  * (also consumed by the snap autotest for a deterministic PASS verdict). */
@@ -519,35 +514,6 @@ static int snapBypass = 0; /* 1 = next navigation skips the snapshot load
 static int cache_off(void)
 {
     return storage_setting_int("cacheWebsite") != 1;
-}
-
-static void view_menu_callback(void *ud)
-{
-    (void)ud;
-    if (!g_viewMenuItem || !pd)
-    {
-        return;
-    }
-    int v = pd->system->getMenuItemValue(g_viewMenuItem);
-    int newMode = (v == 0) ? MODE_READER : MODE_RAW_HTML;
-    if (newMode != currentBrowseMode)
-    {
-        currentBrowseMode = newMode;
-        storage_set_setting_int("mode", currentBrowseMode);
-        storage_save();
-        snapBypass = 1; /* hard reload: snapshot would be for the OLD mode */
-        if (currentDoc && currentDoc->rawHtml && currentDoc->rawHtml[0] &&
-            currentUrlObj)
-        {
-            render_body(currentDoc->rawHtml, currentUrlObj->normalized, 0);
-        }
-        else if (currentUrlObj)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
-                     currentUrlObj->normalized);
-        }
-    }
 }
 
 static void menu_reload(void *ud)
@@ -573,23 +539,39 @@ static void menu_reload(void *ud)
                currentUrlObj->normalized);
 }
 
+/* Playdate allows at most THREE custom system-menu items. Every branch
+ * below adds exactly three, and Settings is always one of them. Earlier
+ * this function added six; the OS silently refused the overflow, so on a
+ * web page the visible menu was Home-Page / View / Reload and Settings
+ * disappeared. View mode lives in Settings > Browse Mode, so the web-page
+ * slots go to Home-Page / Reload / Settings. */
 static void update_system_menu(void)
 {
     pd->system->removeAllMenuItems();
-    g_viewMenuItem = NULL;
-    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
-    if (currentState == STATE_PAGE && currentUrlObj &&
-        strcmp(currentUrlObj->scheme, "about") != 0)
+
+    int webPage = currentUrlObj && currentUrlObj->normalized[0] &&
+                  strcmp(currentUrlObj->scheme, "about") != 0;
+
+    if (currentState == STATE_HOME)
     {
-        int initial = (currentBrowseMode == MODE_READER) ? 0 : 1;
-        g_viewMenuItem =        pd->system->addOptionsMenuItem(
-            "View", k_viewOptions, 2, view_menu_callback, NULL);
-        pd->system->setMenuItemValue(g_viewMenuItem, initial);
+        /* Home-Page is redundant here; keep the two other actions plus the
+         * always-present Settings entry. */
+        pd->system->addMenuItem("Settings", menu_settings, NULL);
+        pd->system->addMenuItem("History", menu_history, NULL);
+        pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
+        return;
+    }
+
+    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
+    if (webPage)
+    {
         pd->system->addMenuItem("Reload", menu_reload, NULL);
     }
+    else
+    {
+        pd->system->addMenuItem("History", menu_history, NULL);
+    }
     pd->system->addMenuItem("Settings", menu_settings, NULL);
-    pd->system->addMenuItem("History", menu_history, NULL);
-    pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
 }
 
 /* ── renderBody (port): parse + Layout.build as a cooperative task ───────── */

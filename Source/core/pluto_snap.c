@@ -1005,6 +1005,29 @@ static int snap_skip_url(const char *url)
     return 0;
 }
 
+/* ARIA disclosures (aria-expanded + aria-controls) are script-owned: their
+ * trigger text, state and panel visibility are commonly swapped by the
+ * page's own click handler. A snapshot is a static render model and has no
+ * live DOM, so it cannot run that handler. Serving one freezes the authored
+ * label (e.g. "Menu" never becomes "Close"). Native <details> disclosures
+ * do not use toggleKey and remain snapshot-safe. */
+static int snap_has_scripted_disclosure(const DocParseResult *doc)
+{
+    if (!doc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < doc->blockCount; i++)
+    {
+        const DocBlock *b = doc->blocks[i];
+        if (b && b->toggleKey && b->toggleKey[0] == 'x')
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
                      unsigned long epoch)
 {
@@ -1027,6 +1050,13 @@ long pluto_snap_save(const DocParseResult *doc, const char *url, int mode,
             logger_log("[snap] save skipped (open disclosure panel)");
             return 0;
         }
+    }
+    if (snap_has_scripted_disclosure(doc))
+    {
+        /* Its click handler owns the label/state, so a restored snapshot
+         * would replay only the authored closed state forever. */
+        logger_log("[snap] skip save (scripted disclosure): %s", url);
+        return 0;
     }
     /* R29: never persist an EMPTY render. A degenerate snapshot turns
      * any transient failure — bot-blocked fetch (LinkedIn-class 999),
@@ -1182,6 +1212,7 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
                                 unsigned long ttlSeconds)
 {
     unsigned char *image = NULL;
+    int bypass = 0;
     if (!url || !url[0] || snap_skip_url(url))
     {
         return NULL;
@@ -1531,13 +1562,25 @@ DocParseResult *pluto_snap_load(const char *url, int mode, unsigned long nowEpoc
          * render a partially-restored page */
     goto fail;
     }
+    if (snap_has_scripted_disclosure(doc))
+    {
+        /* Old entries from before this policy must heal themselves: they
+         * look complete but their disclosure handlers can never run. */
+        logger_log("[snap] bypass scripted disclosure (needs live JS): %s",
+                   url);
+        bypass = 1;
+    goto fail;
+    }
     pluto_spill_store_close(h);
     PLUTO_FREE(image);
     logger_log("[snap] hit url=%s blocks=%ld links=%ld", url, blockCount, linkCount);
     return doc;
 
 fail:
-    logger_log("[snap] load failed (corrupt entry)");
+    if (!bypass)
+    {
+        logger_log("[snap] load failed (corrupt entry)");
+    }
     pluto_spill_store_close(h);
     PLUTO_FREE(image);
     if (doc)
@@ -1561,6 +1604,10 @@ fail:
         doc_arena_free_all(arena);
         PLUTO_FREE(doc->_arena);
         PLUTO_FREE(doc);
+    }
+    if (bypass)
+    {
+        pluto_snap_invalidate(url, mode);
     }
     return NULL;
 }
