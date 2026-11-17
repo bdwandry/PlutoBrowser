@@ -34,7 +34,7 @@
  * click handler, and DOM mutations surface through the standard rewalk.
  * Caps (all #ifndef-guarded so builds can tighten them): */
 #ifndef JSBRIDGE_TIMERS_MAX
-#define JSBRIDGE_TIMERS_MAX 12      /* live timers per page */
+#define JSBRIDGE_TIMERS_MAX 32      /* live timers per page */
 #endif
 #ifndef JSBRIDGE_TIMER_MIN_MS
 #define JSBRIDGE_TIMER_MIN_MS 50    /* clamp tiny delays (battery + thrash) */
@@ -61,13 +61,13 @@
  * calls the pinned handler, DOM mutations surface via callBudget → rewalk.
  * Caps (#ifndef-guarded): */
 #ifndef JSBRIDGE_XHR_MAX
-#define JSBRIDGE_XHR_MAX 4          /* live requests per page */
+#define JSBRIDGE_XHR_MAX 32         /* live requests per page */
 #endif
 #ifndef JSBRIDGE_XHR_BODY_MAX
-#define JSBRIDGE_XHR_BODY_MAX (64 * 1024)  /* response body cap (SDK-alloc) */
+#define JSBRIDGE_XHR_BODY_MAX (256 * 1024) /* response body cap (SDK-alloc) */
 #endif
 #ifndef JSBRIDGE_XHR_PAGE_BUDGET
-#define JSBRIDGE_XHR_PAGE_BUDGET (128 * 1024) /* delivered bytes per page */
+#define JSBRIDGE_XHR_PAGE_BUDGET (512 * 1024) /* delivered bytes per page */
 #endif
 #ifndef JSBRIDGE_XHR_URL_MAX
 #define JSBRIDGE_XHR_URL_MAX 512
@@ -105,6 +105,10 @@ typedef struct
     char err[96];        /* error message when ok==0 */
     char *body;          /* SDK-allocated response (owned; freed at sweep) */
     size_t bodyLen;
+    /* Response Link header (pagination / rel=last). Browsers expose this
+     * through XHR.getResponseHeader and fetch Response.headers; GitHub's
+     * commit-count read depends on it. Empty string = header absent. */
+    char respLink[512];
     void *fnRef;         /* engine-held completion handler */
     /* Phase 4 (browser-true error routing): engine-held onerror ref,
      * dispatched ONLY when the completion is a transport failure
@@ -453,6 +457,14 @@ struct JsBridge
     int histCount; /* entries in use (0..JSBRIDGE_HIST_MAX) */
     int histIdx;   /* current entry index */
 
+    /* Scripted navigation request (location.assign/replace): the engine
+     * records the RESOLVED URL and the frame loop drains it AFTER the JS
+     * bracket returns, then runs the real navigate_to. Never navigates
+     * from inside an engine call (tearing down the live bridge there is
+     * the R67 in-flight hazard). 640 matches main.c's pendingNavUrl. */
+    char navRequest[640];
+    int navRequestSet;
+
 
     int callBudget; /* DOM-mutation budget (per page) */
     int inClick;    /* dispatch re-entrancy guard */
@@ -509,6 +521,20 @@ struct JsBridge
     JsScriptSlot scriptQueue[JSBRIDGE_MAX_SCRIPTS];
     int scriptQueueCount; /* entries parked (<= JSBRIDGE_MAX_SCRIPTS) */
     int scriptQueueNext;  /* next to run; == scriptQueueCount when drained */
+
+    /* Runtime-inserted <script src> lane (document.createElement('script')
+     * + appendChild, script.src assignment while connected). Static HTML
+     * scripts ride scriptQueue/jsext; this queue is for scripts the PAGE
+     * creates at runtime — bundlers, analytics, Google's BotGuard loader.
+     * One fetch at a time through the shared HTTP client (idle-gated), then
+     * run in the page engine and fire load/error on the element. */
+    struct
+    {
+        void *node; /* DomNode* (borrowed; bridge/page lifetime) */
+        char url[1024];
+        unsigned char state; /* 0 free, 1 queued, 2 fetching, 3 done */
+    } dynScripts[JSBRIDGE_DYN_SCRIPTS_MAX];
+    int dynScriptCount; /* high-water mark of used slots */
 
     /* API-P5: the module graph ledger. modKeys hold every resolved module
      * URL this document has loaded; modState 0/1/2 = unvisited/visiting/

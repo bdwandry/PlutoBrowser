@@ -631,6 +631,12 @@ void imgdec_clear_cache(void)
     g_queueCount = 0;
     g_isDownloading = 0;
     g_isDecoding = 0;
+    /* R68: drop the persistent AVIF picture arena with the page. It is a
+     * raw device-pool malloc; holding it across a page change pinned
+     * ~1.5MB while the next page's JS engine/DOM loaded (Marginalia
+     * rewalk dav1d NULL-context crash at 11.7MB heap). No decode is in
+     * flight here: the orphan cleanup below cancels it first. */
+    avif_release_arena();
     /* R65: a decode task cancelled by navigation never runs onDone —
      * free its orphan state (with the body copy) HERE, so the old
      * page's decode RAM leaves with the page. */

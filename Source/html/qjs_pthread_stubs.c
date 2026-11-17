@@ -76,31 +76,55 @@ int pluto_qjs_pthread_cond_timedwait(void *c, void *m, const void *t)
  */
 #include <stdint.h>
 
-#define PLUTO_QJS_ATOMIC_OP(name)                                   \
-    uint64_t name(_Atomic(uint64_t) * p, uint64_t v)                \
+/* Exact GCC libfunc ABI signatures — the same contract libatomic fulfills,
+ * minus the *_1 variants (8-byte aligned loads/stores need no helper). The
+ * signatures must match the compiler built-ins exactly or GCC emits
+ * -Wbuiltin-declaration-mismatch for every one of them. */
+#define PLUTO_QJS_ATOMIC_RMW(name)                                  \
+    unsigned long long name(volatile void *p,                       \
+                            unsigned long long v, int memorder)     \
     {                                                               \
         (void)p;                                                    \
         (void)v;                                                    \
+        (void)memorder;                                             \
         logger_log("[js] 64-bit Atomics op reached (no SAB support) — failing safely"); \
         return 0;                                                   \
     }
 
-/* Exact GCC libfunc ABI names — the same contract libatomic fulfills, */
-/* minus the *_1 variants (8-byte aligned loads/stores need no helper). */
-PLUTO_QJS_ATOMIC_OP(__atomic_fetch_add_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_fetch_sub_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_fetch_and_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_fetch_or_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_fetch_xor_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_exchange_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_load_8)
-PLUTO_QJS_ATOMIC_OP(__atomic_store_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_fetch_add_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_fetch_sub_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_fetch_and_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_fetch_or_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_fetch_xor_8)
+PLUTO_QJS_ATOMIC_RMW(__atomic_exchange_8)
 
-int __atomic_compare_exchange_8(_Atomic(uint64_t) * p, uint64_t *expected, uint64_t desired)
+unsigned long long __atomic_load_8(const volatile void *p, int memorder)
+{
+    (void)p;
+    (void)memorder;
+    logger_log("[js] 64-bit Atomics load reached (no SAB support) — failing safely");
+    return 0;
+}
+
+void __atomic_store_8(volatile void *p, unsigned long long v, int memorder)
+{
+    (void)p;
+    (void)v;
+    (void)memorder;
+    logger_log("[js] 64-bit Atomics store reached (no SAB support) — failing safely");
+}
+
+_Bool __atomic_compare_exchange_8(volatile void *p, void *expected,
+                                  unsigned long long desired, _Bool weak,
+                                  int success_memorder,
+                                  int failure_memorder)
 {
     (void)p;
     (void)expected;
     (void)desired;
+    (void)weak;
+    (void)success_memorder;
+    (void)failure_memorder;
     logger_log("[js] 64-bit Atomics CAS reached (no SAB support) — failing safely");
     return 0; /* false = "no exchange happened" */
 }

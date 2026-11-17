@@ -56,6 +56,7 @@
  * jsbridge_quickjs.c (same accessors, methods, budget + write capture).
  */
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,6 +76,9 @@
 #include "../render/style.h"
 #include "../core/tasks.h"
 #include "../core/url.h"
+#include "../core/cookie_jar.h"
+#include "../core/constants.h" /* USER_AGENT: navigator.userAgent must match the wire UA */
+#include "../core/http_client.h" /* runtime <script src> fetch lane */
 extern void pluto_free(void *p);
 #include "../util/strbuf.h"
 #include "../html/dom.h"
@@ -84,7 +88,10 @@ extern void pluto_free(void *p);
  * host tool (xs/tools/xst.c) but pointed at the FORK: xsAll.h pulls
  * xsPlatform.h → our Source/html/xs_platform.h via -DINCLUDE_XSPLATFORM,
  * then the public xs.h macros. xsCommon.h includes xs_nr_rename.h first,
- * so every engine symbol used below lands on its _nr twin. */
+ * so every engine symbol used below lands on its _nr twin. This TU is OUR
+ * bridge, not a vendored engine source, so xs_platform.h keeps its own
+ * diagnostics visible. */
+#define PLUTO_XS_BRIDGE_TU 1
 #include "../js/xs_moddable_no_recursion/sources/xsAll.h"
 #include "../js/xs_moddable_no_recursion/sources/xsScript.h"
 #include "../js/xs_moddable_no_recursion/includes/xs.h"
@@ -173,7 +180,13 @@ static int xs_flush_microtasks(JsBridge *b);
 #define XS_INC_KEYS 256u
 #define XS_NAME_MOD 127u
 #define XS_SYMBOL_MOD 127u
-#define XS_PARSER_BUF (16u * 1024u)
+/* Modern minified bundles carry single string literals far past 16KB:
+ * Google's search shell embeds a 62,699-byte eval payload and a
+ * 16,885-byte cookie blob, so both challenge scripts died at parse with
+ * "buffer overflow" and the page never left its Loading shell. 128KB
+ * covers that class with margin; the buffer is per-parse (freed with the
+ * parser), so the cost is transient, not resident. */
+#define XS_PARSER_BUF (128u * 1024u)
 #define XS_PARSER_TBL 127u
 
 /* ── R20: time-sliced split execution (watchdog-safe) ─────────────�
@@ -245,7 +258,13 @@ static unsigned long g_splitMaxRunMs = 0;
  * units) and returns 0 once it crosses XS_RUNLIMIT — same scale as the
  * muJS JSBRIDGE_RUNLIMIT statement counter (2,000,000). */
 #ifndef XS_RUNLIMIT
-#define XS_RUNLIMIT 2000000u
+/* Runaway guard base. The old 2M-op base was tuned for small inline
+ * scripts; Google's search challenge legitimately executes ~11.4M metered
+ * ops before it sets its SG_SS cookie (the per-script budget adds
+ * len*256 on top, which was still short). 32M keeps the guard meaningful
+ * for a spin while letting a real challenge finish; the device's 5s
+ * wall-clock bracket remains the watchdog bound. */
+#define XS_RUNLIMIT 32000000u
 #endif
 
 /* C-stack budget handed to the engine's stock fxCheckCStack + parser
@@ -580,7 +599,7 @@ void pluto_fork_stack_overflow_probe(long want, long depth)
     logger_log("[slotstack] overflow alloc: want=%ld depth=%ld", want, depth);
 }
 
-/* ── host-provided platform functions (mxUseDefault* = 0) ────────────
+/* ── host-provided platform functions (mxUseDefault* = 0) ──────────── */
 
 /* These five hooks (fxAbort, fxCStackLimit, fxQueuePromiseJobs,
  * fxCreateMachinePlatform, fxDeleteMachinePlatform) are engine-wide
@@ -819,6 +838,11 @@ static void xs_worker_terminate(xsMachine *the);
 /* API-P10: dynamic-import bridge native — status-string reply protocol
  * (see jsbridge_internal.h); delegates to the shared core in jsbridge.c. */
 static void xs_dyn_request(xsMachine *the);
+
+/* C4: engine-owned fetch shim — installed at ENGINE INIT (see xs_init).
+ * The source and runner live with the shim implementation below; the
+ * forward declaration lets init install it before the page render. */
+static void xs_run_fetch_shim(JsBridge *b, XsState *st, int index);
 
 /* ── accessors (this = element wrapper) ────────────────── */
 
@@ -1152,6 +1176,8 @@ static void xs_el_set_src(xsMachine *the)
     int rc = n ? dom_set_attr(b->dom, n, "src", value) : -1;
     JFree(value);
     if (rc) xsTypeError("src assignment failed");
+    /* script.src = "..." while connected starts a runtime load. */
+    jsbridge_note_dynamic_script(b, n);
 }
 
 static void xs_el_get_textContent(xsMachine *the)
@@ -1507,6 +1533,42 @@ static void xs_el_set_checked(xsMachine *the)
                b->doc ? b->doc->blockCount : -1);
 }
 
+/* `hidden` reflection: the HTML hidden attribute. Pages set this property
+ * to show/hide controls (the projects refresh button/card metadata), and
+ * a write must reach the attribute or CSS [hidden] never applies. */
+static void xs_el_get_hidden(xsMachine *the)
+{
+    DomNode *n = this_node(the);
+    const char *v = n ? dom_get_attr(n, "hidden") : NULL;
+    xsResult = xsBoolean(v ? 1 : 0);
+}
+
+static void xs_el_set_hidden(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (n && n->kind == DOM_ELEMENT)
+    {
+        int on = xsToBoolean(xsArg(0));
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "hidden", "");
+        }
+        else if (dom_get_attr(n, "hidden"))
+        {
+            rc = dom_remove_attr(n, "hidden");
+        }
+        if (rc != 0)
+        {
+            xsTypeError("hidden assignment failed");
+        }
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, n);
+    }
+}
+
 /* Forms-Phase 1: `disabled` reflection — browser-true to the REFLECTED
  * property: .disabled reads the element's OWN disabled-attribute
  * presence (a disabled <fieldset> does NOT flip a child's .disabled —
@@ -1530,8 +1592,15 @@ static void xs_el_set_disabled(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "disabled", "")
-                    : dom_remove_attr(n, "disabled");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "disabled", "");
+        }
+        else if (dom_get_attr(n, "disabled"))
+        {
+            rc = dom_remove_attr(n, "disabled");
+        }
         if (rc != 0)
         {
             xsTypeError("disabled assignment failed");
@@ -1559,8 +1628,15 @@ static void xs_el_set_readOnly(xsMachine *the)
     if (n && n->kind == DOM_ELEMENT)
     {
         int on = xsToBoolean(xsArg(0));
-        int rc = on ? dom_set_attr(b->dom, n, "readonly", "")
-                    : dom_remove_attr(n, "readonly");
+        int rc = 0;
+        if (on)
+        {
+            rc = dom_set_attr(b->dom, n, "readonly", "");
+        }
+        else if (dom_get_attr(n, "readonly"))
+        {
+            rc = dom_remove_attr(n, "readonly");
+        }
         if (rc != 0)
         {
             xsTypeError("readOnly assignment failed");
@@ -2010,6 +2086,33 @@ static void xs_el_get_type(xsMachine *the)
     }
 }
 
+/* `type` is writable on script/style/input/button elements. JSON-LD
+ * injection sets script.type before appending; a getter-only property
+ * throws "set type: no setter" and aborts the rest of that render. */
+static void xs_el_set_type(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n || n->kind != DOM_ELEMENT)
+    {
+        return;
+    }
+    char *v = to_cstring(the, xsArg(0));
+    if (!v)
+    {
+        xsTypeError("out of memory");
+    }
+    int rc = dom_set_attr(b->dom, n, "type", v);
+    JFree(v);
+    if (rc != 0)
+    {
+        xsTypeError("type assignment failed");
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+}
+
 /* namespaceURI — browser-parity: xhtml for html-parsed nodes, svg for
  * svg tags. The hoisting path uses it to skip foreign elements. */
 static void xs_el_get_namespaceURI(xsMachine *the)
@@ -2125,6 +2228,8 @@ static void xs_el_set_textContent(xsMachine *the)
         {
             xsTypeError("textContent assignment failed");
         }
+        b->domDirty = 1; /* text mutation must reach the next walk */
+        jsbridge_note_dom_mutation(b, n);
     }
 }
 
@@ -2223,6 +2328,9 @@ static void xs_el_setAttribute(xsMachine *the)
          * value lanes ride the same store). Text-free writes only —
          * see jsbridge.h's note contract. */
         jsbridge_note_dom_mutation(b, n);
+        /* setAttribute('src', ...) on a connected <script> is a runtime
+         * load (the helper tag/src/connectedness-gates). */
+        jsbridge_note_dynamic_script(b, n);
     }
 }
 
@@ -2465,6 +2573,203 @@ static void xs_maybe_queue_asset_load(JsBridge *b, DomNode *c)
     xs_queue_resource_fire(b, c);
 }
 
+/* Element.prepend()/append() (DOM §4.8): variadic node-or-string
+ * insertion. The reCAPTCHA loader calls document.head.prepend(meta) before
+ * it inserts its client script; without these methods the loader throws
+ * "call: not a function" and the widget never appears. */
+static void xs_el_prepend_append(xsMachine *the, int atEnd)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        xsTypeError("append/prepend: no element");
+    }
+    DomNode *first = (!atEnd && n->childCount > 0) ? n->children[0] : NULL;
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c)
+        {
+            continue;
+        }
+        if (dom_insert_before(b->dom, n, c, first) != 0)
+        {
+            xsTypeError("append/prepend failed");
+        }
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+    xsResult = xsUndefined;
+}
+
+static void xs_el_prepend(xsMachine *the)
+{
+    xs_el_prepend_append(the, 0);
+}
+
+static void xs_el_append(xsMachine *the)
+{
+    xs_el_prepend_append(the, 1);
+}
+
+/* ChildNode.before()/after() (DOM §4.8): insert nodes (or text) immediately
+ * before/after this node in its parent. The contact form's success handler
+ * places its status card with form.after(...) and card.after(...); without
+ * these methods the success path throws after building the card. Multiple
+ * nodes are kept in argument order; a detached node is a no-op, like a
+ * browser. */
+static void xs_el_before_after(xsMachine *the, int after)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *parent = n ? n->parent : NULL;
+    if (!parent)
+    {
+        xsResult = xsUndefined;
+        return;
+    }
+    DomNode *ref = n;
+    if (after)
+    {
+        ref = NULL;
+        for (int i = 0; i + 1 < parent->childCount; i++)
+        {
+            if (parent->children[i] == n)
+            {
+                ref = parent->children[i + 1];
+                break;
+            }
+        }
+    }
+    int moved = 0;
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c || c == n || c == ref)
+        {
+            continue;
+        }
+        if (dom_insert_before(b->dom, parent, c, ref) != 0)
+        {
+            xsTypeError("before/after failed");
+        }
+        moved = 1;
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    if (moved)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, parent);
+    }
+    xsResult = xsUndefined;
+}
+
+static void xs_el_before(xsMachine *the)
+{
+    xs_el_before_after(the, 0);
+}
+
+static void xs_el_after(xsMachine *the)
+{
+    xs_el_before_after(the, 1);
+}
+
+/* Element.replaceChildren(...nodes): remove every current child and append
+ * the arguments in order. Modern list renderers use this as the atomic
+ * "replace the whole list" operation; without it they throw before their
+ * data fetch starts. */
+static void xs_el_replaceChildren(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    if (!n)
+    {
+        xsTypeError("replaceChildren: no element");
+    }
+    while (n->childCount > 0)
+    {
+        dom_remove_child(n, n->children[0]);
+    }
+    int argc = (int)xsToInteger(xsArgc);
+    for (int i = 0; i < argc; i++)
+    {
+        DomNode *c = arg_node(the, i);
+        if (!c)
+        {
+            char *s = to_cstring(the, xsArg(i));
+            if (s && s[0])
+            {
+                c = dom_create_text(b->dom, s);
+            }
+            if (s)
+            {
+                JFree(s);
+            }
+        }
+        if (!c)
+        {
+            continue;
+        }
+        if (dom_append_child(b->dom, n, c) != 0)
+        {
+            xsTypeError("replaceChildren failed");
+        }
+        jsbridge_note_dynamic_script(b, c);
+        xs_maybe_queue_asset_load(b, c);
+    }
+    b->domDirty = 1;
+    jsbridge_note_dom_mutation(b, n);
+    xsResult = xsUndefined;
+}
+
+/* ChildNode.remove(): detach this node from its parent. */
+static void xs_el_remove(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    BUDGET_OR_THROW(b);
+    DomNode *n = this_node(the);
+    DomNode *p = n ? n->parent : NULL;
+    if (p && dom_remove_child(p, n) == 0)
+    {
+        b->domDirty = 1;
+        jsbridge_note_dom_mutation(b, p);
+    }
+    xsResult = xsUndefined;
+}
+
 static void xs_el_appendChild(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -2495,6 +2800,7 @@ static void xs_el_appendChild(xsMachine *the)
     b->domDirty = 1;
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree swap = style change */
     xs_maybe_queue_asset_load(b, c); /* react stylesheets enter via append */
+    jsbridge_note_dynamic_script(b, c); /* runtime <script src> execution */
     /* API-P6: browsers return the appended child — the falsy-return the
      * probe recorded is fixed here (chained mounts like react's
      * a.appendChild(b).appendChild(c) now behave like the browser). */
@@ -2725,11 +3031,11 @@ static void xs_push_style(JsBridge *b, DomNode *node)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(xsResult, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(xsResult, xsID((char *)accs[i].name), getter, xsIsGetter);
         /* getter is now linked on the anchored target, so the setter's
          * allocation below cannot sweep it */
         xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-        xsDefine(xsResult, xsID(accs[i].name), setter, xsIsSetter);
+        xsDefine(xsResult, xsID((char *)accs[i].name), setter, xsIsSetter);
     }
     /* Host data = the element node: classList/style METHODS run with `this`
      * = the object itself, so this_node(the) resolves through it. */
@@ -2901,6 +3207,7 @@ static void xs_el_insertBefore(xsMachine *the)
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, n); /* Phase 10: subtree moved */
     xs_maybe_queue_asset_load(b, c); /* react stylesheet hoisting path */
+    jsbridge_note_dynamic_script(b, c); /* runtime <script src> execution */
     /* API-P6: browsers return the inserted child. */
     xsResult = xs_push_element(b, c);
 }
@@ -3594,11 +3901,16 @@ static xsSlot xs_push_element(JsBridge *b, DomNode *node)
     xs_set_host_data_site(the, "element", obj, node);
     if (st->elwCount < XS_ELW_CAP)
     {
-        xsResult = obj; /* marked-slot anchor while the arrays settle */
+        /* xsResult is the caller's return slot (querySelectorAll builds an
+         * array there). Keep it alive while the new wrapper allocates, then
+         * restore it: the persistent cache slot takes over rooting below. */
+        xsSlot savedResult = xsResult;
+        xsResult = obj;
         int w = st->elwCount++;
         st->elwNode[w] = node;
         st->elwWrap[w] = obj;
         xsRemember(st->elwWrap[w]);
+        xsResult = savedResult;
     }
     else if (!st->elwOverflow)
     {
@@ -4332,6 +4644,207 @@ static void xs_document_getCurrentScript(xsMachine *the)
 
 /* document.title: walk the live tree's <title> so scripts and the chrome
  * agree (doc->title is only filled by the walker, after scripts). */
+/* R66: document.fonts.load() stub (see the other engine bridges). */
+static void xs_promise_noop(xsMachine *the)
+{
+    xsResult = xsUndefined;
+}
+
+static void xs_fonts_load(xsMachine *the)
+{
+    xsSlot p = xsNewHostObject(NULL);
+    def_fn(the, p, "then", xs_promise_noop, 1);
+    def_fn(the, p, "catch", xs_promise_noop, 1);
+    def_fn(the, p, "finally", xs_promise_noop, 1);
+    xsResult = p;
+}
+
+/* ── atob / btoa (HTML §8.3) ────────────────────────────────────────────────
+ * Modern bundles use these for binary blobs (Google's search challenge
+ * decodes its proof-of-work payload with atob and re-encodes the result
+ * with btoa). XS strings are UTF-8, so atob builds a string whose CODE
+ * POINTS are the decoded bytes (0-255); charCodeAt then returns the byte
+ * value exactly as a browser's UTF-16 binary string does. btoa walks the
+ * input's UTF-8 code points and encodes the low byte. */
+static int xs_b64_value(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static void xs_atob(xsMachine *the)
+{
+    const char *src = xsToString(xsArg(0));
+    size_t n = src ? strlen(src) : 0;
+    unsigned char *out = (unsigned char *)malloc((n / 4) * 3 + 4);
+    if (!out)
+    {
+        xsTypeError("atob: out of memory");
+        return;
+    }
+    size_t o = 0;
+    int quad[4];
+    int qn = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        int c = (unsigned char)src[i];
+        if (c == '=')
+        {
+            break;
+        }
+        int v = xs_b64_value(c);
+        if (v < 0)
+        {
+            continue; /* whitespace / non-alphabet bytes are ignored */
+        }
+        quad[qn++] = v;
+        if (qn == 4)
+        {
+            out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+            out[o++] = (unsigned char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+            out[o++] = (unsigned char)(((quad[2] & 3) << 6) | quad[3]);
+            qn = 0;
+        }
+    }
+    if (qn == 2)
+    {
+        out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+    }
+    else if (qn == 3)
+    {
+        out[o++] = (unsigned char)((quad[0] << 2) | (quad[1] >> 4));
+        out[o++] = (unsigned char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+    }
+    char *utf = (char *)malloc(o * 2 + 1);
+    if (!utf)
+    {
+        free(out);
+        xsTypeError("atob: out of memory");
+        return;
+    }
+    size_t u = 0;
+    for (size_t i = 0; i < o; i++)
+    {
+        unsigned char c = out[i];
+        if (c < 0x80)
+        {
+            utf[u++] = (char)c;
+        }
+        else
+        {
+            utf[u++] = (char)(0xC0 | (c >> 6));
+            utf[u++] = (char)(0x80 | (c & 0x3F));
+        }
+    }
+    utf[u] = '\0';
+    xsResult = xsStringBuffer(utf, (txSize)u);
+    free(utf);
+    free(out);
+}
+
+static void xs_btoa(xsMachine *the)
+{
+    const char *src = xsToString(xsArg(0));
+    size_t n = src ? strlen(src) : 0;
+    unsigned char *bytes = (unsigned char *)malloc(n + 1);
+    if (!bytes)
+    {
+        xsTypeError("btoa: out of memory");
+        return;
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < n;)
+    {
+        unsigned char c = (unsigned char)src[i];
+        unsigned int cp;
+        if (c < 0x80)
+        {
+            cp = c;
+            i += 1;
+        }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < n)
+        {
+            cp = ((unsigned int)(c & 0x1F) << 6) |
+                 ((unsigned int)((unsigned char)src[i + 1] & 0x3F));
+            i += 2;
+        }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < n)
+        {
+            cp = ((unsigned int)(c & 0x0F) << 12) |
+                 ((unsigned int)((unsigned char)src[i + 1] & 0x3F) << 6) |
+                 ((unsigned int)((unsigned char)src[i + 2] & 0x3F));
+            i += 3;
+        }
+        else
+        {
+            cp = c;
+            i += 1;
+        }
+        if (cp > 0xFF)
+        {
+            free(bytes);
+            xsTypeError("btoa: character out of range");
+            return;
+        }
+        bytes[o++] = (unsigned char)cp;
+    }
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t outLen = ((o + 2) / 3) * 4;
+    char *out = (char *)malloc(outLen + 1);
+    if (!out)
+    {
+        free(bytes);
+        xsTypeError("btoa: out of memory");
+        return;
+    }
+    size_t p = 0;
+    for (size_t i = 0; i < o; i += 3)
+    {
+        unsigned int v = (unsigned int)bytes[i] << 16;
+        int have = 1;
+        if (i + 1 < o)
+        {
+            v |= (unsigned int)bytes[i + 1] << 8;
+            have = 2;
+        }
+        if (i + 2 < o)
+        {
+            v |= (unsigned int)bytes[i + 2];
+            have = 3;
+        }
+        out[p++] = alphabet[(v >> 18) & 0x3F];
+        out[p++] = alphabet[(v >> 12) & 0x3F];
+        out[p++] = have >= 2 ? alphabet[(v >> 6) & 0x3F] : '=';
+        out[p++] = have >= 3 ? alphabet[v & 0x3F] : '=';
+    }
+    out[p] = '\0';
+    xsResult = xsString(out);
+    free(out);
+    free(bytes);
+}
+
+/* navigator.sendBeacon — fire-and-forget telemetry. The browser has no
+ * script-driven background POST lane; the spec's contract is "queued"
+ * (true), so callers (Google's challenge, analytics) keep their flow. */
+static void xs_navigator_sendBeacon(xsMachine *the)
+{
+    /* Fire-and-forget telemetry. The browser has no background POST lane;
+     * log the target so challenge error beacons (window.onerror →
+     * /httpservice/retry/jserror?emsg=…) are visible in pluto.log. */
+    char *url = to_cstring(the, xsArg(0));
+    logger_log("[js] sendBeacon: %s", url ? url : "");
+    if (url)
+    {
+        JFree(url);
+    }
+    xsResult = xsBoolean(1);
+}
+
 static void xs_document_getTitle(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
@@ -4393,6 +4906,7 @@ static void xs_document_appendChild(xsMachine *the)
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree grew */
+    jsbridge_note_dynamic_script(b, child); /* runtime <script src> */
     xsResult = xsArg(0);
 }
 
@@ -4415,6 +4929,7 @@ static void xs_document_insertBefore(xsMachine *the)
     }
     b->domDirty = 1; /* R58: live-tree mutation → frame-loop re-walk */
     jsbridge_note_dom_mutation(b, child->parent); /* Phase 10: subtree moved */
+    jsbridge_note_dynamic_script(b, child); /* runtime <script src> */
     xsResult = xsArg(0);
 }
 
@@ -4623,12 +5138,29 @@ static void xs_doc_addEventListener(xsMachine *the)
 
 static void xs_location_assign(xsMachine *the)
 {
+    JsBridge *b = bridge_of(the);
     char *u = to_cstring(the, xsArg(0));
-    logger_log("[js] location.assign/replace ignored: %s", u ? u : "");
-    if (u)
+    if (!u || !u[0] || !b)
     {
-        JFree(u);
+        if (u)
+        {
+            JFree(u);
+        }
+        return;
     }
+    /* Resolve against the live document, exactly like a browser's
+     * location.assign/replace. The actual navigate_to runs from the frame
+     * loop AFTER this engine bracket returns (jsbridge_take_nav_request) —
+     * tearing the bridge down inside its own callback is the R67 hazard. */
+    char *abs = url_resolve(b->doc ? b->doc->baseUrl : "", u);
+    if (abs)
+    {
+        snprintf(b->navRequest, sizeof(b->navRequest), "%s", abs);
+        b->navRequestSet = 1;
+        logger_log("[js] location.assign/replace -> %s", abs);
+        JFree(abs);
+    }
+    JFree(u);
 }
 
 static void xs_alert(xsMachine *the)
@@ -4654,18 +5186,22 @@ static void xs_noop(xsMachine *the)
  * macro-redefined by the QuickJS shim there — see the sim-frame probe in
  * the split path) so it reads the SDK's monotonic ms clock (integer ms:
  * sub-ms lane scheduling degrades gracefully). */
+/* Navigation origin for performance.now(): a real browser returns ms
+ * SINCE navigation (small, 0 at load), not the raw monotonic clock
+ * (1.4e15 on the host — a glaring fingerprint mismatch). The epoch
+ * origin is what performance.timeOrigin/timing.navigationStart expose. */
+static double g_perfOriginMs = 0.0;
+static double g_perfEpochStartMs = 0.0;
+
 static void xs_performance_now(xsMachine *the)
 {
-    double ms = 0.0;
-#if defined(TARGET_PLAYDATE)
+    /* SDK monotonic ms on BOTH targets: the sim's clock_gettime is
+     * macro-renamed to the QuickJS stub (returns -1, leaves the struct
+     * untouched), which read garbage. getCurrentTimeMilliseconds is the
+     * simulator's real monotonic clock. */
     PlaydateAPI *pdp = pluto_pd();
-    ms = pdp ? (double)pdp->system->getCurrentTimeMilliseconds() : 0.0;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
-#endif
-    xsResult = xsNumber(ms);
+    double ms = pdp ? (double)pdp->system->getCurrentTimeMilliseconds() : 0.0;
+    xsResult = xsNumber(ms - g_perfOriginMs);
 }
 
 /* performance.getEntriesByType/getEntries — React 19's commit-suspend
@@ -4749,6 +5285,26 @@ static const char *xs_hist_current(JsBridge *b)
     return (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
 }
 
+/* Bounded copy for the journal's fixed-size URL slots (the source may be
+ * the document's 512-byte baseUrl or a caller-supplied long URL). */
+static void xs_hist_copy(char *dst, size_t cap, const char *src)
+{
+    size_t n = src ? strlen(src) : 0;
+    if (cap == 0)
+    {
+        return;
+    }
+    if (n >= cap)
+    {
+        n = cap - 1;
+    }
+    if (n)
+    {
+        memcpy(dst, src, n);
+    }
+    dst[n] = '\0';
+}
+
 /* Seed entry 0 with the doc base on first journal use. */
 static void xs_hist_seed(JsBridge *b)
 {
@@ -4757,7 +5313,7 @@ static void xs_hist_seed(JsBridge *b)
         return;
     }
     const char *base = (b->doc && b->doc->baseUrl[0]) ? b->doc->baseUrl : "";
-    snprintf(b->histUrl[0], JSBRIDGE_HIST_URL_MAX, "%s", base);
+    xs_hist_copy(b->histUrl[0], sizeof(b->histUrl[0]), base);
     b->histCount = 1;
     b->histIdx = 0;
 }
@@ -4779,13 +5335,13 @@ static void xs_hist_arm_delivery(JsBridge *b, const char *fromUrl,
         char fh[JSBRIDGE_HIST_URL_MAX], th[JSBRIDGE_HIST_URL_MAX];
         const char *fh2 = fromUrl ? strchr(fromUrl, '#') : NULL;
         const char *th2 = toUrl ? strchr(toUrl, '#') : NULL;
-        snprintf(fh, sizeof(fh), "%s", fh2 ? fh2 + 1 : "");
-        snprintf(th, sizeof(th), "%s", th2 ? th2 + 1 : "");
+        xs_hist_copy(fh, sizeof(fh), fh2 ? fh2 + 1 : "");
+        xs_hist_copy(th, sizeof(th), th2 ? th2 + 1 : "");
         if (strcmp(fh, th) != 0) /* hash really moved → hashchange */
         {
             st->histPendHash = 1;
-            snprintf(st->histFromUrl, JSBRIDGE_HIST_URL_MAX, "%s", fromUrl);
-            snprintf(st->histToUrl, JSBRIDGE_HIST_URL_MAX, "%s", toUrl);
+            xs_hist_copy(st->histFromUrl, sizeof(st->histFromUrl), fromUrl);
+            xs_hist_copy(st->histToUrl, sizeof(st->histToUrl), toUrl);
         }
     }
 }
@@ -4828,7 +5384,7 @@ static void xs_history_setState_common(xsMachine *the, int mode)
     }
 
     char fromUrl[JSBRIDGE_HIST_URL_MAX];
-    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    xs_hist_copy(fromUrl, sizeof(fromUrl), xs_hist_current(b));
     if (mode) /* push: grow the book (overflow = reuse the top slot — a
                * full journal replaces the head entry, like a short
                * browser session limit; length semantics stay browser-
@@ -4852,7 +5408,7 @@ static void xs_history_setState_common(xsMachine *the, int mode)
     {
         /* no index/count change */
     }
-    snprintf(b->histUrl[b->histIdx], JSBRIDGE_HIST_URL_MAX, "%s", abs);
+    xs_hist_copy(b->histUrl[b->histIdx], sizeof(b->histUrl[b->histIdx]), abs);
 
     /* pin the state for the entry (replace re-pins over the old slot) */
     if (st)
@@ -4908,7 +5464,7 @@ static void xs_history_move(xsMachine *the, int delta)
         return;
     }
     char fromUrl[JSBRIDGE_HIST_URL_MAX];
-    snprintf(fromUrl, sizeof(fromUrl), "%s", xs_hist_current(b));
+    xs_hist_copy(fromUrl, sizeof(fromUrl), xs_hist_current(b));
     b->histIdx = target;
     const char *to = xs_hist_current(b);
     logger_log("[js] history back/forward → j=%d url='%.80s' (popstate "
@@ -4977,11 +5533,51 @@ static int xs_location_parse_current(JsBridge *b, UrlParsed *parsed)
     return url_parse(xs_hist_current(b), parsed) == 0;
 }
 
+/* ── document.cookie (RFC 6265 §7.1 script API) ─────────────────────────────
+ * The getter exposes only non-HttpOnly cookies for the live document URL;
+ * the setter feeds one JS cookie assignment through the SAME jar/parser the
+ * network lane uses (JS cookie syntax is a subset of Set-Cookie). Google's
+ * search challenge sets SG_SS here and then re-checks it — without this
+ * surface the challenge can never complete. */
+static void xs_document_getCookie(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    char buf[768];
+    buf[0] = '\0';
+    if (b && b->doc && xs_location_parse_current(b, &parsed))
+    {
+        cookie_jar_get_js_header(parsed.host, parsed.path, parsed.isSsl,
+                                 buf, sizeof(buf));
+    }
+    xsResult = xsString(buf);
+}
+
+static void xs_document_setCookie(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    static UrlParsed parsed;
+    const char *raw = xsToString(xsArg(0));
+    if (b && b->doc && raw && raw[0] && xs_location_parse_current(b, &parsed))
+    {
+        logger_log("[js] document.cookie set: len=%zu %.96s",
+                   strlen(raw), raw);
+        cookie_jar_store_ex(parsed.host, parsed.path, raw);
+    }
+}
+
 static void xs_location_get_href(xsMachine *the)
 {
     JsBridge *b = bridge_of(the);
     xs_hist_seed(b);
     xsResult = xsString(xs_hist_current(b));
+}
+
+static void xs_location_set_href(xsMachine *the)
+{
+    /* location.href = "..." is an assignment-navigation, same contract as
+     * assign/replace: resolve now, navigate from the frame loop. */
+    xs_location_assign(the);
 }
 
 static void xs_location_get_origin(xsMachine *the)
@@ -5097,7 +5693,7 @@ static void xs_el_getBoundingClientRect(xsMachine *the)
     xsResult = xsNewObject();
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
     {
-        xsDefine(xsResult, xsID(fields[i]), xsInteger(0), xsDefault);
+        xsDefine(xsResult, xsID((char *)fields[i]), xsInteger(0), xsDefault);
     }
 }
 
@@ -5215,7 +5811,7 @@ static void def_fn(xsMachine *the, xsSlot obj, const char *name,
 {
     xsResult = obj;
     xsSlot fn = xsNewHostFunction(cb, length);
-    xsDefine(xsResult, xsID(name), fn, xsDefault);
+    xsDefine(xsResult, xsID((char *)name), fn, xsDefault);
 }
 
 /* Helper: define a plain data property. Same GC contract as def_fn. */
@@ -5224,7 +5820,7 @@ static void def_val(xsMachine *the, xsSlot obj, const char *name,
 {
     (void)the;
     xsResult = obj;
-    xsDefine(xsResult, xsID(name), value, xsDefault);
+    xsDefine(xsResult, xsID((char *)name), value, xsDefault);
 }
 
 /* ── CSSOM StyleSheet shim (text-backed) ─────────────────�
@@ -5491,6 +6087,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"selectedIndex", xs_el_get_selectedIndex, NULL},
         {"options", xs_el_get_options, NULL},
         {"disabled", xs_el_get_disabled, xs_el_set_disabled},
+        {"hidden", xs_el_get_hidden, xs_el_set_hidden},
         {"readOnly", xs_el_get_readOnly, xs_el_set_readOnly},
         /* Forms-Phase 6: the form's enumerated IDL mirrors (the browser
          * reflect shapes; tag-gated, aliasing encoding → enctype). */
@@ -5516,7 +6113,7 @@ static void xs_build_el_proto(JsBridge *b)
         {"data", xs_el_get_data, NULL},
         {"dataset", xs_el_get_dataset, NULL},
         {"nodeValue", xs_el_get_nodeValue, xs_el_set_nodeValue},
-        {"type", xs_el_get_type, NULL},
+        {"type", xs_el_get_type, xs_el_set_type},
         {"namespaceURI", xs_el_get_namespaceURI, NULL},
         {"classList", xs_el_get_classList, NULL},
         {"style", xs_el_get_style, NULL},
@@ -5545,6 +6142,12 @@ static void xs_build_el_proto(JsBridge *b)
         {"appendChild", xs_el_appendChild, 1},
         {"removeChild", xs_el_removeChild, 1},
         {"insertBefore", xs_el_insertBefore, 2},
+        {"prepend", xs_el_prepend, 0},
+        {"append", xs_el_append, 0},
+        {"before", xs_el_before, 0},
+        {"after", xs_el_after, 0},
+        {"replaceChildren", xs_el_replaceChildren, 0},
+        {"remove", xs_el_remove, 0},
         {"querySelector", xs_el_querySelector, 1},
         {"querySelectorAll", xs_el_querySelectorAll, 1},
         {"closest", xs_el_closest, 1},
@@ -5571,12 +6174,12 @@ static void xs_build_el_proto(JsBridge *b)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(proto, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(proto, xsID((char *)accs[i].name), getter, xsIsGetter);
         if (accs[i].set)
         {
             /* getter linked on the rooted proto first — see xs_push_style */
             xsSlot setter = xsNewHostFunction(accs[i].set, 1);
-            xsDefine(proto, xsID(accs[i].name), setter, xsIsSetter);
+            xsDefine(proto, xsID((char *)accs[i].name), setter, xsIsSetter);
         }
     }
     for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
@@ -5936,14 +6539,15 @@ static void xs_storage_getItem(xsMachine *the)
     {
         xsTypeError("out of memory");
     }
-    char out[WS_VAL_MAX];
-    int hit = ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value: xsString copies it immediately, so no
+     * 8KB stack buffer is needed on the device's ~62KB game-task stack. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
+    xsResult = v ? xsString(v) : xsNull;
     JFree(k);
-    xsResult = hit ? xsString(out) : xsNull;
 }
 
 static void xs_storage_setItem(xsMachine *the)
@@ -6123,19 +6727,35 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, perf, "clearMeasures", xs_noop, 0);
         def_fn(the, perf, "clearMarks", xs_noop, 0);
         {
-            /* Device: no CLOCK_MONOTONIC in the toolchain — SDK ms clock. */
+            /* Device: no CLOCK_MONOTONIC in the toolchain — SDK ms clock.
+             * Epoch origin: Unix ms at navigation, the value a real
+             * browser exposes via performance.timeOrigin and
+             * timing.navigationStart (performance.now() is relative to
+             * it — see xs_performance_now). */
             double origin = 0.0;
-#if defined(TARGET_PLAYDATE)
+            double epochNow = 0.0;
             PlaydateAPI *pdp = pluto_pd();
             origin = pdp ? (double)pdp->system->getCurrentTimeMilliseconds()
                          : 0.0;
-#else
-            struct timespec tso;
-            clock_gettime(CLOCK_MONOTONIC, &tso);
-            origin = (double)tso.tv_sec * 1000.0 +
-                     (double)tso.tv_nsec / 1000000.0;
-#endif
-            def_val(the, perf, "timeOrigin", xsNumber(origin));
+            if (pdp)
+            {
+                unsigned int ms = 0;
+                uint32_t sec = pdp->system->getSecondsSinceEpoch(&ms);
+                epochNow = ((double)sec + 946684800.0) * 1000.0 + (double)ms;
+            }
+            g_perfOriginMs = origin;
+            g_perfEpochStartMs = epochNow;
+            def_val(the, perf, "timeOrigin", xsNumber(epochNow));
+            /* performance.timing — challenge/fingerprint code compares
+             * these epoch values with Date.now(); both fields exist and
+             * are browser-shaped. */
+            {
+                xsSlot timing = xsNewHostObject(NULL);
+                xsResult = timing; /* GC anchor */
+                def_val(the, timing, "navigationStart", xsNumber(epochNow));
+                def_val(the, timing, "responseStart", xsNumber(epochNow));
+                def_val(the, perf, "timing", timing);
+            }
         }
         def_val(the, glob, "performance", perf);
     }
@@ -6144,11 +6764,47 @@ static void xs_build_globals(JsBridge *b)
     {
         xsSlot nav = xsNewHostObject(NULL);
         xsResult = nav; /* GC anchor */
-        def_val(the, nav, "userAgent",
-                xsString("PlutoBrowser/1.0 (Playdate; XS/Moddable 9.5.0)"));
-        def_val(the, nav, "appCodeName", xsString("PlutoBrowser"));
-        def_val(the, nav, "appVersion", xsString("1.0"));
+        /* navigator.userAgent MUST match the wire UA (constants.h
+         * USER_AGENT). The old Playdate string disagreed with the Chrome
+         * HTTP header — a first-class bot signal for any challenge that
+         * compares the two. The other navigator fields are the standard
+         * web-platform surface challenge/fingerprint code reads. */
+        def_val(the, nav, "userAgent", xsString(USER_AGENT));
+        def_val(the, nav, "appCodeName", xsString("Mozilla"));
+        def_val(the, nav, "appVersion",
+                xsString("5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) "
+                         "Chrome/126.0.0.0 Safari/537.36"));
+        def_val(the, nav, "platform", xsString("MacIntel"));
+        def_val(the, nav, "language", xsString("en-US"));
+        def_val(the, nav, "cookieEnabled", xsTrue);
+        def_val(the, nav, "onLine", xsTrue);
+        def_val(the, nav, "webdriver", xsFalse);
+        def_val(the, nav, "hardwareConcurrency", xsInteger(1));
+        def_val(the, nav, "maxTouchPoints", xsInteger(0));
+        def_val(the, nav, "deviceMemory", xsNumber(0.25));
+        {
+            xsSlot langs = xsNewArray(2);
+            xsResult = langs; /* GC anchor */
+            xsSetIndex(langs, 0, xsString("en-US"));
+            xsSetIndex(langs, 1, xsString("en"));
+            def_val(the, nav, "languages", langs);
+        }
+        def_val(the, nav, "plugins", xsNewArray(0));
+        def_val(the, nav, "mimeTypes", xsNewArray(0));
+        def_fn(the, nav, "sendBeacon", xs_navigator_sendBeacon, 2);
         def_val(the, glob, "navigator", nav);
+    }
+
+    /* window.chrome — the minimal shape a Chrome-UA client exposes.
+     * Fingerprint code checks it; a Chrome UA without it is a bot signal. */
+    {
+        xsSlot chr = xsNewHostObject(NULL);
+        xsResult = chr; /* GC anchor */
+        def_val(the, chr, "runtime", xsNewHostObject(NULL));
+        def_fn(the, chr, "loadTimes", xs_noop, 0);
+        def_fn(the, chr, "csi", xs_noop, 0);
+        def_val(the, glob, "chrome", chr);
     }
 
     /* API-P3: location is LIVE over the address journal — every
@@ -6179,7 +6835,12 @@ static void xs_build_globals(JsBridge *b)
         for (size_t lc = 0; lc < sizeof(locComps) / sizeof(locComps[0]); lc++)
         {
             xsSlot get = xsNewHostFunction(locComps[lc].get, 0);
-            xsDefine(loc, xsID(locComps[lc].name), get, xsIsGetter);
+            xsDefine(loc, xsID((char *)locComps[lc].name), get, xsIsGetter);
+            if (strcmp(locComps[lc].name, "href") == 0)
+            {
+                xsSlot set = xsNewHostFunction(xs_location_set_href, 1);
+                xsDefine(loc, xsID("href"), set, xsIsSetter);
+            }
         }
         def_fn(the, loc, "assign", xs_location_assign, 1);
         def_fn(the, loc, "replace", xs_location_assign, 1);
@@ -6245,7 +6906,7 @@ static void xs_build_globals(JsBridge *b)
         for (size_t i = 0; i < sizeof(comps) / sizeof(comps[0]); i++)
         {
             xsSlot getter = xsNewHostFunction(comps[i].get, 0);
-            xsDefine(st->urlProto, xsID(comps[i].name), getter, xsIsGetter);
+            xsDefine(st->urlProto, xsID((char *)comps[i].name), getter, xsIsGetter);
         }
         def_fn(the, st->urlProto, "toString", xs_url_toString, 0);
         def_fn(the, st->urlProto, "toJSON", xs_url_toString, 0);
@@ -6298,6 +6959,11 @@ static void xs_build_globals(JsBridge *b)
         def_fn(the, doc, "removeEventListener", xs_noop, 2);
         def_val(the, doc, "defaultView", glob);
         def_val(the, doc, "nodeType", xsInteger(9));
+        /* Page Visibility (HTML §7.1): the browser is always visible on
+         * the Playdate (one foreground page). Challenge/fingerprint code
+         * reads both; undefined is a bot signal. */
+        def_val(the, doc, "hidden", xsFalse);
+        def_val(the, doc, "visibilityState", xsString("visible"));
         /* C4 (input fidelity): react's ChangeEventPlugin capability-probes
          * `"oninput" in document` (browser truth) to pick the modern
          * TrackerEventPlugin path for text-input onChange dispatch.
@@ -6314,6 +6980,13 @@ static void xs_build_globals(JsBridge *b)
             xsDefine(doc, xsID("title"), getter, xsIsGetter);
             xsSlot titleSetter = xsNewHostFunction(xs_document_setTitle, 1);
             xsDefine(doc, xsID("title"), titleSetter, xsIsSetter);
+        }
+        /* document.cookie (RFC 6265 §7.1): live getter + jar-backed setter. */
+        {
+            xsSlot getter = xsNewHostFunction(xs_document_getCookie, 0);
+            xsDefine(doc, xsID("cookie"), getter, xsIsGetter);
+            xsSlot setter = xsNewHostFunction(xs_document_setCookie, 1);
+            xsDefine(doc, xsID("cookie"), setter, xsIsSetter);
         }
         /* A2: currentScript as a live getter — the router stamps each
          * running script's tag span (jsbridge_cur_script_stamp) and this
@@ -6348,8 +7021,51 @@ static void xs_build_globals(JsBridge *b)
          * library's own try/catch (swallowed). Without the property, the walk
          * returns undefined/null and the caller crashes on `sheet.addRule`. */
         def_val(the, doc, "styleSheets", xsNewArray(0));
+        /* R66: document.fonts (see xs_fonts_load). */
+        {
+            xsSlot fonts = xsNewHostObject(NULL);
+            def_fn(the, fonts, "load", xs_fonts_load, 2);
+            def_val(the, doc, "fonts", fonts);
+        }
         def_val(the, glob, "document", doc);
     }
+
+    /* Window geometry + screen (CSSOM View / HTML §7.2-7.3). Browser
+     * challenges and fingerprinting code read these unconditionally; a
+     * missing `screen` is a ReferenceError, which SearchGuard catches and
+     * degrades its token over (the 54-char fail token receipt). The values
+     * are the Playdate's real 400x240 panel; the content viewport is
+     * 400x216 under the 24px chrome bar. colorDepth is the web-platform
+     * convention (24) rather than the 1-bit panel. */
+    def_val(the, glob, "innerWidth", xsInteger(400));
+    def_val(the, glob, "innerHeight", xsInteger(216));
+    def_val(the, glob, "outerWidth", xsInteger(400));
+    def_val(the, glob, "outerHeight", xsInteger(240));
+    def_val(the, glob, "devicePixelRatio", xsNumber(1));
+    def_val(the, glob, "screenX", xsInteger(0));
+    def_val(the, glob, "screenY", xsInteger(0));
+    def_val(the, glob, "pageXOffset", xsInteger(0));
+    def_val(the, glob, "pageYOffset", xsInteger(0));
+    def_val(the, glob, "opener", xsNull);
+    {
+        xsSlot scr = xsNewHostObject(NULL);
+        xsResult = scr; /* GC anchor */
+        def_val(the, scr, "width", xsInteger(400));
+        def_val(the, scr, "height", xsInteger(240));
+        def_val(the, scr, "availWidth", xsInteger(400));
+        def_val(the, scr, "availHeight", xsInteger(240));
+        def_val(the, scr, "availLeft", xsInteger(0));
+        def_val(the, scr, "availTop", xsInteger(0));
+        def_val(the, scr, "colorDepth", xsInteger(24));
+        def_val(the, scr, "pixelDepth", xsInteger(24));
+        def_val(the, glob, "screen", scr);
+    }
+
+    /* Browser globals: atob/btoa (HTML §8.3) — binary blobs in modern
+     * bundles (Google's search challenge decodes its proof-of-work with
+     * atob and re-encodes the result with btoa). */
+    def_fn(the, glob, "atob", xs_atob, 1);
+    def_fn(the, glob, "btoa", xs_btoa, 1);
 
     /* alert/confirm/prompt + no-op timers (UNSUPPORTED — parity) */
     def_fn(the, glob, "alert", xs_alert, 0);
@@ -6464,7 +7180,7 @@ static void xs_drain_jobs(xsMachine *the)
 #endif
 }
 
-/* ── metering (per-script run limit) ───────────────────
+/* ── metering (per-script run limit) ─────────────────── */
 /* Per-run budget, set by each runner from the segment's admitted size.
  * Default is the flat XS_RUNLIMIT for scripts run outside the split
  * path (inline handlers, timers). The split path scales it: a 253KB
@@ -6635,10 +7351,9 @@ static void xs_render_overlay(unsigned long now)
         *r1 ^= (uint8_t)(0x80 >> ((sx + 1) & 7));
     }
     /* R26o/R30c: repaint the "Rendering page content... N%" TEXT line above
-     * the bar. Weak style_font: absent in host harness builds → skip. The
-     * SetTimestamps call above makes this frame the displayed blit target,
-     * so the fill+text below are what the user actually sees this tick. */
-    if (style_font)
+     * the bar. The SetTimestamps call above makes this frame the displayed
+     * blit target, so the fill+text below are what the user actually sees
+     * this tick. */
     {
         LCDFont *f = style_font(PLUTO_FONT_BODY);
         if (f && pd->graphics->setFont && pd->graphics->drawText &&
@@ -6837,6 +7552,22 @@ void xs_ladder_report(unsigned long wantBytes, int accepted)
 static unsigned long xs_mount_now_ms(void); /* defined below the callback */
 #endif
 
+/* R68: wall-clock budget for ONE script's parse+codegen+run. The SDK
+ * run-loop watchdog hard-resets the app after 10s without an update()
+ * return; the engine's op meter alone is not a wall-clock bound (Bing's
+ * 35KB shared module ran 530K metered ops and still exceeded 10s on the
+ * M7 — errorlog 2026-11-10 02:18, "Run loop stalled"). The meter callback
+ * runs every XS_METER_STEP ops, so sampling the SDK clock there bounds
+ * the whole bracket. An abort is contained by xs_parse_and_run's
+ * HostExit bracket (engine reset, page keeps its server shell). Mounts
+ * are exempt: their own resumable burst budget owns the clock. */
+/* 8s: Google's 63KB search challenge parses its eval payload for ~6s on
+ * the M7 (device receipt 2026-11-12: cap error at 6s, no watchdog). 5s
+ * cut it off mid-parse; 8s leaves 2s of watchdog margin. */
+#define XS_SCRIPT_WALL_BUDGET_MS 8000UL
+static unsigned long g_scriptRunStartMs = 0;
+static volatile int g_scriptRunActive = 0;
+
 static txBoolean xs_meter_callback(txMachine *the, txU8 count)
 {
 #if defined(TARGET_PLAYDATE) || defined(TARGET_SIMULATOR)
@@ -6861,6 +7592,31 @@ static txBoolean xs_meter_callback(txMachine *the, txU8 count)
                                   : NULL)
                                   ? (int)(((XsState *)((JsBridge *)xsGetContext(the))->implState)->mount.parked)
                                   : -1));
+    }
+    /* R68: one-script wall-clock bound (see g_scriptRunActive). Sampled
+     * every 64 callbacks (≈32K ops) — the SDK ms clock is not free, and
+     * 32K ops is far finer than the 3s budget needs. Mount bursts are
+     * exempt (their own budget below owns the clock). */
+    if (g_scriptRunActive)
+    {
+        static unsigned scriptClockDiv;
+        JsBridge *sb = (JsBridge *)xsGetContext(the);
+        XsState *sst = sb ? (XsState *)sb->implState : NULL;
+        if (!sst || !sst->mount.active)
+        {
+            if ((++scriptClockDiv & 63) == 0)
+            {
+                unsigned long now = xs_mount_now_ms();
+                if (now - g_scriptRunStartMs > XS_SCRIPT_WALL_BUDGET_MS)
+                {
+                    g_scriptRunActive = 0;
+                    logger_log("[js] script wall budget exceeded "
+                               "(%lums) — aborting containedly",
+                               now - g_scriptRunStartMs);
+                    fxAbort(the, XS_TOO_MUCH_COMPUTATION_EXIT);
+                }
+            }
+        }
     }
 #endif
 #ifdef PLUTO_NR_MOUNT_PAUSE
@@ -7413,7 +8169,8 @@ static int xs_init(JsBridge *b, const char *baseUrl)
     memset(st, 0, sizeof(*st));
     b->implState = st;
 
-    xsMachine *m = xsCreateMachine(&xs_creation, "pluto-page", (void *)b);
+    xsMachine *m = xsCreateMachine((xsCreation *)&xs_creation, "pluto-page",
+                                   (void *)b);
     if (!m)
     {
         JFree(st);
@@ -7496,6 +8253,28 @@ static int xs_init(JsBridge *b, const char *baseUrl)
         JFree(st);
         b->implState = NULL;
         return -1;
+    }
+    /* C4: install the engine-owned fetch/AbortSignal shim HERE, at engine
+     * init, while the heap is clean. It used to run lazily before the
+     * page's first <script>, i.e. AFTER a heavy page had rendered and the
+     * SDK pool was at 9MB+ — on bing.com's 98-block result page the
+     * shim's first parser chunk landed on a corrupted/starved pool and
+     * hard-faulted (device crashlog 2026-11-09 22:56, pc=0x901f77b0,
+     * mmfar=0x4000). The shim is page-independent (it only defines
+     * fetch/AbortSignal on the engine globals), so running it at init is
+     * both safer and browser-faithful: every page sees it before any
+     * script. The lazy call in xs_run_script stays as a latch no-op. */
+    if (!st->fetchShimDone)
+    {
+        xs_run_fetch_shim(b, st, -1);
+        if (!st->machine)
+        {
+            logger_log("[xs] init aborted (fetch shim reset)");
+            pluto_mem_resync_live();
+            JFree(st);
+            b->implState = NULL;
+            return -1;
+        }
     }
     return 0;
 }
@@ -8450,10 +9229,34 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
 #else
     (void)execPeak;
 #endif
+    /* The boot parser cap (1536KB) is a fixed estimate; a script that
+     * ADMITTED at execPeak must be allowed to use that grant or the fork
+     * aborts mid-parse with "script too large (parser memory cap)".
+     * Google's 63KB challenge script admitted at ~1694KB and then died at
+     * the 1536KB cap on device (sim: no cap). Scope the raise to THIS
+     * parse and restore it after the bracket. */
+    unsigned long savedParserCap = fxNRParserTotalCap;
+    if (execPeak && execPeak > savedParserCap)
+    {
+        /* The 19B/B estimate covers the outer parse; Google's challenge
+         * eval'd payload parses with its own parser and lands past the
+         * estimate (device receipts: cap 1694KB -> 1792KB actual; cap
+         * 1950KB -> 2048KB actual; codegen=0 both times). The payload is
+         * heavily obfuscated (~32B/source byte of parser memory), so give
+         * the cap a 1MB margin — the device budget still has room at
+         * ~3.7MB live + ~2.7MB parser. */
+        fxNRParserTotalCap = (unsigned long)execPeak + (1024UL * 1024UL);
+    }
     /* Scale the runaway guard with the admitted source size (R22: the
      * 253KB bootstrap tail legitimately executes far more than the flat
      * 2M-op budget; admission already bounded the segment). */
     xs_run_limit = (txU8)XS_RUNLIMIT + (txU8)len * 256u;
+#ifdef TARGET_PLAYDATE
+    /* R68: arm the wall-clock budget for this whole bracket. Cleared at
+     * the tail; a timeout aborts through the HostExit bracket. */
+    g_scriptRunStartMs = xs_mount_now_ms();
+    g_scriptRunActive = 1;
+#endif
 #ifdef TARGET_PLAYDATE
     /* R-kf bisect stage 3: one row per bracket step. The fork entry's
      * [nrp] probe is the first instruction of fxParseScript_nr and never
@@ -8552,6 +9355,10 @@ static void xs_parse_and_run(JsBridge *b, xsMachine *m, int index,
     /* Per-script meter budget, like the other bridges' run limits. */
     xsEndMetering(m);
     xsEndHostExit(m);
+#ifdef TARGET_PLAYDATE
+    g_scriptRunActive = 0;
+#endif
+    fxNRParserTotalCap = savedParserCap; /* restore the boot cap */
     xs_run_limit = (txU8)XS_RUNLIMIT; /* restore default for other runners */
     xs_exec_finish(b, st, m, index);
 }
@@ -8986,11 +9793,73 @@ static int xs_try_bundler_split_src(JsBridge *b, const char *src, size_t len,
  * (router HTTP), so the shim is a tiny SCRIPT (one xs_run_tiny run, before
  * the page's first script) rather than C promise plumbing. Response shape
  * covers the handler's usage: .ok (200–299), .status, .text()/.json()
- * promise-returning. The signal object's timeoutms drives a setTimeout
- * reject (the real spec abort machinery is out of scope here). */
+ * promise-returning. The website's AbortSignal.timeout(15s) is advisory:
+ * the transport owns the hard deadline, because the device's GitHub
+ * requests take longer than 15s and must still build the cards. */
 static const char g_fetchShimSrc[] =
     "/* pluto fetch shim (engine-owned) */\n"
     "(function (g) {\n"
+    "  /* Device date/number compatibility: the game task's libc locale and\n"
+    "     timezone environment are unusable. These shims keep the same visible\n"
+    "     integer/date output without entering the native locale path. */\n"
+    "  try {\n"
+    "    var pNum = function (v) {\n"
+    "      var n = Number(v);\n"
+    "      if (n !== n || !isFinite(n)) { return String(n); }\n"
+    "      var s = String(n);\n"
+    "      if (s.indexOf('e') >= 0 || s.indexOf('E') >= 0) { return s; }\n"
+    "      var neg = s.charAt(0) === '-';\n"
+    "      if (neg) { s = s.slice(1); }\n"
+    "      var dot = s.indexOf('.');\n"
+    "      var frac = dot >= 0 ? s.slice(dot) : '';\n"
+    "      var int = dot >= 0 ? s.slice(0, dot) : s;\n"
+    "      var out = '';\n"
+    "      while (int.length > 3) {\n"
+    "        out = ',' + int.slice(-3) + out;\n"
+    "        int = int.slice(0, -3);\n"
+    "      }\n"
+    "      return (neg ? '-' : '') + int + out + frac;\n"
+    "    };\n"
+    "    Number.prototype.toLocaleString = function () {\n"
+    "      console.log('[probe] number.toLocaleString');\n"
+    "      return pNum(this.valueOf());\n"
+    "    };\n"
+    "    var pOldDate = Date;\n"
+    "    var pIso = function (s) {\n"
+    "      var m = /^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?Z$/.exec(s);\n"
+    "      if (m) {\n"
+    "        return pOldDate.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], +(m[7] || 0));\n"
+    "      }\n"
+    "      return pOldDate.parse(s);\n"
+    "    };\n"
+    "    var pMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\n"
+    "    pOldDate.prototype.toLocaleDateString = function () {\n"
+    "      console.log('[probe] date.toLocaleDateString');\n"
+    "      var t = this.getTime();\n"
+    "      if (t !== t) { return 'Invalid Date'; }\n"
+    "      var d = new pOldDate(t);\n"
+    "      return pMonths[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();\n"
+    "    };\n"
+    "    var pDate = function () {\n"
+    "      var a = arguments;\n"
+    "      console.log('[probe] Date', a.length, a.length ? typeof a[0] : 'none');\n"
+    "      if (!(this instanceof pDate)) { return new pOldDate().toString(); }\n"
+    "      if (a.length === 0) { return new pOldDate(); }\n"
+    "      if (a.length === 1) {\n"
+    "        return new pOldDate(typeof a[0] === 'string' ? pIso(a[0]) : a[0]);\n"
+    "      }\n"
+    "      return new pOldDate(a[0], a[1], a.length < 3 ? 1 : a[2],\n"
+    "        a.length < 4 ? 0 : a[3], a.length < 5 ? 0 : a[4],\n"
+    "        a.length < 6 ? 0 : a[5], a.length < 7 ? 0 : a[6]);\n"
+    "    };\n"
+    "    pDate.prototype = pOldDate.prototype;\n"
+    "    pDate.now = pOldDate.now;\n"
+    "    pDate.parse = function (s) { return pIso(String(s)); };\n"
+    "    pDate.UTC = pOldDate.UTC;\n"
+    "    g.Date = pDate;\n"
+    "  } catch (pe) {\n"
+    "    console.log('[probe] date/number shim error', pe);\n"
+    "  }\n"
     "  if (typeof g.fetch === 'function') { return; }\n"
     "  if (typeof g.AbortSignal !== 'function') {\n"
     "    var AS = function AbortSignal() {};\n"
@@ -9031,18 +9900,18 @@ static const char g_fetchShimSrc[] =
     "          catch (hfe) {}\n"
     "        }\n"
     "      }\n"
-    "      if (ms > 0) {\n"
-    "        timer = setTimeout(function () {\n"
-    "          timer = 0;\n"
-    "          reject(new Error('TimeoutError: fetch aborted (pluto)'));\n"
-    "        }, ms);\n"
-    "      }\n"
+    "      /* AbortSignal.timeout(15s) is advisory here: the transport owns\n"
+    "         the hard deadline; the device's GitHub reply can exceed 15s. */\n"
     "      xhr.onload = function () {\n"
     "        if (timer) { clearTimeout(timer); timer = 0; }\n"
     "        var st = this.status || 0;\n"
     "        var tx = this.responseText || '';\n"
     "        resolve({ ok: (st >= 200 && st < 300), status: st,\n"
     "          url: String(url), redirected: false,\n"
+    "          headers: { get: function (name) {\n"
+    "            try { return xhr.getResponseHeader(String(name)) || ''; }\n"
+    "            catch (he) { return ''; }\n"
+    "          } },\n"
     "          text: function () { return g.Promise.resolve(tx); },\n"
     "          json: function () {\n"
     "            try { return g.Promise.resolve(JSON.parse(tx)); }\n"
@@ -9377,7 +10246,7 @@ static int xcs_word_before(xsChunkScan *s, size_t at, const char *kw)
     size_t p = at - n;
     if (!xcs_refill(s, p))
         return 0;
-    if (s->window[at - 1 - s->wbase] >= 0x80)
+    if ((unsigned char)s->window[at - 1 - s->wbase] >= 0x80)
         return 0;
     return memcmp(s->window + p - s->wbase, kw, n) == 0;
 }
@@ -11927,7 +12796,7 @@ static void xs_xhr_send(xsMachine *the)
     int found = 0;
     for (int i = 0; i < 3 && !found; i++)
     {
-        xsSlot v = xsGet(xsThis, xsID(names[i]));
+        xsSlot v = xsGet(xsThis, xsID((char *)names[i]));
         if (fxIsCallable(the, &v))
         {
             fn = v;
@@ -12032,6 +12901,26 @@ static void xs_xhr_get_responseURL(xsMachine *the)
     xsResult = xsString((r && r->url[0]) ? r->url : "");
 }
 
+/* The fetch shim's Response.headers.get(name). The router retains the
+ * response Link header (GitHub pagination); other names return "" until
+ * a page needs them. */
+static void xs_xhr_get_response_header(xsMachine *the)
+{
+    JsBridge *b = bridge_of(the);
+    const JsHttpRequest *r = jsbridge_xhr_get(b, xs_xhr_id(the));
+    char *name = to_cstring(the, xsArg(0));
+    const char *out = "";
+    if (r && name && strcasecmp(name, "link") == 0)
+    {
+        out = r->respLink;
+    }
+    xsResult = xsString(out);
+    if (name)
+    {
+        JFree(name);
+    }
+}
+
 static void xs_build_xhr_proto(JsBridge *b)
 {
     xsMachine *the = machine_of(b);
@@ -12043,6 +12932,8 @@ static void xs_build_xhr_proto(JsBridge *b)
     def_fn(the, st->xhrProto, "setRequestHeader", xs_xhr_set_request_header,
            2);
     def_fn(the, st->xhrProto, "abort", xs_xhr_abort, 0);
+    def_fn(the, st->xhrProto, "getResponseHeader",
+           xs_xhr_get_response_header, 1);
     struct
     {
         const char *name;
@@ -12057,7 +12948,7 @@ static void xs_build_xhr_proto(JsBridge *b)
     for (size_t i = 0; i < sizeof(accs) / sizeof(accs[0]); i++)
     {
         xsSlot getter = xsNewHostFunction(accs[i].get, 0);
-        xsDefine(st->xhrProto, xsID(accs[i].name), getter, xsIsGetter);
+        xsDefine(st->xhrProto, xsID((char *)accs[i].name), getter, xsIsGetter);
     }
 }
 

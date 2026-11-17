@@ -56,6 +56,13 @@ char *url_resolve(const char *baseUrlStr, const char *relativeUrlStr);
 /* URL.buildSearchUrl: engineUrl + encode(queryText). malloc'd; caller frees. */
 char *url_build_search_url(const char *searchEngineUrl, const char *queryText);
 
+/* R66: extract the HTTP request-target (path[?query]) directly from a raw
+ * absolute URL, without going through the fixed-size UrlParsed fields. Modern
+ * script/CSS URLs exceed 512 chars (google.com's xjs bundle is 3660), and the
+ * parser's compact storage would truncate the request line. `out` receives
+ * "/" when the URL has no path. Returns out. */
+const char *url_request_target(const char *url, char *out, size_t cap);
+
 /* Convenience: parse and return malloc'd normalized URL (or NULL). */
 char *url_normalize_dup(const char *urlString);
 

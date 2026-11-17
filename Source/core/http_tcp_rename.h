@@ -26,6 +26,7 @@
 #define http_request_h http_tcp_request_h
 #define http_set_identity_encoding http_tcp_set_identity_encoding
 #define http_cancel http_tcp_cancel
+#define http_navigation_reset http_tcp_navigation_reset
 #define http_is_loading http_tcp_is_loading
 #define http_update http_tcp_update
 #endif

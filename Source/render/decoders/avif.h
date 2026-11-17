@@ -30,4 +30,12 @@
  * input. */
 LCDBitmap *avif_decode(const uint8_t *data, size_t len);
 
+/* R68: release the persistent picture arena at page navigation. The arena
+ * is a raw device-pool malloc; holding it across a page change kept ~1.5MB
+ * of a ~12MB pool pinned while the next page's JS engine/DOM loaded (the
+ * Marginalia rewalk dav1d NULL-context crash). Call only when no decode is
+ * in flight (imgdec_clear_cache cancels the decode task first). A no-op on
+ * the simulator/host (the arena is re-created on demand). */
+void avif_release_arena(void);
+
 #endif /* PLUTO_AVIF_H */

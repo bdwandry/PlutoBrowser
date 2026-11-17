@@ -1310,6 +1310,37 @@ static const char JSBRIDGE_SW5_PREFIX[] =
     "if(typeof document!='undefined'&&document.documentElement){"
     "var DS__P=Object.getPrototypeOf(document.documentElement);"
     "if(DS__P&&(typeof DS__P=='object'||typeof DS__P=='function')"
+    "&&typeof Proxy=='function'&&!DS__P.__plutoDS){"
+    "var DS__K2=function(n){var s='';"
+    "for(var i=5;i<n.length;i++){var c=n.charAt(i);"
+    "if(c==='-'){i++;if(i<n.length)s+=n.charAt(i).toUpperCase();}"
+    "else s+=c;}return s;};"
+    "var DS__A=function(k){var s='',i,c;"
+    "for(i=0;i<k.length;i++){c=k.charAt(i);"
+    "if(c>='A'&&c<='Z')s+='-'+c.toLowerCase();else s+=c;}"
+    "return 'data-'+s;};"
+    "try{Object.defineProperty(DS__P,'dataset',{configurable:!0,enumerable:!1,"
+    "get:function(){var el=this;return new Proxy({},{ "
+    "get:function(t,k){if(typeof k!='string')return undefined;"
+    "var v=el.getAttribute(DS__A(k));return v===null?undefined:v;},"
+    "set:function(t,k,v){if(typeof k!='string')return false;"
+    "el.setAttribute(DS__A(k),v===undefined?'':String(v));return true;},"
+    "has:function(t,k){return typeof k=='string'&&el.hasAttribute(DS__A(k));},"
+    "deleteProperty:function(t,k){if(typeof k=='string')el.removeAttribute(DS__A(k));return true;},"
+    "ownKeys:function(){var names=[],out=[],i;"
+    "if(typeof el.getAttributeNames=='function')names=el.getAttributeNames();"
+    "else if(el.attributes&&el.attributes.length!=null)"
+    "for(i=0;i<el.attributes.length;i++)"
+    "try{names.push(el.attributes[i].name)}catch(esn){}"
+    "for(i=0;i<names.length;i++){var n=String(names[i]);"
+    "if(n.indexOf('data-')==0&&n.length>5)out.push(DS__K2(n));}"
+    "return out;},"
+    "getOwnPropertyDescriptor:function(t,k){if(typeof k!='string')return undefined;"
+    "var v=el.getAttribute(DS__A(k));if(v===null)return undefined;"
+    "return {value:v,enumerable:true,configurable:true,writable:true};}"
+    "});}});DS__P.__plutoDS=1;}catch(eds){}"
+    "}"
+    "else if(DS__P&&(typeof DS__P=='object'||typeof DS__P=='function')"
     "&&typeof DS__P.dataset=='undefined'){"
     "var DS__KEY=function(n){var s='';"
     "for(var i=5;i<n.length;i++){var c=n.charAt(i);"
@@ -1586,6 +1617,206 @@ int jsbridge_page_script(JsBridge *b, const char *src, size_t len)
     return 0;
 }
 
+/* ── Runtime-inserted <script src> lane ────────────────────────────────────
+ * Browsers execute a classic script when it is inserted into the document
+ * (or its src is set while connected): fetch asynchronously, run in the
+ * page realm, fire load/error. The static HTML lane (jsext/scriptQueue)
+ * cannot see these; without this lane, runtime loaders (bundlers, analytics,
+ * Google's BotGuard loader) silently never run and their caller falls into a
+ * degraded path. ONE fetch at a time through the shared single-flight HTTP
+ * client, gated on http_is_loading() so XHR/fetch keeps priority. */
+static JsBridge *g_dynFetchBridge = NULL;
+static int g_dynFetchIndex = -1;
+
+static int dyn_node_connected(JsBridge *b, DomNode *n)
+{
+    DomNode *root = b->dom ? b->dom->root : NULL;
+    for (DomNode *p = n; p; p = p->parent)
+    {
+        if (p == root)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int dyn_type_is_js(const char *type)
+{
+    while (*type == ' ' || *type == '\t')
+    {
+        type++;
+    }
+    if (!*type)
+    {
+        return 1;
+    }
+    char low[32];
+    size_t i = 0;
+    for (; type[i] && i + 1 < sizeof(low); i++)
+    {
+        char c = type[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    low[i] = '\0';
+    return strstr(low, "javascript") != NULL ||
+           strstr(low, "ecmascript") != NULL;
+}
+
+void jsbridge_note_dynamic_script(JsBridge *b, void *nodeV)
+{
+    DomNode *n = (DomNode *)nodeV;
+    if (!b || !b->doc || !n || n->kind != DOM_ELEMENT || !n->tag ||
+        strcmp(n->tag, "script") != 0)
+    {
+        return;
+    }
+    if (!dyn_node_connected(b, n))
+    {
+        return; /* detached: starts when it is inserted */
+    }
+    const char *src = dom_get_attr(n, "src");
+    if (!src || !src[0])
+    {
+        return;
+    }
+    const char *type = dom_get_attr(n, "type");
+    if (type && type[0] && !dyn_type_is_js(type))
+    {
+        logger_log("[js] dynamic script skipped (type=%s)", type);
+        return;
+    }
+    for (int i = 0; i < b->dynScriptCount; i++)
+    {
+        if (b->dynScripts[i].node == n)
+        {
+            return; /* already queued/run */
+        }
+    }
+    int slot = -1;
+    for (int i = 0; i < JSBRIDGE_DYN_SCRIPTS_MAX; i++)
+    {
+        if (b->dynScripts[i].state == 0)
+        {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0)
+    {
+        logger_log("[js] dynamic script queue full (%d)", JSBRIDGE_DYN_SCRIPTS_MAX);
+        return;
+    }
+    char *abs = url_resolve(b->doc->baseUrl, src);
+    if (!abs)
+    {
+        return;
+    }
+    if (strncmp(abs, "http://", 7) != 0 && strncmp(abs, "https://", 8) != 0)
+    {
+        JFree(abs);
+        return;
+    }
+    b->dynScripts[slot].node = n;
+    snprintf(b->dynScripts[slot].url, sizeof(b->dynScripts[slot].url), "%s", abs);
+    b->dynScripts[slot].state = 1;
+    if (slot + 1 > b->dynScriptCount)
+    {
+        b->dynScriptCount = slot + 1;
+    }
+    logger_log("[js] dynamic script queued: %s", abs);
+    JFree(abs);
+}
+
+static void dyn_script_on_success(int status, char **headerKeys,
+                                  char **headerVals, int headerCount,
+                                  const char *body, size_t bodyLen,
+                                  const char *url)
+{
+    (void)headerKeys;
+    (void)headerVals;
+    (void)headerCount;
+    (void)url;
+    JsBridge *b = g_dynFetchBridge;
+    int idx = g_dynFetchIndex;
+    g_dynFetchBridge = NULL;
+    g_dynFetchIndex = -1;
+    if (!b || idx < 0 || idx >= b->dynScriptCount)
+    {
+        return;
+    }
+    void *node = b->dynScripts[idx].node;
+    b->dynScripts[idx].state = 3;
+    if (status < 200 || status >= 300 || !body || bodyLen == 0)
+    {
+        logger_log("[js] dynamic script FAIL status=%d len=%zu %s", status,
+                   bodyLen, b->dynScripts[idx].url);
+        jsbridge_dispatch_element_event(b, node, "error");
+        return;
+    }
+    logger_log("[js] dynamic script run %zuB: %s", bodyLen,
+               b->dynScripts[idx].url);
+    b->curTagStart = NULL;
+    b->curTagLen = 0;
+    b->curSrcUrl = b->dynScripts[idx].url;
+    b->lastExtSrcUrl = b->dynScripts[idx].url;
+    jsbridge_page_script(b, body, bodyLen);
+    b->curSrcUrl = NULL;
+    jsbridge_dispatch_element_event(b, node, "load");
+}
+
+static void dyn_script_on_error(const char *message)
+{
+    JsBridge *b = g_dynFetchBridge;
+    int idx = g_dynFetchIndex;
+    g_dynFetchBridge = NULL;
+    g_dynFetchIndex = -1;
+    if (!b || idx < 0 || idx >= b->dynScriptCount)
+    {
+        return;
+    }
+    b->dynScripts[idx].state = 3;
+    logger_log("[js] dynamic script error: %s (%s)", b->dynScripts[idx].url,
+               message ? message : "");
+    jsbridge_dispatch_element_event(b, b->dynScripts[idx].node, "error");
+}
+
+void jsbridge_dyn_scripts_pump(JsBridge *b)
+{
+    if (!b || !b->dynScriptCount || g_dynFetchBridge)
+    {
+        return;
+    }
+    if (http_is_loading())
+    {
+        return; /* XHR/fetch or a page load owns the client */
+    }
+    for (int i = 0; i < b->dynScriptCount; i++)
+    {
+        if (b->dynScripts[i].state != 1)
+        {
+            continue;
+        }
+        b->dynScripts[i].state = 2;
+        g_dynFetchBridge = b;
+        g_dynFetchIndex = i;
+        HttpCallbacks cbs;
+        memset(&cbs, 0, sizeof(cbs));
+        cbs.onSuccess = dyn_script_on_success;
+        cbs.onError = dyn_script_on_error;
+        logger_log("[js] dynamic script fetch: %s", b->dynScripts[i].url);
+        int started = http_get(b->dynScripts[i].url, &cbs);
+        if (!started && g_dynFetchBridge == b)
+        {
+            g_dynFetchBridge = NULL;
+            g_dynFetchIndex = -1;
+            b->dynScripts[i].state = 3;
+            jsbridge_dispatch_element_event(b, b->dynScripts[i].node, "error");
+        }
+        return;
+    }
+}
+
 void js_doc_close(JsBridge *b)
 {
     if (!b)
@@ -1606,6 +1837,14 @@ void js_doc_close(JsBridge *b)
     {
         http_cancel();
         b->xhrInFlight = 0;
+    }
+    /* Same for a runtime <script src> fetch: the bridge is about to die,
+     * so the completion must never touch it. */
+    if (g_dynFetchBridge == b)
+    {
+        http_cancel();
+        g_dynFetchBridge = NULL;
+        g_dynFetchIndex = -1;
     }
     if (g_xhrBridge == b)
     {
@@ -2647,9 +2886,9 @@ static int mod_named_list(const char *src, size_t len, size_t p,
     }
     for (int i = 0; i < n; i++)
     {
-        snprintf(slot->named[i].in, sizeof(slot->named[i].in), "%s",
+        snprintf(slot->named[i].in, sizeof(slot->named[i].in), "%.63s",
                  out[i].in);
-        snprintf(slot->named[i].local, sizeof(slot->named[i].local), "%s",
+        snprintf(slot->named[i].local, sizeof(slot->named[i].local), "%.63s",
                  out[i].local);
     }
     slot->namedCount = n;
@@ -2973,8 +3212,8 @@ static void mod_add_export_pair(ModScan *m, const char *local,
                    JSBRIDGE_MOD_EXPORTS, name);
         return;
     }
-    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s", name);
-    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%s",
+    snprintf(m->exp[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%.63s", name);
+    snprintf(m->expLocal[m->exportCount], JSBRIDGE_MOD_NAME_MAX, "%.63s",
              local);
     m->exportCount++;
 }
@@ -4899,7 +5138,7 @@ static void mod_pump_dynq(JsBridge *b)
         }
         char kesc[JSBRIDGE_MOD_KEY_MAX * 2];
         mod_jsesc(kesc, sizeof(kesc), key);
-        char eval[JSBRIDGE_MOD_KEY_MAX * 2 + 160];
+        char eval[JSBRIDGE_MOD_KEY_MAX * 2 + 200];
         char eval2[JSBRIDGE_MOD_KEY_MAX * 2 + 200];
         if (b->modOk[idx])
         {
@@ -5142,6 +5381,29 @@ void jsbridge_script_queue_pump(JsBridge *b, int *mutationsOut)
     {
         return;
     }
+#ifdef TARGET_PLAYDATE
+    /* R66 device safety valve: heavy pages park many inline scripts, and the
+     * vendored engines' per-script GC has a use-after-free on some real-world
+     * bundles (google.com hard-faulted at slot 6 with a 0xAAAA… poisoned
+     * pointer; the static server HTML already rendered). Run a small prefix
+     * for lightweight JS sites, then stop — the page keeps its server shell
+     * instead of taking the task down. about: test pages are exempt (their
+     * deterministic suites need every slot). */
+    #ifndef JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX
+    #define JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX 4
+    #endif
+    if (b->scriptQueueCount > JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX &&
+        b->scriptQueueNext >= JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX &&
+        !(b->doc && b->doc->baseUrl[0] == 'a' && b->doc->baseUrl[1] == 'b'))
+    {
+        logger_log("[js] script queue: %d slots exceeds device cap (%d) — "
+                   "remaining %d skipped (static shell kept)",
+                   b->scriptQueueCount, JSBRIDGE_DEVICE_SCRIPT_QUEUE_MAX,
+                   b->scriptQueueCount - b->scriptQueueNext);
+        b->scriptQueueNext = b->scriptQueueCount;
+        return;
+    }
+#endif
     if (jsbridge_mount_parked(b))
     {
         return; /* R28: parked mount owns the machine — retry next frame */
@@ -5194,9 +5456,26 @@ void jsbridge_script_queue_pump(JsBridge *b, int *mutationsOut)
     JsScriptSlot slot = b->scriptQueue[b->scriptQueueNext];
     int index = b->scriptQueueNext + 1; /* sync-loop numbering */
     b->scriptQueueNext++;               /* consume BEFORE running */
+    {
+        size_t qlen = 0;
+        if (slot.isExt && slot.extIndex >= 0 &&
+            slot.extIndex < b->doc->extScriptCount)
+        {
+            qlen = ((JsExtScript *)b->doc->extScripts)[slot.extIndex].len;
+        }
+        else if (!slot.isExt)
+        {
+            qlen = slot.inlineLen;
+        }
+        logger_log("[js] queue entry %d/%d ext=%d len=%zu", index,
+                   b->scriptQueueCount, slot.isExt, qlen);
+        logger_log("[js] queue entry %d stack=%u", index,
+                   logger_stack_depth());
+    }
     b->inTimer = 1; /* same re-entrancy contract as a timer fire */
     jsbridge_run_script_entry(b, &slot, index);
     b->inTimer = 0;
+    logger_log("[js] queue entry %d done", index);
     /* doc counters stay the sync loop's post-attach truth, refreshed. */
     b->doc->jsRan = b->ran;
     b->doc->jsErrors = b->errs;
@@ -5288,12 +5567,32 @@ static void xhr_on_progress(int cur, int total)
     }
 }
 
+/* Store the response's Link header for the engines' XHR/fetch surfaces.
+ * GitHub's commit-count read uses rel="last" in this header, so dropping
+ * it silently collapses every repository count to one item. Bounded copy;
+ * an overlong header is truncated, never unsafe. */
+static void xhr_take_response_link(JsHttpRequest *r, char **keys,
+                                   char **vals, int hc)
+{
+    if (!r)
+    {
+        return;
+    }
+    r->respLink[0] = '\0';
+    for (int i = 0; keys && vals && i < hc; i++)
+    {
+        if (keys[i] && strcasecmp(keys[i], "link") == 0)
+        {
+            snprintf(r->respLink, sizeof(r->respLink), "%s",
+                     vals[i] ? vals[i] : "");
+            return;
+        }
+    }
+}
+
 static void xhr_on_success(int status, char **keys, char **vals, int hc,
                            const char *body, size_t bodyLen, const char *url)
 {
-    (void)keys;
-    (void)vals;
-    (void)hc;
     (void)url;
     JsBridge *b = g_xhrBridge;
     if (!b || !g_xhrActiveId)
@@ -5308,6 +5607,7 @@ static void xhr_on_success(int status, char **keys, char **vals, int hc,
         return;
     }
     r->state = JS_XHR_DONE;
+    xhr_take_response_link(r, keys, vals, hc);
     if (status < 200 || status >= 300)
     {
         /* Phase 4: browser-true non-2xx — fetch RESOLVES for any completed
@@ -5831,6 +6131,11 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
     cbs.onSuccess = xhr_on_success;
     cbs.onError = xhr_on_error;
     cbs.onProgress = xhr_on_progress;
+    /* Same-host GET XHRs may reuse one persistent connection. The body is
+     * kept in RAM (XHR has its own 512KB page budget) so a chunked response
+     * reaches DONE when its terminal chunk arrives instead of waiting for
+     * the connection to close. POSTs keep the historical spill lane. */
+    cbs.keepAlive = (!r->method[0] || strcmp(r->method, "GET") == 0);
     g_xhrActiveId = r->id;
     b->xhrInFlight = r->id;
     r->state = JS_XHR_HEADERS_SENT;
@@ -5857,6 +6162,27 @@ static int xhr_start_fetch(JsBridge *b, JsHttpRequest *r)
                  r->xhdrName[xi]);
         snprintf(pairs[npairs].value, sizeof(pairs[npairs].value), "%s",
                  r->xhdrVal[xi]);
+        npairs++;
+    }
+    /* Fetch/XHR defaults to accepting any media type; the page loader's
+     * text/html default belongs to navigations/subresources. API endpoints
+     * reject the wrong Accept outright (GitHub returns 415), so establish
+     * the browser default here unless the page explicitly set one. */
+    int hasAccept = 0;
+    for (int xi = 0; xi < npairs; xi++)
+    {
+        if (strcasecmp(pairs[xi].name, "accept") == 0)
+        {
+            hasAccept = 1;
+            break;
+        }
+    }
+    if (!hasAccept && npairs < JSBRIDGE_XHR_EXTRA_MAX)
+    {
+        snprintf(pairs[npairs].name, sizeof(pairs[npairs].name), "%s",
+                 "Accept");
+        snprintf(pairs[npairs].value, sizeof(pairs[npairs].value), "%s",
+                 "*/*");
         npairs++;
     }
     if (r->method[0] && strcmp(r->method, "POST") == 0 && r->reqBody)
@@ -6021,6 +6347,21 @@ int jsbridge_take_dom_dirty(JsBridge *b)
     }
     b->domDirty = 0;
     logger_log("[dom] dirty: innerHTML assignment triggered rewalk");
+    return 1;
+}
+
+int jsbridge_take_nav_request(JsBridge *b, char *out, size_t cap)
+{
+    if (!b || !b->navRequestSet || !b->navRequest[0])
+    {
+        return 0;
+    }
+    b->navRequestSet = 0;
+    if (out && cap)
+    {
+        snprintf(out, cap, "%s", b->navRequest);
+    }
+    b->navRequest[0] = '\0';
     return 1;
 }
 

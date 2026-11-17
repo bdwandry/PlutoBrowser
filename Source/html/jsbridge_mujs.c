@@ -2201,6 +2201,24 @@ static void js_location_assign(js_State *J)
     js_pushundefined(J);
 }
 
+/* R66: document.fonts.load() stub (font-loader scripts call
+ * .load(...).catch(...); a missing object threw on device). */
+static void js_promise_noop(js_State *J)
+{
+    js_pushundefined(J);
+}
+
+static void js_fonts_load(js_State *J)
+{
+    js_newobject(J);
+    js_newcfunction(J, js_promise_noop, "then", 1);
+    js_setproperty(J, -2, "then");
+    js_newcfunction(J, js_promise_noop, "catch", 1);
+    js_setproperty(J, -2, "catch");
+    js_newcfunction(J, js_promise_noop, "finally", 1);
+    js_setproperty(J, -2, "finally");
+}
+
 /* ── environment construction ────────────────────────────────────────────── */
 static void define_element_proto(js_State *J)
 {
@@ -2282,6 +2300,11 @@ static void define_document(js_State *J, JsBridge *b)
         DomNode *body = first_element(b->dom->root, "body");
         push_element(J, body ? body : b->dom->root);
         js_setproperty(J, -2, "body");
+        /* R66: document.fonts (see js_fonts_load). */
+        js_newobject(J);
+        js_newcfunction(J, js_fonts_load, "load", 2);
+        js_setproperty(J, -2, "load");
+        js_setproperty(J, -2, "fonts");
     }
     js_setglobal(J, "document");
 }
@@ -2325,15 +2348,15 @@ static void js_ws_getItem(js_State *J)
     JsBridge *b = (JsBridge *)js_getcontext(J);
     BUDGET_OR_THROW(b);
     const char *k = js_tostring(J, 1);
-    char out[WS_VAL_MAX];
-    int hit = s && ws_get(s, k, out, sizeof(out));
-    if (!hit)
+    /* Borrow the resident value; js_pushstring copies it immediately. */
+    const char *v = ws_get_ptr(s, k);
+    if (!v)
     {
         logger_log("[webstorage] get origin=%s key='%s' -> null", ws_origin(), k);
     }
-    if (hit)
+    if (v)
     {
-        js_pushstring(J, out);
+        js_pushstring(J, v);
     }
     else
     {
@@ -2652,6 +2675,7 @@ static void mujs_run_script(JsBridge *b, const char *src, size_t len, int index)
             js_pop(J, 1); /* the pushed return value */
         }
     }
+    /* (gc runs at the tail of every run below, after each script) */
     js_gc(J, 0); /* per-script sweep, as the original bridge did */
     JFree(buf);
 }
@@ -2926,7 +2950,7 @@ static int xhr_put(js_State *J, void *p, const char *name)
 /* API-P10: dynamic-import bridge native — delegates to the shared core
  * (jsbridge_dyn_request in jsbridge.c) and pushes the status STRING
  * ("k:<key>" / "p:<id>" / "x:<msg>"). Two args: spec, base. */
-static int js_dyn_request(js_State *J)
+static void js_dyn_request(js_State *J)
 {
     JsBridge *b = (JsBridge *)js_getcontext(J);
     const char *spec = js_tostring(J, 1);
@@ -2934,7 +2958,6 @@ static int js_dyn_request(js_State *J)
     char out[JSBRIDGE_MOD_KEY_MAX + 24];
     jsbridge_dyn_request(b, spec, base, out, sizeof(out));
     js_pushstring(J, out);
-    return 1;
 }
 
 static void js_xhr_open(js_State *J)

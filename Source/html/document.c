@@ -729,7 +729,8 @@ DocBoxSpacing doc_parse_box_spacing(const DocStyleEntry *attrs, int attrCount)
  * walker already converted away from). Semantics identical: text nodes
  * advance the logical offset by their FULL length, writes clamped to cap.
  */
-static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
+static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off,
+                         int visible)
 {
     typedef struct
     {
@@ -775,6 +776,12 @@ static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
             {
                 continue;
             }
+            if (visible && c->kind == DOM_ELEMENT && c->tag &&
+                (!strcmp(c->tag, "style") || !strcmp(c->tag, "script") ||
+                 !strcmp(c->tag, "template")))
+            {
+                continue;
+            }
             if (top + 1 >= cap_)
             {
                 int ncap = cap_ * 2;
@@ -804,7 +811,22 @@ static size_t concat_rec(const DomNode *node, char *buf, size_t cap, size_t off)
 
 size_t doc_concat_node_text(const DomNode *node, char *buf, size_t cap)
 {
-    size_t need = concat_rec(node, buf, cap, 0);
+    size_t need = concat_rec(node, buf, cap, 0, 0);
+    if (cap > 0)
+    {
+        size_t written = need < cap - 1 ? need : cap - 1;
+        buf[written] = '\0';
+    }
+    return need;
+}
+
+/* Visible text for a rendered label (button, link, disclosure). Unlike
+ * textContent, inline <style>/<script>/<template> payloads are not part of
+ * what the page paints. Google ships <style> blocks inside buttons; without
+ * this split the CSS became the button's label and inflated the search box. */
+static size_t doc_concat_visible_text(const DomNode *node, char *buf, size_t cap)
+{
+    size_t need = concat_rec(node, buf, cap, 0, 1);
     if (cap > 0)
     {
         size_t written = need < cap - 1 ? need : cap - 1;
@@ -1355,7 +1377,11 @@ enum
     WX_FIGCAP_END,   /* figcaption: restore figureCaptionDone */
     WX_INERT_END,    /* inert attribute: restore state.inert after the subtree */
     WX_CSS_END,      /* CSS-inherited inline flags: restore pre-CSS state */
-    WX_PSEUDO_END    /* CSS ::after content: emit after the subtree */
+    WX_PSEUDO_END,   /* CSS ::after content: emit after the subtree */
+    WX_DECOR_END,    /* R71: close a spanning box decoration (border/bg) */
+    WX_PIN_END,      /* R71: close a sticky app-bar span */
+    WX_DROPDOWN_END, /* R71: close an out-of-flow disclosure panel span */
+    WX_PANEL_END     /* R71: close a closed disclosure panel span */
 };
 
 typedef struct ExitCtx
@@ -1384,9 +1410,46 @@ typedef struct ExitCtx
      * flowing inside the container's items (exchange at the exit). */
     int gapSaved;
     unsigned char gapSet;
+    int blockStart; /* first block at CSS entry (item-boundary gap) */
+    /* Flex ROW transport saved at the container boundary. */
+    int flexRowSaved;
+    int flexChildDepthSaved;
+    int flexActiveSaved;
+    int flexJustifySaved;
+    int flexCenterSaved;
+    unsigned char flexSet;
+    unsigned char flexPushed;
     char *pseudoText; /* ::after text (arena), NULL when none */
     int pseudoBlock; /* ::after renders as a sibling block (not inline) */
+    int decorIdx; /* R71 spanning decoration index on the document */
+    /* R71 decorated-box padding (halved px). The container's own empty
+     * block is dropped, so its CSS padding would otherwise disappear;
+     * the span exit carries it onto the content blocks. */
+    unsigned char decorPadL, decorPadR, decorPadT, decorPadB;
+    int dropdownStart; /* R71 dropdown panel: first block index */
+    int dropdownSaved; /* R71 dropdown panel: outer dropdown depth */
+    int panelStart;      /* R71 closed disclosure panel: first block */
+    const char *panelKey; /* R71 closed disclosure panel: trigger key */
 } ExitCtx;
+
+/* Active row-flex scope. Direct children are identified by climbing the
+ * DOM parent chain from the node that produced each block — block emission
+ * for a child's text happens on a later frame than the child's enter, so a
+ * walk-time "current child" flag cannot survive the frame loop. */
+typedef struct
+{
+    const DomNode *box;
+    int rowId;
+    int justify;
+    int center;
+    int row;
+    int gap; /* this container's row-gap (halved px) */
+    /* Author content-box padding (full CSS px). The row places its items
+     * inside this inset and the sticky bar's height includes it. */
+    int padL, padR, padT, padB;
+    const DomNode *items[16];
+    int itemCount;
+} FlexCtx;
 
 typedef struct WFrame
 {
@@ -1395,6 +1458,12 @@ typedef struct WFrame
     ExitCtx *ctx;
     const char *sep;
 } WFrame;
+
+/* Disclosure panels are addressed by their HTML id. Real pages use ids far
+ * longer than 64 bytes (the bryanwandrych.com role cards are 80+), so the
+ * registry needs the whole token to match the panel it controls. */
+#define WALK_DISCLOSURE_MAX 32
+#define WALK_DISCLOSURE_ID_CAP 256
 
 struct Walker
 {
@@ -1447,6 +1516,30 @@ struct Walker
     int disabledDepth;
     int truncated;
     int detailsIndex;
+    /* R71: ARIA disclosure widgets (aria-expanded + aria-controls).
+     * Sequential x1..xN numbering mirrors details' d1..dN; the controlled
+     * panel ids are registered in document order so the panel's collapse
+     * recipe can consult the trigger's state. ids/targets are small fixed
+     * buffers (no heap): a page with more than 32 disclosures simply
+     * leaves the extra panels at their CSS-closed default. */
+    int disclosureIndex;
+    int disclosureCount;
+    char disclosureIds[WALK_DISCLOSURE_MAX][WALK_DISCLOSURE_ID_CAP];
+    const DomNode *disclosureTargets[WALK_DISCLOSURE_MAX];
+    unsigned char disclosureOpenState[WALK_DISCLOSURE_MAX];
+    unsigned char disclosureMenu[WALK_DISCLOSURE_MAX]; /* controlled panel is a nav menu */
+    /* R71 sticky app-bar span: the block index where the current sticky
+     * element's subtree began (0 while no pin scope is open). The first
+     * block after exit and the last block before it carry pinStart/End. */
+    int pinOpen;
+    int pinStartBlock;
+    /* R71 out-of-flow disclosure panel: nonzero while walking the
+     * controlled panel's subtree. Blocks produced here carry dropdown=1
+     * and stay out of the sticky bar's row/pin span. */
+    int dropdownDepth;
+    /* R71: the DocBlock an active decoration's own border attach touched
+     * (cleared at the span exit when the span covers the whole subtree). */
+    DocBlock *decorLead[DOC_BOX_DECOR_MAX];
     int anchorCounter;
     int figureCaptionDone;
     char *formAction; /* arena */
@@ -1461,6 +1554,22 @@ struct Walker
      * block's slot swaps to the outer scope's gap or drops to zero —
      * the exact BETWEEN-items semantics. */
     int fgGap;
+    /* Flex ROW layout transport: domDepth is the live element depth;
+     * flexRowId/flexChildDepth scope a row container's DIRECT children;
+     * flexActiveItem is the item id inherited by every block in one
+     * direct-child subtree. flexJustify/flexCenter come from the
+     * container's winning CSS. */
+    int domDepth;
+    int flexRowId;
+    int flexChildDepth;
+    int flexActiveItem;
+    int flexItemSeq;
+    int flexJustify;
+    int flexCenter;
+    FlexCtx flexCtx[32]; /* every flex container seen this walk */
+    int flexCtxCount;
+    int flexSeq;
+    const DomNode *curNode;
 
     /* heap StrBufs owned by this walker (figure captions); freed at teardown */
     StrBuf **heapBufs;
@@ -1475,6 +1584,21 @@ struct Walker
      * The fresh parse's map lands in the promoted heap copy when a
      * bridge attaches, so JS-mutation re-walks inherit the record. */
     DomResult *walkDom;
+
+    /* Device watchdog guard (general, every site): the walk is one
+     * synchronous pass inside a single update frame. On hardware a large
+     * page (gutenberg's 100-book table, wikipedia's icon-heavy article)
+     * can exceed the OS's 10s run-loop watchdog. The walk now carries its
+     * own wall-clock deadline: when it expires the walk stops at a clean
+     * block boundary, sets the existing `truncated` marker, and the page
+     * renders the blocks completed so far (the standard "Page too large"
+     * notice) instead of killing the app. Simulator builds keep the full
+     * walk (no deadline) so the sim remains the feature-complete target. */
+    unsigned long walkStartMs;
+    unsigned long walkDeadlineMs; /* soft per-slice deadline (0 = none) */
+    unsigned long walkHardDeadlineMs; /* absolute safety cap (0 = none) */
+    int walkNodes;
+    int walkPaused; /* soft deadline reached; frame stack holds the rest */
 
     int error;
 };
@@ -1719,6 +1843,8 @@ static int push_children_except(Walker *w, const DomNode *node, const char *tag)
 
 static char *resolve_href(Walker *w, const char *raw); /* used by the image handler below; defined after URL glue */
 
+static void walk_node(Walker *w, const DomNode *node);
+
 static DocBlock *new_block(Walker *w, int type)
 {
     DocBlock *b = (DocBlock *)doc_arena_alloc(&w->arena, sizeof(DocBlock));
@@ -1734,6 +1860,17 @@ static DocBlock *new_block(Walker *w, int type)
     b->fieldWidth = -1; /* Lua-nil sentinel */
     b->fieldRows = -1;  /* Lua-nil sentinel */
     b->colWidth = -1;   /* Lua-nil sentinel */
+    /* A controlled disclosure panel positioned out of flow is a dropdown:
+     * its blocks render outside the app bar's flex row and pin span. */
+    if (w->dropdownDepth > 0)
+    {
+        b->dropdown = 1;
+        b->flexRow = 0;
+        b->flexItem = 0;
+    }
+    /* A block created inside a flex row container's direct-child subtree
+     * is part of that child's flex item. */
+    b->flexSrcNode = w->curNode;
     return b;
 }
 
@@ -1997,10 +2134,10 @@ static const char *walk_align(Walker *w, AttrList a)
     return NULL;
 }
 
-/* CSS list-style-type value → marker code (0 = unknown, keep HTML value).
+/* CSS list-style-type value (including the type token fanned out from a
+ * list-style shorthand) → marker code (0 = unknown, keep HTML value).
  * Codes: '1' decimal, 'a/A' alpha, 'i/I' roman, 'd' disc (*), 'c' circle
- * (o), 's' square (+), 'n' none (no marker). Only the FIRST token counts
- * (list-style shorthand: type comes first). */
+ * (o), 's' square (+), 'n' none (no marker). Only the FIRST token counts. */
 static char walk_list_marker(const char *v, size_t vlen)
 {
     if (!v || vlen == 0)
@@ -2453,6 +2590,344 @@ static int walk_border_final(const char *wv, size_t wl, const char *sv,
  * in order", which a block already is. inline-block simplifies to block
  * (full-width 1-bit); table-* flattens (no anonymous table objects);
  * list-item takes the block (numbering needs ol/ul context). */
+/* Forward declarations for the R71 decor helpers below (their callees are
+ * defined later in this file). */
+static void walk_class_id(AttrList a, const char **classAttr,
+                          const char **idAttr);
+static const void *css_dom_ancestor(const void *node, int i,
+                                    const char **tagLower,
+                                    const char **classAttr,
+                                    const char **idAttr);
+
+/* R71: is this declared length a ZERO used value? Bare `0` is valid CSS and
+ * is what the collapse recipe overwhelmingly ships (height:0), so this
+ * reads it through the shared unit parser instead of the px-only lookup. */
+static int walk_len_zero(const char *v, size_t vlen)
+{
+    if (!v || vlen == 0)
+    {
+        return 0;
+    }
+    int pctMille = 0;
+    int px = fresh_len_px(v, vlen, 1, &pctMille);
+    return px == 0;
+}
+
+/* R71: tags that create a block-level container in the walker — the set
+ * whose CSS border/background must span the WHOLE subtree (cards,
+ * sections, list items). Inline tags keep the historical per-paragraph
+ * attach (an inline border belongs to the surrounding line). */
+static int walk_decor_tag(const char *tag)
+{
+    static const char *const kTags[] = {
+        "body", "div", "p", "section", "article", "main", "header",
+        "footer", "nav", "aside", "address", "hgroup", "noindex",
+        "search", "figure", "figcaption", "blockquote", "li", "dt",
+        "dd", "form", "fieldset", "details", "dialog", "h1", "h2",
+        "h3", "h4", "h5", "h6", "td", "th", "caption"};
+    if (!tag)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kTags) / sizeof(kTags[0]); i++)
+    {
+        if (strcmp(tag, kTags[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* R71: a sticky element can host an app bar — restrict pinning to the
+ * structural containers real site headers live in. */
+static int walk_pin_tag(const char *tag)
+{
+    static const char *const kTags[] = {"header", "nav", "div", "section",
+                                         "main", "footer", "aside",
+                                         "article", "form", "body"};
+    if (!tag)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof(kTags) / sizeof(kTags[0]); i++)
+    {
+        if (strcmp(tag, kTags[i]) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* A row flex container already transports its content-box padding through
+ * FlexCtx. A column flex container does not; its decoration must still inset
+ * the card contents. Grid keeps the block-flow policy and needs the padding
+ * here too. Returns 1 only for the row-flex case. */
+static int walk_flex_row_padding_skip(Walker *w, const DomNode *node,
+                                      const char *tag, AttrList a)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !tag)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0;
+    const char *dv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "display", &dl);
+    if (!dv || (!css_val_eq(dv, dl, "flex") &&
+                !css_val_eq(dv, dl, "inline-flex")))
+    {
+        return 0;
+    }
+    size_t fl = 0;
+    const char *fv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "flex-direction", &fl);
+    return !(fv && css_val_has(fv, fl, "column"));
+}
+
+/* R71: resolve the spanning-decoration values for one container. Returns
+ * 1 when a visible border, a dither background or a corner radius exists.
+ * The numeric scale matches the per-block attach sites (border already
+ * clamped to 0..3, radius halved like every other box length). */
+static int walk_decor_values(Walker *w, const DomNode *node, const char *tag,
+                             AttrList a, int *borderOut, int *bgOut,
+                             int *radiusOut)
+{
+    *borderOut = 0;
+    *bgOut = -1;
+    *radiusOut = 0;
+    if (!w->doc || !w->doc->_css || !node || !tag)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t wl = 0, sl = 0;
+    const char *wv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-width", &wl);
+    const char *sv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-style", &sl);
+    int bw = walk_border_final(wv, wl, sv, sl);
+    if (bw > 3)
+    {
+        bw = 3;
+    }
+    *borderOut = bw > 0 ? bw : 0;
+    size_t gl = 0;
+    const char *gv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "background-color", &gl);
+    if (gv)
+    {
+        int lum = css_color_luminance(gv, gl);
+        if (lum >= 96 && lum <= 215)
+        {
+            *bgOut = lum;
+        }
+    }
+    size_t rl = 0;
+    const char *rv = css_winning_value(eng, tag, classAttr, idAttr, &dom,
+                                       node, "border-radius", &rl);
+    if (rv)
+    {
+        int rpx = css_px_value(rv, rl);
+        if (rpx > 0)
+        {
+            *radiusOut = rpx / 2;
+            if (*radiusOut < 1)
+            {
+                *radiusOut = 1;
+            }
+            if (*radiusOut > 6)
+            {
+                *radiusOut = 6;
+            }
+        }
+    }
+    return (*borderOut > 0 || *bgOut >= 0 || *radiusOut > 0);
+}
+
+/* R71: register/find an ARIA disclosure's controlled panel id. */
+static int walk_disclosure_register(Walker *w, const char *ids, int open,
+                                    int isMenu)
+{
+    if (!w || !ids)
+    {
+        return 0;
+    }
+    char tok[WALK_DISCLOSURE_ID_CAP];
+    size_t n = 0;
+    while (*ids == ' ' || *ids == '\t' || *ids == '\n' || *ids == '\r' ||
+           *ids == '\f')
+    {
+        ids++;
+    }
+    while (*ids && *ids != ' ' && *ids != '\t' && *ids != '\n' &&
+           *ids != '\r' && *ids != '\f' && n + 1 < sizeof(tok))
+    {
+        tok[n++] = *ids++;
+    }
+    tok[n] = '\0';
+    if (n == 0)
+    {
+        return 0;
+    }
+    const DomNode *target = w->walkDom ? dom_find_by_id(w->walkDom, tok) : NULL;
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], tok) == 0)
+        {
+            w->disclosureOpenState[i] = (unsigned char)(open != 0);
+            w->disclosureMenu[i] = (unsigned char)(isMenu != 0);
+            if (target)
+            {
+                w->disclosureTargets[i] = target;
+            }
+            return 1;
+        }
+    }
+    if (w->disclosureCount >= WALK_DISCLOSURE_MAX)
+    {
+        return 0;
+    }
+    memcpy(w->disclosureIds[w->disclosureCount], tok, n + 1);
+    w->disclosureTargets[w->disclosureCount] = target;
+    w->disclosureOpenState[w->disclosureCount] = (unsigned char)(open != 0);
+    w->disclosureMenu[w->disclosureCount] = (unsigned char)(isMenu != 0);
+    w->disclosureCount++;
+    return 1;
+}
+
+static int walk_disclosure_find(Walker *w, const char *id, int *openOut)
+{
+    if (!w || !id)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], id) == 0)
+        {
+            if (openOut)
+            {
+                *openOut = w->disclosureOpenState[i] != 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Is an open disclosure panel somewhere under this node? The controlled
+ * panel is often one level below a height:0/overflow:hidden wrapper (the
+ * usual .collapse container). The wrapper has no id of its own, so the
+ * direct panel check above cannot see the open state; without this bypass
+ * the collapsed wrapper drops the whole subtree and tapping does nothing. */
+static int walk_disclosure_open_below(Walker *w, const DomNode *node)
+{
+    if (!w || !node)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (!w->disclosureOpenState[i])
+        {
+            continue;
+        }
+        const DomNode *p = w->disclosureTargets[i];
+        while (p)
+        {
+            if (p == node)
+            {
+                return 1;
+            }
+            p = p->parent;
+        }
+    }
+    return 0;
+}
+
+/* R71: is this disclosure trigger a navigation menu control? Sites use
+ * several names for the same contract ("Menu", "Open menu", "Toggle
+ * navigation menu"). Treat the command forms as menu controls too, but
+ * keep unrelated popovers ("Hide search menu") out. */
+static int walk_menu_label(const char *lab)
+{
+    if (!lab)
+    {
+        return 0;
+    }
+    while (*lab == ' ' || *lab == '\t' || *lab == '\n' || *lab == '\r')
+    {
+        lab++;
+    }
+    char buf[64];
+    size_t n = 0;
+    while (*lab && n + 1 < sizeof(buf))
+    {
+        char c = *lab++;
+        if (c >= 'A' && c <= 'Z')
+        {
+            c = (char)(c + ('a' - 'A'));
+        }
+        buf[n++] = c;
+    }
+    while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t' ||
+                     buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+    {
+        n--;
+    }
+    buf[n] = '\0';
+    if (strcmp(buf, "menu") == 0)
+    {
+        return 1;
+    }
+    if (strstr(buf, "search"))
+    {
+        return 0;
+    }
+    static const char *const kCommands[] = {"open ", "close ", "toggle ",
+                                            "show ", "hide "};
+    for (size_t i = 0; i < sizeof(kCommands) / sizeof(kCommands[0]); i++)
+    {
+        size_t cl = strlen(kCommands[i]);
+        size_t bl = strlen(buf);
+        if (bl > cl + 3 && strncmp(buf, kCommands[i], cl) == 0 &&
+            strcmp(buf + bl - 4, "menu") == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Is this controlled disclosure panel a navigation menu? */
+static int walk_disclosure_menu(Walker *w, const char *id)
+{
+    if (!w || !id)
+    {
+        return 0;
+    }
+    for (int i = 0; i < w->disclosureCount; i++)
+    {
+        if (strcmp(w->disclosureIds[i], id) == 0)
+        {
+            return w->disclosureMenu[i] != 0;
+        }
+    }
+    return 0;
+}
+
 static int walk_display_mode(const char *v, size_t vlen, const char *f,
                              size_t flen, int isDiv)
 {
@@ -3165,7 +3640,15 @@ static void walk_anim_engage(Walker *w, DocBlock *b, const DomNode *node,
         doc->pendEnd[doc->pendEndCount].node = (void *)node;
         doc->pendEndCount++;
     }
+    /* The registry name is CSS text of arbitrary length; nb is a bounded
+     * receipt label. The old unbounded memcpy overflowed this stack buffer
+     * whenever a page declared a long @keyframes name (device receipt:
+     * bbc.com's image node 830, wild PC + text in the fault address). */
     char nb[25];
+    if (nl >= sizeof(nb))
+    {
+        nl = sizeof(nb) - 1;
+    }
     memcpy(nb, nm, nl);
     nb[nl] = '\0';
     b->animName = doc_arena_str(w, nb);
@@ -3179,14 +3662,202 @@ static void walk_anim_engage(Walker *w, DocBlock *b, const DomNode *node,
  * text-align/align attr wins). */
 static void walk_flex_block(Walker *w, DocBlock *b, const char **alignSlot)
 {
+    if (w->dropdownDepth > 0)
+    {
+        return; /* disclosure panel content is not an app-bar flex item */
+    }
+    if (w->flexRowId)
+    {
+        for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+        {
+            if (w->flexCtx[ci].rowId == w->flexRowId)
+            {
+                b->flexPadL = (unsigned char)w->flexCtx[ci].padL;
+                b->flexPadR = (unsigned char)w->flexCtx[ci].padR;
+                b->flexPadT = (unsigned char)w->flexCtx[ci].padT;
+                b->flexPadB = (unsigned char)w->flexCtx[ci].padB;
+                break;
+            }
+        }
+    }
     if (w->fgGap > 0)
     {
         b->gapApplied = w->fgGap; /* the gap after THIS item (halved px) */
     }
-    if (*alignSlot == NULL && (w->flags & (CSS_F_AIC | CSS_F_ASC)))
+    /* Phase 6: align-items/align-self carry cross-axis centering through
+     * the CSS exit (the element's own text-align/align attr wins). Sticky
+     * app-bar items are the exception: their cross axis is the bar row's
+     * height, so that centering must not become the item's text-align
+     * (which is exactly what used to center the brand in the app bar). */
+    if (!w->pinOpen && *alignSlot == NULL &&
+        (w->flags & (CSS_F_AIC | CSS_F_ASC)))
     {
         *alignSlot = doc_arena_str(w, "center");
     }
+}
+
+/* A synthesized block (ARIA disclosure triggers are the main one) represents
+ * an element that may itself be a flex/grid ITEM. Its own display:flex can
+ * take over the walker's live gap before the block is created, so look up
+ * the nearest enclosing container's stored gap instead of trusting fgGap. */
+static void walk_flex_item_gap(Walker *w, DocBlock *b, const DomNode *node)
+{
+    if (!w || !b || !node || w->dropdownDepth > 0)
+    {
+        return;
+    }
+    for (const DomNode *p = node->parent; p; p = p->parent)
+    {
+        for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+        {
+            if (w->flexCtx[ci].box == p)
+            {
+                if (w->flexCtx[ci].gap > 0)
+                {
+                    b->gapApplied = w->flexCtx[ci].gap;
+                }
+                return;
+            }
+        }
+    }
+}
+
+/* A flex-direction:column container stacks its direct children. Disclosure
+ * labels otherwise flatten those children into one string, which removes
+ * authored line breaks (the mobile role cards stack title over role). */
+static int walk_node_is_column_flex(Walker *w, const DomNode *node)
+{
+    if (!w || !w->doc || !w->doc->_css || !node ||
+        node->kind != DOM_ELEMENT || !node->tag || !node->tag[0])
+    {
+        return 0;
+    }
+    AttrList a = attrs_of(node);
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0, fl = 0;
+    const char *dv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "display", &dl);
+    if (!dv || !css_val_has(dv, dl, "flex"))
+    {
+        return 0;
+    }
+    const char *fv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "flex-direction", &fl);
+    logger_log("[toggle-label] parent=%.16s display=%.12s dir=%.12s",
+               node->tag, dv ? dv : "-", fv ? fv : "-");
+    if (fv && css_val_has(fv, fl, "column"))
+    {
+        logger_log("[toggle-label] column-flex parent=%.20s", node->tag);
+        return 1;
+    }
+    return 0;
+}
+
+/* Copy a disclosure trigger's text, preserving line boundaries introduced
+ * by flex-direction:column. Iterative like doc_concat_node_text so a deep
+ * label subtree cannot consume the device's small game-task stack. */
+static size_t disclosure_label_text(Walker *w, const DomNode *node, char *buf,
+                                    size_t cap, size_t off)
+{
+    typedef struct
+    {
+        const DomNode *node;
+        int nextChild;
+    } LabelFrame;
+    if (!node || !buf || cap == 0)
+    {
+        return off;
+    }
+    int frameCap = 64;
+    int top = 0;
+    LabelFrame *st = (LabelFrame *)PLUTO_MALLOC(
+        sizeof(LabelFrame) * (size_t)frameCap);
+    if (!st)
+    {
+        return off;
+    }
+    st[top].node = node;
+    st[top].nextChild = 0;
+    top++;
+    while (top > 0)
+    {
+        LabelFrame *f = &st[top - 1];
+        const DomNode *n = f->node;
+        if (n->kind == DOM_TEXT)
+        {
+            const char *t = n->text ? n->text : "";
+            size_t len = strlen(t);
+            if (off + 1 < cap)
+            {
+                size_t room = cap - off - 1;
+                size_t cn = len < room ? len : room;
+                memcpy(buf + off, t, cn);
+            }
+            off += len;
+            top--;
+            continue;
+        }
+        if (n->kind == DOM_COMMENT)
+        {
+            top--;
+            continue;
+        }
+        if (n->tag && strcmp(n->tag, "br") == 0)
+        {
+            if (off + 1 < cap)
+            {
+                buf[off++] = '\n';
+            }
+            top--;
+            continue;
+        }
+        if (f->nextChild < n->childCount)
+        {
+            int ci = f->nextChild++;
+            const DomNode *c = n->children[ci];
+            if (!c)
+            {
+                continue;
+            }
+            if (ci > 0 && c->kind != DOM_COMMENT &&
+                walk_node_is_column_flex(w, n) &&
+                !(c->tag && strcmp(c->tag, "br") == 0))
+            {
+                if (off + 1 < cap)
+                {
+                    buf[off++] = '\n';
+                }
+            }
+            if (top + 1 >= frameCap)
+            {
+                int ncap = frameCap * 2;
+                LabelFrame *grown = (LabelFrame *)PLUTO_REALLOC(
+                    st, sizeof(LabelFrame) * (size_t)ncap);
+                if (!grown)
+                {
+                    PLUTO_FREE(st);
+                    return off;
+                }
+                st = grown;
+                frameCap = ncap;
+                f = &st[top - 1];
+            }
+            st[top].node = c;
+            st[top].nextChild = 0;
+            top++;
+        }
+        else
+        {
+            top--;
+        }
+    }
+    PLUTO_FREE(st);
+    return off;
 }
 
 static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
@@ -3341,6 +4012,33 @@ static DocBoxSpacing walk_box_spacing(Walker *w, const DomNode *node,
         }
     }
     return out;
+}
+
+/* Winning CSS length → FULL CSS px (box padding/control metrics; unlike the
+ * halved spacing channel, draw geometry needs the author's value). 0 =
+ * absent/unresolvable. */
+static int walk_px_full(Walker *w, const DomNode *node, const char *tag,
+                        AttrList a, const char *prop)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !tag || !prop)
+    {
+        return 0;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    size_t vl = 0;
+    const char *v = css_winning_value((CssEngine *)w->doc->_css, tag,
+                                      classAttr, idAttr, &dom, node, prop, &vl);
+    if (!v || vl == 0)
+    {
+        return 0;
+    }
+    int pct = 0;
+    int px = fresh_len_px(v, vl, 0, &pct);
+    return px > 0 ? px : 0;
 }
 
 /* CSS box length → halved px (Lua-parity scale). -1 when absent/unparsable
@@ -4307,6 +5005,129 @@ static void walk_css_apply(Walker *w, unsigned css)
     }
 }
 
+/* R72 — CSS FLEX CHIP. A flex container's direct inline-block child is
+ * blockified by CSS. The 1-bit walker's box-switch path only covers div/span,
+ * so without this each label flowed into the container's single paragraph and
+ * both button borders landed on it. Open a dedicated compact block instead,
+ * carrying the authored padding/radius and the parent's row/item identity.
+ * Anchors continue through the normal link path (href + tap rect); spans
+ * (badge/pill tags) are emitted here directly. Layout draws the label and the
+ * full-box frame from the shared fields. */
+static DocBlock *walk_flex_chip_open(Walker *w, const DomNode *node, AttrList a)
+{
+    if (!w || !w->doc || !w->doc->_css || !node || !node->parent || w->cell ||
+        w->dropdownDepth > 0 || !node->tag)
+    {
+        return NULL;
+    }
+    int isAnchor = strcmp(node->tag, "a") == 0;
+    int isSpan = strcmp(node->tag, "span") == 0;
+    if (!isAnchor && !isSpan)
+    {
+        return NULL;
+    }
+    const char *rawHref = attr_val(a, "href");
+    if (isAnchor && (!rawHref || !rawHref[0]))
+    {
+        return NULL;
+    }
+    /* The button contract only applies to a direct child of a ROW flex
+     * container. Parent lookup is exact: wrappers remain normal block flow. */
+    FlexCtx *fc = NULL;
+    for (int ci = w->flexCtxCount - 1; ci >= 0; ci--)
+    {
+        if (w->flexCtx[ci].box == node->parent)
+        {
+            if (w->flexCtx[ci].row)
+            {
+                fc = &w->flexCtx[ci];
+            }
+            break;
+        }
+    }
+    if (!fc)
+    {
+        return NULL;
+    }
+    const char *classAttr = NULL;
+    const char *idAttr = NULL;
+    walk_class_id(a, &classAttr, &idAttr);
+    CssDom dom;
+    dom_css_dom(&dom, css_dom_ancestor);
+    CssEngine *eng = (CssEngine *)w->doc->_css;
+    size_t dl = 0;
+    const char *dv = css_winning_value(eng, node->tag, classAttr, idAttr,
+                                       &dom, node, "display", &dl);
+    if (!dv || !css_val_eq(dv, dl, "inline-block"))
+    {
+        return NULL;
+    }
+    int db = 0, dg = -1, dr = 0;
+    if (!walk_decor_values(w, node, node->tag, a, &db, &dg, &dr))
+    {
+        return NULL; /* a plain inline-block link stays inline text */
+    }
+    int pl = (walk_px_full(w, node, node->tag, a, "padding-left") + 1) / 2;
+    int pr = (walk_px_full(w, node, node->tag, a, "padding-right") + 1) / 2;
+    int pt = (walk_px_full(w, node, node->tag, a, "padding-top") + 1) / 2;
+    int pb = (walk_px_full(w, node, node->tag, a, "padding-bottom") + 1) / 2;
+    if (pl > 24) pl = 24;
+    if (pr > 24) pr = 24;
+    if (pt > 16) pt = 16;
+    if (pb > 16) pb = 16;
+    char ltxt[256];
+    doc_concat_visible_text(node, ltxt, sizeof(ltxt));
+    char *label = doc_arena_collapse(w, ltxt);
+    if (!label || !label[0])
+    {
+        return NULL;
+    }
+    int item = 0;
+    for (int k = 0; k < node->parent->childCount; k++)
+    {
+        if (node->parent->children[k] == node)
+        {
+            item = k + 1;
+            break;
+        }
+    }
+    if (item <= 0)
+    {
+        return NULL;
+    }
+    flush_current_block(w);
+    DocBlock *b = new_block(w, DOC_BLOCK_LINK_BUTTON);
+    if (!b)
+    {
+        return NULL;
+    }
+    b->label = label;
+    b->btnPadL = (unsigned char)pl;
+    b->btnPadR = (unsigned char)pr;
+    b->btnPadT = (unsigned char)pt;
+    b->btnPadB = (unsigned char)pb;
+    b->btnRadius = (unsigned char)dr;
+    b->flexRow = (unsigned short)fc->rowId;
+    b->flexItem = (unsigned short)item;
+    b->flexJustify = (unsigned char)fc->justify;
+    b->flexCenter = (unsigned char)fc->center;
+    b->flexPadL = (unsigned char)fc->padL;
+    b->flexPadR = (unsigned char)fc->padR;
+    b->flexPadT = (unsigned char)fc->padT;
+    b->flexPadB = (unsigned char)fc->padB;
+    b->gapApplied = fc->gap;
+    b->hasSpacing = 1;
+    w->currentBlock = b;
+    if (!push_exit(w, WX_FLUSH))
+    {
+        return NULL;
+    }
+    logger_log("[link-btn] label=%.30s pad=%d/%d/%d/%d deco=%d/%d/%d row=%d item=%d gap=%d",
+               label, pl, pr, pt, pb, db, dg, dr, b->flexRow, b->flexItem,
+               b->gapApplied);
+    return b;
+}
+
 static void handle_element(Walker *w, const DomNode *node)
 {
     const char *tag = node->tag ? node->tag : "";
@@ -4831,6 +5652,7 @@ static void handle_element(Walker *w, const DomNode *node)
     /* ── Links ── */
     else if (strcmp(tag, "a") == 0)
     {
+        DocBlock *linkButton = walk_flex_chip_open(w, node, a);
         ExitCtx *x = push_exit(w, WX_LINK_END);
         if (x)
         {
@@ -4848,6 +5670,10 @@ static void handle_element(Walker *w, const DomNode *node)
             w->anchorCounter++;
             w->currentAnchorIndex = w->anchorCounter;
             strbuf_reset(&w->linkText);
+            if (linkButton)
+            {
+                linkButton->href = doc_arena_str(w, w->currentHref);
+            }
         }
     }
 
@@ -5474,7 +6300,7 @@ static void handle_element(Walker *w, const DomNode *node)
                               * unreachable; the "" is kept. */
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host toggle dispatch + JS checked road */
+                b->srcNode = (void *)node; /* host toggle dispatch + JS checked road */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -5519,7 +6345,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = (strcmp(tbuf, "button") == 0) ? "Button" : "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 b->buttonType = doc_arena_str(w, tbuf); /* tap needs the type */
                 b->defaultValue = doc_arena_str(w, inputVal);
                 P19_COMMON(b);
@@ -5553,7 +6379,7 @@ static void handle_element(Walker *w, const DomNode *node)
                     lb = "Submit";
                 }
                 b->label = doc_arena_str(w, lb);
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 P19_COMMON(b);
                 add_block(w, b);
             }
@@ -5570,7 +6396,7 @@ static void handle_element(Walker *w, const DomNode *node)
         {
             return;
         }
-        b->srcNode = node; /* host input/change dispatch target */
+        b->srcNode = (void *)node; /* host input/change dispatch target */
         b->inputType = doc_arena_str(w, "textarea");
         b->name = doc_arena_str(w, attr_or_d(a, "name", "q"));
         b->placeholder = doc_arena_str(w, attr_or_d(a, "placeholder", ""));
@@ -5610,9 +6436,22 @@ static void handle_element(Walker *w, const DomNode *node)
             strcmp(bbuf, "reset") == 0)
         {
             static char lbuf[1024]; /* hoisted: device gameTask stack is tiny */
-            doc_concat_node_text(node, lbuf, sizeof(lbuf));
+            doc_concat_visible_text(node, lbuf, sizeof(lbuf));
             char *label = doc_arena_collapse(w, lbuf);
             int disabled = attr_has(a, "disabled") || (w->disabledDepth > 0);
+            /* Icon-only controls have no visible text to render. Do not
+             * fabricate a "Button" row for them; disclosure buttons keep
+             * their ARIA label lane and named form buttons keep their
+             * native value/name. Children still walk, so a button-wrapped
+             * image can render on its own. */
+            const char *btnExpanded = attr_val(a, "aria-expanded");
+            const char *btnControls = attr_val(a, "aria-controls");
+            int iconOnly = (!label || label[0] == '\0') &&
+                           !attr_val(a, "name") && !attr_val(a, "value") &&
+                           !(btnExpanded && btnExpanded[0]) &&
+                           !(btnControls && btnControls[0]);
+            if (!iconOnly)
+            {
             flush_current_block(w);
             DocBlock *b = new_block(w, DOC_BLOCK_INPUT_SUBMIT);
             if (b)
@@ -5640,7 +6479,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->label = doc_arena_str(w, lb);
                 b->disabled = disabled;
-                b->srcNode = node; /* host click/submit dispatch target */
+                b->srcNode = (void *)node; /* host click/submit dispatch target */
                 b->buttonType = doc_arena_str(w, bbuf); /* tap needs the type */
                 const char *fa = attr_val(a, "formaction");
                 b->formAction = fa ? resolve_href(w, fa) : doc_arena_str(w, w->formAction ? w->formAction : "");
@@ -5657,6 +6496,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 }
                 b->inert = (w->inert > 0) || disabled;
                 add_block(w, b);
+            }
             }
         }
     }
@@ -5687,7 +6527,7 @@ static void handle_element(Walker *w, const DomNode *node)
                 b->formAction = doc_arena_str(w, w->formAction ? w->formAction : "");
                 b->formMethod = doc_arena_str(w, w->formMethod ? w->formMethod : "get");
                 b->inert = (w->inert > 0) || attr_has(a, "disabled");
-                b->srcNode = node; /* host pick dispatch + JS picker road */
+                b->srcNode = (void *)node; /* host pick dispatch + JS picker road */
                 add_block(w, b);
             }
         }
@@ -6156,7 +6996,7 @@ static void handle_element(Walker *w, const DomNode *node)
         if (wd <= 0 || ht <= 0)
         {
             /* viewBox: ^%s*([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+)%s+([%-%d%.]+) */
-            const char *vb = attr_or_d(a, "viewBox", "");
+            const char *vb = attr_or_d(a, "viewbox", "");
             const char *p = vb;
             double nums[4] = {0, 0, 0, 0};
             int got = 1;
@@ -6646,6 +7486,241 @@ static void run_exit(Walker *w, ExitCtx *x)
     case WX_DIALOG_END:
         add_block(w, new_block(w, DOC_BLOCK_BOX_CLOSE));
         break;
+    case WX_DECOR_END:
+    {
+        /* R71: close the spanning decoration over every block the subtree
+         * produced. A decoration that produced no block (an empty element,
+         * or an inline box that flowed into its parent) stays inert; the
+         * per-block attach from walk_node remains the fallback there. */
+        flush_current_block(w);
+        int di = x->decorIdx;
+        if (di >= 0 && di < w->doc->decorCount)
+        {
+            DocBoxDecor *d = &w->doc->decor[di];
+            if (d->startBlock >= 0 && w->doc->blockCount > d->startBlock)
+            {
+                d->endBlock = w->doc->blockCount - 1;
+                /* A form-only container's border/background is not a card
+                 * outline; drawing its span frame swallows the controls and
+                 * leaves the empty area that made Google's search box look
+                 * like a giant bordered panel. Keep authored frames when
+                 * the span also contains prose/content. */
+                int decorHasInput = 0;
+                int decorHasText = 0;
+                for (int bi = d->startBlock;
+                     bi <= d->endBlock && bi < w->doc->blockCount; bi++)
+                {
+                    DocBlock *db = w->doc->blocks[bi];
+                    int bt = db ? db->type : -1;
+                    if (bt == DOC_BLOCK_INPUT_FIELD)
+                    {
+                        decorHasInput = 1;
+                    }
+                    else if (bt == DOC_BLOCK_PARAGRAPH ||
+                             bt == DOC_BLOCK_HEADING ||
+                             bt == DOC_BLOCK_BLOCKQUOTE ||
+                             bt == DOC_BLOCK_LIST_ITEM ||
+                             bt == DOC_BLOCK_CODE_BLOCK ||
+                             bt == DOC_BLOCK_TABLE)
+                    {
+                        decorHasText = 1;
+                    }
+                }
+                if (decorHasInput && !decorHasText)
+                {
+                    d->border = 0;
+                    d->bgGray = -1;
+                }
+                DocBlock *lead = w->decorLead[di];
+                int leadAtStart = lead &&
+                                  w->doc->blocks[d->startBlock] == lead;
+                if (leadAtStart)
+                {
+                    lead->border = 0;
+                    lead->bgGray = -1;
+                }
+                /* The box's CSS padding belongs inside its frame. The flat
+                 * layout has one horizontal inset channel, so use the
+                 * average side padding; cards normally ship symmetric
+                 * padding and this keeps text off BOTH borders. The
+                 * container's own lead block already carries its padding via
+                 * walk_box_spacing, so do not inset it twice. */
+                int hpad = ((int)x->decorPadL + (int)x->decorPadR + 1) / 2;
+                for (int bi = d->startBlock; bi <= d->endBlock; bi++)
+                {
+                    DocBlock *b = w->doc->blocks[bi];
+                    /* The first block is often the card heading, not the
+                     * container itself: it does not inherit the article's
+                     * padding. Use a minimum inset so every child clears
+                     * the frame without double-insetting a lead that
+                     * already carries its own margin/padding. */
+                    if (b && b->indent < hpad)
+                    {
+                        b->indent = hpad;
+                    }
+                }
+                if (x->decorPadT > 0 &&
+                    w->doc->blocks[d->startBlock]->spacingTop <
+                        x->decorPadT)
+                {
+                    w->doc->blocks[d->startBlock]->spacingTop =
+                        x->decorPadT;
+                }
+                if (x->decorPadB > 0 &&
+                    w->doc->blocks[d->endBlock]->spacingBottom <
+                        x->decorPadB)
+                {
+                    w->doc->blocks[d->endBlock]->spacingBottom =
+                        x->decorPadB;
+                }
+                if (hpad || x->decorPadT || x->decorPadB)
+                {
+                    logger_log("[decor-pad] start=%d end=%d pad=%d/%d/%d/%d h=%d",
+                               d->startBlock, d->endBlock, x->decorPadL,
+                               x->decorPadR, x->decorPadT, x->decorPadB,
+                               hpad);
+                }
+            }
+            else
+            {
+                d->startBlock = -1;
+                d->endBlock = -1;
+            }
+        }
+        break;
+    }
+    case WX_DROPDOWN_END:
+    {
+        /* R71: close a dropdown panel span. The first/last block carry the
+         * markers layout uses to draw the right-aligned panel box. */
+        flush_current_block(w);
+        int ds = x->dropdownStart;
+        if (ds >= 0 && w->doc->blockCount > ds)
+        {
+            w->doc->blocks[ds]->dropdownStart = 1;
+            w->doc->blocks[w->doc->blockCount - 1]->dropdownEnd = 1;
+        }
+        w->dropdownDepth = x->dropdownSaved;
+        break;
+    }
+    case WX_PANEL_END:
+    {
+        flush_current_block(w);
+        int ps = x->panelStart;
+        if (ps >= 0 && w->doc->blockCount > ps)
+        {
+            /* The panel is addressed by its DOM id, but the tap/toggle lane
+             * uses the trigger's positional "xN" key. Map id -> registration
+             * order here so hidden blocks carry the same key as the trigger. */
+            char keybuf[16];
+            const char *rawKey = x->panelKey ? x->panelKey : "";
+            const char *key = rawKey;
+            for (int i = 0; i < w->disclosureCount; i++)
+            {
+                if (strcmp(w->disclosureIds[i], rawKey) == 0)
+                {
+                    snprintf(keybuf, sizeof(keybuf), "x%d", i + 1);
+                    key = keybuf;
+                    break;
+                }
+            }
+            key = doc_arena_str(w, key);
+            for (int i = ps; i < w->doc->blockCount; i++)
+            {
+                DocBlock *pb = w->doc->blocks[i];
+                pb->dropdown = 1;
+                pb->panelKey = key;
+                pb->panelHidden = 1;
+                pb->flexRow = 0;
+                pb->flexItem = 0;
+            }
+            w->doc->blocks[ps]->dropdownStart = 1;
+            w->doc->blocks[w->doc->blockCount - 1]->dropdownEnd = 1;
+            logger_log("[bar] closed panel key=%s blocks=%d..%d", key, ps,
+                       w->doc->blockCount - 1);
+        }
+        w->dropdownDepth = x->dropdownSaved;
+        break;
+    }
+    case WX_PIN_END:
+    {
+        /* R71: mark the sticky container's block span for the pinned
+         * app-bar layer (first block carries pinStart, last pinEnd). A
+         * dropdown panel inside the header is NOT part of the bar: the pin
+         * span ends at the last flow block, so opening the menu cannot
+         * inflate the app bar or the pinned layer. */
+        flush_current_block(w);
+        int ps = w->pinStartBlock;
+        int last = ps - 1;
+        for (int i = ps; i < w->doc->blockCount; i++)
+        {
+            if (!w->doc->blocks[i]->dropdown)
+            {
+                last = i;
+            }
+        }
+        if (w->pinOpen && last >= ps)
+        {
+            w->doc->blocks[ps]->pinStart = 1;
+            w->doc->blocks[last]->pinEnd = 1;
+            logger_log("[bar] span ps=%d last=%d blocks=%d", ps, last,
+                       w->doc->blockCount);
+            for (int i = ps; i <= last && i < ps + 6; i++)
+            {
+                DocBlock *pb = w->doc->blocks[i];
+                logger_log("[bar] span[%d] type=%d row=%d item=%d pad=%d/%d/%d/%d menu=%d drop=%d",
+                           i, pb->type, pb->flexRow, pb->flexItem,
+                           pb->flexPadL, pb->flexPadR, pb->flexPadT,
+                           pb->flexPadB, pb->menuButton, pb->dropdown);
+            }
+            /* Compose the sticky bar as its author's flex row: a menu
+             * trigger carries the container's justify/align, and every
+             * flow block in the bar becomes one item on that single line. */
+            int rowId = 0, just = 0, ctr = 0;
+            int menuIdx = -1;
+            for (int i = ps; i <= last; i++)
+            {
+                if (w->doc->blocks[i]->menuButton)
+                {
+                    menuIdx = i;
+                    rowId = w->doc->blocks[i]->flexRow;
+                    just = w->doc->blocks[i]->flexJustify;
+                    ctr = w->doc->blocks[i]->flexCenter;
+                    break;
+                }
+            }
+            if (rowId)
+            {
+                unsigned char pl = 0, pr = 0, pt = 0, pb = 0;
+                if (menuIdx >= 0)
+                {
+                    pl = w->doc->blocks[menuIdx]->flexPadL;
+                    pr = w->doc->blocks[menuIdx]->flexPadR;
+                    pt = w->doc->blocks[menuIdx]->flexPadT;
+                    pb = w->doc->blocks[menuIdx]->flexPadB;
+                }
+                int item = 1;
+                for (int i = ps; i <= last; i++)
+                {
+                    DocBlock *pbk = w->doc->blocks[i];
+                    if (pbk->dropdown)
+                    {
+                        continue;
+                    }
+                    pbk->flexRow = (unsigned short)rowId;
+                    pbk->flexItem = (unsigned short)(item++);
+                    pbk->flexJustify = (unsigned char)just;
+                    pbk->flexCenter = (unsigned char)ctr;
+                    pbk->flexPadL = pl;
+                    pbk->flexPadR = pr;
+                    pbk->flexPadT = pt;
+                    pbk->flexPadB = pb;
+                }
+            }
+        }
+        w->pinOpen = 0;
+        break;
+    }
     case WX_INERT_END:
         w->inert = x->inertSaved;
         break;
@@ -6656,6 +7731,18 @@ static void run_exit(Walker *w, ExitCtx *x)
         if (x->cssFlags)
         {
             w->flags = x->flags;
+        }
+        if (x->flexPushed && w->flexCtxCount > 0)
+        {
+            w->flexCtxCount--;
+        }
+        if (x->flexSet)
+        {
+            w->flexRowId = x->flexRowSaved;
+            w->flexChildDepth = x->flexChildDepthSaved;
+            w->flexActiveItem = x->flexActiveSaved;
+            w->flexJustify = x->flexJustifySaved;
+            w->flexCenter = x->flexCenterSaved;
         }
         if (x->gapSet)
         {
@@ -6679,6 +7766,20 @@ static void run_exit(Walker *w, ExitCtx *x)
                 tail->gapApplied = x->gapSaved; /* 0 closes the slot */
             }
             w->fgGap = x->gapSaved;
+            /* A flex/grid CONTAINER is itself an item in the outer
+             * container. Apply that outer gap after its last block so the
+             * next card/section starts after the authored gutter. The
+             * decoration end subtracts this same slot, keeping the border
+             * outside the gap. */
+            if (w->fgGap > 0 && w->doc && x->blockStart >= 0 &&
+                w->doc->blockCount > x->blockStart)
+            {
+                DocBlock *tail = w->doc->blocks[w->doc->blockCount - 1];
+                if (tail && tail->gapApplied < w->fgGap)
+                {
+                    tail->gapApplied = w->fgGap;
+                }
+            }
         }
         break;
     case WX_PSEUDO_END:
@@ -6725,12 +7826,64 @@ static void run_exit(Walker *w, ExitCtx *x)
 
 /* ── Recursive walker → explicit frame loop ────────────────────────────────── */
 
+static void walk_node_impl(Walker *w, const DomNode *node);
+
+/* Depth + flex-item wrapper. Element depth is what distinguishes a flex
+ * container's DIRECT children (the flex items) from deeper descendants.
+ * Every direct child gets one item id; all blocks in its subtree are that
+ * item, so layout can stack them inside the item and place items in a row. */
 static void walk_node(Walker *w, const DomNode *node)
 {
     if (!node)
     {
         return;
     }
+    int isElem = (node->kind == DOM_ELEMENT);
+    if (isElem)
+    {
+        w->domDepth++;
+    }
+    int itemMark = 0;
+    if (isElem && w->flexRowId && w->domDepth == w->flexChildDepth)
+    {
+        w->flexItemSeq++;
+        if (w->flexItemSeq > 0xFFFF)
+        {
+            w->flexItemSeq = 1;
+        }
+        w->flexActiveItem = w->flexItemSeq;
+        itemMark = 1;
+    }
+    walk_node_impl(w, node);
+    if (itemMark)
+    {
+        w->flexActiveItem = 0;
+    }
+    if (isElem)
+    {
+        w->domDepth--;
+    }
+}
+
+static void walk_node_impl(Walker *w, const DomNode *node)
+{
+    if (!node)
+    {
+        return;
+    }
+    w->curNode = node;
+#if defined(TARGET_PLAYDATE)
+    /* TEMP crash localizer (device): name the exact node around the
+     * receipted bbc wild-PC window. Remove after the root cause lands. */
+    if (w->walkNodes >= 760 && w->walkNodes <= 900)
+    {
+        logger_log("[walktag] %d %s tag=%.24s text=%.24s peak=%u",
+                   w->walkNodes,
+                   node->kind == DOM_TEXT ? "text" : "elem",
+                   node->tag ? node->tag : "",
+                   node->text ? node->text : "", logger_stack_peak());
+    }
+#endif
     if (node->kind == DOM_COMMENT)
     {
         return; /* hydration markers are not renderable content */
@@ -6741,6 +7894,30 @@ static void walk_node(Walker *w, const DomNode *node)
         return;
     }
     AttrList a = attrs_of(node);
+    /* R71: a panel already held open by an earlier disclosure trigger is
+     * exempt from the CSS-hidden and zero-height gates — the tap that set
+     * disclosureOpen is the user asking to see exactly this subtree even
+     * though the sheet's closed-state display:none/height:0 still wins
+     * the cascade. General: keyed on the controlled element's id. */
+    int panelOpen = 0;
+    const char *panelId = attr_val(a, "id");
+    if (w->doc && w->doc->_css && !w->cell)
+    {
+        if (panelId && panelId[0])
+        {
+            walk_disclosure_find(w, panelId, &panelOpen);
+        }
+    }
+    /* A trigger earlier in the document can own this panel even while the
+     * panel's closed-state CSS hides it. Closed panels are still walked:
+     * their blocks stay in the model flagged hidden, so a snapshot page
+     * (no raw HTML/DOM) can expand them later without a reparse. */
+    int panelControlled = 0;
+    if (w->doc && w->doc->_css && !w->cell && panelId && panelId[0])
+    {
+        panelControlled = walk_disclosure_find(w, panelId, &panelOpen);
+    }
+    int panelClosed = panelControlled && !panelOpen;
     /* CSS (roadmap #2): resolve the element's <style>-rule matches once.
      * display:none/visibility:hidden suppresses the element AND its subtree
      * (identical semantics to the hidden attribute). */
@@ -6752,15 +7929,16 @@ static void walk_node(Walker *w, const DomNode *node)
     {
         cssBits = walk_css_compute(w, node, node->tag, a);
         cssHidden = (cssBits & CSS_F_HIDDEN) != 0;
-        /* Phase 4 positioning policy: out-of-flow (fixed/absolute) WITH
-         * an overlay signal (a non-auto offset or a numeric z-index)
-         * would render ON TOP of the document in a compositor; the flat
-         * 1-bit flow has no overlay layer, so such page chrome drops
-         * (reader-mode precedent; one-line reversible in css.h's policy
-         * note). WITHOUT a signal the CSS static-position rule applies:
-         * the absolute box flows exactly where written. */
-        cssOverlay = (cssBits & CSS_F_OOF) &&
-                     (cssBits & (CSS_F_OFF | CSS_F_OZ));
+        /* R66 positioning policy: out-of-flow boxes (fixed/absolute) are
+         * NOT dropped just because they declare an offset or z-index.
+         * Modern sites put their primary header/search box in fixed
+         * positioning (bing.com's .sbox, google.com's header) — the old
+         * "overlay = drop" rule deleted the page's main content and left
+         * only the footer menus, which is exactly the out-of-order render
+         * users saw. The flat flow now renders them in document order.
+         * The only out-of-flow drop left is the genuine off-screen hiding
+         * recipe (left:-9999px / text-indent:-9999px). */
+        cssOverlay = (cssBits & CSS_F_OFFSCREEN) != 0;
         /* Phase 5 overflow policy: the W3C "visually-hidden" recipe —
          * out-of-flow (fixed/absolute) + overflow:hidden + a concealing
          * clip shape OR a 1px-ish box — IS invisible on the real web
@@ -6817,9 +7995,93 @@ static void walk_node(Walker *w, const DomNode *node)
             return;
         }
     }
-    else if (cssHidden || cssOverlay || cssA11y)
+    else if ((cssHidden && !panelOpen && !panelClosed &&
+              !walk_disclosure_open_below(w, node)) ||
+             cssOverlay || cssA11y)
     {
         return;
+    }
+    /* R71 — DROPDOWN PANEL. A menu-controlled disclosure panel the author
+     * positioned out of flow (the universal mobile nav recipe:
+     * position:absolute; top:100%; right:1rem; display:none). Its blocks
+     * must not join the app bar's flex row or sticky pin span; mark the
+     * subtree so layout can place it as a separate right-aligned panel. */
+    if (panelOpen && panelId && panelId[0] && !w->dropdownDepth &&
+        (cssBits & CSS_F_OOF) && walk_disclosure_menu(w, panelId))
+    {
+        flush_current_block(w);
+        ExitCtx *dx = push_exit(w, WX_DROPDOWN_END);
+        if (dx)
+        {
+            dx->dropdownStart = w->doc->blockCount;
+            dx->dropdownSaved = w->dropdownDepth;
+            w->dropdownDepth++;
+        }
+    }
+    /* R71 — CLOSED DISCLOSURE PANEL. Walk the hidden panel anyway so its
+     * blocks ride the render model/snapshot. The exit marks the span
+     * hidden + dropdown; opening the trigger simply clears panelHidden
+     * and rebuilds layout (snapshot pages have no DOM/raw HTML). */
+    if (panelClosed && panelId && panelId[0] && !w->dropdownDepth &&
+        (cssBits & CSS_F_OOF) && walk_disclosure_menu(w, panelId))
+    {
+        flush_current_block(w);
+        ExitCtx *px = push_exit(w, WX_PANEL_END);
+        if (px)
+        {
+            px->panelStart = w->doc->blockCount;
+            px->panelKey = panelId;
+            px->dropdownSaved = w->dropdownDepth;
+            w->dropdownDepth++;
+        }
+    }
+    /* R71 — THE COLLAPSE RECIPE. A box with a ZERO used height and clipped
+     * overflow renders no visible content in a real browser (the
+     * universal accordion/disclosure panel shape: height:0 or
+     * max-height:0 combined with overflow:hidden — Bootstrap/Tailwind
+     * utilities and hand-rolled cards all ship it). The flat renderer has
+     * no nested scroll regions, so the honest mapping is to drop the
+     * subtree. The ONE general exception: an ARIA disclosure trigger
+     * earlier in the document may hold this panel OPEN; that is exactly
+     * the state a user tap toggles (see the trigger arm below). */
+    if ((cssBits & CSS_F_OVH) && w->doc && w->doc->_css && !w->cell)
+    {
+        const char *zclass = NULL;
+        const char *zid = NULL;
+        walk_class_id(a, &zclass, &zid);
+        CssDom zdom;
+        dom_css_dom(&zdom, css_dom_ancestor);
+        CssEngine *zeng = (CssEngine *)w->doc->_css;
+        int clipZero = 0;
+        size_t zl = 0;
+        const char *zv = css_winning_value(zeng, node->tag ? node->tag : "",
+                                           zclass, zid, &zdom, node,
+                                           "height", &zl);
+        if (zv && walk_len_zero(zv, zl))
+        {
+            clipZero = 1;
+        }
+        if (!clipZero)
+        {
+            zl = 0;
+            zv = css_winning_value(zeng, node->tag ? node->tag : "",
+                                   zclass, zid, &zdom, node,
+                                   "max-height", &zl);
+            if (zv && walk_len_zero(zv, zl))
+            {
+                clipZero = 1;
+            }
+        }
+        if (clipZero)
+        {
+            int panelOpen = 0;
+            const char *pid = attr_val(a, "id");
+            if (!(pid && walk_disclosure_find(w, pid, &panelOpen) && panelOpen) &&
+                !walk_disclosure_open_below(w, node))
+            {
+                return;
+            }
+        }
     }
     int wasInert = w->inert;
     if (attr_has(a, "inert"))
@@ -6871,7 +8133,83 @@ static void walk_node(Walker *w, const DomNode *node)
                 int gp = flex_gap_px(w, node, node->tag, a);
                 cx->gapSaved = w->fgGap;
                 cx->gapSet = 1;
+                cx->blockStart = w->doc ? w->doc->blockCount : 0;
                 w->fgGap = gp > 0 ? gp : 0;
+                /* ROW transport: the default flex axis is row. A column
+                 * container keeps the block flow (already the column).
+                 * justify-content and align-items come from the SAME
+                 * winning declarations the browser uses. */
+                const char *fclass = NULL;
+                const char *fid = NULL;
+                walk_class_id(a, &fclass, &fid);
+                CssDom fdom;
+                dom_css_dom(&fdom, css_dom_ancestor);
+                CssEngine *feng = (CssEngine *)w->doc->_css;
+                const char *ftag = node->tag ? node->tag : "";
+                size_t fdl = 0;
+                const char *fdv = css_winning_value(
+                    feng, ftag, fclass, fid, &fdom, node,
+                    "flex-direction", &fdl);
+                int frow = !(fdv && css_val_has(fdv, fdl, "column"));
+                size_t jl = 0;
+                const char *jv = css_winning_value(
+                    feng, ftag, fclass, fid, &fdom, node,
+                    "justify-content", &jl);
+                int just = 0;
+                if (jv)
+                {
+                    if (css_val_has(jv, jl, "space-between"))
+                    {
+                        just = 3;
+                    }
+                    else if (css_val_has(jv, jl, "center"))
+                    {
+                        just = 1;
+                    }
+                    else if (css_val_has(jv, jl, "flex-end") ||
+                             css_val_has(jv, jl, "end") ||
+                             css_val_has(jv, jl, "right"))
+                    {
+                        just = 2;
+                    }
+                }
+                if (w->flexCtxCount < 32)
+                {
+                    FlexCtx *fc = &w->flexCtx[w->flexCtxCount++];
+                    fc->box = node;
+                    fc->rowId = ++w->flexSeq;
+                    fc->gap = w->fgGap;
+                    fc->justify = just;
+                    fc->center = (cssBits & CSS_F_AIC) ? 1 : 0;
+                    fc->row = frow;
+                    /* The layout's spacing scale is halved CSS px (the
+                     * same scale margins/gaps use), so the bar's box
+                     * padding follows it instead of consuming the short
+                     * 240px viewport at 1:1. */
+                    fc->padL = (walk_px_full(w, node, ftag, a,
+                                             "padding-left") + 1) / 2;
+                    fc->padR = (walk_px_full(w, node, ftag, a,
+                                             "padding-right") + 1) / 2;
+                    fc->padT = (walk_px_full(w, node, ftag, a,
+                                             "padding-top") + 1) / 2;
+                    fc->padB = (walk_px_full(w, node, ftag, a,
+                                             "padding-bottom") + 1) / 2;
+                    if (fc->padL > 24) fc->padL = 24;
+                    if (fc->padR > 24) fc->padR = 24;
+                    if (fc->padT > 16) fc->padT = 16;
+                    if (fc->padB > 16) fc->padB = 16;
+                    /* A pinned app bar is device chrome: on the 240px-tall
+                     * panel the author's 12px vertical padding would eat
+                     * a quarter of the viewport. Keep the horizontal inset
+                     * (logo/control framing) and compact the cross axis to
+                     * a 1px breathing edge around the 20-23px control row. */
+                    if (w->pinOpen)
+                    {
+                        fc->padT = 0;
+                        fc->padB = 0;
+                    }
+                    fc->itemCount = 0;
+                }
             }
         }
     }
@@ -6924,6 +8262,337 @@ static void walk_node(Walker *w, const DomNode *node)
             }
         }
     }
+    /* R71 — ARIA DISCLOSURE WIDGET. The standard accessible accordion
+     * trigger is a control carrying aria-expanded + aria-controls (the
+     * controlled panel's id). Sites ship it already-closed; without the
+     * author's JavaScript the old walker rendered the panel's content
+     * unconditionally. Render the trigger as ONE toggle line (the same
+     * [+]/[-] affordance <details> uses) and let a tap flip the panel
+     * state through the normal toggle re-render lane. General: keyed on
+     * the ARIA contract, not on any class/tag/site. */
+    {
+        const char *ac = attr_val(a, "aria-controls");
+        const char *ae = attr_val(a, "aria-expanded");
+        /* Comboboxes also expose aria-expanded + aria-controls. A form
+         * control is a native field, not an accordion trigger; treating
+         * Google's search textarea as a disclosure dropped the field and
+         * left its enclosing box as a giant empty frame. */
+        if (ac && ae && !w->cell &&
+            strcmp(node->tag ? node->tag : "", "input") != 0 &&
+            strcmp(node->tag ? node->tag : "", "textarea") != 0 &&
+            strcmp(node->tag ? node->tag : "", "select") != 0)
+        {
+            w->disclosureIndex++;
+            int didx = w->disclosureIndex;
+            int dopen = !(ae[0] == 'f' || ae[0] == 'F');
+            if (w->opts && w->opts->disclosureOpen &&
+                (didx - 1) < w->opts->disclosureOpenCount)
+            {
+                dopen = w->opts->disclosureOpen[didx - 1];
+            }
+            static char g_walkDisclosureLabel[1024]; /* hoisted: small stack */
+            static char g_walkDisclosureLines[1024];
+            g_walkDisclosureLabel[0] = '\0';
+            doc_concat_visible_text(node, g_walkDisclosureLabel,
+                                    sizeof(g_walkDisclosureLabel));
+            char *lab = doc_arena_collapse(w, g_walkDisclosureLabel);
+            if (!lab || lab[0] == '\0')
+            {
+                const char *al = attr_val(a, "aria-label");
+                lab = doc_arena_str(w, (al && al[0]) ? al : "Show");
+            }
+            /* Menu-button classification: the controlled panel is a
+             * navigation list/menu, or the visible label is literally
+             * "menu". Those render as a compact right-aligned hamburger;
+             * ordinary accordion headers keep their full row + [+]/[-]. */
+            int isMenu = 0;
+            {
+                char tid[WALK_DISCLOSURE_ID_CAP];
+                size_t tn = 0;
+                const char *q = ac;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r' ||
+                       *q == '\f')
+                {
+                    q++;
+                }
+                while (*q && *q != ' ' && *q != '\t' && *q != '\n' &&
+                       *q != '\r' && *q != '\f' && tn + 1 < sizeof(tid))
+                {
+                    tid[tn++] = *q++;
+                }
+                tid[tn] = '\0';
+                DomNode *target = (tn && w->walkDom)
+                                      ? dom_find_by_id(w->walkDom, tid)
+                                      : NULL;
+                if (target && target->tag &&
+                    (strcmp(target->tag, "ul") == 0 ||
+                     strcmp(target->tag, "ol") == 0 ||
+                     strcmp(target->tag, "nav") == 0 ||
+                     strcmp(target->tag, "menu") == 0))
+                {
+                    isMenu = 1;
+                }
+                if (!isMenu && walk_menu_label(lab))
+                {
+                    isMenu = 1;
+                }
+            }
+            /* Register AFTER classification: the controlled panel's dropdown
+             * behavior is menu-specific, and the open state stays positional. */
+            walk_disclosure_register(w, ac, dopen, isMenu);
+            flush_current_block(w);
+            DocBlock *bo = new_block(w, DOC_BLOCK_PARAGRAPH);
+            if (bo)
+            {
+                char keybuf[16];
+                snprintf(keybuf, sizeof(keybuf), "x%d", didx);
+                bo->toggleKey = doc_arena_str(w, keybuf);
+                bo->toggleOpen = dopen;
+                /* Both menu and accordion triggers need their source node:
+                 * the click lane dispatches the page's own handler (label
+                 * swaps, aria-expanded updates) before the native fallback. */
+                bo->srcNode = (void *)node;
+                bo->hasSpacing = 1;
+                /* Menu trigger: attach the nearest enclosing ROW flex
+                 * container now (the frame loop has the DOM ancestry at
+                 * hand), so the sticky-bar span can compose its title and
+                 * control on one row later. */
+                if (isMenu && w->flexCtxCount > 0)
+                {
+                    const DomNode *fcChild = node;
+                    const DomNode *fcParent = node->parent;
+                    while (fcParent)
+                    {
+                        int ci = -1;
+                        for (int k = 0; k < w->flexCtxCount; k++)
+                        {
+                            if (w->flexCtx[k].box == fcParent)
+                            {
+                                ci = k;
+                                break;
+                            }
+                        }
+                        if (ci >= 0 && w->flexCtx[ci].row)
+                        {
+                            int item = 0;
+                            for (int k = 0; k < fcParent->childCount; k++)
+                            {
+                                if (fcParent->children[k] == fcChild)
+                                {
+                                    item = k + 1;
+                                    break;
+                                }
+                            }
+                            if (item > 0)
+                            {
+                                bo->flexRow = (unsigned short)w->flexCtx[ci].rowId;
+                                bo->flexItem = (unsigned short)item;
+                                bo->flexJustify =
+                                    (unsigned char)w->flexCtx[ci].justify;
+                                bo->flexCenter =
+                                    (unsigned char)w->flexCtx[ci].center;
+                                bo->flexPadL =
+                                    (unsigned char)w->flexCtx[ci].padL;
+                                bo->flexPadR =
+                                    (unsigned char)w->flexCtx[ci].padR;
+                                bo->flexPadT =
+                                    (unsigned char)w->flexCtx[ci].padT;
+                                bo->flexPadB =
+                                    (unsigned char)w->flexCtx[ci].padB;
+                            }
+                            break;
+                        }
+                        fcChild = fcParent;
+                        fcParent = fcParent->parent;
+                    }
+                }
+                if (isMenu)
+                {
+                    bo->menuButton = 1;
+                    bo->label = lab;
+                    /* Author box metrics (full CSS px) for the control. */
+                    /* Menu box lengths use the engine's halved spacing
+                     * scale; font-size stays in CSS px for the big/small
+                     * bucket decision. */
+                    int pl = (walk_px_full(w, node, node->tag, a,
+                                           "padding-left") + 1) / 2;
+                    int pr = (walk_px_full(w, node, node->tag, a,
+                                           "padding-right") + 1) / 2;
+                    int pt = (walk_px_full(w, node, node->tag, a,
+                                           "padding-top") + 1) / 2;
+                    int pb = (walk_px_full(w, node, node->tag, a,
+                                           "padding-bottom") + 1) / 2;
+                    int bw = (walk_px_full(w, node, node->tag, a,
+                                           "border-width") + 1) / 2;
+                    int rr = (walk_px_full(w, node, node->tag, a,
+                                           "border-radius") + 1) / 2;
+                    int gp = (walk_px_full(w, node, node->tag, a,
+                                           "gap") + 1) / 2;
+                    int fs = walk_px_full(w, node, node->tag, a,
+                                          "font-size");
+                    bo->menuPadL = (unsigned char)(pl > 16 ? 16 : pl);
+                    bo->menuPadR = (unsigned char)(pr > 16 ? 16 : pr);
+                    bo->menuPadT = (unsigned char)(pt > 10 ? 10 : pt);
+                    bo->menuPadB = (unsigned char)(pb > 10 ? 10 : pb);
+                    bo->menuBorder = (unsigned char)(bw > 3 ? 3 : bw);
+                    bo->menuRadius = (unsigned char)(rr > 8 ? 8 : rr);
+                    bo->menuGap = (unsigned char)(gp > 10 ? 10 : gp);
+                    bo->menuFontBig = (unsigned char)(fs > 14);
+                }
+                else
+                {
+                    g_walkDisclosureLines[0] = '\0';
+                    disclosure_label_text(w, node, g_walkDisclosureLines,
+                                         sizeof(g_walkDisclosureLines), 0);
+                    int lineCount = 0;
+                    char *line = g_walkDisclosureLines;
+                    while (line && line[0])
+                    {
+                        char *nl = strchr(line, '\n');
+                        if (nl)
+                        {
+                            *nl = '\0';
+                        }
+                        char *seg = doc_arena_collapse(w, line);
+                        if (seg && seg[0])
+                        {
+                            if (lineCount > 0)
+                            {
+                                DocInline *br = new_inline(w, DOC_INLINE_BR);
+                                if (!br ||
+                                    doc_ptrarr_push((void ***)&bo->inlines,
+                                                    &bo->inlineCount,
+                                                    &bo->inlineCap, br))
+                                {
+                                    w->error = 1;
+                                }
+                            }
+                            DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                            if (inl)
+                            {
+                                inl->text = seg;
+                                inl->flags = DOC_INF_BOLD;
+                                if (doc_ptrarr_push((void ***)&bo->inlines,
+                                                    &bo->inlineCount,
+                                                    &bo->inlineCap, inl))
+                                {
+                                    w->error = 1;
+                                }
+                            }
+                            lineCount++;
+                        }
+                        if (!nl)
+                        {
+                            break;
+                        }
+                        line = nl + 1;
+                    }
+                    if (lineCount == 0 && lab && lab[0])
+                    {
+                        DocInline *inl = new_inline(w, DOC_INLINE_TEXT);
+                        if (inl)
+                        {
+                            inl->text = lab;
+                            inl->flags = DOC_INF_BOLD;
+                            if (doc_ptrarr_push((void ***)&bo->inlines,
+                                                &bo->inlineCount,
+                                                &bo->inlineCap, inl))
+                            {
+                                w->error = 1;
+                            }
+                        }
+                    }
+                    logger_log("[toggle-label] key=%s lines=%d inlines=%d",
+                               keybuf, lineCount, bo->inlineCount);
+                }
+                walk_flex_item_gap(w, bo, node);
+                add_block(w, bo);
+            }
+            return;
+        }
+    }
+
+    /* R71 — APP BAR (position:sticky, top-anchored). Open a pin span
+     * before the handler so its exit frame runs after the whole subtree
+     * and can mark the first/last block. Layout keeps the flow position
+     * and re-draws this span at the content-viewport top once scrolled
+     * past (real sticky semantics). */
+    if ((cssBits & CSS_F_STICKY) && !w->pinOpen && walk_pin_tag(node->tag))
+    {
+        const char *pclass = NULL;
+        const char *pidattr = NULL;
+        walk_class_id(a, &pclass, &pidattr);
+        CssDom pdom;
+        dom_css_dom(&pdom, css_dom_ancestor);
+        size_t ptl = 0;
+        const char *ptv = css_winning_value(
+            (CssEngine *)w->doc->_css, node->tag ? node->tag : "", pclass,
+            pidattr, &pdom, node, "top", &ptl);
+        int ptpct = 0;
+        int ptpx = ptv ? fresh_len_px(ptv, ptl, 1, &ptpct) : -1;
+        if (ptpx >= 0 && ptpx <= 8)
+        {
+            flush_current_block(w);
+            w->pinOpen = 1;
+            w->pinStartBlock = w->doc->blockCount;
+            if (!push_exit(w, WX_PIN_END))
+            {
+                w->pinOpen = 0;
+            }
+        }
+    }
+
+    /* R71 — SPANNING BOX DECORATION. A container's border/background
+     * belongs around its WHOLE subtree; the per-block attach below only
+     * sees the container's own (often empty) block. Record a span now;
+     * the exit frame closes it over every block the subtree produced. */
+    int decorIdx = -1;
+    if (!w->cell && walk_decor_tag(node->tag) && w->doc &&
+        w->doc->decorCount < DOC_BOX_DECOR_MAX)
+    {
+        int db = 0, dg = -1, dr = 0;
+        if (walk_decor_values(w, node, node->tag, a, &db, &dg, &dr))
+        {
+            decorIdx = w->doc->decorCount++;
+            DocBoxDecor *d = &w->doc->decor[decorIdx];
+            d->startBlock = w->doc->blockCount;
+            d->endBlock = -1;
+            d->border = db;
+            d->bgGray = dg;
+            d->radius = dr;
+            w->decorLead[decorIdx] = NULL;
+            /* A row-flex box already transports its padding through
+             * FlexCtx; adding it again here would double-inset its items. */
+            int padL = 0, padR = 0, padT = 0, padB = 0;
+            if (!walk_flex_row_padding_skip(w, node, node->tag, a))
+            {
+                padL = (walk_px_full(w, node, node->tag, a,
+                                     "padding-left") + 1) / 2;
+                padR = (walk_px_full(w, node, node->tag, a,
+                                     "padding-right") + 1) / 2;
+                padT = (walk_px_full(w, node, node->tag, a,
+                                     "padding-top") + 1) / 2;
+                padB = (walk_px_full(w, node, node->tag, a,
+                                     "padding-bottom") + 1) / 2;
+                /* Keep a pathological padding from zeroing the content
+                 * measure (the same device-sized caps as the flex bar). */
+                if (padL > 24) padL = 24;
+                if (padR > 24) padR = 24;
+                if (padT > 16) padT = 16;
+                if (padB > 16) padB = 16;
+            }
+            ExitCtx *dx = push_exit(w, WX_DECOR_END);
+            if (dx)
+            {
+                dx->decorIdx = decorIdx;
+                dx->decorPadL = (unsigned char)padL;
+                dx->decorPadR = (unsigned char)padR;
+                dx->decorPadT = (unsigned char)padT;
+                dx->decorPadB = (unsigned char)padB;
+            }
+        }
+    }
+
     /* CSS display box-switching for the presentational containers
      * (roadmap #2 HARD): div/span honor block/inline/flex/grid/table/
      * contents/float where those differ from the native box. Semantic
@@ -6932,7 +8601,17 @@ static void walk_node(Walker *w, const DomNode *node)
      * here (not in handle_element) so the post-handler CSS below still
      * attaches to the synthetic block uniformly. */
     int dispHandled = 0;
-    if (w->doc && w->doc->_css && !w->cell &&
+    /* Inline-block spans that are direct children of a flex row (badge
+     * pills such as GitHub's language/commit tags) become compact flex
+     * items. Their full label is captured by walk_flex_chip_open; walking
+     * the children again would duplicate that text into a block. */
+    if (w->doc && w->doc->_css && !w->cell && node->tag &&
+        strcmp(node->tag, "span") == 0 &&
+        walk_flex_chip_open(w, node, a))
+    {
+        dispHandled = 1;
+    }
+    if (!dispHandled && w->doc && w->doc->_css && !w->cell &&
         ((node->tag && strcmp(node->tag, "div") == 0) ||
          (node->tag && strcmp(node->tag, "span") == 0)))
     {
@@ -7015,6 +8694,12 @@ static void walk_node(Walker *w, const DomNode *node)
     /* CSS borders: same attachment point (the handler's fresh block). */
     if (w->doc && w->doc->_css && w->currentBlock)
     {
+        /* R71: remember which block the decoration's own attach touched,
+         * so the span exit can retire a duplicate frame. */
+        if (decorIdx >= 0)
+        {
+            w->decorLead[decorIdx] = w->currentBlock;
+        }
         const char *classAttr = NULL;
         const char *idAttr = NULL;
         walk_class_id(a, &classAttr, &idAttr);
@@ -7070,13 +8755,28 @@ static void walk_node(Walker *w, const DomNode *node)
     }
 }
 
-static int walk_children(Walker *w, const DomNode *parent)
+static unsigned long walk_now_ms(void)
+{
+    PlaydateAPI *api = pluto_pd();
+    /* Host suites fake only system->realloc; the clock entry may be NULL.
+     * The synchronous host path uses budget 0, so a 0 clock is harmless. */
+    if (api && api->system && api->system->getCurrentTimeMilliseconds)
+    {
+        return api->system->getCurrentTimeMilliseconds();
+    }
+    return 0;
+}
+
+/* Push a node's children onto the walk frame stack. Split from the pump so
+ * a device slice can stop BETWEEN frames and resume later with the exact
+ * same stack — the resumable walk is what lets a 5000-node wikipedia
+ * article render on hardware without ever monopolizing the run loop. */
+static int walk_push_children(Walker *w, const DomNode *parent)
 {
     if (w->error)
     {
         return -1;
     }
-    int base = w->frameCount; /* re-entrant calls only unwind their own frames */
     if (parent)
     {
         /* SW8 touch point: a stub encountered during descent materializes
@@ -7101,8 +8801,60 @@ static int walk_children(Walker *w, const DomNode *parent)
             }
         }
     }
-    while (!w->error && w->frameCount > base)
+    return 0;
+}
+
+/* Drain the frame stack down to stopAt. budgetMs > 0 is a SLICE: when the
+ * wall clock reaches it the pump parks (walkPaused=1) and returns 1 with
+ * the remaining frames intact. The caller yields to the run loop and calls
+ * walk_pump again next frame. A 60s absolute cap on hardware is the final
+ * containment for a pathological page (the standard truncation marker). */
+static int walk_pump(Walker *w, int stopAt, unsigned long budgetMs)
+{
+    unsigned long now = walk_now_ms();
+    if (w->walkStartMs == 0)
     {
+        w->walkStartMs = now;
+#if defined(TARGET_PLAYDATE)
+        w->walkHardDeadlineMs = now + 60000UL;
+#else
+        w->walkHardDeadlineMs = 0;
+#endif
+    }
+    if (budgetMs > 0)
+    {
+        w->walkDeadlineMs = now + budgetMs;
+        w->walkPaused = 0;
+    }
+    while (!w->error && w->frameCount > stopAt)
+    {
+        /* Watchdog guard + device receipt: the walk's progress must be
+         * visible in pluto.log right before any stall. One line per 64
+         * nodes is cheap on hardware and names the exact node count. */
+        if ((++w->walkNodes & 63) == 0)
+        {
+            now = walk_now_ms();
+            unsigned long elapsed = now - w->walkStartMs;
+            logger_log("[walk] nodes=%d elapsed=%lums frames=%d blocks=%d "
+                       "peak=%u",
+                       w->walkNodes, elapsed, w->frameCount,
+                       w->doc ? w->doc->blockCount : -1,
+                       logger_stack_peak());
+            if (w->walkHardDeadlineMs && now >= w->walkHardDeadlineMs)
+            {
+                w->truncated = 1;
+                logger_log("[walk] HARD CAP 60s hit after %d nodes — "
+                           "truncating at a clean block boundary (page keeps "
+                           "its rendered prefix)",
+                           w->walkNodes);
+                break;
+            }
+            if (budgetMs > 0 && now >= w->walkDeadlineMs)
+            {
+                w->walkPaused = 1;
+                return 1;
+            }
+        }
         WFrame f = w->frames[--w->frameCount];
         if (f.kind == 1)
         {
@@ -7121,6 +8873,16 @@ static int walk_children(Walker *w, const DomNode *parent)
         }
     }
     return w->error ? -1 : 0;
+}
+
+static int walk_children(Walker *w, const DomNode *parent)
+{
+    int base = w->frameCount; /* re-entrant calls only unwind their own frames */
+    if (walk_push_children(w, parent) != 0)
+    {
+        return -1;
+    }
+    return walk_pump(w, base, 0);
 }
 
 /* Phase 7: :target's matcher input — the current page URL's fragment id
@@ -7425,6 +9187,67 @@ static int refresh_from_content(DocParseResult *out, const char *content,
     return 1;
 }
 
+/* ── Token-stream inert-container depth (base/meta pre-scan) ────────────────
+ * The base/meta scan below reads the FLAT token stream, so it must honour
+ * the containment the DOM walker gets for free. <noscript> is inert only
+ * while the scripting flag is on (a no-JS browser still honours a noscript
+ * meta refresh); <template>/<noembed>/<noframes> are inert in every mode.
+ * Google's search shell ships its /httpservice/retry/enablejs meta refresh
+ * inside <noscript> — following it landed every JS-enabled page on the
+ * "Turn on JavaScript to keep searching" screen. */
+typedef struct
+{
+    int noscript;
+    int template;
+    int noembed;
+    int noframes;
+} InertDepth;
+
+static void inert_depth_update(InertDepth *d, const Token *tok, int scriptingOn)
+{
+    if (!d || !tok || tok->type != TOK_TAG || !tok->name)
+    {
+        return;
+    }
+    int *slot = NULL;
+    if (strcmp(tok->name, "template") == 0)
+    {
+        slot = &d->template;
+    }
+    else if (strcmp(tok->name, "noembed") == 0)
+    {
+        slot = &d->noembed;
+    }
+    else if (strcmp(tok->name, "noframes") == 0)
+    {
+        slot = &d->noframes;
+    }
+    else if (scriptingOn && strcmp(tok->name, "noscript") == 0)
+    {
+        slot = &d->noscript;
+    }
+    if (!slot)
+    {
+        return;
+    }
+    if (tok->isClosing)
+    {
+        if (*slot > 0)
+        {
+            (*slot)--;
+        }
+    }
+    else if (!tok->isSelfClosing)
+    {
+        (*slot)++;
+    }
+}
+
+static int inert_depth_any(const InertDepth *d)
+{
+    return d && (d->noscript || d->template || d->noembed || d->noframes);
+}
+
 /* ── Table column definitions (<colgroup>/<col>, WHATWG §4.9.4/§4.9.5) ────── */
 
 /* One <col> inside a group. span defaults to 1; invalid/negative → 1.
@@ -7626,6 +9449,330 @@ static int doc_get_attr(const Token *tok, const char *key, const char **outVal)
     return 0;
 }
 
+/* ── Resumable walk state ───────────────────────────────────────────────────
+ * The walk is the only parse stage that scales with page size (wikipedia:
+ * ~5000 nodes × ~4.5ms/node on the M7 ≈ 22s — two watchdogs' worth). This
+ * state parks the walk between frames: the frame stack, arena, StrBufs and
+ * DOM all live here until the walk completes. Fresh parses and JS-mutation
+ * re-walks share it; document_free aborts a parked state. */
+typedef struct DocWalkState
+{
+    DocParseResult *out;
+    Walker w;
+    DomResult dom;      /* fresh parse: the walked tree (stack result) */
+    TokenizeResult tr;  /* fresh parse: freed at finish/abort */
+    int trValid;
+    int domKeptByBridge;
+    int isRewalk;
+    int mode;
+    int walkStarted;
+    int finished;
+    DocParseOpts optsCopy; /* fresh parse: OWNED copy of the caller's opts.
+                            * The caller's DocParseOpts lives on the render
+                            * task's stack and dies when a slice returns; a
+                            * parked walk that kept the pointer called
+                            * opts->svgDecoder through stack garbage on the
+                            * next slice (device wild-PC receipts). */
+    DocParseOpts rewalkOpts;
+    unsigned long tStart, tTok, tDom, tCss, tJs, tWalk;
+} DocWalkState;
+
+static void walk_state_free_buffers(DocWalkState *st)
+{
+    if (!st)
+    {
+        return;
+    }
+    strbuf_free(&st->w.linkText);
+    strbuf_free(&st->w.preBuf);
+    strbuf_free(&st->w.textareaBuf);
+    strbuf_free(&st->w.mathBuf);
+    for (int i = 0; i < st->w.heapBufCount; i++)
+    {
+        if (st->w.heapBufs[i])
+        {
+            strbuf_free(st->w.heapBufs[i]);
+            PLUTO_FREE(st->w.heapBufs[i]);
+        }
+    }
+    if (st->w.heapBufs)
+    {
+        PLUTO_FREE(st->w.heapBufs);
+    }
+    if (st->w.frames)
+    {
+        PLUTO_FREE(st->w.frames);
+    }
+    if (!st->isRewalk)
+    {
+        if (!st->domKeptByBridge)
+        {
+            dom_free_result(&st->dom);
+        }
+        if (st->trValid)
+        {
+            tokenizer_free_result(&st->tr);
+            st->trValid = 0;
+        }
+    }
+}
+
+/* Abort a parked/partial walk without producing output (navigation). */
+static void walk_state_abort(DocWalkState *st)
+{
+    if (!st)
+    {
+        return;
+    }
+    walk_state_free_buffers(st);
+    /* R68 PARTIAL-WALK OWNERSHIP: the render task keeps the blocks the
+     * walker already produced when this abort is an OOM. Those blocks and
+     * every string they point at live in st->w.arena — freeing it here
+     * left layout reading freed memory (device crash 2026-11-13: Reuters
+     * walk OOM at 157 blocks, then layout_normalize_align dereferenced
+     * block->align=0x51 from the freed arena). Adopt the arena into the
+     * document so the kept blocks stay valid; document_free owns it. If
+     * the adoption allocation itself fails, drop the block count so the
+     * caller cannot keep dangling pointers. */
+    DocParseResult *out = st->out;
+    if (out && out->blockCount > 0 && st->w.arena.head)
+    {
+        DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+        if (keep)
+        {
+            *keep = st->w.arena;
+            st->w.arena.head = NULL;
+            out->_arena = keep;
+        }
+        else
+        {
+            out->blockCount = 0;
+        }
+    }
+    doc_arena_free_all(&st->w.arena);
+    PLUTO_FREE(st);
+}
+
+static void walk_state_log_phase(DocWalkState *st, int werr)
+{
+    if (!st)
+    {
+        return;
+    }
+    unsigned long tEnd = walk_now_ms();
+    logger_log("[phase] parse tok=%lums dom=%lums css=%lums js=%lums "
+               "walk=%lums total=%lums nodes=%d blocks=%d trunc=%d err=%d",
+               st->tTok - st->tStart, st->tDom - st->tTok,
+               st->tCss - st->tDom, st->tJs - st->tCss,
+               tEnd - st->tWalk, tEnd - st->tStart, st->w.walkNodes,
+               st->out->blockCount, st->w.truncated, werr);
+}
+
+/* Common finalization after the pump reports completion. Returns the public
+ * parse result code (fresh: 0 even on a contained parse error; rewalk: -1
+ * on failure, matching document_rewalk's contract). */
+static int walk_state_finish(DocWalkState *st)
+{
+    if (!st)
+    {
+        return -1;
+    }
+    DocParseResult *out = st->out;
+    int isRewalk = st->isRewalk;
+    int werr = st->w.error;
+    walk_state_log_phase(st, werr);
+    walk_state_free_buffers(st);
+
+    if (werr || (!isRewalk && !out->rawHtml))
+    {
+        doc_free_walk_output(out);
+        out->parseError = 1;
+        doc_arena_free_all(&st->w.arena);
+        PLUTO_FREE(st);
+        return isRewalk ? -1 : 0;
+    }
+
+    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
+    if (!keep)
+    {
+        doc_arena_free_all(&st->w.arena);
+        PLUTO_FREE(st);
+        return -1;
+    }
+    *keep = st->w.arena;
+    st->w.arena.head = NULL;
+    out->_arena = keep;
+    if (!isRewalk)
+    {
+        out->mode = st->mode;
+        out->isReaderMode = 0;
+    }
+    /* R71 receipt: one line per walk names the general layout transports
+     * that engaged (the disclosure count is the ARIA trigger registry size,
+     * pinStarts the number of sticky app-bar spans the layout will draw). */
+    {
+        int pinStarts = 0;
+        int menuButtons = 0;
+        for (int bi = 0; bi < out->blockCount; bi++)
+        {
+            if (out->blocks[bi] && out->blocks[bi]->pinStart)
+            {
+                pinStarts++;
+            }
+            if (out->blocks[bi] && out->blocks[bi]->menuButton)
+            {
+                menuButtons++;
+            }
+        }
+        logger_log("[r71] walk blocks=%d decor=%d disclosure=%d pin=%d menu=%d",
+                   out->blockCount, out->decorCount, st->w.disclosureCount,
+                   pinStarts, menuButtons);
+        for (int bi = 0; bi < out->blockCount && bi < 6; bi++)
+        {
+            DocBlock *bb = out->blocks[bi];
+            logger_log("[flex] bi=%d type=%d row=%d item=%d just=%d ctr=%d "
+                       "align=%.12s label=%.20s",
+                       bi, bb->type, bb->flexRow, bb->flexItem,
+                       bb->flexJustify, bb->flexCenter,
+                       bb->align ? bb->align : "-",
+                       bb->label ? bb->label : "-");
+        }
+    }
+    PLUTO_FREE(st);
+    return 0;
+}
+
+/* Pump one slice. Returns 1 = parked (more work), 0 = complete, -1 = error. */
+static int walk_state_pump(DocWalkState *st, unsigned long budgetMs)
+{
+    if (!st)
+    {
+        return -1;
+    }
+    if (!st->walkStarted)
+    {
+        const DomNode *root = st->isRewalk
+                                  ? ((DomResult *)st->out->_dom)->root
+                                  : st->dom.root;
+        if (walk_push_children(&st->w, root) != 0)
+        {
+            return -1;
+        }
+        st->walkStarted = 1;
+    }
+    int rc = walk_pump(&st->w, 0, budgetMs);
+    if (rc > 0)
+    {
+        return 1;
+    }
+    if (rc < 0)
+    {
+        return -1;
+    }
+    if (!st->finished)
+    {
+        walker_finish(&st->w);
+        st->finished = 1;
+        if (st->w.error)
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static DocWalkState *walk_state_begin_fresh(DocParseResult *out, int mode,
+                                            const DocParseOpts *opts,
+                                            const DomResult *dom,
+                                            int domKeptByBridge,
+                                            const TokenizeResult *tr,
+                                            unsigned long tStart,
+                                            unsigned long tTok,
+                                            unsigned long tDom,
+                                            unsigned long tCss,
+                                            unsigned long tJs,
+                                            unsigned long tWalk)
+{
+    DocWalkState *st = (DocWalkState *)PLUTO_MALLOC(sizeof(DocWalkState));
+    if (!st)
+    {
+        return NULL;
+    }
+    memset(st, 0, sizeof(*st));
+    st->out = out;
+    st->mode = mode;
+    st->domKeptByBridge = domKeptByBridge;
+    st->dom = *dom;
+    st->tr = *tr;
+    st->trValid = 1;
+    st->tStart = tStart;
+    st->tTok = tTok;
+    st->tDom = tDom;
+    st->tCss = tCss;
+    st->tJs = tJs;
+    st->tWalk = tWalk;
+
+    if (opts)
+    {
+        st->optsCopy = *opts;
+    }
+    else
+    {
+        memset(&st->optsCopy, 0, sizeof(st->optsCopy));
+    }
+
+    Walker *w = &st->w;
+    w->doc = out;
+    w->opts = &st->optsCopy;
+    w->formAction = NULL;
+    w->walkDom = out->_dom ? (DomResult *)out->_dom : &st->dom;
+    w->formMethod = doc_arena_str_lower(w, "get");
+    w->suppressNoscript = out->suppressNoscript;
+    if (strbuf_init(&w->linkText) || strbuf_init(&w->preBuf) ||
+        strbuf_init(&w->textareaBuf) || strbuf_init(&w->mathBuf))
+    {
+        st->w.error = 1;
+    }
+    css_match_cache_bump();
+    walk_set_target(out);
+    return st;
+}
+
+static DocWalkState *walk_state_begin_rewalk(DocParseResult *doc)
+{
+    DocWalkState *st = (DocWalkState *)PLUTO_MALLOC(sizeof(DocWalkState));
+    if (!st)
+    {
+        return NULL;
+    }
+    memset(st, 0, sizeof(*st));
+    st->out = doc;
+    st->isRewalk = 1;
+    st->tStart = st->tTok = st->tDom = st->tCss = st->tJs = st->tWalk =
+        walk_now_ms();
+    st->rewalkOpts.svgDecoder = doc->svgDecoder;
+    st->rewalkOpts.detailsOpen = doc->detailsOpen;
+    st->rewalkOpts.detailsOpenCount = doc->detailsOpenCount;
+    st->rewalkOpts.disclosureOpen = doc->disclosureOpen;
+    st->rewalkOpts.disclosureOpenCount = doc->disclosureOpenCount;
+
+    Walker *w = &st->w;
+    w->doc = doc;
+    w->opts = &st->rewalkOpts;
+    w->formAction = NULL;
+    w->walkDom = (DomResult *)doc->_dom;
+    w->formMethod = doc_arena_str_lower(w, "get");
+    w->suppressNoscript = doc->suppressNoscript;
+    if (strbuf_init(&w->linkText) || strbuf_init(&w->preBuf) ||
+        strbuf_init(&w->textareaBuf) || strbuf_init(&w->mathBuf))
+    {
+        st->w.error = 1;
+    }
+    css_match_cache_bump();
+    walk_set_target(doc);
+    return st;
+}
+
 int document_parse(const char *htmlString, const char *baseUrl, int mode,
                    const DocParseOpts *opts, DocParseResult *out)
 {
@@ -7633,22 +9780,44 @@ int document_parse(const char *htmlString, const char *baseUrl, int mode,
                              NULL, out);
 }
 
-int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
-                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
-                      struct JsBridge **outBridge, DocParseResult *out)
+static int document_parse_ex_budget(const char *htmlString,
+                                    const char *baseUrl, int mode,
+                                    const DocParseOpts *opts,
+                                    DocScriptPolicy scriptPolicy,
+                                    struct JsBridge **outBridge,
+                                    DocParseResult *out,
+                                    unsigned long budgetMs)
 {
     logger_stack_touch();
+    /* Phase receipts: one line per page names the stage that costs the
+     * device its watchdog margin (fetch is outside this call). */
+    unsigned long tStart = walk_now_ms();
+    unsigned long tTok = tStart, tDom = tStart, tCss = tStart;
+    unsigned long tJs = tStart, tWalk = tStart;
     /* Caller-provided Full-mode ext table (html/jsext results, attached by
      * main.c's render task BEFORE this call) must survive the zeroing below
      * — js_doc_attach executes doc->extScripts at their page positions, and
-     * document_free owns freeing bodies + arena. */
+     * document_free owns freeing bodies + arena. The external CSS bodies
+     * (Phase 1.5, fetched by the render task) are the same contract: they
+     * are doc-lifetime buffers joined into the CSS engine below. */
     struct JsExtScript_ *savedExt = out->extScripts;
     int savedExtCount = out->extScriptCount;
     void *savedExtArena = out->_extArena;
+    char **savedCssBody = out->cssExtBody;
+    size_t *savedCssLen = out->cssExtLen;
+    int savedCssN = out->cssExtN;
     memset(out, 0, sizeof(*out));
     out->extScripts = savedExt;
     out->extScriptCount = savedExtCount;
     out->_extArena = savedExtArena;
+    out->cssExtBody = savedCssBody;
+    out->cssExtLen = savedCssLen;
+    out->cssExtN = savedCssN;
+    out->svgDecoder = opts ? opts->svgDecoder : NULL;
+    out->detailsOpen = opts ? opts->detailsOpen : NULL;
+    out->detailsOpenCount = opts ? opts->detailsOpenCount : 0;
+    out->disclosureOpen = opts ? opts->disclosureOpen : NULL;
+    out->disclosureOpenCount = opts ? opts->disclosureOpenCount : 0;
     if (outBridge)
     {
         *outBridge = NULL;
@@ -7675,6 +9844,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     {
         return -1;
     }
+    tTok = walk_now_ms();
     snprintf(out->title, sizeof(out->title), "%s",
              tr.pageTitle[0] ? tr.pageTitle : "Web Page");
 
@@ -7687,12 +9857,19 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         {
             return -1;
         }
-        out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
-        if (!out->rawHtml)
+        if (opts && opts->adoptHtml)
         {
-            return -1;
+            out->rawHtml = (char *)htmlString; /* caller transfers ownership */
         }
-        strcpy(out->rawHtml, htmlString);
+        else
+        {
+            out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+            if (!out->rawHtml)
+            {
+                return -1;
+            }
+            strcpy(out->rawHtml, htmlString);
+        }
         out->mode = mode;
         return 0;
     }
@@ -7701,10 +9878,21 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
     {
         char base[512];
         snprintf(base, sizeof(base), "%s", baseUrl ? baseUrl : "");
+        /* Same scripting flag the walker applies: <noscript> content is
+         * invisible to an engine-enabled page, and inert containers are
+         * never parsed. The flat token stream must honour both. */
+        const int scriptingOn = (scriptPolicy != DOC_SCRIPT_OFF) ? 1 : 0;
         const char *tokenBase = NULL;
+        InertDepth inert;
+        memset(&inert, 0, sizeof(inert));
         for (int i = 0; i < tr.tokens.count; i++)
         {
             const Token *tok = &tr.tokens.items[i];
+            inert_depth_update(&inert, tok, scriptingOn);
+            if (inert_depth_any(&inert))
+            {
+                continue;
+            }
             if (tok->type == TOK_TAG && strcmp(tok->name, "base") == 0 && !tok->isClosing)
             {
                 const char *href = NULL;
@@ -7741,9 +9929,15 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         }
         snprintf(out->baseUrl, sizeof(out->baseUrl), "%s", base);
 
+        memset(&inert, 0, sizeof(inert));
         for (int i = 0; i < tr.tokens.count; i++)
         {
             const Token *tok = &tr.tokens.items[i];
+            inert_depth_update(&inert, tok, scriptingOn);
+            if (inert_depth_any(&inert))
+            {
+                continue;
+            }
             if (tok->type == TOK_TAG && strcmp(tok->name, "meta") == 0 && !tok->isClosing)
             {
                 const char *httpEquiv = NULL;
@@ -7772,6 +9966,7 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         tokenizer_free_result(&tr);
         return -1;
     }
+    tDom = walk_now_ms();
 
     /* 4b. Inline <script> execution (jsbridge / muJS). DOC_SCRIPT_OFF is the
      * historical path: scripts stay skipped by the tokenizer and no engine is
@@ -7783,10 +9978,17 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
      * live tree); it is freed by document_free, never here. FULL behaves like
      * RUN_KEEP but also executes fetched external <script src> bodies stored
      * in out->extScripts (prefetched by html/jsext before parsing). */
-    out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
-    if (out->rawHtml)
+    if (opts && opts->adoptHtml)
     {
-        strcpy(out->rawHtml, htmlString);
+        out->rawHtml = (char *)htmlString; /* caller transfers ownership */
+    }
+    else
+    {
+        out->rawHtml = (char *)PLUTO_MALLOC(strlen(htmlString) + 1);
+        if (out->rawHtml)
+        {
+            strcpy(out->rawHtml, htmlString);
+        }
     }
     /* 4c. CSS engine (roadmap #2): extract <style> bodies from the raw HTML
      * (the tokenizer skips them, so the DOM never carries stylesheet text)
@@ -7824,12 +10026,35 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
             /* engine alloc failure: page renders without CSS (graceful) */
         }
     }
+    tCss = walk_now_ms();
     /* <noscript> policy follows the script policy (browser "scripting flag"):
      * any mode that runs an engine hides noscript fallback content; Off and
      * reader mode keep rendering it. document_rewalk reads the same flag so
      * JS-mutation re-renders stay consistent. */
     out->suppressNoscript = (scriptPolicy != DOC_SCRIPT_OFF) ? 1 : 0;
-    if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
+    /* Device engine admission (general, every site): the JS machines need
+     * roughly a megabyte of working heap. Under budget pressure the attach
+     * path can be handed refused allocations and fault (device receipt:
+     * w3.org's Cloudflare page left the tracked live near the budget, then
+     * lite.cnn's engine attach overflowed the task stack). Render the
+     * server HTML without JS instead of crashing. Simulator builds have no
+     * budget gate, so headroom is effectively unlimited there. */
+    if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml &&
+        pluto_mem_headroom_bytes() < 1536UL * 1024UL)
+    {
+        /* 1.5MB floor: the XS machine's INITIAL allocations (384KB chunk +
+         * heap/key tables + 128KB parser buffer + bridge state) can exceed
+         * a 900KB grant; the old gate let fxCreateMachine_nr start and
+         * fault mid-construction under the Reuters 1.24MB body (device
+         * crash 2026-11-13, heap 12.9MB, mmfar=0x5fff0). Refuse the engine
+         * cleanly and keep the server HTML instead. */
+        out->jsErrors = 1;
+        snprintf(out->jsLastError, sizeof(out->jsLastError),
+                 "engine skipped: low memory");
+        logger_log("[js] engine skipped: headroom %luKB < 1536KB",
+                   pluto_mem_headroom_bytes() / 1024);
+    }
+    else if (scriptPolicy != DOC_SCRIPT_OFF && out->rawHtml)
     {
         /* Promote the stack DomResult to the heap so it can outlive this
          * function (the bridge and click dispatch need the live tree). */
@@ -7886,93 +10111,72 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
         }
     }
 
-    Walker w;
-    memset(&w, 0, sizeof(w));
-    w.doc = out;
-    w.opts = opts;
-    w.formAction = NULL;
-    /* Phase 10: the walk's DomResult instance — the promoted heap copy
-     * when a bridge attached (so the completion map lands where the
-     * re-walks consult it), the stack result otherwise. */
-    w.walkDom = out->_dom ? (DomResult *)out->_dom : &dom;
-    w.formMethod = doc_arena_str_lower(&w, "get");
-    /* Browser parity: a page whose engine attached (or that the tokenizer
-     * treated as scripting) hides its <noscript> fallback content. DOC_SCRIPT_OFF
-     * keeps the historical render-it behavior (JavaScript setting Off — the
-     * warning is genuinely useful there). */
-    w.suppressNoscript = out->suppressNoscript;
-    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
-                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
-    int werr = sbFail;
-
-    /* formMethod default: "get" (reference state.formMethod = "get"). */
-    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
-    walk_set_target(out); /* Phase 7: :target fragment per walk */
-    if (!werr && walk_children(&w, dom.root) != 0)
+    tJs = walk_now_ms();
+    tWalk = walk_now_ms();
+    DocWalkState *st = walk_state_begin_fresh(
+        out, mode, opts, &dom, domKeptByBridge, &tr, tStart, tTok, tDom, tCss,
+        tJs, tWalk);
+    if (!st)
     {
-        werr = 1;
-    }
-    if (!werr)
-    {
-        walker_finish(&w);
-        werr = w.error;
-    }
-
-    /* Walker teardown (buffers + frames; arena kept on success). */
-    strbuf_free(&w.linkText);
-    strbuf_free(&w.preBuf);
-    strbuf_free(&w.textareaBuf);
-    strbuf_free(&w.mathBuf);
-    for (int i = 0; i < w.heapBufCount; i++)
-    {
-        if (w.heapBufs[i])
+        if (!domKeptByBridge)
         {
-            strbuf_free(w.heapBufs[i]);
-            PLUTO_FREE(w.heapBufs[i]);
+            dom_free_result(&dom);
         }
-    }
-    if (w.heapBufs)
-    {
-        PLUTO_FREE(w.heapBufs);
-    }
-    if (w.frames)
-    {
-        PLUTO_FREE(w.frames);
-    }
-    /* The heap DomResult is owned by out->_dom (freed via document_free);
-     * only the plain parse path frees the stack copy here. */
-    if (!domKeptByBridge)
-    {
-        dom_free_result(&dom);
-    }
-    tokenizer_free_result(&tr);
-
-    out->mode = mode;
-    out->isReaderMode = 0;
-
-    if (werr || !out->rawHtml)
-    {
-        /* The reference throws out of Document.parse (bare <li> etc); the
-         * caller gets no doc. Mirror with parseError + an emptied result. */
-        doc_free_walk_output(out);
-        out->parseError = 1;
-        /* arena still holds objects; free it now */
-        doc_arena_free_all(&w.arena);
-        return 0;
-    }
-
-    /* Keep the arena (blocks/links/strings live in it). */
-    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
-    if (!keep)
-    {
-        doc_free_walk_output(out);
-        doc_arena_free_all(&w.arena);
+        tokenizer_free_result(&tr);
         return -1;
     }
-    *keep = w.arena;
-    w.arena.head = NULL;
-    out->_arena = keep;
-    return 0;
+    int walkRc = walk_state_pump(st, budgetMs);
+    if (walkRc > 0)
+    {
+        /* Parked: the frame stack + arena + DOM live in the state; the
+         * caller (render task) yields and resumes next frame. */
+        out->_walkState = st;
+        return 1;
+    }
+    if (walkRc < 0)
+    {
+        walk_state_abort(st);
+        return -1;
+    }
+    return walk_state_finish(st);
+}
+
+int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
+                      const DocParseOpts *opts, DocScriptPolicy scriptPolicy,
+                      struct JsBridge **outBridge, DocParseResult *out)
+{
+    return document_parse_ex_budget(htmlString, baseUrl, mode, opts,
+                                    scriptPolicy, outBridge, out, 0);
+}
+
+int document_parse_ex_sliced(const char *htmlString, const char *baseUrl,
+                             int mode, const DocParseOpts *opts,
+                             DocScriptPolicy scriptPolicy, DocParseResult *out,
+                             unsigned long budgetMs)
+{
+    return document_parse_ex_budget(htmlString, baseUrl, mode, opts,
+                                    scriptPolicy, NULL, out, budgetMs);
+}
+
+int document_parse_resume(DocParseResult *doc, unsigned long budgetMs)
+{
+    if (!doc || !doc->_walkState)
+    {
+        return 0;
+    }
+    DocWalkState *st = (DocWalkState *)doc->_walkState;
+    int rc = walk_state_pump(st, budgetMs);
+    if (rc > 0)
+    {
+        return 1;
+    }
+    doc->_walkState = NULL;
+    if (rc < 0)
+    {
+        walk_state_abort(st);
+        return -1;
+    }
+    return walk_state_finish(st);
 }
 
 /* Re-run ONLY the element walker over a (possibly JS-mutated) live DOM.
@@ -7986,13 +10190,17 @@ int document_parse_ex(const char *htmlString, const char *baseUrl, int mode,
  * set in play. */
 int g_rewalkTestForceWalkError = 0;
 #endif
-int document_rewalk(DocParseResult *doc)
+int document_rewalk_sliced(DocParseResult *doc, unsigned long budgetMs)
 {
     if (!doc || !doc->_dom)
     {
         return -1;
     }
-    DomResult *dom = (DomResult *)doc->_dom;
+    if (doc->_walkState)
+    {
+        /* Resume a previously parked re-walk. */
+        return document_parse_resume(doc, budgetMs);
+    }
 
     /* Drop the previous walk output + its arena. Layout must not hold
      * borrowed strings across this call (browser clears it first). */
@@ -8006,90 +10214,46 @@ int document_rewalk(DocParseResult *doc)
     doc->parseError = 0;
     doc->blockCount = doc->blockCap = 0;
     doc->blocks = NULL;
+    /* R71: spanning decorations index the OLD block array; every re-walk
+     * rebuilds both from scratch. */
+    doc->decorCount = 0;
+    memset(doc->decor, 0, sizeof(doc->decor));
     /* Phase 10: the end-event queue reflects exactly the walk that is
      * about to run (per-(node,name) dedupe persists on the DOM). */
     doc->pendEndCount = 0;
 
-    Walker w;
-    memset(&w, 0, sizeof(w));
-    w.doc = doc;
-    w.opts = NULL;
-    w.walkDom = dom; /* Phase 10: the live heap DomResult */
-    w.formAction = NULL;
-    w.formMethod = doc_arena_str_lower(&w, "get");
-    w.suppressNoscript = doc->suppressNoscript; /* keep the parse policy */
-    int sbFail = strbuf_init(&w.linkText) || strbuf_init(&w.preBuf) ||
-                 strbuf_init(&w.textareaBuf) || strbuf_init(&w.mathBuf);
-    int werr = sbFail;
-    css_match_cache_bump(); /* fresh walk: prior match-mask entries are stale */
-    walk_set_target(doc); /* Phase 7: :target fragment per walk */
-    if (!werr && walk_children(&w, dom->root) != 0)
+    DocWalkState *st = walk_state_begin_rewalk(doc);
+    if (!st)
     {
-        werr = 1;
+        doc->parseError = 1;
+        return -1;
     }
-    if (!werr)
+    int rc = walk_state_pump(st, budgetMs);
+    if (rc > 0)
     {
-        walker_finish(&w);
-        werr = w.error;
+        doc->_walkState = st;
+        return 1;
     }
-
-    strbuf_free(&w.linkText);
-    strbuf_free(&w.preBuf);
-    strbuf_free(&w.textareaBuf);
-    strbuf_free(&w.mathBuf);
-    for (int i = 0; i < w.heapBufCount; i++)
+    if (rc < 0)
     {
-        if (w.heapBufs[i])
-        {
-            strbuf_free(w.heapBufs[i]);
-            PLUTO_FREE(w.heapBufs[i]);
-        }
+        walk_state_abort(st);
+        doc->parseError = 1;
+        return -1;
     }
-    if (w.heapBufs)
-    {
-        PLUTO_FREE(w.heapBufs);
-    }
-    if (w.frames)
-    {
-        PLUTO_FREE(w.frames);
-    }
-
 #if defined(PLUTO_REWALK_OOM_AUTOTEST)
     if (g_rewalkTestForceWalkError)
     {
         /* Test seam engagement point: the walk above may have built
          * partial blocks — exactly the production mid-refusal shape. */
-        werr = 1;
+        st->w.error = 1;
     }
 #endif
-    if (werr)
-    {
-        /* R59 (Wikipedia device crash, 2026-10-18): this branch used to
-         * return 0 with doc->blocks still holding the PARTIAL walk output
-         * whose strings die with the arena freed right below — the
-         * renderer then went on to LAYOUT over that half-freed state and
-         * break_lines dereferenced reused arena memory as a block's inline
-         * array (pc=break_lines+0x4e, mmfar=0x0C00, heap in a denied
-         * strait at 13.4MB on device). Free the partial HEAP walk output
-         * via doc_free_walk_output (the arrays own no arena data), free
-         * the arena, and REPORT the failure so render_step routes to the
-         * error screen instead of layout. */
-        doc_free_walk_output(doc);
-        doc->parseError = 1;
-        doc_arena_free_all(&w.arena);
-        return -1;
-    }
+    return walk_state_finish(st);
+}
 
-    DocArena *keep = (DocArena *)PLUTO_MALLOC(sizeof(DocArena));
-    if (!keep)
-    {
-        doc_arena_free_all(&w.arena);
-        return -1;
-    }
-    *keep = w.arena;
-    w.arena.head = NULL;
-    doc->_arena = keep;
-    return 0;
+int document_rewalk(DocParseResult *doc)
+{
+    return document_rewalk_sliced(doc, 0);
 }
 
 /* ── Phase 10: transition lane — transition-arm consult for a live node ───
@@ -8153,6 +10317,13 @@ void document_free(DocParseResult *doc)
     if (!doc)
     {
         return;
+    }
+    if (doc->_walkState)
+    {
+        /* A parked sliced walk (navigation/teardown mid-render): its
+         * frame stack, arena and partial output die here. */
+        walk_state_abort((DocWalkState *)doc->_walkState);
+        doc->_walkState = NULL;
     }
     doc_free_walk_output(doc);
     if (doc->rawHtml)

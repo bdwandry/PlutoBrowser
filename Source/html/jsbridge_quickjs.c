@@ -40,6 +40,14 @@
 #include "jsbridge.h"
 #include "jsbridge_internal.h"
 #include "jsbridge_bundler.h"
+#include <stdint.h>
+/* The Makefile defines JS_PTR64 for the 32-bit device target; quickjs.h
+ * defines it itself on 64-bit hosts. Undef only where the header will
+ * re-define it, so the device keeps the Makefile's forced portable
+ * JSValue representation. */
+#if INTPTR_MAX >= INT64_MAX
+#undef JS_PTR64
+#endif
 #include "quickjs.h"
 #include "../core/logger.h"
 #include "../util/strbuf.h"
@@ -309,6 +317,10 @@ static void qjs_take_exception_text(JsBridge *b, JSContext *ctx)
         owned = (msg != NULL);
     }
     logger_log("[js] qjs: exc-text cstring owned=%d", owned);
+    if (msg)
+    {
+        logger_log("[js] qjs: exc msg: %.200s", msg);
+    }
     if (!msg)
     {
         JSValue sec = JS_GetException(ctx);
@@ -1238,7 +1250,9 @@ static JSValue qjs_cl_item(JSContext *ctx, JSValueConst this_val, int argc,
     int idx = -1;
     if (!JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
     {
-        JS_ToInt32(ctx, &idx, argv[0]);
+        int32_t idx32 = -1;
+        JS_ToInt32(ctx, &idx32, argv[0]);
+        idx = (int)idx32;
     }
     const char *cls = (n && n->kind == DOM_ELEMENT) ? dom_get_attr(n, "class")
                                                     : NULL;
@@ -2094,7 +2108,9 @@ static JSValue qjs_timer_setup(JSContext *ctx, JsBridge *b, QjsState *st,
     int delay = 0;
     if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
     {
-        JS_ToInt32(ctx, &delay, argv[1]);
+        int32_t delay32 = 0;
+        JS_ToInt32(ctx, &delay32, argv[1]);
+        delay = (int)delay32;
     }
     if (delay < 0)
     {
@@ -2134,7 +2150,9 @@ static JSValue qjs_clear_common(JSContext *ctx, int argc, JSValueConst *argv)
     int id = 0;
     if (argc && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]))
     {
-        JS_ToInt32(ctx, &id, argv[0]);
+        int32_t id32 = 0;
+        JS_ToInt32(ctx, &id32, argv[0]);
+        id = (int)id32;
     }
     return JS_NewInt32(ctx, jsbridge_timer_clear(b, id));
 }
@@ -2484,6 +2502,36 @@ static void qjs_define_history(JSContext *ctx, JSValue glob)
     JS_SetPropertyStr(ctx, glob, "history", hist);
 }
 
+/* R66: minimal document.fonts.load() — the font-loader pattern
+ * (google.com's first inline script) calls .load(...).catch(...). Without
+ * this object the call throws inside QuickJS's exception path on device
+ * (host sim contained it, hardware hard-faulted). A resolved-looking
+ * thenable with no-op then/catch is the browser-compatible shape: font
+ * loading is not observable on a 1-bit device anyway. */
+static JSValue qjs_promise_noop(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    (void)argc;
+    (void)argv;
+    return JS_DupValue(ctx, this_val);
+}
+
+static JSValue qjs_fonts_load(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    JSValue p = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, p, "then",
+                      JS_NewCFunction(ctx, qjs_promise_noop, "then", 1));
+    JS_SetPropertyStr(ctx, p, "catch",
+                      JS_NewCFunction(ctx, qjs_promise_noop, "catch", 1));
+    JS_SetPropertyStr(ctx, p, "finally",
+                      JS_NewCFunction(ctx, qjs_promise_noop, "finally", 1));
+    return p;
+}
+
 static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
                            const char *baseUrl)
 {
@@ -2552,6 +2600,15 @@ static void define_globals(JSContext *ctx, QjsState *st, JsBridge *b,
      * INSIDE the library's own try/catch (swallowed, like a browser whose
      * stylesheet quota rejected the rule). Structural rendering proceeds. */
     JS_SetPropertyStr(ctx, doc, "styleSheets", JS_NewArray(ctx));
+    /* R66: FontFaceSet stub (see qjs_fonts_load). */
+    {
+        JSValue fonts = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, fonts, "load",
+                          JS_NewCFunction(ctx, qjs_fonts_load, "load", 2));
+        JS_SetPropertyStr(ctx, fonts, "ready",
+                          qjs_fonts_load(ctx, JS_UNDEFINED, 0, NULL));
+        JS_SetPropertyStr(ctx, doc, "fonts", fonts);
+    }
     /* R17: activeElement — real browsers return <body> when nothing has
      * focus; React's getActiveElement reads it before every text insertion. */
     {
@@ -2945,6 +3002,8 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
         }
         return;
     }
+    logger_log("[js] qjs: run_script %d len=%zu stack=%u limit=%u", index,
+               len, logger_stack_depth(), (unsigned)QJS_STACK_LIMIT);
     /* R18 first: if this is a bundler monolith, execute it as plan
      * segments. The gate below never sees the monolith (the C recursion
      * scanner is itself unprobed recursion — the SW4 crash mechanism — and
@@ -3104,9 +3163,13 @@ static void quickjs_run_script(JsBridge *b, const char *src, size_t len,
     memcpy(buf, prefix, plen);
     memcpy(buf + plen, src, len);
     buf[plen + len] = '\0';
+    logger_log("[js] qjs: compile begin (script %d, %zu bytes) stack=%u",
+               index, len, logger_stack_depth());
     JSValue compiled = JS_Eval(st->ctx, buf, plen + len, "[page]",
                                JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
     JFree(buf);
+    logger_log("[js] qjs: compile done (script %d) stack=%u", index,
+               logger_stack_depth());
     if (JS_IsException(compiled))
     {
         b->errs++;

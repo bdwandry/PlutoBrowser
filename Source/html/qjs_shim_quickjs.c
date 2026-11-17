@@ -34,4 +34,37 @@
 #define js_realloc pluto_qjs_realloc
 #define js_strdup pluto_qjs_strdup
 
+/* quickjs.h defines JS_PTR64 itself on 64-bit hosts; the Makefile forces it
+ * on the 32-bit device. Undef only where the header re-defines it. */
+#include <stdint.h>
+#if INTPTR_MAX >= INT64_MAX
+#undef JS_PTR64
+#endif
+
+/* newlib's <time.h> hides clock_gettime unless _POSIX_TIMERS is set, and the
+ * command-line -Dclock_gettime rename means the engine calls our stub under
+ * this name. Declare it with the POSIX signature (matching the host's own
+ * declaration too) so the call is never implicit. */
+#include <time.h>
+int pluto_qjs_clock_gettime(clockid_t clk, struct timespec *ts);
+
+/* Newlib has no malloc_usable_size. The default allocator (not the one this
+ * bridge installs) only uses it for accounting; upstream documents returning
+ * 0 as the fallback for platforms without the call. */
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__EMSCRIPTEN__) && \
+    !defined(__linux__) && !defined(__GLIBC__)
+#define malloc_usable_size(ptr) ((size_t)0)
+#endif
+
+/* The vendored engine is compiled with the project's -Wall set; these are
+ * diagnostics in stock QuickJS code, not in PlutoBrowser's adapter. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wformat"
+#pragma GCC diagnostic ignored "-Wdouble-promotion"
+#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
+#if !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wstack-usage="
+#endif
+#endif
+
 #include "../js/QuickJS/quickjs.c"

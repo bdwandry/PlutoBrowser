@@ -7,10 +7,18 @@
  * - The full state machine arrives in later phases.
  */
 #include <stdio.h>
+#include <string.h>
+#include <strings.h>
 #include "pd_api.h"
 
 #ifdef TARGET_SIMULATOR
 #include <stdlib.h>
+#endif
+
+#ifdef TARGET_PLAYDATE
+/* Device-only newlib guard (core/pluto_times_stub.c): the game-task
+ * environment pointer is invalid; clear it before date formatting. */
+void pluto_env_sanitize(void);
 #endif
 
 #include "core/logger.h"
@@ -56,6 +64,7 @@
 #include "html/document.h"
 #include "html/css.h" /* Phase 1.5: stylesheet-scan API + caps */
 #include "html/jsbridge.h"
+#include "html/webstorage.h"
 #include "html/jsbridge_internal.h" /* Forms-Phase 3: the shared validity layer */
 #include "html/jsext.h"
 #include "html/sdisco.h" /* the script-derived submission routes (no site data) */
@@ -69,6 +78,24 @@
 #include "util/strutil.h"
 
 static PlaydateAPI *pd = NULL;
+
+/* R66a stylesheet-stage budget. The simulator's TLS handshakes finish in
+ * well under a second; the device's take 4-8s (receipted against google.com).
+ * The original 8s bound cancelled Google's main stylesheet mid-handshake,
+ * which exposed the page's hidden AI-mode chrome (device vs simulator
+ * rendering divergence). The device gets enough room for one stalled connect
+ * attempt plus a retry; the simulator keeps its original bound. */
+#if defined(TARGET_PLAYDATE)
+/* Device TLS is the cost: wikipedia's two Vector 2022 sheets receipted at
+ * 20s + 9s on hardware (the old 30s bound expired exactly as the second
+ * sheet landed, so the page rendered with no CSS after a 30s wait). 60s
+ * covers the measured handshake + body time for a normal connection; the
+ * stage still yields every frame, so this is a load-time bound, never a
+ * watchdog risk. */
+#define PLUTO_CSS_EXT_BUDGET_MS 60000UL
+#else
+#define PLUTO_CSS_EXT_BUDGET_MS 8000UL
+#endif
 
 /* The Raphcal keyboard port reads this global (declared in keyboard.h). */
 PlaydateAPI *playdate = NULL;
@@ -175,10 +202,19 @@ static int progressNetCur = 0;
 static int progressNetTotal = 0;
 static int progressTotal = 0;
 static int isRendering = 0;
+/* Set when the current page response is Cloudflare's managed challenge.
+ * The response is not parsed; the browser shows a specific error page and
+ * the fieldtest harnesses report a distinct blocked result. */
+static int g_pageChallenge = 0;
 static int pendingNavUrlSet = 0;              /* Lua pendingNavUrl */
 static int pendingFlipUnload = 0;             /* settings flip: unload old page
                                                * before the deferred reload */
 static char pendingNavUrl[640] = "";
+/* Scripted-navigation Referer (location.assign/replace/href): the page
+ * that requested the navigation. Manual address-bar/bookmark navigations
+ * leave this empty (browser-true: no Referer). Consumed by navigate_to. */
+static char pendingNavReferer[640] = "";
+static int pendingNavRefererSet = 0;
 static int navigatingHistory = 0;             /* Lua navigatingHistory */
 static int mouseX = 200, mouseY = 100;        /* HTML-mode virtual cursor */
 #define MOUSE_SPEED 4                          /* Lua mouseSpeed */
@@ -300,7 +336,59 @@ static void details_keys_clear(void)
     {
         pluto_free(detailsKeys[i]);
     }
+    memset(detailsOpenState, 0, sizeof(detailsOpenState));
     detailsKeyCount = 0;
+}
+
+/* R71: ARIA disclosure widgets (aria-expanded + aria-controls), keyed
+ * "x1".."xN" by the walker. Same contract as the details map: the key list
+ * + positional open-state array ride document_parse as disclosureOpen[]. */
+static int disclosureOpenState[64];
+static int disclosureKeyCount = 0;
+static int g_lastDisclosureIdx = -1; /* render-error undo target */
+
+/* The walker numbers triggers x1..xN in document order and reads the
+ * override array by that position. "x2" therefore means slot 1, not "the
+ * first key the user happened to tap" — appending click-order slots made a
+ * role tap write slot 0 while the walker read slot 1, so the panel stayed
+ * closed. Keep the array dense through the highest ordinal seen. */
+static int disclosure_key_index(const char *dkey)
+{
+    if (!dkey || dkey[0] != 'x' || dkey[1] == '\0')
+    {
+        return -1;
+    }
+    int ordinal = 0;
+    const char *p = dkey + 1;
+    while (*p >= '0' && *p <= '9')
+    {
+        ordinal = ordinal * 10 + (*p - '0');
+        if (ordinal > 64)
+        {
+            return -1;
+        }
+        p++;
+    }
+    if (p == dkey + 1 || *p != '\0' || ordinal < 1)
+    {
+        return -1;
+    }
+    int idx = ordinal - 1;
+    if (idx >= disclosureKeyCount)
+    {
+        disclosureKeyCount = idx + 1;
+    }
+    return idx;
+}
+
+/* Toggle state is page-local. Without this reset, an x1 menu opened on the
+ * previous page stays in slot 0; opening any xN disclosure on the next page
+ * re-renders the menu open too. */
+static void disclosure_keys_clear(void)
+{
+    memset(disclosureOpenState, 0, sizeof(disclosureOpenState));
+    disclosureKeyCount = 0;
+    g_lastDisclosureIdx = -1;
 }
 
 /* Diagnostic counters exposed in logs. */
@@ -329,8 +417,9 @@ static void form_kb_will_hide(int okButtonPressed, void *ud);
 static void form_kb_text_changed(void *ud);
 static DomNode *form_node_ancestor(DomNode *n);
 /* Forms-Phase 4: the form API host hooks (registered at boot) + the
- * implicit-submission chain the keyboard's Enter commits ride. The
- * bridge rides the call so mid-parse scripts (a battery page running
+ * synthetic Enter-implicit-submission chain. The Playdate keyboard's
+ * OK is a text commit, not an Enter key, so it does not ride this chain.
+ * The bridge rides the call so mid-parse scripts (a battery page running
  * its inline form API calls before g_pageJs exists) still dispatch
  * through their own machine. */
 static int pluto_host_form_reset(JsBridge *b, void *formNode);
@@ -347,9 +436,10 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
 static void http_on_error(const char *message);
 static void nav_autoretry_cb(void *ud); /* R65: one-shot transport retry */
 static int g_navAutoRetried = 0;        /* R65: one retry per navigation */
+static int g_navAutoRetrying = 0;       /* the current navigate_to IS the retry */
+static unsigned int g_navAutoRetryTimer = 0; /* pending 2s retry timer id */
 static void update_system_menu(void);
 static void settings_on_change(void);
-static void view_menu_callback(void *ud);
 static void meta_refresh_cb(void *ud);
 #if defined(PLUTO_NAV_AUTOTEST)
 static void nav_autotest_tick(void);
@@ -412,10 +502,6 @@ static void settings_cleared_cookies(void)
     cookie_jar_clear();
 }
 
-/* Reader/HTML "View" options item (Lua: addOptionsMenuItem("View", ...)). */
-static PDMenuItem *g_viewMenuItem = NULL;
-static const char *k_viewOptions[2] = { "Reader", "HTML" };
-
 /* ── SW6 snapshot cache ────────────────────────────────────────────────── */
 /* SW6 fast-path telemetry: how many navigations rendered from a snapshot
  * (also consumed by the snap autotest for a deterministic PASS verdict). */
@@ -436,51 +522,62 @@ static int cache_off(void)
     return storage_setting_int("cacheWebsite") != 1;
 }
 
-static void view_menu_callback(void *ud)
+static void menu_reload(void *ud)
 {
     (void)ud;
-    if (!g_viewMenuItem || !pd)
+    if (!currentUrlObj || !currentUrlObj->normalized[0] ||
+        strncmp(currentUrlObj->scheme, "about", 5) == 0)
     {
         return;
     }
-    int v = pd->system->getMenuItemValue(g_viewMenuItem);
-    int newMode = (v == 0) ? MODE_READER : MODE_RAW_HTML;
-    if (newMode != currentBrowseMode)
-    {
-        currentBrowseMode = newMode;
-        storage_set_setting_int("mode", currentBrowseMode);
-        storage_save();
-        snapBypass = 1; /* hard reload: snapshot would be for the OLD mode */
-        if (currentDoc && currentDoc->rawHtml && currentDoc->rawHtml[0] &&
-            currentUrlObj)
-        {
-            render_body(currentDoc->rawHtml, currentUrlObj->normalized, 0);
-        }
-        else if (currentUrlObj)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
-                     currentUrlObj->normalized);
-        }
-    }
+    snapBypass = 1;
+    /* The website caches its GitHub payload in localStorage. A hard reload
+     * must mean "go to GitHub again", not replay that payload, so drop this
+     * origin's webstorage too. Normal navigation keeps it (the site's own
+     * cache is part of how the page is programmed). */
+    ws_clear(ws_local());
+    pluto_snap_invalidate(currentUrlObj->normalized,
+                          (int)currentBrowseMode);
+    pendingNavUrlSet = 1;
+    snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+             currentUrlObj->normalized);
+    logger_log("[nav] hard reload: %s (snapshot bypass)",
+               currentUrlObj->normalized);
 }
 
+/* Playdate allows at most THREE custom system-menu items. Every branch
+ * below adds exactly three, and Settings is always one of them. Earlier
+ * this function added six; the OS silently refused the overflow, so on a
+ * web page the visible menu was Home-Page / View / Reload and Settings
+ * disappeared. View mode lives in Settings > Browse Mode, so the web-page
+ * slots go to Home-Page / Reload / Settings. */
 static void update_system_menu(void)
 {
     pd->system->removeAllMenuItems();
-    g_viewMenuItem = NULL;
-    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
-    if (currentState == STATE_PAGE && currentUrlObj &&
-        strcmp(currentUrlObj->scheme, "about") != 0)
+
+    int webPage = currentUrlObj && currentUrlObj->normalized[0] &&
+                  strcmp(currentUrlObj->scheme, "about") != 0;
+
+    if (currentState == STATE_HOME)
     {
-        int initial = (currentBrowseMode == MODE_READER) ? 0 : 1;
-        g_viewMenuItem = pd->system->addOptionsMenuItem(
-            "View", k_viewOptions, 2, view_menu_callback, NULL);
-        pd->system->setMenuItemValue(g_viewMenuItem, initial);
+        /* Home-Page is redundant here; keep the two other actions plus the
+         * always-present Settings entry. */
+        pd->system->addMenuItem("Settings", menu_settings, NULL);
+        pd->system->addMenuItem("History", menu_history, NULL);
+        pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
+        return;
+    }
+
+    pd->system->addMenuItem("Home-Page", menu_home_page, NULL);
+    if (webPage)
+    {
+        pd->system->addMenuItem("Reload", menu_reload, NULL);
+    }
+    else
+    {
+        pd->system->addMenuItem("History", menu_history, NULL);
     }
     pd->system->addMenuItem("Settings", menu_settings, NULL);
-    pd->system->addMenuItem("History", menu_history, NULL);
-    pd->system->addMenuItem("Clear Cookies", menu_clear_cookies, NULL);
 }
 
 /* ── renderBody (port): parse + Layout.build as a cooperative task ───────── */
@@ -548,7 +645,7 @@ static void css_ext_on_spill(int status, SpillFile spill, size_t bodyLen,
 
 static void css_ext_on_error(const char *message)
 {
-    (void)message;
+    logger_log("[css-ext] error: %.120s", message ? message : "(null)");
     g_cssErr = 1;
     g_cssDone = 1;
 }
@@ -584,6 +681,7 @@ typedef struct RenderTask
     int cssUrlN;                         /* hrefs resolved & queued */
     int cssIdx;                          /* current fetch slot */
     size_t cssBytes;                     /* RAM envelope (PLUTO_CSS_EXT_TOTAL_MAX) */
+    unsigned long cssStartMs;            /* R66: wall-clock budget start */
     char *cssUrls[PLUTO_CSS_EXT_MAX];    /* resolved, still owned here */
     char *cssBody[PLUTO_CSS_EXT_MAX];    /* captured bodies */
     size_t cssLen[PLUTO_CSS_EXT_MAX];
@@ -594,6 +692,16 @@ typedef struct RenderTask
  * every teardown path closes it BEFORE document_free frees the doc (and
  * the live DOM the engine points into). */
 static JsBridge *g_pageJs = NULL;
+
+/* The render task currently owned by tasks.c. tasks_cancel_all() (every
+ * navigation) drops a task WITHOUT calling its onError, so the task's
+ * body/doc/CSS/prefetch state — and, on a parse-in-progress, a whole
+ * half-built DOM + engine — used to leak into the next page. On device
+ * that leak became a wild free/PC at the next navigation (receipted:
+ * wikipedia timeout -> next-site jump, PC=0x69646570 = "pedi" from the
+ * URL). navigate_to now aborts this task through the SAME cleanup path
+ * render_error uses before cancelling the scheduler. */
+static RenderTask *g_activeRenderTask = NULL;
 
 /* Close the old page's bridge + doc, then adopt the new one. Callers must
  * already hold the new doc in rt->doc. */
@@ -643,7 +751,7 @@ static void page_swap_doc(RenderTask *rt)
             else
             {
                 unsigned long now = 0;
-                uint32_t ms = 0;
+                unsigned int ms = 0;
                 now = pd->system->getSecondsSinceEpoch(&ms);
                 pluto_snap_save(currentDoc, currentUrlObj->normalized,
                                 (int)currentBrowseMode, now);
@@ -718,7 +826,7 @@ static void page_swap_doc(RenderTask *rt)
         else
         {
             unsigned long now = 0;
-            uint32_t ms = 0;
+            unsigned int ms = 0;
             now = pd->system->getSecondsSinceEpoch(&ms);
             pluto_snap_save(currentDoc, currentUrlObj->normalized,
                             (int)currentBrowseMode, now);
@@ -824,6 +932,11 @@ static void js_timers_update(void)
      * this frame by http_update; completions it settled are pending here). */
     int xhrMutations = 0;
     (void)jsbridge_xhr_pump(g_pageJs, &xhrMutations);
+    /* Runtime <script src> lane: a page-inserted classic script is fetched
+     * (idle-gated on the shared HTTP client) and run in the page engine,
+     * then load/error fires on the element. Static HTML scripts still ride
+     * jsext/scriptQueue. */
+    jsbridge_dyn_scripts_pump(g_pageJs);
     /* API-P10: the async module lane — deliveries (already settled this
      * frame by http_update) drain through the standing module bracket,
      * the transport head starts the next wire fetch while the client is
@@ -841,6 +954,30 @@ static void js_timers_update(void)
     if (jsbridge_take_dom_dirty(g_pageJs))
     {
         xhrMutations = 1;
+    }
+    /* Scripted navigation (location.assign/replace/href): the bridge
+     * records the resolved URL during the pump above; route it through
+     * the SAME pendingNavUrl path as a real link/tap. The actual teardown
+     * runs at the top of the next frame, after this engine bracket has
+     * returned (never inside a live JS callback). */
+    {
+        char scriptedNav[640];
+        if (jsbridge_take_nav_request(g_pageJs, scriptedNav,
+                                      sizeof(scriptedNav)))
+        {
+            pendingNavUrlSet = 1;
+            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", scriptedNav);
+            /* Browser-true Referer: a scripted location change is
+             * referred by the document that requested it. */
+            snprintf(pendingNavReferer, sizeof(pendingNavReferer), "%s",
+                     (currentDoc && currentDoc->baseUrl[0])
+                         ? currentDoc->baseUrl
+                         : (currentUrlObj ? currentUrlObj->normalized : ""));
+            pendingNavRefererSet = 1;
+            logger_log("[js] scripted navigation queued: %s (referer %s)",
+                       scriptedNav,
+                       pendingNavReferer[0] ? pendingNavReferer : "(none)");
+        }
     }
     if (mutations || xhrMutations)
     {
@@ -920,7 +1057,7 @@ static void doc_dump_timer_lines(void)
 }
 static void js_timers_autotest_tick(void)
 {
-    if (g_timersTestPhase == 3 || isRendering)
+    if (g_timersTestPhase == 3 || isRendering || !currentDoc)
     {
         return;
     }
@@ -3280,9 +3417,10 @@ static void formval_autotest_tick(void)
  *   phase 5: form.reset() (the host hook) → the typed value returns
  *            to "" (block + value attribute + focused echo restored,
  *            no events);
- *   phase 6: retype via the OK-commit lane (form_kb_ok_commit — the
- *            exact did_hide journey) → the Enter chain rides the
- *            default submit button (click → gate → submit → wire);
+ *   phase 6: retype via the synthetic Enter-key lane (form_kb_ok_commit);
+ *            this is NOT the keyboard's OK action (OK only commits) → the
+ *            Enter chain rides the default submit button (click → gate
+ *            → submit → wire);
  *   phase 7: the navigation landed on about:formprobe?user=EnterValid
  *            (&age= — Forms-Phase 6 makes the query the browser-true
  *            form data set; the old legacy walk skipped the empty
@@ -3535,7 +3673,7 @@ static void forment_autotest_tick(void)
             g_formentPhase = 9;
             return;
         }
-        logger_log("[forment-autotest] OK-commit → implicit Enter chain");
+        logger_log("[forment-autotest] synthetic Enter-key lane → implicit submit");
         form_key_snapshot(user);
         form_kb_ok_commit("EnterValid");
         g_formentFrames = 0;
@@ -3548,8 +3686,8 @@ static void forment_autotest_tick(void)
             strncmp(currentDoc->baseUrl, "about:formprobe?", 16) == 0 &&
             strstr(currentDoc->baseUrl, "user=EnterValid"))
         {
-            logger_log("[forment-autotest] PASS: Enter rode the default "
-                       "button through the full chain (url=%s)",
+            logger_log("[forment-autotest] PASS: synthetic Enter rode the "
+                       "default button through the full chain (url=%s)",
                        currentDoc->baseUrl);
             g_formentPhase = 9;
             return;
@@ -3578,7 +3716,13 @@ static void forment_autotest_tick(void)
  * Never defined for device builds. */
 #define FIELDTEST_MAX_SITES 24
 #define FIELDTEST_EXPECTED_SITES 20 /* resume only if the list matches */
-#define FIELDTEST_FRAMES_PER_SITE 450 /* 15s @30fps */
+#define FIELDTEST_FRAMES_PER_SITE 1500 /* 30s @50fps — the old 450 was
+                                        * 9s at the simulator's real 50fps
+                                        * (15s was assumed at 30fps), which
+                                        * cut heavy pages (daringfireball,
+                                        * bbc) mid-load. The device harness
+                                        * uses a wall-clock liveness bound;
+                                        * 30s matches its normal case. */
 static char ftUrl[FIELDTEST_MAX_SITES][512];
 static int ftEngine[FIELDTEST_MAX_SITES];
 static char ftCrit[FIELDTEST_MAX_SITES][128];
@@ -3588,6 +3732,27 @@ static int ftIndex = -1;
 static unsigned ftFrames = 0;
 static int ftPhase = 0; /* 0=boot-wait, 1=running, 2=done */
 static int ftPass = 0, ftFail = 0;
+/* Seam hygiene: the matrix forces a per-site engine (and Full JS) into the
+ * SAVED settings. A run that ended on engine 0 (muJS) left every later
+ * launch unable to compile modern page scripts — bryanwandrych.com/projects
+ * sat on its "Loading projects…" status because site.js never ran. Remember
+ * the user's values when the matrix starts and put them back when it ends. */
+static int ftSavedJsEngine = -1;
+static int ftSavedJsEnabled = -1;
+static void fieldtest_restore_settings(void)
+{
+    if (ftSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", ftSavedJsEngine);
+    storage_set_setting_int("jsEnabled", ftSavedJsEnabled);
+    jsbridge_set_engine(ftSavedJsEngine);
+    storage_save();
+    logger_log("[fieldtest] restored saved jsEngine=%d jsEnabled=%d",
+               ftSavedJsEngine, ftSavedJsEnabled);
+    ftSavedJsEngine = -1;
+}
 /* Checkpoint file: macOS's AppKit automatic termination can kill the sim
  * mid-matrix (long idle stretches); state persists so a supervisor relaunch
  * RESUMES instead of restarting - the run stays one logical session. */
@@ -3660,7 +3825,35 @@ static int fieldtest_text_hit(const char *text, const char *needle)
     char hay[256];
     snprintf(hay, sizeof(hay), "%s", text);
     fieldtest_lcase(hay);
-    return strstr(hay, needle) != NULL;
+    /* R68: criterion may list alternatives separated by '|' (dynamic pages
+     * serve different variant text; ANY listed phrase proves the render).
+     * Trim spaces around each alternative; empty alternatives are ignored. */
+    char crit[128];
+    snprintf(crit, sizeof(crit), "%s", needle);
+    char *p = crit;
+    while (p && *p)
+    {
+        char *bar = strchr(p, '|');
+        if (bar)
+        {
+            *bar = '\0';
+        }
+        while (*p == ' ' || *p == '\t')
+        {
+            p++;
+        }
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+        {
+            p[--n] = '\0';
+        }
+        if (*p && strstr(hay, p))
+        {
+            return 1;
+        }
+        p = bar ? bar + 1 : NULL;
+    }
+    return 0;
 }
 static int fieldtest_dom_contains(const char *needle)
 {
@@ -3774,7 +3967,7 @@ static void fieldtest_load_list(void)
                 sscanf(bar + 1, " %127[^\r\n]", crit);
             }
             snprintf(ftUrl[ftCount], sizeof(ftUrl[0]), "%s", url);
-            ftEngine[ftCount] = (eng >= 0 && eng <= 3) ? eng : 0; /* 3 = XS */
+            ftEngine[ftCount] = (eng >= 0 && eng <= 4) ? eng : 0; /* 4 = XS-NR (default) */
             snprintf(ftCrit[ftCount], sizeof(ftCrit[0]), "%s", crit);
             ftCount++;
         }
@@ -3822,6 +4015,14 @@ static void fieldtest_dump_page(void)
 }
 static void fieldtest_score_page(void)
 {
+    if (g_pageChallenge)
+    {
+        logger_log("[fieldtest] RESULT: FAIL (bot-challenge) site=%s",
+                   ftUrl[ftIndex]);
+        fieldtest_hist_log("FAIL", ftUrl[ftIndex]);
+        ftFail++;
+        return;
+    }
     if (ftCrit[ftIndex][0])
     {
         char needle[128];
@@ -3895,6 +4096,11 @@ static void fieldtest_tick(void)
         {
             return;
         }
+        if (ftSavedJsEngine < 0)
+        {
+            ftSavedJsEngine = storage_setting_int("jsEngine");
+            ftSavedJsEnabled = storage_setting_int("jsEnabled");
+        }
         storage_set_setting_int("jsEnabled", 2); /* Full: external scripts */
         if (ftIndex < 0)
         {
@@ -3914,7 +4120,8 @@ static void fieldtest_tick(void)
     /* phase 1: spend FIELDTEST_FRAMES_PER_SITE on each site */
     if (ftFrames >= FIELDTEST_FRAMES_PER_SITE)
     {
-        if (currentState == STATE_ERROR && !ftRetried[ftIndex])
+        if (currentState == STATE_ERROR && !ftRetried[ftIndex] &&
+            !g_pageChallenge)
         {
             /* transient sim network flake (-16): one retry per site */
             ftRetried[ftIndex] = 1;
@@ -3925,6 +4132,37 @@ static void fieldtest_tick(void)
         logger_log("[fieldtest] --- snapshot %s", ftUrl[ftIndex]);
         fieldtest_dump_page();
         fieldtest_score_page();
+#if defined(PLUTO_MENU_AUTOTEST)
+        /* Simulator-only menu verification: drive the same disclosure key a
+         * real tap uses, then hold the page so the screenshot shows the open
+         * dropdown. Never defined for device builds. */
+        if (currentDoc && currentState == STATE_PAGE)
+        {
+            /* Open the first ordinary disclosure, not the app-bar menu.
+             * On /work the nav toggle is x1 and the first role is x2; the
+             * test must exercise the role card the report is about. */
+            const char *key = NULL;
+            for (int bi = 0; bi < currentDoc->blockCount; bi++)
+            {
+                if (currentDoc->blocks[bi]->toggleKey &&
+                    !currentDoc->blocks[bi]->menuButton)
+                {
+                    key = currentDoc->blocks[bi]->toggleKey;
+                    break;
+                }
+            }
+            if (key)
+            {
+                logger_log("[menu-autotest] opening %s", key);
+                toggle_details(key);
+                ftPhase = 2;
+                return;
+            }
+            logger_log("[menu-autotest] no role disclosure found");
+        }
+        logger_log("[menu-autotest] skipped state=%d doc=%d", currentState,
+                   currentDoc ? 1 : 0);
+#endif
         ftIndex++;
         if (ftIndex >= ftCount)
         {
@@ -3932,6 +4170,7 @@ static void fieldtest_tick(void)
                        "matrix %d/%d",
                        ftCount, ftPass, ftFail, ftPass, ftCount);
             fieldtest_state_clear();
+            fieldtest_restore_settings();
             ftPhase = 2;
             return;
         }
@@ -3940,6 +4179,463 @@ static void fieldtest_tick(void)
     }
 }
 #endif /* PLUTO_FIELDTEST_AUTOTEST */
+
+#if defined(PLUTO_DEV_FIELDTEST)
+/* ── DEVICE 20-SITE MATRIX (PLUTO_DEV_FIELDTEST) ────────────────────────────
+ * The hardware twin of the simulator's SW0 fieldtest seam. Runs the SAME 20
+ * sites in ONE browser session, in order, with Full JS. The device is
+ * autonomous (no keyboard): it navigates, waits for the page to settle,
+ * scores the rendered DOM against the site's criterion, and appends a
+ * resumable result line to the Data dir.
+ *
+ * Crash resilience: `ftdev_next.txt` is written with the NEXT index BEFORE
+ * each navigation. A watchdog/crash therefore resumes at the next site on
+ * the following boot instead of replaying the one that died; the missing
+ * verdict line names the crash site. `ftdev_current.txt` names the site
+ * that was in flight at the moment of death.
+ *
+ * Controls (all optional, plain text in the app Data dir):
+ *   ftdev_next.txt   first site number (1-based; absent = 1)
+ *   ftdev_end.txt    last site number, inclusive (absent = 20)
+ *   ftdev_engine.txt 0 muJS / 1 Duktape / 2 QuickJS / 3 XS / 4 XS NR
+ *                     (absent = 4, the engine the device matrix receipts
+ *                     were taken on)
+ *
+ * NEVER compiled into a release build: the clean-release contract is
+ * `make device` with no DEVICEDEFS, and this guard is absent there. */
+#define FTDEV_MAX_SITES 20
+typedef struct
+{
+    const char *url;
+    const char *crit;
+} FtDevSite;
+static const FtDevSite g_ftdevSites[FTDEV_MAX_SITES] = {
+    {"https://lite.duckduckgo.com/lite/", "duckduckgo"},
+    {"https://html.duckduckgo.com/html/?q=playdate", "playdate"},
+    {"https://text.npr.org/", "npr"},
+    {"https://www.reuters.com/", "reuters"},
+    {"https://en.wikipedia.org/wiki/Playdate_(console)", "playdate"},
+    {"https://en.wikipedia.org/wiki/Special:Random", "wikipedia"},
+    {"https://news.ycombinator.com/", "hacker news"},
+    {"https://lobste.rs/", "lobsters"},
+    {"https://www.bing.com/search?q=playdate", "results|any time"},
+    {"https://search.marginalia.nu/search?query=playdate", "marginalia"},
+    {"https://example.com/", "documentation examples"},
+    {"https://motherfuckingwebsite.com/", "motherfucking website"},
+    {"https://bryanwandrych.com/", "bryan"},
+    {"https://daringfireball.net/", "daring fireball"},
+    {"https://old.reddit.com/", "reddit"},
+    {"https://textboard.org/", "textboard"},
+    {"https://www.gutenberg.org/browse/scores/top", "gutenberg"},
+    {"https://www.w3.org/", "w3c"},
+    {"https://lite.cnn.com/", "cnn"},
+    {"https://www.bbc.com/news", "live|uk"},
+};
+static int g_ftdevPhase = 0; /* 0 boot wait, 1 running, 2 done */
+static unsigned g_ftdevFrames = 0;
+static int g_ftdevIndex = 0;
+static int g_ftdevEnd = FTDEV_MAX_SITES;
+static int g_ftdevEngine = 4;
+/* Same seam hygiene as the simulator matrix: the device run writes its
+ * engine + Full JS into the saved settings and must put the user's values
+ * back when the run completes. */
+static int g_ftdevSavedJsEngine = -1;
+static int g_ftdevSavedJsEnabled = -1;
+static void ftdev_restore_settings(void)
+{
+    if (g_ftdevSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_ftdevSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_ftdevSavedJsEnabled);
+    jsbridge_set_engine(g_ftdevSavedJsEngine);
+    storage_save();
+    logger_log("[ftdev] restored saved jsEngine=%d jsEnabled=%d",
+               g_ftdevSavedJsEngine, g_ftdevSavedJsEnabled);
+    g_ftdevSavedJsEngine = -1;
+}
+static int g_ftdevSiteFrames = 0;
+static int g_ftdevRetried = 0;
+static int g_ftdevSawPage = 0;
+static int g_ftdevSettleFrames = 0;
+static int g_ftdevPass = 0;
+static int g_ftdevFail = 0;
+
+static int ftdev_read_int(const char *name, int def)
+{
+    SDFile *f = pd->file->open(name, kFileReadData);
+    if (!f)
+    {
+        return def;
+    }
+    char buf[32];
+    int n = pd->file->read(f, buf, sizeof(buf) - 1);
+    pd->file->close(f);
+    if (n <= 0)
+    {
+        return def;
+    }
+    buf[n] = '\0';
+    return atoi(buf);
+}
+
+static void ftdev_write_text(const char *name, const char *text, int append)
+{
+    SDFile *f = pd->file->open(name, append ? kFileAppend : kFileWrite);
+    if (!f)
+    {
+        logger_log("[ftdev] write open failed: %s", name);
+        return;
+    }
+    pd->file->write(f, text, (unsigned int)strlen(text));
+    pd->file->close(f);
+}
+
+static void ftdev_lcase(char *s)
+{
+    for (; *s; s++)
+    {
+        if (*s >= 'A' && *s <= 'Z')
+        {
+            *s += 32;
+        }
+    }
+}
+
+static int ftdev_text_hit(const char *text, const char *needle)
+{
+    char hay[256];
+    snprintf(hay, sizeof(hay), "%s", text);
+    ftdev_lcase(hay);
+    /* R68: '|'-separated alternatives (same contract as the simulator
+     * harness; dynamic pages serve variant text, ANY phrase proves render). */
+    char crit[128];
+    snprintf(crit, sizeof(crit), "%s", needle);
+    char *p = crit;
+    while (p && *p)
+    {
+        char *bar = strchr(p, '|');
+        if (bar)
+        {
+            *bar = '\0';
+        }
+        while (*p == ' ' || *p == '\t')
+        {
+            p++;
+        }
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+        {
+            p[--n] = '\0';
+        }
+        if (*p && strstr(hay, p))
+        {
+            return 1;
+        }
+        p = bar ? bar + 1 : NULL;
+    }
+    return 0;
+}
+
+static int ftdev_dom_contains(const char *needle)
+{
+    if (!currentDoc)
+    {
+        return 0;
+    }
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *blk = currentDoc->blocks[i];
+        if (!blk)
+        {
+            continue;
+        }
+        if (blk->inlines)
+        {
+            for (int j = 0; j < blk->inlineCount; j++)
+            {
+                const DocInline *in = blk->inlines[j];
+                if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                    in->text[0] && ftdev_text_hit(in->text, needle))
+                {
+                    return 1;
+                }
+            }
+        }
+        if (blk->type == DOC_BLOCK_TABLE && blk->table)
+        {
+            const DocTable *t = blk->table;
+            for (int r = 0; r < t->rowCount; r++)
+            {
+                const DocRow *row = t->rows[r];
+                if (!row)
+                {
+                    continue;
+                }
+                for (int c = 0; c < row->cellCount; c++)
+                {
+                    const DocCell *cell = row->cells[c];
+                    if (!cell)
+                    {
+                        continue;
+                    }
+                    for (int k = 0; k < cell->inlineCount; k++)
+                    {
+                        const DocInline *in = cell->inlines[k];
+                        if (in && in->type == DOC_INLINE_TEXT && in->text &&
+                            in->text[0] && ftdev_text_hit(in->text, needle))
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static void ftdev_advance(const char *verdict, const char *why)
+{
+    char line[512];
+    int blocks = currentDoc ? currentDoc->blockCount : 0;
+    snprintf(line, sizeof(line), "%s\t%d\t%d\t%s\t%s\n", verdict,
+             g_ftdevIndex + 1, blocks,
+             g_ftdevSites[g_ftdevIndex].url, why ? why : "");
+    ftdev_write_text("ftdev_results.txt", line, 1);
+    logger_log("[ftdev] RESULT: %s site=%d/%d blocks=%d why=%s url=%s",
+               verdict, g_ftdevIndex + 1, FTDEV_MAX_SITES, blocks,
+               why ? why : "", g_ftdevSites[g_ftdevIndex].url);
+    /* R68: per-site DEVICE RAM receipt (pluto_mem funnel; peak reset before
+     * this site's navigation). Device-only seam; never in a clean release. */
+    logger_log("[ftdev] MEM site=%d live=%luKB peak=%luKB bigAlloc=%luKB "
+               "refusals=%lu",
+               g_ftdevIndex + 1, pluto_mem_live() >> 10,
+               pluto_mem_peak() >> 10, pluto_mem_peak_alloc() >> 10,
+               pluto_mem_refusals());
+    if (strcmp(verdict, "PASS") == 0)
+    {
+        g_ftdevPass++;
+    }
+    else
+    {
+        g_ftdevFail++;
+    }
+    g_ftdevIndex++;
+    if (g_ftdevIndex >= g_ftdevEnd || g_ftdevIndex >= FTDEV_MAX_SITES)
+    {
+        snprintf(line, sizeof(line),
+                 "DONE\tpass=%d\tfail=%d\tlast=%d\n", g_ftdevPass, g_ftdevFail,
+                 g_ftdevIndex);
+        ftdev_write_text("ftdev_results.txt", line, 1);
+        logger_log("[ftdev] done: PASS %d / FAIL %d (through site %d)",
+                   g_ftdevPass, g_ftdevFail, g_ftdevIndex);
+        ftdev_restore_settings();
+        g_ftdevPhase = 2;
+        return;
+    }
+    g_ftdevSiteFrames = 0;
+    g_ftdevRetried = 0;
+    g_ftdevSawPage = 0;
+    g_ftdevSettleFrames = 0;
+    {
+        char nbuf[24];
+        snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+        ftdev_write_text("ftdev_next.txt", nbuf, 0);
+        snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+        ftdev_write_text("ftdev_current.txt", nbuf, 0);
+    }
+    logger_log("[ftdev] === site %d/%d engine=%d %s | %s",
+               g_ftdevIndex + 1, FTDEV_MAX_SITES, g_ftdevEngine,
+               g_ftdevSites[g_ftdevIndex].url,
+               g_ftdevSites[g_ftdevIndex].crit);
+    {
+        char startLine[512];
+        snprintf(startLine, sizeof(startLine), "START\t%d\t%s\n",
+                 g_ftdevIndex + 1, g_ftdevSites[g_ftdevIndex].url);
+        ftdev_write_text("ftdev_results.txt", startLine, 1);
+    }
+    pluto_mem_peak_reset(); /* R68: per-site RAM peak starts here */
+    navigate_to(g_ftdevSites[g_ftdevIndex].url);
+}
+
+static void ftdev_tick(void)
+{
+    if (g_ftdevPhase == 2)
+    {
+        return;
+    }
+    g_ftdevFrames++;
+    if (g_ftdevPhase == 0)
+    {
+        if (g_ftdevFrames < 30)
+        {
+            return;
+        }
+        /* The radio associates a few seconds after boot. Starting the first
+         * site before it does burned the first two 120s timeouts on the last
+         * hardware run (wifi level 0). Wait up to 18s, then proceed anyway
+         * (a genuinely offline device should still record the failures). */
+        if (netmon_level() == 0 && g_ftdevFrames < 900)
+        {
+            if ((g_ftdevFrames % 60) == 0)
+            {
+                logger_log("[ftdev] waiting for wifi (level 0, frame %u)",
+                           g_ftdevFrames);
+            }
+            return;
+        }
+        /* ftdev_next.txt is 1-BASED (the site number to run next), matching
+         * the receipted device protocol: "17" means site 17. Internally the
+         * index is 0-based. */
+        g_ftdevIndex = ftdev_read_int("ftdev_next.txt", 1) - 1;
+        g_ftdevEnd = ftdev_read_int("ftdev_end.txt", FTDEV_MAX_SITES);
+        g_ftdevEngine = ftdev_read_int("ftdev_engine.txt", 4);
+        if (g_ftdevIndex < 0)
+        {
+            g_ftdevIndex = 0;
+        }
+        if (g_ftdevEnd > FTDEV_MAX_SITES)
+        {
+            g_ftdevEnd = FTDEV_MAX_SITES;
+        }
+        if (g_ftdevEngine < 0 || g_ftdevEngine > 4)
+        {
+            g_ftdevEngine = 4;
+        }
+        if (g_ftdevIndex >= g_ftdevEnd || g_ftdevIndex >= FTDEV_MAX_SITES)
+        {
+            logger_log("[ftdev] nothing to run (next=%d end=%d)",
+                       g_ftdevIndex, g_ftdevEnd);
+            g_ftdevPhase = 2;
+            return;
+        }
+        if (g_ftdevSavedJsEngine < 0)
+        {
+            g_ftdevSavedJsEngine = storage_setting_int("jsEngine");
+            g_ftdevSavedJsEnabled = storage_setting_int("jsEnabled");
+        }
+        storage_set_setting_int("jsEnabled", 2); /* Full JS */
+        storage_set_setting_int("jsEngine", g_ftdevEngine);
+        jsbridge_set_engine(g_ftdevEngine);
+        snapBypass = 1; /* measure the live pipeline, never a snapshot */
+        logger_log("[ftdev] start (sites %d-%d, Full JS, engine=%d)",
+                   g_ftdevIndex + 1, g_ftdevEnd, g_ftdevEngine);
+        {
+            char nbuf[24];
+            /* The NEXT site number (1-based) is written BEFORE this site
+             * runs: a crash skips the dead site on the next boot and the
+             * missing verdict line names it. */
+            snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 2);
+            ftdev_write_text("ftdev_next.txt", nbuf, 0);
+            snprintf(nbuf, sizeof(nbuf), "%d", g_ftdevIndex + 1);
+            ftdev_write_text("ftdev_current.txt", nbuf, 0);
+            snprintf(nbuf, sizeof(nbuf),
+                     "START\t%d\t%s\n", g_ftdevIndex + 1,
+                     g_ftdevSites[g_ftdevIndex].url);
+            ftdev_write_text("ftdev_results.txt", nbuf, 1);
+        }
+        g_ftdevPhase = 1;
+        logger_log("[ftdev] === site %d/%d engine=%d %s | %s",
+                   g_ftdevIndex + 1, FTDEV_MAX_SITES, g_ftdevEngine,
+                   g_ftdevSites[g_ftdevIndex].url,
+                   g_ftdevSites[g_ftdevIndex].crit);
+        pluto_mem_peak_reset(); /* R68: per-site RAM peak starts here */
+        navigate_to(g_ftdevSites[g_ftdevIndex].url);
+        return;
+    }
+
+    /* phase 1: wait for the page, then settle before scoring. Device
+     * pages need longer than the simulator: TLS + CSS + script prefetch
+     * + JS compile. 30s hard timeout per site; 3s settle after the first
+     * PAGE state so late images/scripts land. */
+    g_ftdevSiteFrames++;
+    if (g_pageChallenge)
+    {
+        ftdev_advance("FAIL", "bot-challenge");
+        return;
+    }
+    if (currentState == STATE_PAGE)
+    {
+        g_ftdevSawPage = 1;
+    }
+    if (currentState == STATE_ERROR && !g_ftdevRetried &&
+        !g_pageChallenge && g_ftdevSiteFrames < 300)
+    {
+        g_ftdevRetried = 1;
+        logger_log("[ftdev] retry (error page) site=%d %s", g_ftdevIndex + 1,
+                   g_ftdevSites[g_ftdevIndex].url);
+        navigate_to(g_ftdevSites[g_ftdevIndex].url);
+        return;
+    }
+    if (currentState == STATE_ERROR && g_ftdevRetried &&
+        g_ftdevSiteFrames > 400) /* one manual + one transport retry had
+                                  * their chance; don't burn the 120s timeout
+                                  * on a host that cannot resolve */
+    {
+        ftdev_advance("FAIL", "error-page");
+        return;
+    }
+    /* Settle = STATE_PAGE and NO render task running, continuously for 3s.
+     * A JS startup script can re-walk a heavy page (wikipedia's loader),
+     * which flips the state back to LOADING — scoring the fresh prefix
+     * would miss the article body. The counter resets whenever the page
+     * is rendering again, so scoring always sees the final walk. */
+    if (currentState == STATE_PAGE && !isRendering)
+    {
+        g_ftdevSettleFrames++;
+    }
+    else
+    {
+        g_ftdevSettleFrames = 0;
+    }
+    if (g_ftdevSettleFrames >= 150) /* 3s @ 50fps */
+    {
+        char needle[128];
+        snprintf(needle, sizeof(needle), "%s",
+                 g_ftdevSites[g_ftdevIndex].crit);
+        ftdev_lcase(needle);
+        if (ftdev_dom_contains(needle))
+        {
+            ftdev_advance("PASS", "criterion");
+        }
+        else if (currentDoc && currentDoc->blockCount > 0)
+        {
+            ftdev_advance("FAIL", "missing-criterion");
+        }
+        else
+        {
+            ftdev_advance("FAIL", "empty-render");
+        }
+        return;
+    }
+    /* 180s @ 50fps: device TLS + CSS + script prefetch + the sliced walk
+     * on a heavy article legitimately takes a minute before the final
+     * render, and the radio can drop mid-page (err=-21) while the transport
+     * auto-retry recovers. The timeout is a liveness bound, not a
+     * performance score. */
+    if (g_ftdevSiteFrames >= 9000)
+    {
+        /* R68: one retry on TIMEOUT, same as the existing error-page retry.
+         * A transient WiFi/DNS stall (the receipted NPR class: no page, no
+         * error event, just a dead 180s window) should not cost the site a
+         * permanent FAIL when the same build passes it individually. */
+        if (!g_ftdevRetried)
+        {
+            g_ftdevRetried = 1;
+            g_ftdevSiteFrames = 0;
+            g_ftdevSettleFrames = 0;
+            g_ftdevSawPage = 0;
+            logger_log("[ftdev] retry (timeout) site=%d %s", g_ftdevIndex + 1,
+                       g_ftdevSites[g_ftdevIndex].url);
+            navigate_to(g_ftdevSites[g_ftdevIndex].url);
+            return;
+        }
+        ftdev_advance("FAIL", "timeout");
+    }
+}
+#endif /* PLUTO_DEV_FIELDTEST */
 
 #if defined(PLUTO_CSS_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic proof that the
@@ -4044,14 +4740,35 @@ static void css_autotest_tick(void)
 
 #if defined(PLUTO_NAV_AUTOTEST)
 /* TEMPORARY (autotest builds, sim + device): deterministic repro for the
- * google.com navigation crash. Boots to the home page, presses A on the
- * Google speed-dial card through the REAL home-page input path, then
- * watches the navigation complete: state 2 (page rendered) with a live doc
- * is PASS; an error page for google.com FAILs. Verifies the OS is still
- * alive 10s later (the device errorlog overflow killed the task ~3s after
- * the nav). PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
+ * google.com navigation crash. Boots STRAIGHT to google.com (armed in the
+ * kEventInit handler — no home-page card steering), then watches the
+ * navigation complete: state 2 (page rendered) with a live doc is PASS; an
+ * error page for google.com FAILs. Verifies the OS is still alive 10s later
+ * (the device errorlog overflow killed the task ~3s after the nav).
+ * PASS/FAIL lands in pluto.log via [nav-autotest] lines. */
 static int g_navTestPhase = 0; /* 0=home, 1=await page, 2=stable check, 3=done */
 static unsigned g_navTestFrames = 0;
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+static int g_navTestReloaded = 0;
+#endif
+/* The optional engine force is a test override; restore the engine the user
+ * had saved when the run finishes (same leak the fieldtest seam had). */
+static int g_navSavedJsEngine = -1;
+static int g_navSavedJsEnabled = -1;
+static void nav_autotest_restore_settings(void)
+{
+    if (g_navSavedJsEngine < 0)
+    {
+        return;
+    }
+    storage_set_setting_int("jsEngine", g_navSavedJsEngine);
+    storage_set_setting_int("jsEnabled", g_navSavedJsEnabled);
+    jsbridge_set_engine(g_navSavedJsEngine);
+    storage_save();
+    logger_log("[nav-autotest] restored jsEngine=%d jsEnabled=%d",
+               g_navSavedJsEngine, g_navSavedJsEnabled);
+    g_navSavedJsEngine = -1;
+}
 #ifdef PLUTO_NAV_AUTOTEST_ENGINE
 /* Optional engine force for the run: 0=muJS 1=Duktape 2=QuickJS 3=XS
  * (Moddable). Storage AND the live router are set before navigation; the
@@ -4066,6 +4783,10 @@ static void nav_autotest_tick(void)
 {
     if (g_navTestPhase == 3 || isRendering)
     {
+        if (g_navTestPhase == 3)
+        {
+            nav_autotest_restore_settings();
+        }
         return;
     }
     ++g_navTestFrames;
@@ -4075,15 +4796,13 @@ static void nav_autotest_tick(void)
     }
     if (g_navTestPhase == 0)
     {
-        if (currentState != STATE_HOME)
-        {
-            return;
-        }
         if (NAV_AUTOTEST_ENGINE_VAL >= 0)
         {
             static int navEngineApplied = 0;
             if (!navEngineApplied)
             {
+                g_navSavedJsEngine = storage_setting_int("jsEngine");
+                g_navSavedJsEnabled = storage_setting_int("jsEnabled");
                 storage_set_setting_int("jsEngine", NAV_AUTOTEST_ENGINE_VAL);
                 jsbridge_set_engine(NAV_AUTOTEST_ENGINE_VAL);
                 if (storage_setting_int("jsEnabled") != 2)
@@ -4096,28 +4815,10 @@ static void nav_autotest_tick(void)
                 navEngineApplied = 1;
             }
         }
-        /* The Google speed-dial card is bookmark #2 (index 2): Storage
-         * order is Bitmap Gallery(1), Google(2), ... Steer with crank. */
-        int target = 2;
-        if (home_page_selected_index() != target)
-        {
-            home_page_handle_crank(HOME_CRANK_STEP_PX);
-            return;
-        }
-        logger_log("[nav-autotest] on Google card, pressing A");
-        char *u = home_page_handle_input(1u << 5, NULL);
-        if (u)
-        {
-            pendingNavUrlSet = 1;
-            snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s", u);
-            pluto_free(u);
-            g_navTestPhase = 1;
-        }
-        else
-        {
-            logger_log("[nav-autotest] FAIL: A on Google card returned no URL");
-            g_navTestPhase = 3;
-        }
+        /* Navigation was armed directly at boot; just start watching. */
+        logger_log("[nav-autotest] waiting for direct google.com render");
+        g_navTestPhase = 1;
+        g_navTestFrames = 0;
         return;
     }
     if (g_navTestPhase == 1)
@@ -4126,6 +4827,14 @@ static void nav_autotest_tick(void)
         {
             logger_log("[nav-autotest] PASS: google.com rendered (title=%.40s, "
                        "%u frames)", pageTitle, g_navTestFrames);
+#ifdef PLUTO_NAV_AUTOTEST_RELOAD
+            if (!g_navTestReloaded)
+            {
+                g_navTestReloaded = 1;
+                logger_log("[nav-autotest] forcing cache-bypassed reload");
+                menu_reload(NULL);
+            }
+#endif
             g_navTestPhase = 2;
             g_navTestFrames = 0;
         }
@@ -5116,6 +5825,18 @@ static void log_render_result(const char *tag, DocParseResult *doc)
     logger_log("[render-result] %s: blocks=%d links=%d title='%.48s'",
                tag, doc->blockCount, doc->linkCount,
                doc->title[0] ? doc->title : "");
+    {
+        /* R71 receipt: spanning decorations + the sticky app-bar span. */
+        int pinStart = 0;
+        for (int bi = 0; bi < doc->blockCount; bi++)
+        {
+            if (doc->blocks[bi] && doc->blocks[bi]->pinStart)
+            {
+                pinStart++;
+            }
+        }
+        logger_log("[r71] render decor=%d pin=%d", doc->decorCount, pinStart);
+    }
     if (doc->blockCount == 0)
     {
         return;
@@ -5162,18 +5883,116 @@ static void log_render_result(const char *tag, DocParseResult *doc)
         }
         logger_log("[render-result]   block[%d] type=%d text='%.60s'",
                    bi, blk->type, text);
+        if (blk->type == DOC_BLOCK_INPUT_SUBMIT)
+        {
+            logger_log("[render-result]     submit value='%.40s' name='%.40s'",
+                       blk->value ? blk->value : "",
+                       blk->name ? blk->name : "");
+        }
     }
+}
+
+/* Per-frame walk slice. The element walk is the only parse stage that
+ * scales with page size (wikipedia: ~5000 nodes × ~4.5ms/node on the M7
+ * ≈ 22s). A 500ms slice keeps the loading screen animating and leaves
+ * >9s of the OS's 10s run-loop watchdog untouched; the simulator keeps
+ * the historical unlimited walk (it is the reference renderer). */
+static unsigned long render_walk_budget_ms(void)
+{
+#if defined(TARGET_PLAYDATE)
+    return 500UL;
+#else
+    return 0UL;
+#endif
+}
+
+/* R71: a toggle re-render (details / ARIA disclosure) reparses rawHtml but
+ * deliberately skips the network CSS stage, so a page whose whole styling
+ * lives in an external <link rel="stylesheet"> used to re-render UNSTYLED —
+ * on bryanwandrych.com/work the collapse recipe itself lives in the external
+ * sheet, so the panel would pop open after its own toggle. Copy the live
+ * doc's sheets into the new doc (document_parse_ex joins them exactly like
+ * freshly fetched ones and owns the copies). Bounded by the same per-page
+ * caps as the fetch path. */
+static void reuse_external_css(RenderTask *rt)
+{
+    if (!rt || !rt->doc || !currentDoc || currentDoc->cssExtN <= 0)
+    {
+        return;
+    }
+    int n = currentDoc->cssExtN;
+    if (n > PLUTO_CSS_EXT_MAX)
+    {
+        n = PLUTO_CSS_EXT_MAX;
+    }
+    rt->doc->cssExtBody =
+        (char **)pluto_mem_realloc(NULL, sizeof(char *) * (size_t)n);
+    rt->doc->cssExtLen =
+        (size_t *)pluto_mem_realloc(NULL, sizeof(size_t) * (size_t)n);
+    if (!rt->doc->cssExtBody || !rt->doc->cssExtLen)
+    {
+        if (rt->doc->cssExtBody)
+        {
+            pluto_mem_realloc(rt->doc->cssExtBody, 0);
+            rt->doc->cssExtBody = NULL;
+        }
+        if (rt->doc->cssExtLen)
+        {
+            pluto_mem_realloc(rt->doc->cssExtLen, 0);
+            rt->doc->cssExtLen = NULL;
+        }
+        return;
+    }
+    int w = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const char *body = currentDoc->cssExtBody[i];
+        size_t len = currentDoc->cssExtLen[i];
+        if (!body || len == 0)
+        {
+            continue;
+        }
+        char *cp = (char *)pluto_mem_realloc(NULL, len + 1);
+        if (!cp)
+        {
+            break;
+        }
+        memcpy(cp, body, len);
+        cp[len] = '\0';
+        rt->doc->cssExtBody[w] = cp;
+        rt->doc->cssExtLen[w] = len;
+        w++;
+    }
+    rt->doc->cssExtN = w;
+    logger_log("[css-ext] toggle reuse: %d sheet(s)", w);
 }
 
 static int render_step(TaskCtx *ctx)
 {
     RenderTask *rt = (RenderTask *)ctx->data;
+    unsigned long walkBudget = render_walk_budget_ms();
+
+    /* Fresh navigation: discard the previous page's disclosure/details
+     * overrides. Toggle re-renders and JS-mutation re-walks keep them. */
+    if (!rt->isToggle && !rt->rewalkDoc)
+    {
+        details_keys_clear();
+        disclosure_keys_clear();
+    }
 
     /* ── JS-mutation re-walk path: rebuild blocks/links from the live tree ── */
     if (rt->rewalkDoc && !rt->parsed)
     {
-        logger_log("render: rewalk start (live DOM mutation re-render)");
-        int wrc = document_rewalk(rt->rewalkDoc);
+        int firstSlice = (rt->rewalkDoc->_walkState == NULL);
+        if (firstSlice)
+        {
+            logger_log("render: rewalk start (live DOM mutation re-render)");
+        }
+        int wrc = document_rewalk_sliced(rt->rewalkDoc, walkBudget);
+        if (wrc > 0)
+        {
+            return 1; /* parked between frames; resume next step */
+        }
         if (wrc != 0)
         {
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
@@ -5206,7 +6025,46 @@ static int render_step(TaskCtx *ctx)
                 return -1;
             }
             memset(rt->doc, 0, sizeof(DocParseResult));
+            if (rt->isToggle)
+            {
+                reuse_external_css(rt);
+            }
             tasks_report_progress(0.05f);
+        }
+
+        /* A sliced walk parked between frames: resume it before any other
+         * stage. The DOM/CSS/JS stages already ran; only the element walk
+         * remains. */
+        if (rt->doc->_walkState)
+        {
+            int wrc = document_parse_resume(rt->doc, walkBudget);
+            if (wrc > 0)
+            {
+                return 1;
+            }
+            if (wrc < 0)
+            {
+                if (rt->doc->blockCount > 0)
+                {
+                    /* R68: PARTIAL-WALK RESILIENCE. The device funnel can
+                     * refuse a late walk allocation on a heavy page; the
+                     * blocks already produced are valid (BBC News rendered
+                     * 99 blocks before the 8MB walk refusal). Lay out the
+                     * partial page instead of discarding the whole render.
+                     * The simulator's larger pool never takes this path. */
+                    logger_log("render: walk OOM — keeping %d partial blocks",
+                               rt->doc->blockCount);
+                    rt->parsed = 1;
+                    tasks_report_progress(0.6f);
+                    return 1; /* layout next tick */
+                }
+                snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
+                         "Parse Error: walk out of memory");
+                return -1;
+            }
+            rt->parsed = 1;
+            tasks_report_progress(0.6f);
+            return 1; /* layout next tick */
         }
 
         /* ── Stage C (Phase 1.5): external stylesheet fetch ──
@@ -5223,9 +6081,12 @@ static int render_step(TaskCtx *ctx)
         {
             if (rt->cssPhase == 0)
             {
-                /* C1: scan + resolve (no network in this step). */
+                /* C1: scan + resolve (no network in this step). Static:
+                 * 24 x 1024 href bytes is too much for the device
+                 * game-task stack (one render task at a time). */
                 rt->cssPhase = 1;
-                char hrefs[PLUTO_CSS_EXT_MAX][512];
+                rt->cssStartMs = pd->system->getCurrentTimeMilliseconds();
+                static char hrefs[PLUTO_CSS_EXT_MAX][PLUTO_CSS_HREF_MAX];
                 unsigned char mediaOk[PLUTO_CSS_EXT_MAX];
                 memset(hrefs, 0, sizeof(hrefs));
                 memset(mediaOk, 0, sizeof(mediaOk));
@@ -5270,6 +6131,36 @@ static int render_step(TaskCtx *ctx)
             }
             if (rt->cssPhase == 2)
             {
+                /* R66: bounded stylesheet stage. A redirecting/hanging CSS
+                 * URL must never hold the page on "Loading..." forever
+                 * (daringfireball.net/css/ie_sucks.php loops 301s). The
+                 * budget is device-sized (see PLUTO_CSS_EXT_BUDGET_MS):
+                 * device TLS handshakes are slow enough that an 8s bound
+                 * dropped Google's main sheet mid-connect. */
+                if (rt->cssStartMs &&
+                    pd->system->getCurrentTimeMilliseconds() - rt->cssStartMs >
+                        PLUTO_CSS_EXT_BUDGET_MS)
+                {
+                    if (rt->cssIdx < rt->cssUrlN)
+                    {
+                        logger_log("[css-ext] budget reached at %d/%d — "
+                                   "skipping remaining sheets",
+                                   rt->cssIdx, rt->cssUrlN);
+                    }
+                    if (g_cssInFlight)
+                    {
+                        g_cssInFlight = 0;
+                        g_cssDone = 0;
+                        http_cancel();
+                    }
+                    if (g_cssBody)
+                    {
+                        pluto_mem_realloc(g_cssBody, 0);
+                        g_cssBody = NULL;
+                        g_cssLen = 0;
+                    }
+                    rt->cssIdx = rt->cssUrlN;
+                }
                 if (g_cssInFlight && g_cssDone)
                 {
                     /* Consume the finished fetch (success, error, or
@@ -5290,6 +6181,8 @@ static int render_step(TaskCtx *ctx)
                     }
                     else
                     {
+                        logger_log("[css-ext] miss-status=%d err=%d len=%zu",
+                                   g_cssStatus, g_cssErr, g_cssLen);
                         logger_log("[css-ext] miss %s (status=%d err=%d)",
                                    rt->cssUrls[rt->cssIdx], g_cssStatus,
                                    g_cssErr);
@@ -5370,6 +6263,17 @@ static int render_step(TaskCtx *ctx)
                             {
                                 rt->doc->cssExtBody[w] = rt->cssBody[k];
                                 rt->doc->cssExtLen[w] = rt->cssLen[k];
+                                /* OWNERSHIP MOVED: the doc now owns this
+                                 * body. Clearing the task slot is what keeps
+                                 * render_css_free (render_done / render_error
+                                 * teardown) from freeing it a second time —
+                                 * the receipted double-free was a heap
+                                 * corruption at every page transition after
+                                 * a page with an external stylesheet
+                                 * (sim: malloc_error_break inside
+                                 * document_free; device: wild frees). */
+                                rt->cssBody[k] = NULL;
+                                rt->cssLen[k] = 0;
                                 w++;
                             }
                         }
@@ -5432,15 +6336,27 @@ static int render_step(TaskCtx *ctx)
             progressNetTotal = 0;
         }
 
-        /* detailsOpen overrides for toggle re-renders. */
+        /* detailsOpen / disclosureOpen overrides for toggle re-renders. */
         DocParseOpts opts;
         memset(&opts, 0, sizeof(opts));
-        if (rt->isToggle && detailsKeyCount > 0)
+        if (rt->isToggle)
         {
-            opts.detailsOpen = detailsOpenState;
-            opts.detailsOpenCount = detailsKeyCount;
+            if (detailsKeyCount > 0)
+            {
+                opts.detailsOpen = detailsOpenState;
+                opts.detailsOpenCount = detailsKeyCount;
+            }
+            if (disclosureKeyCount > 0)
+            {
+                opts.disclosureOpen = disclosureOpenState;
+                opts.disclosureOpenCount = disclosureKeyCount;
+            }
         }
         opts.svgDecoder = app_svg_decoder;
+        /* The render task's body becomes the document's rawHtml (one
+         * allocation for the page lifetime instead of a full second copy).
+         * The task slot is cleared after the parse adopts it. */
+        opts.adoptHtml = 1;
 
         /* JavaScript execution policy: Off → DOC_SCRIPT_OFF (no engine ever
          * created); Inline → RUN_KEEP (inline scripts only, files skipped —
@@ -5507,11 +6423,39 @@ static int render_step(TaskCtx *ctx)
             }
         }
 
-        int rc = document_parse_ex(rt->body, rt->url, currentBrowseMode,
-                                   rt->isToggle ? &opts : NULL, jsPolicy, NULL,
-                                   rt->doc);
+        int rc = document_parse_ex_sliced(rt->body, rt->url, currentBrowseMode,
+                                          &opts, jsPolicy, rt->doc,
+                                          walkBudget);
+        /* Ownership hand-off: the doc's rawHtml IS the task's body buffer.
+         * Clearing the task slot prevents a double free at render_done;
+         * document_free owns the bytes for the page lifetime. */
+        if (rt->body && rt->doc && rt->doc->rawHtml == rt->body)
+        {
+            rt->body = NULL;
+            logger_log("[mem] html adopted by doc (no second copy)");
+        }
+        if (rc > 0)
+        {
+            /* The tokenize/DOM/CSS/JS stages completed; the element walk is
+             * parked with its frame stack in rt->doc->_walkState. Yield so
+             * the run loop stays alive, then resume at the top of this
+             * block next step. */
+            return 1;
+        }
         if (rc != 0 || rt->doc->parseError)
         {
+            if (rt->doc->blockCount > 0)
+            {
+                /* R68: same partial-walk resilience as the resume path —
+                 * a late device allocation refusal must not discard the
+                 * blocks already produced. */
+                logger_log("render: parse/walk incomplete — keeping %d "
+                           "partial blocks",
+                           rt->doc->blockCount);
+                rt->parsed = 1;
+                tasks_report_progress(0.6f);
+                return 1;
+            }
             snprintf(g_renderErrMsg, sizeof(g_renderErrMsg),
                      "Parse Error: parse failed");
             return -1;
@@ -5588,6 +6532,36 @@ static void render_css_free(RenderTask *rt)
     rt->cssPhase = 0;
 }
 
+/* Free every resource a render task owns. Shared by render_error (the
+ * visible failure path) and the navigation abort (silent: the user left the
+ * page, so no error UI). Must be called BEFORE tasks_cancel_all drops the
+ * task, otherwise its half-built doc/engine/body leak into the next page. */
+static void render_task_dispose(RenderTask *rt)
+{
+    if (!rt)
+    {
+        return;
+    }
+    jsext_abort_active(); /* FULL-mode prefetch session (if any) */
+    render_css_free(rt);
+    if (rt->body)
+    {
+        pluto_free(rt->body);
+        rt->body = NULL;
+    }
+    if (rt->doc)
+    {
+        if (rt->doc->_jsbridge)
+        {
+            js_doc_close(rt->doc->_jsbridge);
+        }
+        document_free(rt->doc);
+        free(rt->doc);
+        rt->doc = NULL;
+    }
+    free(rt);
+}
+
 /* ── Phase 10: end-event drain (animation + transition lanes) ──────────────
  * Runs in render_done — after a render (fresh parse or JS-mutation
  * re-walk) completed, when the visible state IS the final state a
@@ -5659,6 +6633,10 @@ static void render_done(void *result, void *userdata)
     if (!rt)
     {
         return;
+    }
+    if (g_activeRenderTask == rt)
+    {
+        g_activeRenderTask = NULL;
     }
     isRendering = 0;
     int wasRewalk = (rt->rewalkDoc != NULL); /* read before page_swap_doc */
@@ -5748,6 +6726,10 @@ static void render_done(void *result, void *userdata)
     }
 
     render_css_free(rt);
+    if (rt->body)
+    {
+        logger_log("[mem] render body free ptr=%p", (void *)rt->body);
+    }
     pluto_free(rt->body);
     free(rt);
 }
@@ -5759,36 +6741,32 @@ static void render_error(const char *message, void *userdata)
     (void)message;
     RenderTask *rt = (RenderTask *)userdata;
     isRendering = 0;
+    if (g_activeRenderTask == rt)
+    {
+        g_activeRenderTask = NULL;
+    }
     if (rt)
     {
-        /* FULL-mode prefetch mid-flight: abort the session (cancels any
-         * in-flight script request + frees the arena) before tearing down. */
-        jsext_abort_active();
         if (rt->isToggle)
         {
             /* Lua: undo the toggle flip on error. */
-            if (detailsKeyCount > 0)
+            if (g_lastDisclosureIdx >= 0 &&
+                g_lastDisclosureIdx < disclosureKeyCount)
+            {
+                disclosureOpenState[g_lastDisclosureIdx] =
+                    !disclosureOpenState[g_lastDisclosureIdx];
+            }
+            else if (detailsKeyCount > 0)
             {
                 detailsOpenState[detailsKeyCount - 1] =
                     !detailsOpenState[detailsKeyCount - 1];
             }
         }
-        render_css_free(rt);
-        if (rt->body)
-        {
-            pluto_free(rt->body);
-        }
         if (rt->doc)
         {
-            if (rt->doc->_jsbridge)
-            {
-                js_doc_close(rt->doc->_jsbridge); /* engine dies with the doc */
-            }
             log_render_result("render-error(discarded)", rt->doc);
-            document_free(rt->doc);
-            free(rt->doc);
         }
-        free(rt);
+        render_task_dispose(rt);
     }
     error_page_show(g_renderErrMsg, currentUrlObj ? currentUrlObj->normalized : "");
     currentState = STATE_ERROR;
@@ -5796,7 +6774,13 @@ static void render_error(const char *message, void *userdata)
     update_system_menu();
 }
 
-static void render_body(const char *body, const char *url, int addToHistory)
+/* Ownership-taking render entry: `body` is a heap buffer the task ADOPTS
+ * (freed by render_task_dispose). The old path copied the body twice —
+ * HTTP client buffer → encoding_to_utf8 → pluto_strdup — so a 1.2MB
+ * Reuters body peaked at ~3.6MB before the parse even started (device
+ * receipt 2026-11-13: walk OOM at 7798KB). Callers that already own a
+ * UTF-8 conversion hand it straight in. */
+static void render_body_owned(char *body, const char *url, int addToHistory)
 {
     isRendering = 1;
     progressCurrent = 0;
@@ -5809,14 +6793,29 @@ static void render_body(const char *body, const char *url, int addToHistory)
     RenderTask *rt = (RenderTask *)calloc(1, sizeof(RenderTask));
     if (!rt)
     {
+        if (body)
+        {
+            pluto_free(body);
+        }
         isRendering = 0;
         return;
     }
-    rt->body = pluto_strdup(body ? body : "");
+    rt->body = body ? body : pluto_strdup("");
     snprintf(rt->url, sizeof(rt->url), "%s", url ? url : "");
     rt->addToHistory = addToHistory;
     rt->isToggle = 0;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
+}
+
+static void render_body(const char *body, const char *url, int addToHistory)
+{
+    render_body_owned(pluto_strdup(body ? body : ""), url, addToHistory);
 }
 
 static void meta_refresh_cb(void *ud)
@@ -5833,7 +6832,14 @@ static void meta_refresh_cb(void *ud)
 /* SVG decoder hook for document_parse (production path). */
 static int app_svg_decoder(const char *xml, int w, int h, void **outBitmap)
 {
+    unsigned long t0 = pd->system->getCurrentTimeMilliseconds();
     *outBitmap = svg_decode(xml, w, h);
+    unsigned long dt = pd->system->getCurrentTimeMilliseconds() - t0;
+    /* Device receipt: inline SVG is decoded synchronously inside the walk.
+     * A single multi-second decode is a watchdog risk; the log names the
+     * exact input size and cost so the slow class is measurable. */
+    logger_log("[svgd] hook %lums %dx%d xml=%zu ok=%d",
+               dt, w, h, xml ? strlen(xml) : 0, *outBitmap ? 1 : 0);
     return *outBitmap ? 0 : -1;
 }
 
@@ -5844,9 +6850,36 @@ static void navigate_to(const char *urlString)
     {
         return;
     }
+    g_pageChallenge = 0; /* fresh navigation: old response's status is gone */
+
+    /* A pending transport auto-retry belongs to the navigation that armed
+     * it. Without this cancel it fires 2s later and HIJACKS whatever the
+     * user (or the device matrix) navigated to in the meantime — the
+     * receipted failure: textboard's retry pulled the browser back off
+     * gutenberg.org mid-fetch. Cancel before touching any page state. */
+    if (g_navAutoRetryTimer)
+    {
+        pdtimer_cancel(g_navAutoRetryTimer);
+        g_navAutoRetryTimer = 0;
+    }
 
     /* Any still-running parse/render of a previous page must be dropped;
-     * its onComplete would otherwise fire later and hijack the new page. */
+     * its onComplete would otherwise fire later and hijack the new page.
+     * tasks_cancel_all() alone does NOT run the task's error cleanup, so
+     * the task's body/doc/engine/CSS/prefetch state used to leak into the
+     * next page (device receipt: leaving a still-loading wikipedia article
+     * corrupted the heap and the next navigation jumped to PC=0x69646570
+     * = "pedi", text from the URL). Dispose the task through the SAME
+     * cleanup path render_error uses BEFORE the scheduler drops it. */
+    if (g_activeRenderTask)
+    {
+        RenderTask *aborting = g_activeRenderTask;
+        g_activeRenderTask = NULL;
+        isRendering = 0;
+        logger_log("[nav] aborting in-flight render task (body=%s)",
+                   aborting->url);
+        render_task_dispose(aborting);
+    }
     tasks_cancel_all();
     jsext_abort_active(); /* FULL-mode prefetch: kill any in-flight session */
     /* R65: the pre-cancel — EVERY leave-a-page route funnels through here
@@ -5859,6 +6892,14 @@ static void navigate_to(const char *urlString)
      * before go_back/go_home). http_cancel() takes BOTH lanes and is
      * safe when idle. */
     http_cancel();
+    /* R69: hard-reset the old page's network state before the new request
+     * starts. The device allows four simultaneous connections; leaked
+     * closed objects and retired OS-HTTP connections used to exhaust the
+     * pool after two pages ("Connection failed: buffer too small
+     * (err=-14)") until the app restarted. This runs while the client is
+     * idle, so every closed object is safe to release and the new page
+     * gets the full pool. */
+    http_navigation_reset();
     pluto_spill_reset(); /* SW2b page-close contract: the old page's
                           * session stream files die HERE (abort receipts
                           * already did this pair); snapshots + the SW4
@@ -5921,9 +6962,14 @@ static void navigate_to(const char *urlString)
     snprintf(urlBuf, sizeof(urlBuf), "%s", trimmed ? trimmed : urlString);
     pluto_free(trimmed);
 
-    g_navAutoRetried = 0; /* R65: each manual navigation re-arms the
-                           * ONE transport auto-retry (a user re-click
-                           * after a failed retry never loops). */
+    if (!g_navAutoRetrying)
+    {
+        g_navAutoRetried = 0; /* R65: each MANUAL navigation re-arms the
+                               * ONE transport auto-retry. The retry's own
+                               * navigate_to must NOT re-arm it — otherwise
+                               * a host-not-found URL loops forever (the
+                               * receipted textboard 2s retry storm). */
+    }
 
     /* Reset per-navigation state (Lua runNavigation). The old layout items
      * (with their owned values) are freed by layout_clear during the render
@@ -5984,7 +7030,7 @@ static void navigate_to(const char *urlString)
         {
             char withScheme[648 + 16];
             snprintf(withScheme, sizeof(withScheme), "https://%s", urlBuf);
-            snprintf(urlBuf, sizeof(urlBuf), "%s", withScheme);
+            snprintf(urlBuf, sizeof(urlBuf), "%.647s", withScheme);
         }
     }
 
@@ -6002,7 +7048,7 @@ static void navigate_to(const char *urlString)
      * any miss/expiry falls through to the classic fetch path. */
     {
         unsigned long now = 0;
-        uint32_t ms = 0;
+        unsigned int ms = 0;
         now = pd->system->getSecondsSinceEpoch(&ms);
         /* Load with the SAME key the save used: currentUrlObj->normalized.
          * The raw urlBuf differs whenever url_parse canonifies the input
@@ -6089,7 +7135,18 @@ static void navigate_to(const char *urlString)
     cbs.onProgress = http_on_progress;
     cbs.onSuccess = http_on_success;
     cbs.onError = http_on_error;
-    http_get(urlBuf, &cbs);
+    /* Scripted navigations carry the requesting document as Referer;
+     * manual navigations carry none. One-shot, consumed here. */
+    if (pendingNavRefererSet)
+    {
+        http_set_navigation_referer(pendingNavReferer);
+        pendingNavRefererSet = 0;
+        pendingNavReferer[0] = '\0';
+    }
+    /* Top-level document navigation: full browser header signature
+     * (Sec-Fetch-*, Upgrade-Insecure-Requests, Chrome Accept). Google's
+     * SearchGuard judges the session, not just the SG_SS cookie. */
+    http_get_navigation(urlBuf, &cbs);
 }
 
 /* ── HTTP callbacks (port of the HttpClient.get handler table) ──────────── */
@@ -6187,9 +7244,11 @@ void pluto_ui_net_progress(int cur, int total)
     progressNetTotal = total;
     /* Log every 64KB so pluto.log alone proves real bytes moved on the
      * device (user trust: "show me more than 0 bytes"). Log the start and
-     * every 64KB step even when total is unknown (chunked responses). */
+     * every 64KB step even when total is unknown (chunked responses).
+     * R66: this used to shift by 6 (every 64 BYTES), turning a 263KB
+     * script into ~200 file-open/close log lines and starving the fetch. */
     static int lastLoggedK = -1;
-    int k = cur >> 6;
+    int k = cur >> 16;
     if (k != lastLoggedK)
     {
         lastLoggedK = k;
@@ -6204,11 +7263,72 @@ void pluto_ui_net_progress(int cur, int total)
     }
 }
 
+/* Bounded body search: HTTP bodies are length-addressed, not NUL-ended. */
+static int http_body_has(const char *body, size_t bodyLen, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (!body || n == 0 || bodyLen < n)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i + n <= bodyLen; i++)
+    {
+        if (memcmp(body + i, needle, n) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Cloudflare's managed challenge is a 403 with Cf-Mitigated: challenge.
+ * The header is authoritative; body markers are a fallback for proxies
+ * that strip response headers. This is a classification only: it does not
+ * pretend to solve the challenge. */
+static int http_is_cloudflare_challenge(int status, char **headerKeys,
+                                        char **headerVals, int headerCount,
+                                        const char *body, size_t bodyLen)
+{
+    for (int i = 0; i < headerCount; i++)
+    {
+        if (!headerKeys || !headerKeys[i] || !headerVals || !headerVals[i])
+        {
+            continue;
+        }
+        if (strcasecmp(headerKeys[i], "cf-mitigated") == 0 &&
+            strcasecmp(headerVals[i], "challenge") == 0)
+        {
+            return 1;
+        }
+    }
+    if (status != 403)
+    {
+        return 0;
+    }
+    return http_body_has(body, bodyLen, "__cf_chl_opt") ||
+           http_body_has(body, bodyLen, "cdn-cgi/challenge-platform/") ||
+           http_body_has(body, bodyLen, "<title>Just a moment...</title>");
+}
+
 static void http_on_success(int status, char **headerKeys, char **headerVals,
                             int headerCount, const char *body, size_t bodyLen,
                             const char *url)
 {
-    (void)status;
+    if (http_is_cloudflare_challenge(status, headerKeys, headerVals,
+                                     headerCount, body, bodyLen))
+    {
+        g_pageChallenge = 1;
+        logger_log("[http] Cloudflare challenge detected (status=%d) url=%s",
+                   status, url ? url : "");
+        error_page_show("This site requires a browser check that "
+                        "PlutoBrowser cannot complete. Cloudflare blocked "
+                        "the page.",
+                        url ? url : "");
+        currentState = STATE_ERROR;
+        snprintf(pageTitle, sizeof(pageTitle), "Browser Check Required");
+        update_system_menu();
+        return;
+    }
     const char *contentType = NULL;
     for (int i = 0; i < headerCount; i++)
     {
@@ -6219,13 +7339,23 @@ static void http_on_success(int status, char **headerKeys, char **headerVals,
             break;
         }
     }
-    /* Lua: body = Encoding.toUtf8(body, headers["content-type"]). */
+    /* Lua: body = Encoding.toUtf8(body, headers["content-type"]).
+     * bodyLen (not strlen) so embedded NULs never truncate the payload.
+     * The UTF-8 buffer is handed to the render task with OWNERSHIP — the
+     * old path freed it and immediately made a third full copy. */
+    logger_log("[mem] http body ptr=%p len=%luKB", (const void *)body,
+               (unsigned long)((body ? bodyLen : 0) / 1024));
     char *utf8 = encoding_to_utf8((const unsigned char *)body,
-                                  body ? strlen(body) : 0, contentType);
-    render_body(utf8 ? utf8 : (body ? body : ""), url, 1);
+                                  body ? bodyLen : 0, contentType);
     if (utf8)
     {
-        pluto_free(utf8);
+        logger_log("[mem] utf8 body ptr=%p len=%luKB", (void *)utf8,
+                   (unsigned long)(bodyLen / 1024));
+        render_body_owned(utf8, url, 1);
+    }
+    else
+    {
+        render_body(body ? body : "", url, 1);
     }
 }
 
@@ -6255,7 +7385,8 @@ static void http_on_error(const char *message)
         g_navAutoRetried = 1;
         logger_log("[nav] AUTO-RETRY (transport failure): %s",
                    currentUrlObj->normalized);
-        pdtimer_perform_after_delay(pd, 2000, nav_autoretry_cb, pluto_strdup(retry));
+        g_navAutoRetryTimer = pdtimer_perform_after_delay(
+            pd, 2000, nav_autoretry_cb, pluto_strdup(retry));
         currentState = STATE_LOADING;
         snprintf(pageTitle, sizeof(pageTitle), "Retrying...");
         update_system_menu();
@@ -6273,9 +7404,12 @@ static void http_on_error(const char *message)
 static void nav_autoretry_cb(void *ud)
 {
     char *url = (char *)ud;
+    g_navAutoRetryTimer = 0; /* this timer is firing now */
     if (url)
     {
+        g_navAutoRetrying = 1;
         navigate_to(url);
+        g_navAutoRetrying = 0;
         pluto_free(url);
     }
 }
@@ -6318,22 +7452,156 @@ static void page_rewalk_now(void)
     rt->isToggle = 1; /* restore scroll position */
     rt->prevScroll = prevScroll;
     rt->prevTarget = prevTarget;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
+}
+
+/* Let the page's own click handler own a disclosure when it lands on the
+ * state the user requested. The rewalk then reads the LIVE DOM, preserving
+ * label swaps (Menu -> Close) and other script mutations. If the handler
+ * does not reach the requested aria-expanded state, the native re-parse is
+ * still the fallback (e.g. a script whose internal state cannot close). */
+static int disclosure_try_page_toggle(const char *dkey, int idx, int wantOpen)
+{
+    if (!g_pageJs || !currentDoc || !dkey || dkey[0] != 'x')
+    {
+        return 0;
+    }
+    void *srcNode = NULL;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            srcNode = b->srcNode;
+            break;
+        }
+    }
+    if (!srcNode)
+    {
+        return 0;
+    }
+    const char *before = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int rc = jsbridge_dispatch_element_event(g_pageJs, srcNode, "click");
+    const char *after = dom_get_attr((const DomNode *)srcNode, "aria-expanded");
+    int afterOpen = after && !(after[0] == 'f' || after[0] == 'F');
+    int changed = before ? (after && strcmp(before, after) != 0) : (after != NULL);
+    if (!changed || afterOpen != wantOpen)
+    {
+        logger_log("[toggle] page click missed key=%s want=%d rc=%d "
+                   "aria=%s->%s — native fallback",
+                   dkey, wantOpen, rc, before ? before : "-",
+                   after ? after : "-");
+        return 0;
+    }
+    disclosureOpenState[idx] = wantOpen;
+    g_lastDisclosureIdx = idx;
+    logger_log("[toggle] page-owned key=%s open=%d rc=%d aria=%s->%s", dkey,
+               wantOpen, rc, before ? before : "-", after ? after : "-");
+    /* Live attributes are the truth for this rewalk. Drop overrides left
+     * by an earlier native re-parse so they cannot mask the page's flip. */
+    currentDoc->disclosureOpen = NULL;
+    currentDoc->disclosureOpenCount = 0;
+    page_rewalk_now();
+    return 1;
+}
+
+/* Snapshot pages carry no raw HTML or DOM, so the normal toggle re-render
+ * cannot run. A closed disclosure panel is still in the render model as
+ * hidden blocks (panelKey/panelHidden), so flip that span and rebuild the
+ * layout locally — no network, parse, JS, or re-render task. */
+static int snapshot_toggle_panel(const char *dkey)
+{
+    if (!currentDoc || !dkey || !dkey[0])
+    {
+        return 0;
+    }
+    int found = 0;
+    int closed = 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        const DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            found = 1;
+            closed = b->panelHidden;
+            break;
+        }
+    }
+    if (!found)
+    {
+        return 0;
+    }
+    int open = closed ? 1 : 0;
+    for (int i = 0; i < currentDoc->blockCount; i++)
+    {
+        DocBlock *b = currentDoc->blocks[i];
+        if (b && b->panelKey && strcmp(b->panelKey, dkey) == 0)
+        {
+            b->panelHidden = open ? 0 : 1;
+        }
+        if (b && b->toggleKey && strcmp(b->toggleKey, dkey) == 0)
+        {
+            b->toggleOpen = open;
+        }
+    }
+    logger_log("[toggle] snapshot key=%s open=%d (layout rebuild)", dkey, open);
+    layout_build(currentDoc);
+    return 1;
 }
 
 /* ── Interactive <details> toggling (port of toggleDetails) ─────────────── */
 static void toggle_details(const char *dkey)
 {
-    if (!currentDoc || !currentDoc->rawHtml || !currentDoc->rawHtml[0] || isRendering)
+    if (!currentDoc || isRendering)
     {
         return;
     }
-    int idx = details_key_index(dkey);
+    if (!currentDoc->rawHtml || !currentDoc->rawHtml[0])
+    {
+        if (snapshot_toggle_panel(dkey))
+        {
+            return;
+        }
+        logger_log("[toggle] key=%s ignored (snapshot, no panel blocks)",
+                   dkey ? dkey : "?");
+        return;
+    }
+    /* R71: "xN" keys belong to ARIA disclosure widgets, "dN" to <details>. */
+    int *stateArr;
+    int idx;
+    if (dkey && dkey[0] == 'x')
+    {
+        idx = disclosure_key_index(dkey);
+        stateArr = disclosureOpenState;
+        g_lastDisclosureIdx = idx;
+    }
+    else
+    {
+        idx = details_key_index(dkey);
+        stateArr = detailsOpenState;
+        g_lastDisclosureIdx = -1;
+    }
     if (idx < 0)
     {
         return;
     }
-    detailsOpenState[idx] = !detailsOpenState[idx];
+    if (dkey && dkey[0] == 'x')
+    {
+        int wantOpen = !disclosureOpenState[idx];
+        if (disclosure_try_page_toggle(dkey, idx, wantOpen))
+        {
+            return;
+        }
+    }
+    stateArr[idx] = !stateArr[idx];
+    logger_log("[toggle] key=%s idx=%d open=%d", dkey ? dkey : "?", idx,
+               stateArr[idx]);
 
     int prevScroll = scrollY;
     int prevTarget = targetScrollY;
@@ -6347,7 +7615,7 @@ static void toggle_details(const char *dkey)
     if (!rt)
     {
         isRendering = 0;
-        detailsOpenState[idx] = !detailsOpenState[idx]; /* undo flip */
+        stateArr[idx] = !stateArr[idx]; /* undo flip */
         return;
     }
     rt->body = pluto_strdup(currentDoc->rawHtml);
@@ -6356,7 +7624,13 @@ static void toggle_details(const char *dkey)
     rt->isToggle = 1;
     rt->prevScroll = prevScroll;
     rt->prevTarget = prevTarget;
-    tasks_run(render_step, rt, render_done, render_error, rt);
+    g_activeRenderTask = rt;
+    if (tasks_run(render_step, rt, render_done, render_error, rt) != 0)
+    {
+        g_activeRenderTask = NULL;
+        render_task_dispose(rt);
+        isRendering = 0;
+    }
 }
 
 /* ── Form keyboard target resolution ─────────────────────────────────────── */
@@ -6478,7 +7752,7 @@ static const LayoutItem *form_key_item(void)
 static void form_node_form(char *out, size_t cap, const DomNode *n)
 {
     out[0] = '\0';
-    const char *base = (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl : "";
+    const char *base = (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl : "";
     for (const DomNode *p = n ? n->parent : NULL; p; p = p->parent)
     {
         if (p->kind == DOM_ELEMENT && p->tag && strcmp(p->tag, "form") == 0)
@@ -7334,8 +8608,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
         if (resolved && resolved[0])
         {
             char *abs = url_resolve(
-                (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
-                                                    : "",
+                (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl
+                                                       : "",
                 resolved);
             if (abs)
             {
@@ -7383,8 +8657,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
             }
             {
                 char *abs = url_resolve(
-                    (currentDoc && currentDoc->baseUrl) ? currentDoc->baseUrl
-                                                        : "",
+                    (currentDoc && currentDoc->baseUrl[0]) ? currentDoc->baseUrl
+                                                           : "",
                     disco->url);
                 if (abs)
                 {
@@ -7438,7 +8712,8 @@ static int pluto_form_fallback(DomNode *form, const LayoutItem *item,
         if (enc[0])
         {
             const char *join = strchr(url, '?') ? "&" : "?";
-            snprintf(url + off, sizeof(url) - off, "%s%s", join, enc);
+            strncat(url + off, join, sizeof(url) - off - 1);
+            strncat(url + off, enc, sizeof(url) - off - strlen(url + off) - 1);
         }
         logger_log("[fbform] GET submit → url=%.110s", url);
         pendingNavUrlSet = 1;
@@ -7593,7 +8868,7 @@ static DomNode *form_node_search(DomNode *n, int *ord, int depth)
                 const char *fact = form_node_attr(n, "formaction");
                 if (fact)
                 {
-                    const char *base = (currentDoc && currentDoc->baseUrl)
+                    const char *base = (currentDoc && currentDoc->baseUrl[0])
                                            ? currentDoc->baseUrl
                                            : "";
                     char *abs = url_resolve(base, fact);
@@ -7727,10 +9002,10 @@ static int g_formKbOkayPressed = 0; /* last will_hide's OK flag (Phase 4) */
 static void form_kb_will_hide(int okButtonPressed, void *ud)
 {
     (void)ud;
-    /* Forms-Phase 4: remember WHY the keyboard hid. OK = the Enter
-     * commit → implicit submission follows the change commit (the
-     * browser's Enter order). A plain dismissal (tapping elsewhere)
-     * commits without submitting. */
+    /* Remember WHY the keyboard hid. The Playdate keyboard's OK is its
+     * done/confirm action, not an Enter key: both OK and a plain dismissal
+     * commit the text, and neither submits the form. Submission belongs to
+     * the form's own button. */
     g_formKbOkayPressed = okButtonPressed ? 1 : 0;
 }
 
@@ -7756,13 +9031,11 @@ static void form_kb_did_hide(void *ud)
             form_key_write(txt, 1 /* commit → input + change */);
             if (g_formKbOkayPressed)
             {
-                /* Forms-Phase 4: the browser's Enter order — the commit
-                 * (input+change) just ran; implicit submission follows
-                 * when the field belongs to a form. textarea fields
-                 * never implicitly submit (pluto_form_enter_commit
-                 * checks). */
-                logger_log("[form] keyboard OK commit → enter chain");
-                pluto_form_enter_commit();
+                /* The keyboard's OK is a text commit, not an Enter key.
+                 * Firing input+change is enough for react's controlled
+                 * input; implicit submission waits for the form's own
+                 * submit button. */
+                logger_log("[form] keyboard OK commit (no implicit submit)");
             }
             else
             {
@@ -7800,11 +9073,10 @@ static void form_kb_text_changed(void *ud)
     }
 }
 
-/* Forms-Phase 4 (autotest lane): the keyboard's OK commit exactly as
- * form_kb_did_hide rides it — the change commit, then the Enter-implicit
- * chain (pluto_form_enter_commit checks the field's form, the textarea
- * exception and the default button). The driver calls this to exercise
- * a real user's OK press without opening the OS keyboard. */
+/* Forms-Phase 4 (autotest lane): synthetic Enter-key lane. The Playdate
+ * keyboard's OK no longer submits, but this keeps the Enter-implicit
+ * chain covered (pluto_form_enter_commit checks the field's form, the
+ * textarea exception and the default button). */
 static void form_kb_ok_commit(const char *text)
 {
     form_key_write(text, 1 /* commit → input + change */);
@@ -8183,7 +9455,8 @@ static int pluto_host_form_wire(JsBridge *b, void *formNode,
     return 1;
 }
 
-/* The Enter-implicit chain (the keyboard's OK commit). Browser truth:
+/* The Enter-implicit chain (synthetic Enter-key lane; the Playdate
+ * keyboard's OK commit deliberately does NOT submit). Browser truth:
  * implicit submission on a TEXT field rides the form's default button
  * when one exists (its click + activation: the click, then the gate
  * honoring its formNovalidate, then the submit event, then the wire);
@@ -8971,6 +10244,9 @@ static void draw_render_progress_ui(void)
 
 static int updateFrame(void *userdata)
 {
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
     (void)userdata;
     frameCount++;
 
@@ -9096,6 +10372,10 @@ static int updateFrame(void *userdata)
 
 #if defined(PLUTO_FIELDTEST_AUTOTEST)
     fieldtest_tick();
+#endif
+
+#if defined(PLUTO_DEV_FIELDTEST)
+    ftdev_tick();
 #endif
 
 #if defined(PLUTO_NAV_AUTOTEST)
@@ -9403,6 +10683,11 @@ static int updateFrame(void *userdata)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
                         }
+                        else if (activeLink->href &&
+                                 strncmp(activeLink->href, "toggle:", 7) == 0)
+                        {
+                            toggle_details(activeLink->href + 7);
+                        }
                         else if (page_handle_js_click(activeLink->index))
                         {
                             /* A JS click handler ran (see HTML-mode branch). */
@@ -9526,12 +10811,12 @@ static int updateFrame(void *userdata)
                     !(btnCurrent & (1 << 0)) && !(btnCurrent & (1 << 1)) &&
                     !layout_get_on_demand_consumed())
                 {
-                    const LMLink *hitLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hitLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (!hitLink)
                     {
                         /* No link under the cursor: try a bare image hit. */
                         const LayoutItem *imgItem = layout_image_at(
-                            mouseX, mouseY + scrollY);
+                            mouseX, layout_page_y(mouseX, mouseY, scrollY));
                         if (imgItem)
                         {
                             const char *im2 = storage_setting_str("imageMode");
@@ -9564,6 +10849,13 @@ static int updateFrame(void *userdata)
                                  primary->inputItem)
                         {
                             activate_form_block((const LayoutItem *)primary->inputItem);
+                        }
+                        else if (hitLink->href &&
+                                 strncmp(hitLink->href, "toggle:", 7) == 0)
+                        {
+                            /* A disclosure rect whose aux metadata was lost
+                             * still toggles from its href. */
+                            toggle_details(hitLink->href + 7);
                         }
                         else if (page_handle_js_click(hitLink->index))
                         {
@@ -9628,7 +10920,7 @@ static int updateFrame(void *userdata)
                 const char *currentHoverSrc = NULL;
                 if (isHtmlMode)
                 {
-                    const LMLink *hovered = lm_get_hovered_link(mouseX, mouseY + scrollY);
+                    const LMLink *hovered = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
                     if (hovered)
                     {
                         const LMRectAux *pr = lm_rect_aux(hovered->index, 0);
@@ -9921,8 +11213,9 @@ static int updateFrame(void *userdata)
     /* Hover status bar: show URL under cursor (like desktop browsers). */
     if (currentState == STATE_PAGE && currentBrowseMode == MODE_RAW_HTML)
     {
-        const LMLink *hovLink = lm_get_hovered_link(mouseX, mouseY + scrollY);
-        if (hovLink && hovLink->href)
+        const LMLink *hovLink = lm_get_hovered_link(mouseX, layout_page_y(mouseX, mouseY, scrollY));
+        if (hovLink && hovLink->href &&
+            strncmp(hovLink->href, "toggle:", 7) != 0)
         {
             hud_draw_hover_status(hovLink->href);
         }
@@ -10058,6 +11351,13 @@ static int updateFrame(void *userdata)
     /* Phase 4: pump timers each frame. */
     pdtimer_update();
 
+    /* R67: SDK connection releases are safe only when no render/walk is
+     * live. A release during the sliced walk was the bbc wild-PC window.
+     * Do not also gate on STATE_LOADING: between network fetches the client
+     * is idle, and blocking the TCP graveyard for the whole page load
+     * exhausts the SDK's four-slot pool on fetch-heavy pages. */
+    http_set_release_gate(!isRendering);
+
     /* Phase 24: pump the HTTP state machine each frame. */
     http_update();
 
@@ -10081,6 +11381,9 @@ __declspec(dllexport)
 __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSystemEvent event, uint32_t arg)
 {
     (void)arg;
+#ifdef TARGET_PLAYDATE
+    pluto_env_sanitize();
+#endif
 
     switch (event)
     {
@@ -10723,9 +12026,33 @@ __attribute__((noinline)) static int pluto_event_handler(PlaydateAPI *api, PDSys
 #endif
 
 #if defined(PLUTO_NAV_AUTOTEST)
-        /* TEMPORARY (autotest builds, sim + device): leave the app on the
-         * home page — nav_autotest_tick() steers the Google speed-dial card
-         * and presses A through the real input path (see updateFrame). */
+        /* TEMPORARY (autotest builds, sim + device): navigate STRAIGHT to
+         * the target at boot. The default is google.com; a seam build can
+         * point it at another live page through tests/nav_autotest_url.h
+         * (URL literals cannot ride -D: "//" starts a preprocessor comment).
+         * The old seam cranked to the Google speed-dial card and pressed A;
+         * when the crank steering never landed on index 2 the run sat on the
+         * home page forever. Direct navigation removes that failure mode —
+         * nav_autotest_tick only watches. */
+#ifdef PLUTO_NAV_AUTOTEST_TARGET_FILE
+#include "../tests/nav_autotest_url.h"
+#define NAV_AUTOTEST_URL_STR PLUTO_NAV_AUTOTEST_URL_STR
+#else
+#define NAV_AUTOTEST_URL_STR "https://google.com"
+#endif
+#ifdef PLUTO_NAV_AUTOTEST_FULLJS
+        if (storage_setting_int("jsEnabled") != 2)
+        {
+            storage_set_setting_int("jsEnabled", 2);
+            logger_log("[nav-autotest] jsEnabled forced to 2 (Full)");
+        }
+        snapBypass = 1;
+#endif
+        pendingNavUrlSet = 1;
+        snprintf(pendingNavUrl, sizeof(pendingNavUrl), "%s",
+                 NAV_AUTOTEST_URL_STR);
+        logger_log("[nav-autotest] direct navigation to %s",
+                   NAV_AUTOTEST_URL_STR);
 #endif
 
         /* Keyboard instance. The port's contract:

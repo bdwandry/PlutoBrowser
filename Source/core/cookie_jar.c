@@ -932,8 +932,9 @@ static int cookie_is_dead(const Cookie *c, long long now)
     return (!c->name) || (!c->domain) || (c->expires >= 0 && c->expires <= now);
 }
 
-char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
-                            char *buf, size_t cap)
+static char *cookie_jar_get_header_mode(const char *host, const char *path,
+                                        int isSsl, char *buf, size_t cap,
+                                        int includeHttpOnly)
 {
     long long now = now_seconds();
     size_t used = 0;
@@ -953,7 +954,8 @@ char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
             pruned = 1;
             continue;
         }
-        if (domain_matches(c, host) && path_matches(c, path) && (!c->secure || isSsl))
+        if (domain_matches(c, host) && path_matches(c, path) &&
+            (!c->secure || isSsl) && (includeHttpOnly || !c->httpOnly))
         {
             size_t need = strlen(c->name) + 1 + strlen(c->value) + 2;
             size_t room = cap > used ? cap - used : 0;
@@ -980,6 +982,18 @@ char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
         save();
     }
     return buf;
+}
+
+char *cookie_jar_get_header(const char *host, const char *path, int isSsl,
+                            char *buf, size_t cap)
+{
+    return cookie_jar_get_header_mode(host, path, isSsl, buf, cap, 1);
+}
+
+char *cookie_jar_get_js_header(const char *host, const char *path, int isSsl,
+                               char *buf, size_t cap)
+{
+    return cookie_jar_get_header_mode(host, path, isSsl, buf, cap, 0);
 }
 
 void cookie_jar_prune(void)

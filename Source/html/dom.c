@@ -346,8 +346,9 @@ static int stack_has_tag(const Stack *s, const char *tag)
     return 0;
 }
 
-/* prepareListItem: close the deepest open li (stopping at a list container),
- * then require a list container in scope; otherwise collapse to root. */
+/* prepareListItem: close the deepest open li (stopping at a list container).
+ * R66: a stray <li> outside a list container stays nested where it appears
+ * (browser behavior); it no longer collapses the builder stack to root. */
 static void prepare_list_item(Stack *s)
 {
     for (int i = s->count - 1; i >= 1; i--)
@@ -364,16 +365,12 @@ static void prepare_list_item(Stack *s)
             break;
         }
     }
-    for (int i = s->count - 1; i >= 1; i--)
-    {
-        const char *t = s->items[i]->tag;
-        if (strcmp(t, "ul") == 0 || strcmp(t, "ol") == 0 ||
-            strcmp(t, "menu") == 0 || strcmp(t, "dir") == 0)
-        {
-            return;
-        }
-    }
-    s->count = 1;
+    /* R66: a stray <li> outside a list container must NOT collapse the
+     * builder stack to the root. Modern pages routinely place <li> inside
+     * a <div> (google.com's autocomplete does exactly this); the old
+     * "collapse to root" rule detached the whole subtree from its hidden
+     * ancestors, so closed menus and no-JS fallbacks rendered as page
+     * content. Browsers keep the <li> nested where it appears. */
 }
 
 static void prepare_dt_dd(Stack *s)
@@ -391,14 +388,8 @@ static void prepare_dt_dd(Stack *s)
             break;
         }
     }
-    for (int i = s->count - 1; i >= 1; i--)
-    {
-        if (strcmp(s->items[i]->tag, "dl") == 0)
-        {
-            return;
-        }
-    }
-    s->count = 1;
+    /* R66: same browser-parity rule as stray <li>: keep the element nested
+     * under the current container instead of collapsing to root. */
 }
 
 static int is_table_ctx(const char *t)

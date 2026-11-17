@@ -88,6 +88,11 @@ typedef struct
                            const char *url);
     void (*onError)(const char *message);
     void (*onProgress)(int cur, int total);
+    /* General XHR GET lane: allow a same-host persistent TCP connection and
+     * keep the body in RAM so chunked completion can be detected without
+     * waiting for the server to close the socket. Other request lanes leave
+     * this 0 and keep their existing spill/close path. */
+    int keepAlive;
 } HttpCallbacks;
 
 /* Initialize (stores the API pointer). Call once at boot — inits BOTH
@@ -98,6 +103,19 @@ void http_client_init(PlaydateAPI *pd);
  * Returns 1 if a request was started (or answered internally), 0 on
  * immediate failure (onError already fired). */
 int http_get(const char *urlString, const HttpCallbacks *callbacks);
+
+/* Top-level document navigation GET: same wire contract as http_get, but
+ * the request carries the full browser navigation header signature
+ * (Chrome Accept, Sec-Fetch-*, Upgrade-Insecure-Requests, client hints).
+ * Google's SearchGuard judges the whole session; the plain minimal header
+ * set is treated as a bot even after the SG_SS challenge passes. The flag
+ * rides the redirect chain and is cleared by the next non-navigation call. */
+int http_get_navigation(const char *urlString, const HttpCallbacks *callbacks);
+
+/* Set the Referer for the NEXT navigation request (scripted location
+ * changes send the current document URL; manual address-bar navigations
+ * send none). One-shot: consumed by the next http_call_ex. */
+void http_set_navigation_referer(const char *url);
 
 /* C4 (fetch/POST): start a request with an explicit METHOD and optional
  * REQUEST body. The body bytes are copied (caller keeps ownership);
@@ -167,6 +185,18 @@ void http_set_identity_encoding(int on);
 
 /* Cancel any in-flight request (safe when idle). */
 void http_cancel(void);
+
+/* Navigation hard reset: call AFTER http_cancel, while the client is idle
+ * and before the next request starts. Releases every closed connection
+ * object and closes anything still pooled, so the new page starts with
+ * the SDK's full connection pool. Safe when idle. */
+void http_navigation_reset(void);
+
+/* R67: gate SDK connection releases while a page is still rendering.
+ * Releasing a TLS object during the sliced walk was the receipted bbc
+ * wild-PC window (the connection's SDK event-loop state outlives the
+ * open callback). main.c sets this 1 only when no render task is live. */
+void http_set_release_gate(int allowed);
 
 /* 1 while a request is connecting/reading. */
 int http_is_loading(void);

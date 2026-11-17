@@ -844,6 +844,7 @@ txBoolean fxGetNextStringX(int c, txU4* value)
 
 void fxGetNextToken(txParser* parser)
 {
+	parser->tokenCount++;
 #ifdef TARGET_PLAYDATE
 	/* R-kf: poll the bridge keepalive every 64 scanned tokens (see
 	   fxGetNextCharacter). */

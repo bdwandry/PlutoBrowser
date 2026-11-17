@@ -5,7 +5,7 @@ Source/core/pluto_snap.c Source/core/pluto_spill.c Source/core/pluto_page.c Sour
 Source/html/document.c Source/html/dom.c Source/html/entities.c Source/html/tokenizer.c Source/html/readability.c Source/html/css.c
 Source/core/url.c Source/core/constants.c Source/core/encoding.c Source/core/cookie_jar.c Source/core/storage.c
 Source/util/strbuf.c Source/util/strutil.c Source/util/json.c Source/util/pdtimer.c
-Source/html/jsbridge.c Source/html/jsext.c Source/html/jsbridge_bundler.c
+Source/html/jsbridge.c Source/html/jsext.c Source/html/jsbridge_bundler.c Source/html/sdisco.c Source/html/webstorage.c
 Source/render/decoders/scale.c Source/render/decoders/dither.c Source/render/decoders/inflate.c Source/render/decoders/png.c
 Source/js/muJS/*.c Source/js/duktape/duktape.c
 Source/html/qjs_shim_quickjs.c Source/html/qjs_shim_libregexp.c Source/html/qjs_shim_libunicode.c Source/html/qjs_shim_cutils.c Source/html/qjs_shim_dtoa.c Source/html/qjs_pthread_stubs.c
@@ -42,4 +42,4 @@ cc -o /tmp/jstest $SRCS \
  -Dpthread_cond_timedwait=pluto_qjs_pthread_cond_timedwait -Dclock_gettime=pluto_qjs_clock_gettime \
  -DINCLUDE_XSPLATFORM -DXSPLATFORM=\"xs_platform.h\" \
  -DJS_ASTLIMIT=48 -DJS_ENVLIMIT=64 -DJS_TRYLIMIT=8 -DREG_MAXREC=48 -DREG_MAXCLASS=16 -DJS_STACKSIZE=2048 \
- -fsanitize=address,undefined
+ -Wno-incompatible-function-pointer-types -fsanitize=address,undefined

@@ -76,6 +76,16 @@ void lm_add_link_rect_ex(const char *href, const char *text, const LMRect *rect,
                          int anchorIndex, const LMRectAux *aux);
 /* Metadata for a link's rect (index into the link's rect array); NULL if absent. */
 const LMRectAux *lm_rect_aux(int linkIndex, int rectIndex);
+/* Flat rect count + bulk translate (flex row layout repositions a whole
+ * flex item after its blocks were laid out, hit rects included). */
+int lm_rect_total(void);
+void lm_shift_rects(int startFlat, int count, int dx, int dy);
+/* Widen a flat rect range horizontally: dropdown rows are full-panel hit
+ * targets, not only as wide as their text. */
+void lm_widen_rects(int startFlat, int count, int x, int w);
+/* Mark a flat rect range as a top-layer hit region. Overlay rects win over
+ * page rects when a disclosure panel is open above them. */
+void lm_set_overlay_rects(int startFlat, int count);
 /* 1-based access for tests/navigation; NULL if out of range. */
 const LMLink *lm_link_at(int linkIndex);
 int lm_get_link_count(void);

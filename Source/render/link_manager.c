@@ -18,6 +18,8 @@ static LMLink *g_links = NULL;
 static int g_linkCount = 0;
 static int g_linkCap = 0;
 static int g_selectedIndex = 0; /* 0 = none (Lua nil) */
+static int g_overlayFrom = -1;  /* flat rect range for the open top layer */
+static int g_overlayCount = 0;
 
 static void *lm_alloc(size_t n)
 {
@@ -53,6 +55,8 @@ void lm_clear(void)
     }
     g_linkCount = 0;
     g_selectedIndex = 0;
+    g_overlayFrom = -1;
+    g_overlayCount = 0;
 }
 
 void lm_clear_selection(void)
@@ -174,6 +178,78 @@ void lm_add_link_rect_ex(const char *href, const char *text, const LMRect *rect,
         }
     }
     g_linkCount++;
+}
+
+int lm_rect_total(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_linkCount; i++)
+    {
+        n += g_links[i].rectCount;
+    }
+    return n;
+}
+
+void lm_shift_rects(int startFlat, int count, int dx, int dy)
+{
+    if (count <= 0 || (dx == 0 && dy == 0))
+    {
+        return;
+    }
+    int flat = 0;
+    for (int i = 0; i < g_linkCount; i++)
+    {
+        LMLink *l = &g_links[i];
+        for (int r = 0; r < l->rectCount; r++, flat++)
+        {
+            if (flat < startFlat || flat >= startFlat + count)
+            {
+                continue;
+            }
+            l->rects[r].x += dx;
+            l->rects[r].y += dy;
+        }
+        if (l->rectCount > 0)
+        {
+            l->primaryRect = l->rects[0];
+        }
+    }
+}
+
+void lm_widen_rects(int startFlat, int count, int x, int w)
+{
+    if (count <= 0)
+    {
+        return;
+    }
+    if (w < 0)
+    {
+        w = 0;
+    }
+    int flat = 0;
+    for (int i = 0; i < g_linkCount; i++)
+    {
+        LMLink *l = &g_links[i];
+        for (int r = 0; r < l->rectCount; r++, flat++)
+        {
+            if (flat < startFlat || flat >= startFlat + count)
+            {
+                continue;
+            }
+            l->rects[r].x = x;
+            l->rects[r].w = w;
+        }
+        if (l->rectCount > 0)
+        {
+            l->primaryRect = l->rects[0];
+        }
+    }
+}
+
+void lm_set_overlay_rects(int startFlat, int count)
+{
+    g_overlayFrom = (startFlat >= 0 && count > 0) ? startFlat : -1;
+    g_overlayCount = (startFlat >= 0 && count > 0) ? count : 0;
 }
 
 const LMRectAux *lm_rect_aux(int linkIndex, int rectIndex)
@@ -377,19 +453,33 @@ void lm_add_link(const char *href, int x, int y, int w, int h)
 
 const LMLink *lm_get_hovered_link(int screenX, int pageY)
 {
-    for (int i = 0; i < g_linkCount; i++)
+    /* Top-layer rects (an open dropdown) must win over page content that
+     * occupies the same page coordinates underneath the panel. Pass 0
+     * tests only the overlay range; pass 1 falls back to the full list. */
+    for (int pass = 0; pass < 2; pass++)
     {
-        const LMLink *link = &g_links[i];
-        for (int j = 0; j < link->rectCount; j++)
+        int flat = 0;
+        for (int i = 0; i < g_linkCount; i++)
         {
-            const LMRect *r = &link->rects[j];
-            /* Lua `(r.w or 60)` fires only on nil; C rects always carry
-             * numeric w/h, so raw values are the faithful mapping (a 0
-             * width hit-tests with width 0, exactly as Lua would). */
-            if (screenX >= r->x && screenX <= r->x + r->w &&
-                pageY >= r->y && pageY <= r->y + r->h)
+            const LMLink *link = &g_links[i];
+            for (int j = 0; j < link->rectCount; j++, flat++)
             {
-                return link;
+                const LMRect *r = &link->rects[j];
+                int inOverlay = g_overlayFrom >= 0 &&
+                                flat >= g_overlayFrom &&
+                                flat < g_overlayFrom + g_overlayCount;
+                if (pass == 0 && !inOverlay)
+                {
+                    continue;
+                }
+                /* Lua `(r.w or 60)` fires only on nil; C rects always carry
+                 * numeric w/h, so raw values are the faithful mapping (a 0
+                 * width hit-tests with width 0, exactly as Lua would). */
+                if (screenX >= r->x && screenX <= r->x + r->w &&
+                    pageY >= r->y && pageY <= r->y + r->h)
+                {
+                    return link;
+                }
             }
         }
     }

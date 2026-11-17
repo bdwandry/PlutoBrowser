@@ -1196,10 +1196,10 @@ static void svg_collect_gradients(const char *xml, size_t len)
                     sa = 1;
                 }
                 /* premultiplied average */
-                rs += (double)c.r * sa;
-                gs += (double)c.g * sa;
-                bs += (double)c.b * sa;
-                as += sa;
+                rs += (double)c.r * (double)sa;
+                gs += (double)c.g * (double)sa;
+                bs += (double)c.b * (double)sa;
+                as += (double)sa;
                 ns++;
                 if (ns >= 64)
                 {
@@ -1281,8 +1281,8 @@ static void svg_mat_compose(SvgMat *r, const SvgMat *A, const SvgMat *B)
 
 static void svg_mat_apply(const SvgMat *m, double x, double y, double *ox, double *oy)
 {
-    *ox = m->a * x + m->c * y + m->e;
-    *oy = m->b * x + m->d * y + m->f;
+    *ox = (double)m->a * x + (double)m->c * y + (double)m->e;
+    *oy = (double)m->b * x + (double)m->d * y + (double)m->f;
 }
 
 /* Parse an SVG transform list; returns 0 if nothing parsed. */
@@ -1842,7 +1842,13 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     double vbMinX = 0, vbMinY = 0, vbW = 0, vbH = 0;
     int haveVb = 0;
     {
+        /* Our DOM serializer lowercases attribute keys (viewbox); hand-written
+         * SVG test fixtures use the spec spelling (viewBox). Accept both. */
         const char *v = strstr(xml, "viewBox");
+        if (!v)
+        {
+            v = strstr(xml, "viewbox");
+        }
         if (v)
         {
             /* viewBox%s*=%s*["']%s*number %s+ number %s+ number %s+ number */
@@ -2004,6 +2010,18 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
     {
         return NULL;
     }
+    /* Device watchdog safety valve: inline SVG is decoded synchronously
+     * inside the element walk. A pathological path (thousands of arc
+     * segments / a giant <use> expansion) could otherwise monopolize the
+     * run loop. The cap is device-only and generous (3s); the simulator
+     * remains unbounded (the reference renderer). */
+    unsigned long svgStartMs = 0;
+#if defined(TARGET_PLAYDATE)
+    if (pd->system && pd->system->getCurrentTimeMilliseconds)
+    {
+        svgStartMs = pd->system->getCurrentTimeMilliseconds();
+    }
+#endif
     logger_log("[svgd] enter %zu bytes (P22 TEMP)", len); /* TEMP R64 */
     logger_stack_touch();
     svg_build_patterns(pd);
@@ -2072,6 +2090,24 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
         {
             logger_log("[svgd] el#%d tag=%.10s peak=%u (P22 TEMP)",
                        svgdOps, tagName ? tagName : "?", logger_stack_peak());
+#if defined(TARGET_PLAYDATE)
+            if (svgStartMs && pd->system &&
+                pd->system->getCurrentTimeMilliseconds)
+            {
+                unsigned long now =
+                    pd->system->getCurrentTimeMilliseconds();
+                if (now - svgStartMs > 3000UL)
+                {
+                    logger_log("[svgd] DEVICE BUDGET 3s at ops=%d — aborting "
+                               "decode (icon skipped, page continues)",
+                               svgdOps);
+                    pd->graphics->popContext();
+                    strbuf_free(&body);
+                    pd->graphics->freeBitmap(img);
+                    return NULL;
+                }
+            }
+#endif
         }
         if (!isClose)
         {
@@ -2110,8 +2146,8 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                 /* shape state = copy of current group state + own attrs */
                 SvgState S = g_stk[stkN - 1];
                 svg_state_apply(&S, &attrs);
-                LCDColor col;
-                int sw = (int)(S.strokeW * scale + 0.5);
+                LCDColor col = (LCDColor)kColorBlack;
+                int sw = (int)((double)S.strokeW * scale + 0.5);
                 if (sw < 1)
                 {
                     sw = 1;
@@ -2130,10 +2166,10 @@ LCDBitmap *svg_decode(const char *xml, int maxW, int maxH)
                     const char *ry = attrs_get(&attrs, "ry");
                     if (matAxis)
                     {
-                        double ux0 = S.m.a * x0 + S.m.e;
-                        double uy0 = S.m.d * y0 + S.m.f;
-                        double ux1 = S.m.a * (x0 + rw) + S.m.e;
-                        double uy1 = S.m.d * (y0 + rh) + S.m.f;
+                        double ux0 = (double)S.m.a * x0 + (double)S.m.e;
+                        double uy0 = (double)S.m.d * y0 + (double)S.m.f;
+                        double ux1 = (double)S.m.a * (x0 + rw) + (double)S.m.e;
+                        double uy1 = (double)S.m.d * (y0 + rh) + (double)S.m.f;
                         if (ux1 < ux0)
                         {
                             double t = ux0;

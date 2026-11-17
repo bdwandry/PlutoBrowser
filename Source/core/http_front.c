@@ -56,6 +56,7 @@
 #undef http_request_h
 #undef http_set_identity_encoding
 #undef http_cancel
+#undef http_navigation_reset
 #undef http_is_loading
 #undef http_update
 
@@ -213,6 +214,16 @@ void http_cancel(void)
 {
     http_tcp_cancel();
     oshttp_cancel(); /* safe when idle */
+}
+
+void http_navigation_reset(void)
+{
+    /* Called after http_cancel, while the client is idle: no TLS session
+     * is live, so every closed connection object can be released now.
+     * The OS lane's cancel already closed its retired connections; a
+     * second pass reaps any notification that landed in between. */
+    http_tcp_navigation_reset();
+    oshttp_cancel();
 }
 
 int http_is_loading(void)

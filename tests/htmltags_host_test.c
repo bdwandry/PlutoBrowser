@@ -26,12 +26,14 @@
 #include <string.h>
 #include <stddef.h>
 #include "pd_api.h"
+#include "core/http_client.h"
 
 /* ---- Fake Playdate API ---- */
 static void *host_realloc(void *p, size_t n) { return realloc(p, n); }
 static struct playdate_sys g_fakeSys;
 static PlaydateAPI g_fakeApi;
 static int g_fakeInit = 0;
+PlaydateAPI *playdate = NULL;
 PlaydateAPI *pluto_pd(void)
 {
     if (!g_fakeInit)
@@ -52,7 +54,6 @@ void tasks_report_progress(float f) { (void)f; } /* readability stub */
 
 /* http_client stubs: html/jsext.c (linked for jsext_arena_free) references
  * these; the network prefetch path is never exercised here. */
-typedef struct HttpCallbacks HttpCallbacks;
 int http_get(const char *url, const HttpCallbacks *cb)
 {
     (void)url;
@@ -68,6 +69,44 @@ void http_cancel(void) {}
 void http_client_init(PlaydateAPI *pd) { (void)pd; }
 void http_update(void) {}
 int http_is_loading(void) { return 0; }
+int http_get_headers(const char *urlString, const HttpHeaderPair *extra,
+                     int nExtra, const HttpCallbacks *callbacks)
+{
+    (void)urlString; (void)extra; (void)nExtra; (void)callbacks;
+    return 0;
+}
+int http_request_ct(const char *method, const char *urlString,
+                    const char *contentType, const char *body, size_t bodyLen,
+                    const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)body;
+    (void)bodyLen; (void)callbacks;
+    return 0;
+}
+int http_request_h(const char *method, const char *urlString,
+                   const char *contentType, const HttpHeaderPair *extra,
+                   int nExtra, const char *body, size_t bodyLen,
+                   const HttpCallbacks *callbacks)
+{
+    (void)method; (void)urlString; (void)contentType; (void)extra;
+    (void)nExtra; (void)body; (void)bodyLen; (void)callbacks;
+    return 0;
+}
+/* webstorage stubs: no Playdate file API in this harness. */
+typedef struct WsStore WsStore;
+void ws_bind(const char *docUrl) { (void)docUrl; }
+WsStore *ws_local(void) { return NULL; }
+WsStore *ws_session(void) { return NULL; }
+const char *ws_origin(void) { return ""; }
+int ws_count(WsStore *s) { (void)s; return 0; }
+int ws_key(WsStore *s, int idx, char *out, size_t outMax) { (void)s; (void)idx; (void)out; (void)outMax; return 0; }
+int ws_get(WsStore *s, const char *key, char *out, size_t outMax) { (void)s; (void)key; (void)out; (void)outMax; return 0; }
+int ws_set(WsStore *s, const char *key, const char *value) { (void)s; (void)key; (void)value; return 1; }
+void ws_remove(WsStore *s, const char *key) { (void)s; (void)key; }
+void ws_clear(WsStore *s) { (void)s; }
+void http_set_identity_encoding(int on) { (void)on; }
+void pluto_ui_net_progress(int cur, int total) { (void)cur; (void)total; }
+struct LCDFont *style_font(int role) { (void)role; return NULL; }
 
 #include "html/document.h"
 #include "html/jsbridge_internal.h"
@@ -459,6 +498,41 @@ int main(void)
         CHECK(foundTitle,
               "nested table: inner story text survives (HN pattern)");
         free_doc(d);
+    }
+
+    /* 100. Optional live-page regression (diagnostic): parse a saved HTML
+     * file under ASan. Set PLUTO_HTML_FILE=/path/page.html. The walk runs
+     * synchronously (host budget 0); any stack/heap overflow is reported
+     * with a precise frame instead of a device wild-PC. */
+    {
+        const char *path = getenv("PLUTO_HTML_FILE");
+        if (path && path[0])
+        {
+            FILE *f = fopen(path, "rb");
+            if (f)
+            {
+                fseek(f, 0, SEEK_END);
+                long n = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                char *buf = (char *)malloc((size_t)n + 1);
+                if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n)
+                {
+                    buf[n] = '\0';
+                    DocParseResult *d = calloc(1, sizeof(DocParseResult));
+                    if (d)
+                    {
+                        document_parse(buf, "https://www.bbc.com/news",
+                                       MODE_RAW_HTML, NULL, d);
+                        printf("live-file parse: blocks=%d links=%d title='%s'\n",
+                               d->blockCount, d->linkCount, d->title);
+                        document_free(d);
+                        free(d);
+                    }
+                }
+                free(buf);
+                fclose(f);
+            }
+        }
     }
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
