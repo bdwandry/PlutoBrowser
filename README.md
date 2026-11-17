@@ -204,22 +204,22 @@ Configurable via **Settings > Image Mode** (Left/Right to cycle). Controls how i
 
 ### Networking
 - **Selectable Network Stack**: **Settings > Network Protocol** cycles **Hybrid** (default — pages, scripts, XHR/fetch and forms ride the raw-TCP stack; display images ride the OS HTTP stack), **TCP** (raw sockets for everything), and **HTTP** (the Playdate OS HTTP stack for everything). `about:` pages are always served locally with no wire request, and the chrome badge shows the live route (`[WEB-TCP]`, `[WEB-HTTP]`, `[WEB-HYBRID]`).
-- **HTTP/1.1 over TCP**: Native async sockets with SDK TLS, keep-alive, chunked transfer, connection-pool recovery, and `Accept-Encoding: identity` by default with a gzip fallback (**Settings > Compression**). Redirects are followed with depth tracking and browser-true verb semantics: 301/302/303 rewrite POST→GET and drop the body; 307/308 preserve method, body and Content-Type. Range requests (206) and cache revalidation (`If-None-Match` → 304) are supported.
+- **HTTP/1.1 over TCP**: Native async sockets with SDK TLS, per-request page connections, a keep-alive lane for sequential same-host XHR GETs, chunked transfer, and connection-pool recovery. Navigation pages advertise `Accept-Encoding: gzip, deflate`; subresources default to `identity`, with **Settings > Compression: Gzip** opting them into gzip and gzip responses decoded as a fallback. Redirects are followed with depth tracking and browser-true verb semantics: 301/302/303 rewrite POST→GET and drop the body; 307/308 preserve method, body and Content-Type. Range requests (206) and cache revalidation (`If-None-Match` → 304) are supported.
 - **OS HTTP Backend**: Uses `playdate.network.http` for pages or display images when selected; both backends share one in-flight request.
-- **Cookie Jar**: Session cookie persistence across requests, also exposed to page scripts through `document.cookie` (on XS No-Recursion).
-- **Character Encoding Detection**: Scans `<meta charset>`, `<meta http-equiv="Content-Type">`, BOM markers, and chardet heuristics.
+- **Cookie Jar**: RFC 6265 jar with a 300-cookie cap, persisted to disk; `document.cookie` exposes non-HttpOnly cookies to scripts on XS No-Recursion.
+- **Character Encoding Detection**: Handles BOMs, the HTTP `Content-Type` charset, and `<meta>` charset declarations; decodes UTF-8/UTF-16 and Windows-1252/Latin-1.
 
 ### User Interface
 - **Display FPS**: Settings option cycling **30**, **50** (default), or **Uncapped** (0). 50 fps yields smoother scrolling and more responsive crank/cursor motion at the cost of higher battery usage.
 - **Show FPS**: Settings option (**Off** default) drawing a live frame-rate overlay.
-- **Invert Crank**: Settings option reversing the crank's scroll/cursor direction.
+- **Invert Crank**: Settings option reversing crank-driven page scrolling and Home/Settings selection.
 - **JavaScript Execution**: Settings option with three modes (default **Full**, persisted): **Off** — no JS engine is created and scripts are ignored; **Inline** — embedded `<script>` blocks run during page load (HTML mode) and live element click listeners can intercept links; **Full** — external `<script src>` files are also downloaded and executed, browser-faithful: resolved against the page URL, fetched once per unique file via the same single-flight HTTP client, deduplicated but executed at every slot in page order (max 48 script elements, 24 unique external files), with disk-streamed downloads uncapped, a 512KB RAM-resident per-page budget, a 768KB per-script execution ceiling, and fail-skip so one bad file never breaks the page. (Replaces the earlier On/Off "Enable Javascript" toggle; previously saved values carry over.)
-- **JavaScript Engine**: Settings row selecting the active JS engine — cycles **muJS ↔ Duktape ↔ QuickJS ↔ XS (Moddable) ↔ XS (No Recursion)** (persisted, default **XS (No Recursion)**) when Execution is Inline or Full, and locks to **Off** when Execution is Off (derived from the Execution policy — it can never disagree with it). Strict engine isolation: the selected engine runs the page exclusively (all inline and external scripts, listeners, `document.write`, click dispatch); the other engines' code is never entered — no mixing, no fallback. The four stock engines are vendored and never modified: muJS 1.3.10 (ES5 subset), Duktape 2.7.0 (ES5.1), QuickJS 2026-06-04 (ES2023, same DOM surface), and XS (Moddable). The XS No-Recursion fork is the project's own no-recursion port of XS.
-- **Compression**: Settings option (**Off** default, identity-first requests; **Gzip** sends `Accept-Encoding: gzip` with strict accounting and a transparent fallback).
+- **JavaScript Engine**: Settings row selecting the active JS engine — cycles **muJS ↔ Duktape ↔ QuickJS ↔ XS (Moddable) ↔ XS (No Recursion)** (persisted, default **XS (No Recursion)**) when Execution is Inline or Full, and locks to **Off** when Execution is Off (derived from the Execution policy — it can never disagree with it). Strict engine isolation: the selected engine runs the page exclusively (all inline and external scripts, listeners, `document.write`, click dispatch); the other engines' code is never entered — no mixing, no fallback. The four stock engines are vendored and never modified: muJS 1.3.8 (ES5 subset), Duktape 2.7.0 (ES5.1), QuickJS 2026-06-04 (ES2023, same DOM surface), and XS (Moddable). The XS No-Recursion fork is the project's own no-recursion port of XS.
+- **Compression**: Settings option (**Off** default: subresources request `identity`, while navigation pages still advertise gzip/deflate; **Gzip** opts subresources into gzip, with strict accounting and a transparent fallback).
 - **Cached Website**: Settings option (**Off** default) serving snapshot revisits instantly; empty/loading renders are never cached.
 - **Network Protocol**: Settings option cycling **TCP → HTTP → Hybrid** (persisted, default **Hybrid**) — see Networking above.
 - **Clock Format**: Settings option (**12-Hour** default, **24-Hour** alternative) for the chrome-bar clock and history timestamps — always live device-local time, following travel and daylight-saving changes with no restart.
-- **Chrome Bar**: host/URL display, SSL lock icon, loading progress, local-time clock, WiFi indicator, and the live `[READER-…]` / `[WEB-…]` network-protocol badge.
+- **Chrome Bar**: host or `about:` label, SSL lock/globe icon, loading progress, local-time clock, WiFi indicator, and the live `[READER-…]` / `[WEB-…]` network-protocol badge.
 - **Address Bar**: On-screen keyboard for URL entry and search.
 - **URL Hover Status Bar**: Shows destination URL when hovering links in HTML mode (like desktop browsers).
 - **Link Preview**: Bottom HUD displays `-> https://...` for D-pad-selected links in reader mode.
@@ -253,7 +253,7 @@ All 10 user-facing internal pages are also listed **on the Home page** under a *
 ```
 PlutoBrowser/
 ├── PlutoBrowser.pdx/           # Compiled Playdate binary bundle (gitignored)
-├── Makefile                    # Build and launch automation
+├── Makefile                    # Build automation
 ├── README.md                   # This file
 ├── AGENTS.md                   # Device deploy & log-collection workflow
 ├── MASTER_TODO.md              # Development roadmap & phase history
@@ -281,7 +281,7 @@ PlutoBrowser/
     │   ├── http_tcp_backend.c  # Rename-macro wrapper TU for the raw-TCP backend
     │   ├── storage.c           # Persistent datastore for bookmarks, history, cookies, & settings
     │   ├── cookie_jar.c        # RFC 6265 cookie jar (300-cookie cap, storage-persisted, HttpOnly hidden from JS)
-    │   ├── encoding.c          # Character encoding detection (charset, BOM, chardet)
+    │   ├── encoding.c          # Character encoding detection (charset, BOM, meta)
     │   ├── netmon.c            # WiFi status polling with radio-kick backoff
     │   ├── pluto_mem.c         # funneled allocator with device-envelope budgets
     │   ├── pluto_snap.c        # Rendered-snapshot cache (empty/loading renders never persist)
@@ -317,16 +317,16 @@ PlutoBrowser/
     │   ├── link_manager.c      # Link selection, hitbox tracking, hover detection
     │   ├── image_decoder.c     # Image decode dispatcher, 1-bit dithering, caching, per-image evict
     │   └── decoders/           # Format-specific image decoders
-    │       ├── svg.c           # SVG path rendering (M/L/H/V/C/S/T/A/Z), transforms, styles
-    │       ├── webp.c          # WebP (VP8) lossy & lossless decoding
+    │       ├── svg.c           # SVG paths, transforms, viewBox, fills/strokes, gradients, inline styles
+    │       ├── webp.c          # WebP VP8L lossless decoding and Huffman tables
     │       ├── webp_vp8.c      # VP8 bitstream decoder
     │       ├── webp_vp8_data.c # VP8 bitstream tables
-    │       ├── webp_container.c# WebP container parsing
-    │       ├── jpeg.c          # Baseline JPEG DCT decoding
-    │       ├── png.c           # PNG interlaced/palette/truecolor decoding
-    │       ├── gif.c           # GIF animated & static frame decoding
-    │       ├── bmp.c           # BMP 1-bit & 8-bit bitmap decoding
-    │       ├── ico.c           # ICO favicon extraction
+    │       ├── webp_container.c # WebP container, alpha, and animation parsing
+    │       ├── jpeg.c          # Baseline and progressive DC JPEG decoding
+    │       ├── png.c           # PNG grayscale/palette/truecolor/alpha; Adam7 first pass
+    │       ├── gif.c           # GIF first-frame decoding (static or animation)
+    │       ├── bmp.c           # BMP 1/4/8-bit palette and 24/32-bit decoding
+    │       ├── ico.c           # ICO/CUR DIB and PNG-compressed icon decoding
     │       ├── tif.c           # TIFF decoding
     │       ├── tga.c           # TGA decoding
     │       ├── psd.c           # PSD decoding
@@ -336,11 +336,11 @@ PlutoBrowser/
     │       ├── avif.c          # AVIF stills via the vendored dav1d AV1 decoder
     │       ├── dav1d/          # Vendored dav1d 1.5.1 (C-only 8-bit AV1 decode)
     │       ├── inflate.c       # DEFLATE decompression (used by PNG, GIF, WebP)
-    │       ├── dither.c        # Ordered dithering for grayscale-to-monochrome
+    │       ├── dither.c        # 4×4 Bayer ordered dithering to 1-bit
     │       └── scale.c         # Image scaling utilities
     │
     ├── ui/                     # User interface components
-    │   ├── chrome.c            # Top toolbar (host/URL, SSL lock, progress, local-time clock, WiFi, protocol badge)
+    │   ├── chrome.c            # Top toolbar (host/about label, SSL lock/globe, progress, clock, WiFi, protocol badge)
     │   ├── address_bar.c       # URL entry & search bar with on-screen keyboard
     │   ├── home_page.c         # Speed-dial + Test Cases start page (Settings button)
     │   ├── hud.c               # Scrollbar, link preview bar, URL hover status bar
@@ -350,7 +350,7 @@ PlutoBrowser/
     │   └── settings_page.c     # 13-row settings overlay (search, browse mode, invert crank, image mode, display FPS, FPS overlay, JS execution/engine, compression, cache, clear cookies, clock, network protocol)
     │
     ├── keyboard/               # On-screen keyboard component
-    │   └── keyboard.c          # Full QWERTY input for address bar & form fields
+    │   └── keyboard.c          # Column keyboard for letters, numbers, symbols & menu actions
     │
     ├── util/                   # Small shared utilities
     │   ├── json.c              # JSON parser (datastore format)
@@ -358,7 +358,7 @@ PlutoBrowser/
     │   ├── strutil.c           # String helpers
     │   └── pdtimer.c           # Timer API bindings
     │
-    ├── js/                     # Vendored JS engines: four stock engines (never modified) — muJS 1.3.10, Duktape 2.7.0, QuickJS 2026-06-04, XS (Moddable) — plus the XS No-Recursion fork
+    ├── js/                     # Vendored JS engines: four stock engines (never modified) — muJS 1.3.8, Duktape 2.7.0, QuickJS 2026-06-04, XS (Moddable) — plus the XS No-Recursion fork
     │
     ├── fonts/                  # Roobert font family (Playdate .fnt + table .png pairs)
     │   ├── Roobert-20-Medium(.fnt)
